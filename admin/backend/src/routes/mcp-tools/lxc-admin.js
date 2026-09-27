@@ -556,11 +556,12 @@ export function createLxcAdminHandlers(kit) {
       return out.stdout || '';
     };
     try {
-      const [serverRaw, expandedRaw, stateRaw, release, cpuRaw, memRaw, swapsRaw, rootFsRaw, psRaw] = await Promise.all([
+      const [serverRaw, expandedRaw, stateRaw, release, bootRaw, cpuRaw, memRaw, swapsRaw, rootFsRaw, psRaw] = await Promise.all([
         capture('incus', ['query', '/1.0']),
         capture('incus', ['config', 'show', guest, '--expanded', '--format=json']),
         capture('incus', ['query', `/1.0/instances/${guest}/state`]),
         capture('incus', ['exec', guest, '--', 'cat', '/etc/os-release']),
+        capture('incus', ['exec', guest, '--', 'cat', '/proc/sys/kernel/random/boot_id']),
         capture('incus', ['exec', guest, '--', 'nproc']),
         capture('incus', ['exec', guest, '--', 'cat', '/proc/meminfo']),
         capture('incus', ['exec', guest, '--', 'cat', '/proc/swaps']),
@@ -571,6 +572,8 @@ export function createLxcAdminHandlers(kit) {
       const server = JSON.parse(serverRaw), expanded = JSON.parse(expandedRaw), state = JSON.parse(stateRaw);
       const root = Object.values(expanded.expanded_devices || expanded.devices || {}).find(d => d.type === 'disk' && d.path === '/');
       const image = inst.instance.config?.['volatile.base_image'];
+      const identity = inst.instance.config?.['volatile.uuid'];
+      const bootGeneration = bootRaw.trim();
       const cpu = Number(cpuRaw.trim());
       const ramKb = Number(/^MemTotal:\s+(\d+) kB$/m.exec(memRaw)?.[1]);
       const swapKb = Number(/^SwapTotal:\s+(\d+) kB$/m.exec(memRaw)?.[1]);
@@ -581,14 +584,17 @@ export function createLxcAdminHandlers(kit) {
       const qemuName = new RegExp(`(?:^|[ ,])guest=${guest}(?:[, ]|$)`);
       const qemu = processes.find(p => p.pid === state.pid && /^qemu-system-/.test(p.comm) && qemuName.test(p.args)) ||
         processes.find(p => /^qemu-system-/.test(p.comm) && qemuName.test(p.args));
-      if (!server.environment?.server_version || !/^[a-f0-9]{64}$/i.test(image || '') || !root?.size || !Number.isInteger(cpu) || cpu < 1 ||
+      if (!server.environment?.server_version || !/^[a-f0-9]{64}$/i.test(image || '') ||
+          !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(identity || '') ||
+          !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(bootGeneration) ||
+          !root?.size || !Number.isInteger(cpu) || cpu < 1 ||
           !Number.isFinite(ramKb) || ramKb <= 0 || !Number.isFinite(swapKb) ||
           !Number.isFinite(rootFsBytes) || rootFsBytes <= 0 || !qemu)
-        return err('VM proof incomplete: image fingerprint, root disk/filesystem, guest CPU/RAM/swap, or exact host QEMU process could not be established');
+        return err('VM proof incomplete: image fingerprint, VM identity/boot generation, root disk/filesystem, guest CPU/RAM/swap, or exact host QEMU process could not be established');
       const tree = [qemu];
       for (let i = 0; i < tree.length; i++) for (const p of processes) if (p.ppid === tree[i].pid && !tree.some(x => x.pid === p.pid)) tree.push(p);
       return ok({ container: name, incus_server_version: server.environment?.server_version || null,
-        actual_image_fingerprint: image, guest_os_release: release.trim(),
+        actual_image_fingerprint: image, vm_identity: identity, boot_generation: bootGeneration, guest_os_release: release.trim(),
         cpu: { guest_visible: cpu, configured: expanded.expanded_config?.['limits.cpu'] || null },
         memory: { guest_mem_total_bytes: ramKb * 1024, configured: expanded.expanded_config?.['limits.memory'] || null },
         root_disk: { configured_size: root.size, guest_filesystem_bytes: rootFsBytes, pool: root.pool || null },

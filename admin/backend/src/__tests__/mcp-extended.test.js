@@ -224,18 +224,22 @@ test('inspect_a3_vm requires a VM and actual Debian 13 guest proof', async () =>
     ['config show pp-proof --expanded --format=json', JSON.stringify({ expanded_config: { 'limits.cpu': '2', 'limits.memory': '4GiB' }, expanded_devices: { root: { type: 'disk', path: '/', size: '12GiB', pool: 'default' } } })],
     ['query /1.0/instances/pp-proof/state', JSON.stringify({ pid: 42 })],
     ['exec pp-proof -- cat /etc/os-release', 'ID=debian\nVERSION_ID="13"\n'],
+    ['exec pp-proof -- cat /proc/sys/kernel/random/boot_id', '11111111-2222-3333-4444-555555555555\n'],
     ['exec pp-proof -- nproc', '2\n'],
     ['exec pp-proof -- cat /proc/meminfo', 'MemTotal:       4000000 kB\nSwapTotal:             0 kB\n'],
     ['exec pp-proof -- cat /proc/swaps', 'Filename\tType\tSize\tUsed\tPriority\n'],
     ['exec pp-proof -- df -B1 --output=size /', '1B-blocks\n12884901888\n'],
     ['-eo pid=,ppid=,rss=,comm=,args=', '42 1 1000 qemu-system-x86 qemu-system-x86_64 -name guest=pp-proof,debug-threads=on\n43 42 100 helper helper\n'],
   ]);
-  const vm = { type: 'virtual-machine', status: 'Running', config: { 'volatile.base_image': image } };
+  const vm = { type: 'virtual-machine', status: 'Running', config: { 'volatile.base_image': image,
+    'volatile.uuid': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } };
   const { ctx } = makeCtx({ fetchLxcInstance: async () => ({ instance: vm }), lxcContainerDetail: () => ({ status: 'Running' }),
     runHostCapture: async (_bin, argv) => ({ status: 0, stdout: responses.get(argv.join(' ')) || '', stderr: '' }) });
   const { handlers } = createExtendedHandlers(ctx);
   const proof = parse(await handlers.inspect_a3_vm({ container: 'proof' }, AUTH));
   assert.equal(proof.incus_server_version, '7.5.1');
+  assert.equal(proof.vm_identity, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  assert.equal(proof.boot_generation, '11111111-2222-3333-4444-555555555555');
   assert.equal(proof.memory.guest_mem_total_bytes, 4000000 * 1024);
   assert.equal(proof.root_disk.guest_filesystem_bytes, 12884901888);
   assert.equal(proof.swap.disabled, true);

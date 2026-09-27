@@ -882,7 +882,8 @@ credential, vault or real sign-in identity is authorized by this evidence.
 Source now includes `inspect_a3_vm`, a read-only MCP tool restricted to an
 Incus virtual machine in the Running state. It reads the Incus server version,
 expanded CPU/memory/root-disk configuration, actual guest `/etc/os-release`,
-guest visible CPU/RAM/swap, image fingerprint, and the exact host QEMU process
+guest visible CPU/RAM/swap, image fingerprint, Incus VM UUID and guest boot ID,
+and the exact host QEMU process
 plus descendant RSS. Any missing item, a container, a stopped VM, or a guest
 that does not prove Debian 13 is refused with a reason. The package allowlist
 now includes Debian `chromium`, `fonts-liberation`, and `fonts-dejavu-core` for

@@ -74,7 +74,8 @@ isolation boundary. S6 remains open.
 
 The `inspect_a3_vm` MCP reader adds fixed, bounded Incus and `ps` calls for
 one named VM. It refuses containers, stopped guests, missing image fingerprint,
-non-Debian-13 guest `/etc/os-release`, and incomplete CPU/RAM/root/swap/QEMU
+non-Debian-13 guest `/etc/os-release`, missing Incus UUID or guest boot ID,
+and incomplete CPU/RAM/root/swap/QEMU
 readback. It returns only the matching QEMU PID and aggregate descendant RSS,
 never the process command line. The instance name comes through the existing
 MCP guest-name and token-scope checks, and no call starts or changes a guest.

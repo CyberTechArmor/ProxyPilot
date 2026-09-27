@@ -12,13 +12,16 @@ import { savePomerium,readPomerium,pomeriumState,pomeriumSecrets,reviewPomeriumR
 import { POMERIUM_IMAGE,POMERIUM_APP,renderPomeriumConfig } from '../lib/setup-engine/pomerium-logic.js';
 import { preparePomeriumFiles,ensurePomeriumRuntime,assertExternalConfig } from '../lib/setup-engine/pomerium-runtime.js';
 import { configurePomeriumRoutes,protectionForRoute } from '../lib/setup-engine/pomerium-routes.js';
-import { verifyLoopbackSockets,checkGatewayRedirect,verifyPomeriumGateway } from '../lib/setup-engine/pomerium-probes.js';
+import { verifyLoopbackSockets,verifyPrivateApplications,checkGatewayRedirect,verifyPomeriumGateway } from '../lib/setup-engine/pomerium-probes.js';
 import { validatePomeriumClient } from '../lib/setup-engine/pomerium-identity.js';
 import { getJob } from '../lib/setup-engine/store.js';
 import { runOnce,reconcile } from '../lib/setup-engine/executor.js';
 import { runBackendSteps } from '../lib/setup-engine/backend-steps.js';
 import { validateRunnerJob,reconcileDecision,FencedError } from '../lib/setup-engine/logic.js';
 import { verifyAssertion,testApp } from '../../scripts/g4-test-app.mjs';
+import { createToolkit } from '../routes/mcp-tools/common.js';
+import { createPlatformHandlers } from '../routes/mcp-tools/platform.js';
+import { createConfirmationStore } from '../lib/mcp-ext/logic.js';
 const {buildDomainCaddyConfig}=await import('../routes/services.js');
 
 // The pinned official image inherits its CA bundle path from its base image.
@@ -67,6 +70,36 @@ function harness(db,dir,{clientProbe=async()=>({readOnly:true}),privateProbe=asy
 }
 const withDb=async(fn)=>{const dir=mkdtempSync(join(tmpdir(),'g4-')),db=makeDb();try{await fn(db,dir);}finally{db.close();rmSync(dir,{recursive:true,force:true});}};
 
+test('MCP route protection binds exact review, verified subject, revision and job provenance',()=>withDb(async db=>{
+  savePomerium(db,configInput);
+  db.exec(`CREATE TABLE mcp_ledger (id INTEGER PRIMARY KEY,ts TEXT,token_id INTEGER,actor TEXT,tool TEXT,subject_type TEXT,subject_id TEXT,project_id INTEGER,args_json TEXT,outcome TEXT,dry_run INTEGER,confirmation_used INTEGER,snapshot TEXT,summary TEXT,detail_json TEXT,duration_ms INTEGER)`);
+  const policy={feature_flags:{'mcp.platform':{default:true}}};
+  const ctx={getDb:()=>db,getSetting:()=>null,policy,confirmations:createConfirmationStore(),
+    toolResult:(data,{isError=false}={})=>({content:[{type:'text',text:JSON.stringify(data)}],isError}),
+    logAudit:()=>{}};
+  const tools=createPlatformHandlers(createToolkit(ctx));
+  const auth={id:7,created_by:'admin'};
+  const call=async(name,args={})=>{
+    const result=await tools[name](args,auth);
+    return {error:result.isError,body:JSON.parse(result.content[0].text)};
+  };
+  const state=await call('get_route_protection');
+  assert.equal(state.body.revision,1);
+  assert(state.body.identities.some(i=>i.subject==='subject-alice'));
+  const args={route_id:'test-route',action:'protect',allowed_identities:['subject-alice'],expected_revision:1};
+  const first=await call('set_route_protection',args);
+  assert.equal(first.body.needs_confirmation,true);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM setup_route_protection').get().n,0);
+  const altered=await call('set_route_protection',{...args,allowed_identities:['unknown'],confirmation_token:first.body.confirmation_token});
+  assert.equal(altered.error,true);
+  const applied=await call('set_route_protection',{...args,confirmation_token:first.body.confirmation_token});
+  assert.equal(applied.error,false);
+  assert.equal(applied.body.job.via,'mcp');
+  assert.equal(applied.body.job.requested_by,'mcp:7');
+  assert.equal((await call('set_route_protection',{...args,confirmation_token:first.body.confirmation_token})).error,true);
+  assert.equal((await call('set_route_protection',args)).error,true,'stale revision is refused');
+}));
+
 test('G4 API enforces admin, CSRF, sudo, strict inputs and secret-free inert save; skip is inert',()=>withDb(async db=>{
   const a=await apiFixture(db);try {
     assert.equal((await a.request('/pomerium',{who:null})).status,401);
@@ -103,16 +136,40 @@ test('G4.3 review binds full route and small verified subject allow list; machin
   assert.throws(()=>reviewPomeriumRoute(db,{...input,subjects:['unknown']}),/verified/);
   db.prepare("UPDATE service_http_routes SET csp='default-src self' WHERE id='test-route'").run();
   assert.throws(()=>savePomeriumRoute(db,{...input,reviewToken:review.reviewToken,reviewed:true},'admin'),/changed after review/);
-  for(const [field,value,reason] of [['target_port',3001,/independent/],['websocket_enabled',1,/Unsupported/],['basic_auth_json','[]',/Unsupported/],['path_prefix','/api',/single HTTPS/]]) {
+  for(const [field,value,reason] of [['target_port',3001,/independent/],['basic_auth_json','[]',/Unsupported/],['path_prefix','/api',/single HTTPS/]]) {
     const old=db.prepare(`SELECT ${field} AS value FROM service_http_routes WHERE id='test-route'`).get().value;
     db.prepare(`UPDATE service_http_routes SET ${field}=? WHERE id='test-route'`).run(value);assert.throws(()=>reviewPomeriumRoute(db,input),reason);db.prepare(`UPDATE service_http_routes SET ${field}=? WHERE id='test-route'`).run(old);
   }
+}));
+test('G4 reviews managed LXC port 3001 and WebSocket intent but refuses without a host ingress fence',()=>withDb(async db=>{
+  savePomerium(db,configInput);
+  db.prepare("UPDATE services SET runtime='lxc',target_ip='10.185.17.240',lxc_container_name='nodus' WHERE id='app'").run();
+  db.prepare("UPDATE service_http_routes SET target_port=3001,websocket_enabled=1 WHERE id='test-route'").run();
+  const input={expectedRevision:1,routeId:'test-route',subjects:['subject-alice'],action:'protect'};
+  const review=reviewPomeriumRoute(db,input);
+  assert.equal(review.upstream,'http://10.185.17.240:3001');
+  assert.equal(review.lxcContainer,'nodus');
+  assert.equal(review.websocket,true);
+  const config=renderPomeriumConfig(readPomerium(db).config,[review],pomeriumSecrets(db,readPomerium(db)));
+  assert.equal(config.routes[0].allow_websockets,true);
+  await assert.rejects(verifyPrivateApplications([review],{job:jobHandle,exec:{host:async()=>{throw new Error('must refuse before host command');}}}),/persistent host ingress fence/);
+  db.exec(`CREATE TABLE mcp_ledger (id INTEGER PRIMARY KEY,ts TEXT,token_id INTEGER,actor TEXT,tool TEXT,subject_type TEXT,subject_id TEXT,project_id INTEGER,args_json TEXT,outcome TEXT,dry_run INTEGER,confirmation_used INTEGER,snapshot TEXT,summary TEXT,detail_json TEXT,duration_ms INTEGER)`);
+  const ctx={getDb:()=>db,getSetting:()=>null,policy:{feature_flags:{'mcp.platform':{default:true}}},confirmations:createConfirmationStore(),
+    toolResult:(data,{isError=false}={})=>({content:[{type:'text',text:JSON.stringify(data)}],isError}),logAudit:()=>{}};
+  const tools=createPlatformHandlers(createToolkit(ctx)),auth={id:7,created_by:'admin'};
+  const state=JSON.parse((await tools.get_route_protection({},auth)).content[0].text);
+  assert.equal(state.routes.find(r=>r.id==='test-route').apply_ready,false);
+  const refused=await tools.set_route_protection({route_id:'test-route',action:'protect',allowed_identities:['subject-alice'],expected_revision:1},auth);
+  assert.equal(refused.isError,true);
+  assert.match(refused.content[0].text,/host ingress fence/);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM setup_route_protection').get().n,0);
 }));
 test('G4.3 SQL route ownership prevents aliases, edits, delete and moving the protected upstream',()=>withDb(db=>{
   savePomerium(db,configInput);protect(db);
   assert.throws(()=>db.exec("UPDATE service_http_routes SET target_port=9999 WHERE id='test-route'"),/owns/);
   assert.throws(()=>db.exec("DELETE FROM service_http_routes WHERE id='test-route'"),/explicit removal/);
   assert.throws(()=>db.exec("UPDATE services SET target_ip='10.0.0.1' WHERE id='app'"),/stable/);
+  assert.throws(()=>db.exec("UPDATE services SET lxc_container_name='other' WHERE id='app'"),/stable managed LXC identity/);
   assert.throws(()=>db.exec("INSERT INTO service_http_routes(id,service_id,domain,path_prefix,target_port) VALUES('alias','app','bypass.example.com','/',18443)"),/bypass/);
 }));
 test('G4.3 native private listener proof rejects wildcard, duplicate public listener, Docker publish and missing process identity',()=>{

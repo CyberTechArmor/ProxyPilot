@@ -78,17 +78,29 @@ Changing G3 account linkage is not an implicit change to a saved Pomerium policy
 
 Choose one existing route. G4 supports a single HTTPS hostname at `/`, without a
 prefix rewrite, backed by a **native process bound to 127.0.0.1** on an unreserved
-port. A plain proxy service may have `runtime=null` in the existing schema. No new
-application type or generated application scaffold is introduced.
+port. A plain proxy service may have `runtime=null` in the existing schema. Review
+also recognizes a managed LXC private IPv4 upstream, including application port
+3001, but application of that intent fails before Caddy changes until a persistent
+host ingress fence proves that direct guest-IP access is blocked. A route review
+alone is not protection. No new application type or generated application
+scaffold is introduced.
 
 The review shows the exact upstream and up to twenty explicitly selected subjects
 already verified through G3 for the same issuer. Policy is an OR of exact
 `claim/sub` values. Everyone else is denied. Email text, request headers and
 unverified group names cannot grant access. Caddy IP restrictions, response
 headers/CSP, framing and body/upload limits retain their existing renderer path.
-WebSocket routes, custom upstream timeouts, host overrides, basic authentication,
+Custom upstream timeouts, host overrides, basic authentication,
 rate-limit combinations, static sites and prefix routes are refused rather than
-having their behavior silently removed.
+having their behavior silently removed. Reviewed WebSocket routes carry
+`allow_websockets` into Pomerium's route configuration.
+
+The Platform MCP surface offers `get_route_protection` to read the exact Pomerium
+revision, route candidates, current intents, jobs and verified Keycloak subject
+IDs. `set_route_protection` reviews a protect/remove action with an expected
+revision and subject IDs, then requires a one-time confirmation token bound to
+that exact review before queuing the existing runner. Its dry run only reviews.
+Neither tool accepts an email address as proof of identity.
 
 Public routing is **Caddy → Pomerium → application**. There is no `forward_auth`.
 Caddy deletes incoming `X-Pomerium-*`, forwarded user/email/groups,
@@ -105,7 +117,8 @@ including localhost aliases. A named conflict blocks activation without editing
 that other configuration. These checks assume an uncompromised host and measure
 its current state; G4 does not continuously police root changes, arbitrary
 external tunnels or future application rebinding. A service needing broader
-network containment is refused; G4 does not rebuild host networking.
+network containment remains blocked until a host boundary and direct-IP bypass
+probes have been implemented and verified.
 
 ## Apply, failure and removal
 
@@ -177,7 +190,9 @@ Reusable app integration belongs to G8.
 ## Independent access and sessions
 
 ProxyPilot's dashboard hostname, native SSO callbacks, local recovery hostname,
-backend port 3001 and G2 identity hostname are excluded from selection. The entire
+its own backend listener at 127.0.0.1:3001 and G2 identity hostname are excluded
+from selection. An unrelated managed LXC application using port 3001 is a review
+candidate, subject to the host ingress fence above. The entire
 Pomerium authentication hostname routes directly to Core without a Pomerium access
 policy; Core owns its OAuth and `.pomerium` endpoints. Application `.pomerium`
 endpoints also traverse Core. Keycloak discovery, authorization, token, JWKS and

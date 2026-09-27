@@ -8,7 +8,7 @@ import { OPENBAO_SCHEMA } from './lib/setup-engine/openbao-store.js';
 import { AGENTS_SCHEMA as OPENBAO_AGENTS_SCHEMA } from './lib/setup-engine/openbao-agents.js';
 import { INFISICAL_AGENTS_SCHEMA, addContainerColumns as addInfisicalAgentContainerColumns } from './lib/setup-engine/infisical-agents.js';
 import { INFISICAL_SCHEMA } from './lib/setup-engine/infisical-store.js';
-import { POMERIUM_SCHEMA } from './lib/setup-engine/pomerium-store.js';
+import { POMERIUM_SCHEMA, POMERIUM_LXC_IDENTITY_TRIGGER } from './lib/setup-engine/pomerium-store.js';
 import { SSO_SCHEMA } from './lib/sso/store.js';
 import { KEYCLOAK_SCHEMA } from './lib/setup-engine/keycloak-store.js';
 import Database from 'better-sqlite3';
@@ -2454,6 +2454,7 @@ export function initDatabase() {
   runMigration(db, 1018, 'infisical_agents', (d) => d.exec(INFISICAL_AGENTS_SCHEMA));
   // "Runs in container": the agent's container, its pinned address and identity.
   runMigration(db, 1019, 'infisical_agent_containers', (d) => addInfisicalAgentContainerColumns(d));
+  runMigration(db, 1020, 'pomerium_lxc_identity_lock', (d) => d.exec(POMERIUM_LXC_IDENTITY_TRIGGER));
 
   runMigration(db, 1011, 'route_ip_allowlist_paths', (d) => {
     const cols = d.prepare(`PRAGMA table_info(service_http_routes)`).all().map((c) => c.name);

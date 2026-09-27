@@ -16,7 +16,7 @@ registerHooks({resolve(specifier,context,next){
   return next(specifier,context);
 }});
 export function schema(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS services(id TEXT PRIMARY KEY,name TEXT,kind TEXT,runtime TEXT CHECK(runtime IN ('lxc','docker') OR runtime IS NULL),target_ip TEXT,type TEXT,status TEXT,is_admin INTEGER DEFAULT 0,root_dir TEXT,container_name TEXT,data_dir TEXT);
+  db.exec(`CREATE TABLE IF NOT EXISTS services(id TEXT PRIMARY KEY,name TEXT,kind TEXT,runtime TEXT CHECK(runtime IN ('lxc','docker') OR runtime IS NULL),target_ip TEXT,lxc_container_name TEXT,type TEXT,status TEXT,is_admin INTEGER DEFAULT 0,root_dir TEXT,container_name TEXT,data_dir TEXT);
 CREATE TABLE IF NOT EXISTS service_http_routes(id TEXT PRIMARY KEY,service_id TEXT,domain TEXT,path_prefix TEXT,target_port INTEGER,websocket_enabled INTEGER DEFAULT 0,ssl_enabled INTEGER DEFAULT 1,force_https INTEGER DEFAULT 1,max_upload_size TEXT DEFAULT '1G',strip_prefix INTEGER DEFAULT 0,read_timeout_seconds INTEGER,write_timeout_seconds INTEGER,max_body_bytes INTEGER,host_header_override TEXT,allow_framing INTEGER,frame_ancestors TEXT,health_path TEXT,extra_headers_json TEXT,csp TEXT,basic_auth_json TEXT,ip_allowlist_json TEXT,rate_limit_json TEXT,UNIQUE(domain,path_prefix));
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,username TEXT,role TEXT,password_hash TEXT);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT,expires_at TEXT,last_used_at TEXT DEFAULT CURRENT_TIMESTAMP,revoked_at TEXT,sudo_until TEXT,ip TEXT,user_agent TEXT);

@@ -32,6 +32,15 @@ export const PLATFORM_TOOLS = Object.freeze([
     'Before apply (optionally for one service): does each selected hostname resolve to the Caddy host — from this host\'s resolver AND from the public resolver 1.1.1.1, with any disagreement named and whether the zone is on the stored Cloudflare token (else the exact record to set at the external DNS host) — does another route already serve it, is Docker available on the host, which loopback port each owned service uses and whether something already listens there, and is the installation key present and able to open the saved protected credentials (reported as present/absent only). Read-only.',
     {}),
 
+  tool('get_route_protection',
+    'Read the saved Pomerium revision, protection intents and job, eligible application routes with refusal reasons, and verified Keycloak identities for this issuer. No credentials or tokens are returned.',
+    {}),
+
+  tool('set_route_protection',
+    'Review or apply sign-in protection for one existing application route. Supply the route id, protect/remove action, verified Keycloak subject IDs, and expected Pomerium revision. A supported first call returns the exact review and a one-time confirmation_token; repeat the same arguments with that token to queue the existing Pomerium runner. Managed LXC protection refuses before queuing until a persistent host ingress fence and direct-IP proof are available. A changed route or policy refuses the token. dry_run returns only the review.',
+    { route_id: { type: 'string', description: 'Existing service_http_routes id from get_route_protection.' }, action: { type: 'string', enum: ['protect', 'remove'] }, allowed_identities: { type: 'array', items: { type: 'string' }, description: 'Verified Keycloak subject IDs; empty when removing protection.' }, expected_revision: { type: 'number', description: 'Pomerium revision from get_route_protection.' }, dry_run: P.dry_run, confirmation_token: P.confirmation_token },
+    ['route_id', 'action', 'allowed_identities', 'expected_revision']),
+
   tool('save_platform_setup',
     'Save the Full Platform plan (stage A) — domains, realm and additional administrator addresses. All five services are always installed; the VPN networks are included automatically. Inert, exactly like the dashboard\'s "Save reviewed plan": nothing is installed and no job is queued. Only the fields you pass change; the rest keep their saved (or suggested) values. Refused when if_revision is not the saved revision (another session changed it), while an operation is running, and for input the dashboard refuses — with the dashboard\'s own messages (hostname/realm/ownership migrations, additional-address changes after apply — use set_platform_restricted_networks, a hostname that already serves a route, unrestricted networks). dry_run returns the changes and DNS work without saving. Next: apply_platform_setup with the returned revision and review_digest.',
     {

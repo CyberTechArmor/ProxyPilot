@@ -538,6 +538,7 @@
       "host_command: getDb, getSetting, setSetting, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, fetchLxcInstance, lxcReachableAddress,": 1
     },
     "admin/backend/src/routes/mcp-tools/lxc-admin.js": {
+      "host_command: const out = await runHostCapture(binary, argv, { timeoutMs: 15000 }).catch(error => ({ status: 1, stderr: error?.message }));": 1,
       "host_command: const q = await runHostCapture('incus', ['query', `/1.0/instances/${incus(newName)}`], { timeoutMs: 30000 });": 1,
       "host_command: const r = await runHostCapture('incus', ['copy', snap ? `${incus(name)}/${snap}` : incus(name), incus(newName)], { timeoutMs: 30 * 60 * 1000 });": 1,
       "host_command: const r = await runHostCapture('incus', ['import', file, incus(newName)], { timeoutMs: 45 * 60 * 1000 });": 1,

@@ -29,6 +29,7 @@ export const LXC_ADMIN_TOOLS = [
   mutating('remove_lxc_device', 'Detach a device from a guest (never root/eth0 or a ProxyPilot-managed device). A setup-engine job: snapshot first, read back as gone, the device\'s properties returned as previous.',
     { container: P.container, device: { type: 'string' } }, ['container', 'device', 'confirm']),
   tool('get_lxc_usage', 'Live CPU seconds, memory (usage/peak/swap/limit), disk usage, process count, per-interface traffic, limits and devices for one guest — read from the host, never from inside the guest.', { container: P.container }, ['container']),
+  tool('inspect_a3_vm', 'Read-only A3 proof for one running Incus VM: Incus server version, actual guest /etc/os-release, image fingerprint, CPU, memory, root disk, swap, state, and host QEMU RSS. Refuses containers and reports each measurement that cannot be established.', { container: P.container }, ['container']),
   mutating('delete_lxc_file', 'Delete a file or directory inside a guest. Files keep a copy as <path>.old unless keep_old: false; directories need recursive: true.',
     { container: P.container, path: { type: 'string', description: 'Absolute path inside the guest.' }, recursive: { type: 'boolean' }, keep_old: { type: 'boolean' } }, ['container', 'path', 'confirm']),
   tool('move_lxc_file', 'Move or rename a path inside a guest (parent directories are created; refuses to overwrite unless overwrite: true).',

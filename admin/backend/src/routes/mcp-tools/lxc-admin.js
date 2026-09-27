@@ -542,6 +542,62 @@ export function createLxcAdminHandlers(kit) {
     });
   });
 
+  const inspect_a3_vm = reader('inspect_a3_vm', async (args) => {
+    const name = nameOf(args);
+    if (!name) return err('Invalid VM name');
+    const inst = await instanceOrError(name);
+    if (inst.error) return err(inst.error);
+    if (inst.instance.type !== 'virtual-machine') return err(`${name} is ${inst.instance.type || 'an unknown guest type'}, not a VM`);
+    if (inst.instance.status !== 'Running') return err(`${name} is ${inst.instance.status || 'not running'}; actual guest OS and RAM cannot be read`);
+    const guest = incus(name);
+    const capture = async (binary, argv) => {
+      const out = await runHostCapture(binary, argv, { timeoutMs: 15000 }).catch(error => ({ status: 1, stderr: error?.message }));
+      if (out.status !== 0) throw new Error(`${binary} ${argv[0]} failed: ${tail(out.stderr || '') || `exit ${out.status}`}`);
+      return out.stdout || '';
+    };
+    try {
+      const [serverRaw, expandedRaw, stateRaw, release, cpuRaw, memRaw, swapsRaw, rootFsRaw, psRaw] = await Promise.all([
+        capture('incus', ['query', '/1.0']),
+        capture('incus', ['config', 'show', guest, '--expanded', '--format=json']),
+        capture('incus', ['query', `/1.0/instances/${guest}/state`]),
+        capture('incus', ['exec', guest, '--', 'cat', '/etc/os-release']),
+        capture('incus', ['exec', guest, '--', 'nproc']),
+        capture('incus', ['exec', guest, '--', 'cat', '/proc/meminfo']),
+        capture('incus', ['exec', guest, '--', 'cat', '/proc/swaps']),
+        capture('incus', ['exec', guest, '--', 'df', '-B1', '--output=size', '/']),
+        capture('ps', ['-eo', 'pid=,ppid=,rss=,comm=,args=']),
+      ]);
+      if (!parseDebian13Release(release)) return err(`${name}:/etc/os-release does not prove Debian 13`);
+      const server = JSON.parse(serverRaw), expanded = JSON.parse(expandedRaw), state = JSON.parse(stateRaw);
+      const root = Object.values(expanded.expanded_devices || expanded.devices || {}).find(d => d.type === 'disk' && d.path === '/');
+      const image = inst.instance.config?.['volatile.base_image'];
+      const cpu = Number(cpuRaw.trim());
+      const ramKb = Number(/^MemTotal:\s+(\d+) kB$/m.exec(memRaw)?.[1]);
+      const swapKb = Number(/^SwapTotal:\s+(\d+) kB$/m.exec(memRaw)?.[1]);
+      const swapRows = swapsRaw.trim().split(/\r?\n/).slice(1).filter(Boolean);
+      const rootFsBytes = Number(rootFsRaw.trim().split(/\s+/).at(-1));
+      const processes = psRaw.split(/\r?\n/).map(line => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line))
+        .filter(Boolean).map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), rssKb: Number(m[3]), comm: m[4], args: m[5] }));
+      const qemuName = new RegExp(`(?:^|[ ,])guest=${guest}(?:[, ]|$)`);
+      const qemu = processes.find(p => p.pid === state.pid && /^qemu-system-/.test(p.comm) && qemuName.test(p.args)) ||
+        processes.find(p => /^qemu-system-/.test(p.comm) && qemuName.test(p.args));
+      if (!server.environment?.server_version || !/^[a-f0-9]{64}$/i.test(image || '') || !root?.size || !Number.isInteger(cpu) || cpu < 1 ||
+          !Number.isFinite(ramKb) || ramKb <= 0 || !Number.isFinite(swapKb) ||
+          !Number.isFinite(rootFsBytes) || rootFsBytes <= 0 || !qemu)
+        return err('VM proof incomplete: image fingerprint, root disk/filesystem, guest CPU/RAM/swap, or exact host QEMU process could not be established');
+      const tree = [qemu];
+      for (let i = 0; i < tree.length; i++) for (const p of processes) if (p.ppid === tree[i].pid && !tree.some(x => x.pid === p.pid)) tree.push(p);
+      return ok({ container: name, incus_server_version: server.environment?.server_version || null,
+        actual_image_fingerprint: image, guest_os_release: release.trim(),
+        cpu: { guest_visible: cpu, configured: expanded.expanded_config?.['limits.cpu'] || null },
+        memory: { guest_mem_total_bytes: ramKb * 1024, configured: expanded.expanded_config?.['limits.memory'] || null },
+        root_disk: { configured_size: root.size, guest_filesystem_bytes: rootFsBytes, pool: root.pool || null },
+        swap: { guest_swap_total_bytes: swapKb * 1024, active_devices: swapRows, disabled: swapKb === 0 && swapRows.length === 0 },
+        state: { status: inst.instance.status, pid: state.pid || null },
+        host_qemu: { pid: qemu.pid, own_rss_bytes: qemu.rssKb * 1024, descendant_rss_bytes: tree.reduce((n,p) => n + p.rssKb * 1024,0), descendant_pids: tree.map(p => p.pid) } });
+    } catch (error) { return err(`VM proof unavailable: ${String(error.message || error).slice(0, 240)}`); }
+  });
+
   /* ---------------------------- in-guest file ops ------------------------- */
 
   function guestPath(args, key = 'path') {
@@ -995,7 +1051,7 @@ export function createLxcAdminHandlers(kit) {
     list_lxc_exports, delete_lxc_export,
     delete_lxc_container, clone_lxc_container, export_lxc, import_lxc,
     list_snapshots, restore_snapshot, delete_snapshot,
-    set_lxc_resources, get_lxc_setup_jobs, acknowledge_lxc_setup_job, add_lxc_device, remove_lxc_device, get_lxc_usage,
+    set_lxc_resources, get_lxc_setup_jobs, acknowledge_lxc_setup_job, add_lxc_device, remove_lxc_device, get_lxc_usage, inspect_a3_vm,
     delete_lxc_file, move_lxc_file, mkdir_lxc, chmod_lxc_file, push_lxc_file_from_ticket,
     service_control, list_processes, install_package,
     get_command_allowlist, set_command_allowlist,

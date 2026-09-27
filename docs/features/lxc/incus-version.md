@@ -21,8 +21,11 @@ upgraded or restarted by this rule. Incus downloads a separate VM image when
 
 ## Existing hosts
 
-`update.sh` now checks the signed Zabbly stable channel even when the
-ProxyPilot checkout is current. If a newer Incus package is available, its
+Incus upgrades are manual. An ordinary application update leaves the Incus
+package, daemon, image settings and rollback checkpoints unchanged. A host
+operator can run `sudo ./update.sh --yes --upgrade-incus` to check the signed
+Zabbly stable channel, including when the ProxyPilot checkout is current. If
+a newer Incus package is available, its
 single-host upgrade step requires Linux 6.12 or later, an apt simulation with
 no non-Incus package removals, a readable instance and storage inventory,
 adequate backup space, a verified archive of `/var/lib/incus`, SQL dumps and
@@ -44,8 +47,9 @@ The Incus package step can interrupt Incus management and guests during the
 service/package restart. A full update can take longer than a dashboard-only
 rebuild.
 
-The installer and updater explicitly set `images.auto_update_cached=true`
-and `images.auto_update_interval=6` and read them back. These settings apply
+The installer and explicitly requested Incus upgrade set
+`images.auto_update_cached=true` and `images.auto_update_interval=6` and read
+them back. These settings apply
 to future alias downloads. Incus does not auto-update fingerprint-pinned
 images or previously copied images that were not marked `--auto-update`, and
 image refresh does not update an already-created guest's OS packages.

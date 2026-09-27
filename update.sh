@@ -37,6 +37,7 @@ FORCE_REBUILD=false
 SKIP_RESTART=false
 VERBOSE=false
 ENABLE_MOCK2=false
+UPGRADE_INCUS=false
 # Non-interactive mode (the dashboard's "Update now" runs this script through
 # the root oneshot in deploy/proxypilot-update.service, with no terminal).
 # --yes answers every prompt with its SAFE default: the uncommitted-changes
@@ -59,6 +60,9 @@ for arg in "$@"; do
         --enable-mock2)
             ENABLE_MOCK2=true
             ;;
+        --upgrade-incus)
+            UPGRADE_INCUS=true
+            ;;
         --yes|-y)
             ASSUME_YES=true
             ;;
@@ -77,6 +81,8 @@ for arg in "$@"; do
             echo "                           MOCK2_ENABLED=true in the deployed .env). The"
             echo "                           'Projects' section appears for admins after"
             echo "                           the restart. A production pin still forces it off."
+            echo "  --upgrade-incus          Explicitly install/upgrade Incus stable and refresh"
+            echo "                           image settings; never implied by an app update."
             echo "  --yes, -y                Non-interactive: answer every prompt with its safe"
             echo "                           default. Refuses to run over uncommitted local"
             echo "                           changes unless --discard-local is also given; an"
@@ -1047,25 +1053,27 @@ if [ "$LOCAL" = "$REMOTE" ]; then
         log "Local and origin/main are both at: $($GIT_CMD log -1 --format='%h (%ad) %s' --date=short origin/main 2>/dev/null || echo "$REMOTE")"
         log ""
         if [ "$ASSUME_YES" = true ]; then
-            # The application is current, but the host Incus stable channel
-            # may have advanced. Run the same guarded package/image step
-            # without rebuilding an unchanged dashboard.
-            log "${BLUE}[3/7] Checking Incus stable release and image updates...${NC}"
-            SUDO_CMD=""
-            if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
-            if ! command -v incus &>/dev/null; then
-                if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/install-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
+            # Only an explicit host request may change Incus packages.
+            if [ "$UPGRADE_INCUS" = true ]; then
+                log "${BLUE}[3/7] Checking Incus stable release and image updates...${NC}"
+                SUDO_CMD=""
+                if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
+                if ! command -v incus &>/dev/null; then
+                    if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/install-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
+                        exit 1
+                    fi
+                    $SUDO_CMD systemctl enable --now incus.service || exit 1
+                    if ! incus storage list --format json 2>/dev/null | grep -q '"name"'; then
+                        $SUDO_CMD incus admin init --minimal || exit 1
+                    fi
+                fi
+                if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/upgrade-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
                     exit 1
                 fi
-                $SUDO_CMD systemctl enable --now incus.service || exit 1
-                if ! incus storage list --format json 2>/dev/null | grep -q '"name"'; then
-                    $SUDO_CMD incus admin init --minimal || exit 1
-                fi
+                log "${BLUE}ProxyPilot code is unchanged; explicit Incus request completed.${NC}"
+            else
+                log "Incus package and image settings unchanged (pass --upgrade-incus for an explicit host upgrade)."
             fi
-            if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/upgrade-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
-                exit 1
-            fi
-            log "${BLUE}ProxyPilot code is unchanged; Incus stable and image settings checked.${NC}"
             exit 0
         fi
         read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
@@ -1168,8 +1176,10 @@ if [ "$LOCAL" != "$REMOTE" ]; then
 fi
 log ""
 
-# Check and install Incus if not present
-log "${BLUE}[3/7] Checking Incus installation...${NC}"
+# Incus package changes require an explicit host flag. An application update
+# must not take a new Incus rollback checkpoint or restart its daemon.
+if [ "$UPGRADE_INCUS" = true ]; then
+log "${BLUE}[3/7] Explicit Incus stable upgrade requested...${NC}"
 SUDO_CMD=""
 if [ "$EUID" -ne 0 ]; then SUDO_CMD="sudo"; fi
 if command -v incus &> /dev/null; then
@@ -1198,6 +1208,9 @@ fi
 if ! (set -o pipefail; $SUDO_CMD bash "$SCRIPT_DIR/scripts/upgrade-incus-stable.sh" 2>&1 | tee -a "$LOG_FILE"); then
     log "${RED}Incus upgrade or image-refresh verification failed; see the checkpoint path in the log.${NC}"
     exit 1
+fi
+else
+    log "[3/7] Incus package and image settings unchanged (pass --upgrade-incus for an explicit host upgrade)."
 fi
 log ""
 

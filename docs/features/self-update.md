@@ -4,14 +4,17 @@ ProxyPilot can update itself from the dashboard (Profile → Application
 Settings → **Update now**) and over MCP (`run_proxypilot_update`). Both do
 exactly one thing: ask the host to run `update.sh --yes`, the same script an
 operator runs by hand — DB backup, `git pull`, self re-exec, dependency
-install, Incus stable-channel check and guarded upgrade, frontend build,
-host-agent rebuild, `docker compose down/build/up`, health check. Nothing is
-re-implemented over RPC. Even when application code is already current,
-`--yes` checks Incus; it does not rebuild the dashboard merely for that check.
+install, frontend build, host-agent rebuild, `docker compose down/build/up`,
+health check. Nothing is re-implemented over RPC. An application update never
+installs or upgrades Incus, including when the application code is current.
+An operator must explicitly run `sudo ./update.sh --yes --upgrade-incus` on the
+host to request the Incus stable-channel check and guarded upgrade. The
+dashboard and MCP update runner do not accept that flag.
 
-The Incus step uses `scripts/upgrade-incus-stable.sh`. It refuses a clustered
-host, a kernel below the current Incus minimum, unsupported storage pools,
-insufficient local backup capacity, failed SQL dumps or archive verification,
+The explicitly requested Incus step uses `scripts/upgrade-incus-stable.sh`. It
+refuses a clustered host, a kernel below the current Incus minimum,
+unsupported storage pools, insufficient local backup capacity, failed SQL
+dumps or archive verification,
 and unrelated apt package removals. For an upgrade it saves the local and
 global SQL dumps and a full `/var/lib/incus` archive, plus recursive ZFS
 snapshots for external ZFS pool sources, before installing the pinned Zabbly
@@ -91,6 +94,9 @@ proxypilot-update.path (PathExists=…/request.json)  →  proxypilot-update.ser
   (no `-x`: `.env`, `data/` and other ignored files survive) instead of
   cancelling. **The runner never passes it**; it is not in the flag allowlist
   of the agent, the runner or the backend. An operator types it at a shell.
+* `--upgrade-incus` — host-only opt-in for the Incus package/image step. The
+  dashboard and MCP runner cannot set it. An ordinary `update.sh --yes` leaves
+  Incus packages, daemon, images and rollback checkpoints alone.
 * `install_update_runner` — installs the runner + units, enables the path
   unit, records the checkout, refreshes `installed.json`.
 * The agent is built with `-ldflags -X …methods.AgentVersion=<short sha>` so

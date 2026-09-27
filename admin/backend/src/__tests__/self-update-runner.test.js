@@ -262,6 +262,7 @@ test('forged, stale, malformed and disallowed requests are refused with a reason
     ['nonce_mismatch', { nonce: 'b'.repeat(32), writeNonce: true, mismatch: true }],
     ['stale', { ageSec: 500 }],
     ['invalid_flags', { flags: '--discard-local' }],
+    ['invalid_flags', { flags: '--upgrade-incus' }],
     ['invalid_flags', { flags: '--rebuild --enable-mock2 --verbose' }],
     ['malformed', { action: 'shell' }],
     ['malformed', { requestedBy: 'admin; rm -rf /' }],

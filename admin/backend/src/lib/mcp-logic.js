@@ -18,6 +18,7 @@
 //   explicitly allows; every feature here is plain request/response.
 
 import { createHash, randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 import { MCP_EXT_TOOLS, MCP_EXT_INSTRUCTIONS } from './mcp-ext/catalog/index.js';
 
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
@@ -1046,12 +1047,17 @@ export function validUnitName(s) {
   return v;
 }
 
-/** A probe target host: IPv4 or a DNS name label chain. */
+/** A probe target host: IPv4, IPv6 literal, or a DNS name label chain. */
 export function validProbeHost(s) {
   const v = String(s ?? '').trim();
-  if (!v || v.length > 253 || v.startsWith('-')) return null;
+  if (!v || v.length > 253 || v.startsWith('-') || v.includes('%')) return null;
+  if (isIP(v) === 6) return v;
   if (!/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(v)) return null;
   return v;
+}
+
+export function probeUrlHost(host) {
+  return isIP(host) === 6 ? `[${host}]` : host;
 }
 
 /** A simple filename glob for grep --include (no paths, no traversal). */
@@ -1250,7 +1256,7 @@ const MCP_BASE_TOOLS = [
       type: 'object',
       properties: {
         container: { type: 'string' },
-        host: { type: 'string', description: 'Target host, default 127.0.0.1.' },
+        host: { type: 'string', description: 'Target IPv4, bare IPv6 literal, or DNS hostname; default 127.0.0.1. IPv6 zone identifiers are refused.' },
         port: { type: 'number' },
         scheme: { type: 'string', enum: ['tcp', 'http', 'https'], description: 'Default http.' },
         path: { type: 'string', description: 'URL path for http/https probes, default /.' },

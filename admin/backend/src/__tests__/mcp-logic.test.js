@@ -970,7 +970,7 @@ test('classifyCurlExit maps the failure classes a caller acts on', () => {
 // ---- cycle 5: observe parsing + static-site id handling ----
 
 import {
-  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost,
+  parseStatFileList, parseSystemctlShow, validUnitName, validProbeHost, probeUrlHost,
   validFileGlob, normalizeServiceId,
 } from '../lib/mcp-logic.js';
 
@@ -1007,6 +1007,10 @@ test('validUnitName / validProbeHost / validFileGlob reject option-lookalikes an
   assert.equal(validUnitName('a b'), null);
   assert.equal(validProbeHost('127.0.0.1'), '127.0.0.1');
   assert.equal(validProbeHost('db.internal'), 'db.internal');
+  assert.equal(validProbeHost('fd42:53c1:d5e6:16b0:1266:6aff:fe92:72ae'), 'fd42:53c1:d5e6:16b0:1266:6aff:fe92:72ae');
+  assert.equal(probeUrlHost('fd42:53c1:d5e6:16b0:1266:6aff:fe92:72ae'), '[fd42:53c1:d5e6:16b0:1266:6aff:fe92:72ae]');
+  assert.equal(probeUrlHost('db.internal'), 'db.internal');
+  assert.equal(validProbeHost('fd42::1%eth0'), null);
   assert.equal(validProbeHost('-flag'), null);
   assert.equal(validProbeHost('a b'), null);
   assert.equal(validFileGlob('*.yml'), '*.yml');

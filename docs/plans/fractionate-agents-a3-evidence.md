@@ -899,3 +899,9 @@ Actual image fingerprint, host QEMU RSS, browser latency and the host network
 boundary remain unmeasured until this tool is deployed and the VM can be
 started behind a verified deny-by-default fence. The older-writer and
 S6/SEC-01/SEC-04 limits above still apply.
+
+Submitted source head `f8c0b8372e359080cf1c64eaf0655969e097ae37` on
+draft PR #686 completed [Security regression run 95](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36311952348)
+and [Storage (ZFS) and migration tests run 82](https://github.com/CyberTechArmor/ProxyPilot/actions/runs/36311952333)
+successfully. These CI results cover that exact head only; A3 host acceptance
+and the live guest measurements remain open.

@@ -1,5 +1,10 @@
 # Next section prompt — A4 credential and provider broker, gated by A3
 
+> **Historical (2026-09-28).** A3 was accepted and A4 was implemented from the
+> user's expanded A4 prompt; the current state is in the
+> [A4 reference](fractionate-agents-a4-reference.md) and
+> [A4 evidence](fractionate-agents-a4-evidence.md).
+
 Do not execute merely by reading this file. **A4 is gated on A3 acceptance.**
 As of 2026-09-28 the host-owned A3 supervisor is installed on the proof VM and
 every automated target case has passed (18/18 plus the confirmed worker

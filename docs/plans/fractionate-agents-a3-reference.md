@@ -7,8 +7,13 @@ next work. Recheck every mutable value below (SHAs, services, VM boot) before
 acting. If this page and a later dated evidence entry disagree, the evidence
 wins.
 
-**Status in one line:** every automated A3 criterion has passed on the VM, but
-A3 is **not accepted** yet.
+**Status (updated after acceptance):** A3 was **accepted on 2026-09-28** (last
+section of the [A3 evidence](fractionate-agents-a3-evidence.md)); A4 now builds
+on it, see the [A4 reference](fractionate-agents-a4-reference.md). The status
+notes below are the pre-acceptance snapshot.
+
+**Pre-acceptance status:** every automated A3 criterion has passed on the VM, but
+A3 was **not accepted** yet.
 
 - The supervisor and runner are installed from code commit `0572dcff`. The
   second target run passed all 18 cases.

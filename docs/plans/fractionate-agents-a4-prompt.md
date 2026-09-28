@@ -1,19 +1,27 @@
 # Next section prompt — A4 credential and provider broker, gated by A3
 
-Do not execute merely by reading this file. **A3 remains blocked** at the
-[A3 evidence](fractionate-agents-a3-evidence.md). Before A4 implementation,
-use the observed disposable Incus VM findings and finish A3: implement
-the Incus VM supervisor and browser/egress broker; prove
-the actual filesystem, socket, network, redirect, CPU, RSS, process, time,
-disk, cancellation, crash and descendant/workspace limits. Resolve the pilot's
-S6/SEC-01/SEC-04 dependency with observed results. A configuration assertion
-or local WSL probe is insufficient. Keep A2/A3 feature gates off.
+Do not execute merely by reading this file. **A4 is gated on A3 acceptance.**
+As of 2026-09-28 the host-owned A3 supervisor, guest runner and typed backend
+client are implemented, but the target proof has not run. The
+[A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md) must first
+record A3 as accepted from observed evidence on the proof VM; start from the
+[A3 reference](fractionate-agents-a3-reference.md). A configuration assertion
+or a local test is insufficient. Keep A2/A3 feature gates off.
+
+The A4 credential broker must use the A3 path, not bypass it. Sign-in
+submission belongs to `submit_bound_fixture`, which the supervisor refuses
+today (`CREDENTIAL_BROKER_UNAVAILABLE`). A4 must deliver the bound fixture
+through a host-side broker without putting the value in the model context, the
+guest runner's command channel, page-visible logs or supervisor receipts. It
+must also extend the origin proxy's reviewed path policy for `/api/login`
+itself, with the matching proof. Do not widen any other A3 method, socket or
+allowlist.
 
 Then read the official A1–A8 plan, A1 architecture, pilot contract, acceptance
 matrix and source register, A2 and A3 evidence and exact diff, current
 Operations schema/store/routes, host-boundary inventory, `CLAUDE.md`, adjacent
 `FINISH.md` and both trackers. Capture branch, HEAD, full status and pre-edit
-hashes. Preserve B1–B4, D1–D4, migrations 1100–1108 and immutable history.
+hashes. Preserve B1–B4, D1–D4, migrations 1100–1109 and immutable history.
 
 Scope A4 to one synthetic sign-in credential binding and one allowlisted
 provider/model route. Use an operator-authorized project/profile/binding UUID

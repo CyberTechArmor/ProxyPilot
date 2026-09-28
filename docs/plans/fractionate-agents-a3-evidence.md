@@ -1121,14 +1121,21 @@ provider, credential, vault, live identity or deployment was activated, and
 
 ### Operator commands and rollback
 
-On the host, stage the exact pushed commits on the candidate, install the
+On the host, stage the exact code commit on the candidate, install the
 supervisor and run the target proof. The installer copies reviewed bytes into
-root-owned `/etc` and records their digests. Replace `<TIP>` with the branch tip
-reported with this change:
+root-owned `/etc` and records their digests. The command pins the code commit
+(later branch commits are docs only), so new docs commits do not invalidate it:
 
 ```
-sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; test "$(git rev-parse FETCH_HEAD)" = <TIP>; git -c user.name="ProxyPilot operator" -c user.email=operator@proxypilot cherry-pick 12ad1392845630eec56705776bae444f54eac58a..<TIP>; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 3cd80b70e971b484f442fbb96ac07f2ad8c66add FETCH_HEAD; git -c user.name="ProxyPilot operator" -c user.email=operator@proxypilot cherry-pick 12ad1392845630eec56705776bae444f54eac58a..3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
 ```
+
+This one-commit `cherry-pick` was simulated against a stand-in candidate (GitHub
+`main` plus the candidate's identical A3 files and policy line). It applied
+cleanly and produced exactly the code commit's tree. Reference documents for
+later conversations: the [A3 reference](fractionate-agents-a3-reference.md),
+the [archived handoff](fractionate-agents-a3-claude-handoff.md) and the next
+[A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md).
 
 Ordered rollback, which adds to the handoff's order:
 

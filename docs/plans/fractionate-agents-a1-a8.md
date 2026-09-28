@@ -6,7 +6,10 @@
 > the proof VM, and the host-owned worker supervisor, guest runner, typed
 > backend client and signed teardown receipts are implemented. The supervisor's
 > installation and its lifecycle proof on the proof VM remain open; see the
-> dated [A3 evidence](fractionate-agents-a3-evidence.md). A4 stays gated on A3.
+> dated [A3 evidence](fractionate-agents-a3-evidence.md), the orientation page
+> [A3 reference](fractionate-agents-a3-reference.md) and the next bounded
+> [A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md). A4 stays
+> gated on A3.
 
 Approved sequence by user direction, 2026-09-25. This plan supersedes the earlier
 suggested next step of D5 and the unbounded future-agent sequence. It establishes

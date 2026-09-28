@@ -1,13 +1,18 @@
 # A5 supervised execution loop — evidence
 
-**A5 is NOT accepted.** Host run 1 (2026-09-28, last section) passed the A3
-proof (19/19) and 14 of the 18 A5 cases with a real person's approval. A
-runner defect failed every successful sign-in, and two harness defects
-failed `outside_set` and the marker scan. They are fixed in `b9bd56e6`. Host
-run 2 is next: the [A5 reference](fractionate-agents-a5-reference.md), steps
-R1–R4. A2, A3 and
-Operations activation stay off. PR #686 and PR #699 stay draft. Nothing was
-merged, deployed or promoted, and no host command ran from this session.
+**A5 is NOT accepted.** Host runs 1 and 2 (2026-09-28, the last two
+sections) installed and exercised A5 on the proof host:
+- Host run 1: A3 19/19 on runner `57770035…`.
+- Host run 2: A5 cases passed across two tries, with real human approvals,
+  and the A5 canary was clean twice.
+
+Still open:
+- step R2 on the current runner `a631ad9d…` (the full A3 proof, the A4 proof
+  and the A4 canary);
+- one A5 run with all 17 cases green, including the supervised run.
+
+The harness fixes are in `9b9a15ed`. Host run 3 is next: the
+[A5 reference](fractionate-agents-a5-reference.md), steps S1–S4.
 
 The [A5 reference](fractionate-agents-a5-reference.md) is the orientation page.
 This file is the record: later dated sections win.
@@ -489,3 +494,102 @@ commands are for a repository checkout. They ran here on `b9bd56e6`:
 - host-boundary inventory: exit 0.
 
 The reference now says so.
+
+## 2026-09-28 host run 2: runner fix confirmed on the A5 path; R2 not yet run
+
+The user pasted the outputs of step R1, a first A5 proof, the diagnostic
+command, and a second A5 proof. **Step R2** (the A3 proof on the new runner,
+the A4 proof and the A4 canary) **was not run.**
+
+### Step R1: as predicted
+
+- **Staging.** `staged 39787edbbd8f8d42a5acbee29874faadeeb845de (was
+  f2edffcf…) from b9bd56e6…; 77 paths match exactly`.
+- **Supervisor reinstall.** Supervisor `151f1d24…` (unchanged), runner
+  **`a631ad9d…`**, everything else unchanged, `accepting_launch: true`.
+  - The new receipt key is `f6304ffbec8af33f3d98cc205ce08c6b3d63cfe9a09023b1c427b9526d6df05b`;
+    `b7fa10e4…` was archived. Boot `83df9a03…`.
+- **Broker.** `790a1957…`, `approle_login: ok`, every binding revoked (19),
+  price revision 7.
+- **A4 demo server set aside.** `server.mjs.a4` = `8bb065061749f42c…`.
+- **Demo deploy.** `previous_sha256 ce241fb1…`, `server_sha256 496846cd…`,
+  service active.
+- **Proxy proof.** 21 codes passed.
+
+### First A5 proof (report `20260928T212926Z`): 16 of 18
+
+- **The approval.** Run `4d232b84-…`, digest `7e990e0ca66c…`, typed
+  `7e990e0ca66c`.
+- **`supervised_run` passed (29.9 s).** This is **the runner fix confirmed on
+  the real demo**: the verified account, both model choices, the human
+  approval consumed, logout, and a verified receipt.
+- **Also passed:**
+  - `injection_scan`, `rule_only`, and `outcome_classes` (all four,
+    including `challenge`);
+  - `pins_and_consent`, `duplicate_start`;
+  - `approval_checks`, `approval_race`, `approval_after_revocation`;
+  - `binding_changed_mid_run`, `stale_guide_and_grant`;
+  - `operator_stop`, `takeover`;
+  - `provider_error`, `unknown_price`, `budget_exhausted`.
+- **Failed: `outside_set`**, with `result_class: provider_error`. The ledger
+  (call `f9de1651-…`) shows `max_output_tokens: 1`, `http_status: 400`,
+  `provider_error: {type: invalid_request_error}`, released with 0 settled.
+  **The provider rejects a 1-token cap.** The main guide's 8-token cap works,
+  so the minimum is between 2 and 8.
+- **Failed: `coordinator_restart`.** The child ended normally (`code: 0`)
+  after 11 s. Its log shows `open_landing` → `step_failed: BROWSER_TIMEOUT`
+  (10.1 s), so the run ended `blocked/action_failed` and never reached the
+  crash point at `open_login`.
+  - This was one navigation timeout out of about 40 launches on this host
+    that day. The same step took 0.2 s in the run before it.
+  - The case depended on a page loading. The timeout itself is recorded
+    here, not explained away.
+- **Canary.** Passed: 0 value and 0 marker matches in all 16 sinks,
+  **including `host_journal_all`**. The marker fix is confirmed.
+
+### Second A5 proof (report `20260928T213452Z`): 16 of 18
+
+- **`coordinator_restart` passed (1.1 s).**
+- **Failed: `supervised_run`.** The terminal showed digest
+  `dd6af16a721bed0e…`, and the person typed **13** characters
+  (`dd6af16a721be`). The harness accepted exactly 12, so it recorded
+  `REFUSED_BY_PERSON` and stopped the run. The result was `cancelled` (0
+  submits) with a verified receipt. This is the designed fail-safe for an
+  answer that is not the expected one; nothing reached the credential path.
+- **Failed: `outside_set`**, the same HTTP 400 as before.
+- **Canary.** Passed again, 0 value and 0 marker matches in all 16 sinks.
+
+### Decision and fixes (`9b9a15ed`, harness only)
+
+- **`outside_set` (user decision): prove it locally.** A real model reply
+  outside the allowed set cannot be forced:
+  - the provider rejects a 1-token cap;
+  - two tokens can already spell `read_files`;
+  - the model otherwise obeys ALLOWED (host run 1).
+
+  The refusal stays proven against the real Supervisor and Broker classes
+  (`test_a5_model_step.py`: `I would choose read_files` and `shell` give
+  `MODEL_CHOICE_INVALID`, and the call is settled), by the launcher, and by
+  the coordinator tests. The installed supervisor is byte-identical to the
+  tested one (`151f1d24…`). The host case is removed, and the aux guide's cap
+  returns to 8.
+- **The approval** now accepts any correct digest prefix of **12 or more**
+  characters. Fewer or wrong characters still refuse. The harness test now
+  answers 13 characters, and the refusal test answers 11.
+- **`coordinator_restart`** kills the child right after reserving its
+  **first** step (`open_landing`), before the supervisor is asked. It also
+  asserts that the supervisor journal has no action for the attempt and that
+  the step is `uncertain`. When the child does not die, the report carries
+  the child run's result.
+- **Local checks:** script tests 148 OK (the harness end-to-end test
+  included) and host-boundary inventory exit 0. No backend, runner,
+  supervisor, broker or demo file changed.
+
+### State after host run 2
+
+- The candidate is `39787edb…`.
+- The installed files are supervisor `151f1d24…`, runner `a631ad9d…`, broker
+  `790a1957…` and demo `496846cd…`.
+- The receipt key is `f6304ffb…` and the boot is `83df9a03…`.
+- The price table is at revision 9 (restored by `unknown_price`).
+- All bindings are revoked, and the fixture mode is cleared.

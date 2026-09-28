@@ -18,9 +18,22 @@ installed the A5 supervisor, runner, broker and demo server:
 - `outside_set` depended on the model misbehaving.
 - The marker scan counted its own sudo command line.
 
-All three are fixed in `b9bd56e6` (see the evidence). **Host run 2** below is
-next. Nothing is activated, merged, deployed or promoted. PR #686 and PR #699
-stay draft.
+All three are fixed in `b9bd56e6` (see the evidence).
+
+Host run 2 (2026-09-28):
+- Installed the new runner and demo server.
+- A5 reached 17 of 18 cases across two tries. The A5 canary scan passed
+  (0 values, 0 markers) twice.
+- Not yet run: step R2 (the A3 proof on the new runner, the A4 proof and the
+  A4 canary).
+- `outside_set` is now proven locally only (user decision: the provider
+  rejects a 1-token cap).
+- A 13-character approval was refused, as designed; any prefix of 12 or more
+  characters now approves.
+- `coordinator_restart` no longer depends on a page loading.
+
+These are in `9b9a15ed`. **Host run 3** below is next. Nothing is activated,
+merged, deployed or promoted. PR #686 and PR #699 stay draft.
 
 ## Read first
 
@@ -49,7 +62,8 @@ stay draft.
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted |
 | PR #699 head (A4) | `efe0aa05fcdb989efb7e84fd2e8cef224989da79` | A5's base; draft |
 | A5 code, host run 1 | `6d420735b9e1b7a074a9c061ed5b6e133fb74d76` | Staged and installed in host run 1 |
-| **A5 code, host run 2** | `b9bd56e6ae2a00eed08064ea06e4e01b0657ddb0` | **Stage this.** Changes the runner, the demo server, the harness and the canary scan; later commits are docs |
+| A5 code, host run 2 | `b9bd56e6ae2a00eed08064ea06e4e01b0657ddb0` | Staged and installed in host run 2 (candidate `39787edb…`) |
+| **A5 code, host run 3** | `9b9a15ed033058a143a2abb6c9127d5bce13b0bc` | **Stage this.** Harness only (`a5-probe.mjs`, its test); nothing to reinstall; later commits are docs |
 | Live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged |
 | Candidate | `f2edffcf1f02fbc1a1d027020a1c0e0ab2598b9f` (host run 1 staging of `6d420735`) | Host run 2, step 1 stages `b9bd56e6` onto it |
 
@@ -81,7 +95,7 @@ boot is `83df9a03-e43f-4d95-80b8-3f9303e9f6e5` (A3 `guest_crash`).
 | `scripts/a4-credential-broker.py` | `MAX_PROMPT_BYTES = 16000` |
 | `admin/frontend/demo/server.mjs` | A5 fixture modes and the injected file entry |
 | `scripts/a4-fixture-account.py` | `set-mode`, `clear-mode`, `server.mjs.previous`, `rollback-server --to` |
-| `scripts/a5-probe.mjs`, `scripts/a5-proof-db.mjs` | **Target proof harness** (18 cases) and its proof database |
+| `scripts/a5-probe.mjs`, `scripts/a5-proof-db.mjs` | **Target proof harness** (17 cases) and its proof database |
 | `scripts/a4-canary-scan.py` | `--a5-dir`, `--a5-marker` (the marker comes from the file, never the command line) |
 | Tests | `admin/backend/src/__tests__/operational-run-coordinator.test.js` (15); `scripts/tests/test_a5_{model_step,fixture_modes,probe_harness}.py` (12); A5 cases in `test_a4_credential_submit.py` |
 
@@ -170,7 +184,6 @@ in brackets):
 | `injection_scan` | The injected marker is in no proof DB, log, supervisor journal or broker journal |
 | `rule_only` | A rule-decided run makes no model call anywhere |
 | `outcome_classes` | expired → `credential_rejected`, locked → `rate_limited`, challenge → `challenge_required`, redirect → `unexpected_origin` (no failure counted in the shared bucket) |
-| `outside_set` | A real model answer outside the set gives `model_choice_invalid` (the call settles) |
 | `pins_and_consent` | A live attempt refuses an altered guide (`GUIDE_HASH_MISMATCH`), an altered policy (`RUN_POLICY_MISMATCH`) and a set not offered (`INVALID_REQUEST`); a profile without consent gets `GUIDE_NOT_SHAREABLE`, and its run makes no call |
 | `duplicate_start` | `RUN_ALREADY_ACTIVE`; the unlaunched run ends without a worker |
 | `approval_checks` | Wrong digest, no elevation, not eligible, stale after rotation, duplicate; no submit |
@@ -185,6 +198,20 @@ in brackets):
 | `budget_exhausted` | Refused before any provider request; the limits are restored |
 | `coordinator_restart` | A child coordinator is SIGKILLed after reserving a step: fenced, the step is never sent, `interrupted`, receipt verified |
 
+**A model reply outside the allowed set** is proven locally only (user
+decision, 2026-09-28). The coverage is:
+- `test_a5_model_step.py`: the real Supervisor and Broker classes refuse
+  `I would choose read_files` and `shell` with `MODEL_CHOICE_INVALID`, and
+  the call settles;
+- the launcher's own check;
+- the coordinator test.
+
+The real provider rejects a 1-token cap (HTTP 400), and two tokens can
+already spell `read_files`, so no host case can force such a reply. On the
+host, the installed supervisor is byte-identical to the tested one
+(`151f1d24…`), and `pins_and_consent` proves the refusal of an allowed set
+the rules do not offer.
+
 The `timeout` class is proven locally only (real Chromium through the real
 proxy policy). It is never run on the live demo: see the proxy finding in the
 evidence.
@@ -194,7 +221,36 @@ evidence.
 Every command runs as root on the proof host, as one paste. Review each
 output before the next. No step prints a secret.
 
-### Host run 2 (next): stage `b9bd56e6`, then the A3, A4 and A5 proofs again
+### Host run 3 (next): stage `9b9a15ed`, then the A3/A4 regression (R2) and the A5 proof
+
+Only the harness changed since host run 2. There is nothing to reinstall:
+the installed supervisor (`151f1d24…`), runner (`a631ad9d…`), broker
+(`790a1957…`) and demo server (`496846cd…`) stay.
+
+**Step S1 (stage only).**
+
+```
+sudo sh -c 'set -e; C=9b9a15ed033058a143a2abb6c9127d5bce13b0bc; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/beautiful-maxwell-9bldxg; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; python3 scripts/a3-install-supervisor.py status | grep -E "a3-worker-(supervisor|guest)|accepting_launch|key_id"'
+```
+
+Expected output:
+- `staged <sha> (was 39787edb…) from 9b9a15ed…; <n> paths match exactly`,
+  then the new HEAD;
+- supervisor `151f1d24…`, runner `a631ad9d…`;
+- `"accepting_launch": true`, key `f6304ffb…`.
+
+**Step S2 = step 2 below. Required:** a new A4 binding, then the full A3
+proof on the new runner, the A4 proof and the A4 canary. All 19 A3 cases and
+all six A4 cases must pass. Host runs 1 and 2 did not run it on runner
+`a631ad9d…`.
+
+**Step S3 = step R3 below** (the A5 proof and the canary with `--a5-marker`).
+Expect 17 cases, all `"passed": true`. At the approval prompt, type at least
+the first 12 characters of the digest; a longer correct prefix is fine.
+
+**Step S4 = step 4 below.**
+
+### Host run 2 (2026-09-28, done): stage `b9bd56e6`, then the A3, A4 and A5 proofs again
 
 The supervisor and broker code are unchanged since host run 1. The runner
 changed, and it is installed with the supervisor, so the supervisor is
@@ -238,8 +294,8 @@ sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; node --no-warnings a5
 ```
 
 Expected output: step 3's list below.
-- `outside_set` now passes: the one-token reply is recorded by the
-  supervisor as `invalid`.
+- (Host run 2: `outside_set` got HTTP 400 for the one-token cap and is no
+  longer a host case.)
 - `host_journal_all` must show `marker_matches: 0`. The host run 1 sudo line
   carried the old marker, which is no longer searched for.
 
@@ -330,21 +386,20 @@ are under `/var/lib/proxypilot-a3-proof/proof/` and
 
 **Step 3 (the A5 proof; one human approval; then the canary with the A5 sinks).**
 Run it in a terminal where you can type. It takes about 3–6 minutes and makes
-about three real `gpt-6-luna` calls (two in the supervised run, one in
-`outside_set`); the provider-error case is refused by the provider without
-generating.
+about two real `gpt-6-luna` calls (both in the supervised run). The
+provider-error case is refused by the provider without generating.
 
 When the supervised run reaches the submit, the terminal shows the action,
 run, attempt and fence, binding and revision, origin, guide hash, policy
-digest and the **approval digest**. Check them, then type the digest's first
-12 characters. Anything else refuses and stops the run.
+digest and the **approval digest**. Check them, then type at least the
+digest's first 12 characters. Anything else refuses and stops the run.
 
 ```
 sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; node --no-warnings a5-probe.mjs; echo "a5_exit=$?"; D=$(ls -td /var/lib/proxypilot-a5-proof/*/ | head -1); B=$(cat "$D/last-binding"); python3 a4-canary-scan.py --binding "$B" --a5-dir "$D" --a5-marker; echo "canary_exit=$?"'
 ```
 
 Expected output:
-1. One JSON line per case, each `"passed": true`: the 18 cases in the table
+1. One JSON line per case, each `"passed": true`: the 17 cases in the table
    above, starting with `supervised_run`.
 2. A final line with `"a5_proof": "passed"`, the report path and the last
    binding ID. Then `a5_exit=0`.
@@ -363,9 +418,6 @@ If it fails:
   A failed case stops its run before the next starts. The harness always
   revokes its bindings, clears the fixture mode and restores the price and
   limits it changed.
-- `outside_set` failing with the model answering inside the set is a model
-  behaviour, not a boundary failure. Paste it; the case is then rerun with
-  `--only outside_set`.
 
 (Host run 1 typed `--marker A5-INJECTION-MARKER` here. That option is gone:
 the typed marker was logged by sudo and counted itself.)

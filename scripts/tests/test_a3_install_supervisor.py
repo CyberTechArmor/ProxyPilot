@@ -34,7 +34,9 @@ class InstallerTests(unittest.TestCase):
         self.paths = {'TARGET': root / 'etc' / 'supervisor', 'UNIT': root / 'systemd' / 'proxypilot-a3-supervisor.service',
                       'KEY': root / 'etc' / 'supervisor-key.pem', 'PUBLIC_KEY': root / 'etc' / 'supervisor-pub.pem',
                       'JOURNAL': root / 'state' / 'supervisor-install.json', 'STATE_DIR': root / 'state' / 'supervisor',
-                      'KEY_ARCHIVE': root / 'state' / 'supervisor-keys'}
+                      'KEY_ARCHIVE': root / 'state' / 'supervisor-keys',
+                      'RENEW_SERVICE': root / 'systemd' / 'proxypilot-a3-proxy-renew.service',
+                      'RENEW_TIMER': root / 'systemd' / 'proxypilot-a3-proxy-renew.timer'}
         self.commands = []
         self.active = False
         self.fail_enable = False
@@ -66,7 +68,8 @@ class InstallerTests(unittest.TestCase):
             self.active = False
         if argv[:2] == ['systemctl', 'show']:
             prop = argv[3].split('=', 1)[1]
-            return {'FragmentPath': str(inst.UNIT), 'DropInPaths': '', 'NeedDaemonReload': 'no',
+            fragment = {inst.RENEW_TIMER.name: inst.RENEW_TIMER, inst.RENEW_SERVICE.name: inst.RENEW_SERVICE}
+            return {'FragmentPath': str(fragment.get(argv[2], inst.UNIT)), 'DropInPaths': '', 'NeedDaemonReload': 'no',
                     'Requires': 'proxypilot-a3-fence.service system.slice',
                     'After': 'proxypilot-a3-fence.service proxypilot-a3-origin-proxy.service'}[prop] + '\n'
         if argv[:2] == ['systemctl', 'is-active'] and not self.active:
@@ -99,6 +102,11 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result['key_id'], journal['key_id'])
         self.assertIn(['systemctl', 'enable', '--now', inst.UNIT.name], self.commands)
         self.assertFalse(any('nft' in c or 'incus' in c for c in self.commands))
+        # The proxy certificate renewal timer is installed, recorded and enabled with the supervisor.
+        for path in (inst.RENEW_SERVICE, inst.RENEW_TIMER):
+            self.assertEqual(journal['files'][str(path)], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertIn(['systemctl', 'enable', '--now', inst.RENEW_TIMER.name], self.commands)
+        self.assertEqual(result['certificate_renewal'], {'timer': inst.RENEW_TIMER.name, 'state': 'active/enabled'})
         self.assertEqual(inst.install()['key_id'], journal['key_id'])  # idempotent readback
         (inst.TARGET / 'a3-worker-guest.py').write_text('#!/usr/bin/env python3\nprint(1)\n')
         with self.assertRaisesRegex(ValueError, 'changed'):
@@ -122,10 +130,46 @@ class InstallerTests(unittest.TestCase):
         self.status_active = None
         result = inst.remove()
         self.assertTrue(Path(result['key_archived']).exists())
-        self.assertFalse(inst.KEY.exists() or inst.UNIT.exists())
+        self.assertFalse(inst.KEY.exists() or inst.UNIT.exists() or inst.RENEW_TIMER.exists())
+        self.assertIn(['systemctl', 'disable', '--now', inst.RENEW_TIMER.name], self.commands)
         self.assertEqual(json.loads(inst.JOURNAL.read_text())['phase'], 'removed')
         self.assertNotEqual(inst.install()['key_id'], installed['key_id'])
 
+
+    def test_an_installation_from_before_the_renewal_timer_still_reads_back_and_removes(self):
+        inst.install()
+        journal = json.loads(inst.JOURNAL.read_text())
+        for path in (inst.RENEW_SERVICE, inst.RENEW_TIMER):
+            del journal['files'][str(path)]
+            path.unlink()
+        inst.JOURNAL.write_text(json.dumps(journal))
+        self.assertIsNone(inst.status()['certificate_renewal'])
+        self.commands.clear()
+        inst.remove()
+        self.assertNotIn(['systemctl', 'disable', '--now', inst.RENEW_TIMER.name], self.commands)
+
+
+class RenewTimerTests(unittest.TestCase):
+    def test_timer_runs_the_installed_proxy_installer_every_six_hours(self):
+        self.assertIn('ExecStart=/usr/bin/python3 -I /etc/proxypilot-a3-proof/supervisor/a3-install-proxy.py renew',
+                      inst.RENEW_SERVICE_TEXT)
+        self.assertIn('Type=oneshot', inst.RENEW_SERVICE_TEXT)
+        self.assertNotIn('candidate', inst.RENEW_SERVICE_TEXT)
+        self.assertNotIn('--force', inst.RENEW_SERVICE_TEXT)
+        self.assertIn('a3-install-proxy.py', inst.SOURCES)   # the copy the timer runs is installed and digest-checked
+        for line in ('OnCalendar=*-*-* 00/6:17:00', 'Persistent=true', 'OnBootSec=10min', 'WantedBy=timers.target'):
+            self.assertIn(line, inst.RENEW_TIMER_TEXT)
+
+    @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze is required')
+    def test_timer_and_service_verify(self):
+        with tempfile.TemporaryDirectory() as temp:
+            paths = []
+            for path, text in ((inst.RENEW_SERVICE, inst.RENEW_SERVICE_TEXT), (inst.RENEW_TIMER, inst.RENEW_TIMER_TEXT)):
+                target = Path(temp) / path.name
+                target.write_text(text)
+                paths.append(str(target))
+            result = REAL_RUN(['systemd-analyze', 'verify', *paths], capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 class OperatorPageTests(unittest.TestCase):
     def test_loopback_token_host_and_typed_relay_only(self):

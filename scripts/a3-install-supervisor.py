@@ -35,6 +35,38 @@ JOURNAL = i.STATE / 'supervisor-install.json'
 STATE_DIR = i.STATE / 'supervisor'
 KEY_ARCHIVE = i.STATE / 'supervisor-keys'
 OPERATOR_SOCKET = Path('/run/proxypilot-a3/operator.sock')
+# The origin proxy's self-signed certificate lives 7 days; this timer runs the
+# INSTALLED proxy installer's `renew` (re-issue when under 3 days remain and no
+# attempt is live), so it never lapses unattended. It is installed with the
+# supervisor because it runs the supervisor's reviewed copy of that installer.
+RENEW_SERVICE = Path('/etc/systemd/system/proxypilot-a3-proxy-renew.service')
+RENEW_TIMER = Path('/etc/systemd/system/proxypilot-a3-proxy-renew.timer')
+RENEW_SERVICE_TEXT = '''[Unit]
+Description=Renew the A3 origin proxy certificate when it is due
+After=proxypilot-a3-fence.service proxypilot-a3-origin-proxy.service proxypilot-a3-supervisor.service
+ConditionPathExists=/etc/proxypilot-a3-proof/supervisor/a3-install-proxy.py
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /etc/proxypilot-a3-proof/supervisor/a3-install-proxy.py renew
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+'''
+RENEW_TIMER_TEXT = '''[Unit]
+Description=Check the A3 origin proxy certificate every six hours
+
+[Timer]
+OnBootSec=10min
+OnCalendar=*-*-* 00/6:17:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+'''
 UNIT_TEXT = '''[Unit]
 Description=A3 worker supervisor for the proof VM
 Requires=proxypilot-a3-fence.service
@@ -97,6 +129,8 @@ def plan_files(source_dir=Path(__file__).resolve().parent):
             raise ValueError(f'Unreviewed source: {name}')
         files[TARGET / name] = data
     files[UNIT] = UNIT_TEXT.encode()
+    files[RENEW_SERVICE] = RENEW_SERVICE_TEXT.encode()
+    files[RENEW_TIMER] = RENEW_TIMER_TEXT.encode()
     return files
 
 
@@ -141,6 +175,19 @@ def wait_status(expected_key):
     raise ValueError(f'Supervisor did not answer with the installed key: {last}')
 
 
+def renew_timer_checks(data):
+    """The certificate renewal timer, for an installation that recorded it."""
+    if str(RENEW_TIMER) not in data['files']:
+        return None
+    i.execute(['systemctl', 'is-enabled', RENEW_TIMER.name])
+    i.execute(['systemctl', 'is-active', RENEW_TIMER.name])
+    for unit, path in ((RENEW_TIMER.name, RENEW_TIMER), (RENEW_SERVICE.name, RENEW_SERVICE)):
+        show = lambda prop: i.execute(['systemctl', 'show', unit, f'--property={prop}', '--value']).strip()  # noqa: E731
+        if show('FragmentPath') != str(path) or show('DropInPaths') or show('NeedDaemonReload') != 'no':
+            raise ValueError(f'Loaded {unit} does not match the installed file')
+    return {'timer': RENEW_TIMER.name, 'state': 'active/enabled'}
+
+
 def unit_checks():
     i.execute(['systemctl', 'is-active', UNIT.name])
     i.execute(['systemctl', 'is-enabled', UNIT.name])
@@ -169,6 +216,7 @@ def status():
         raise ValueError(f"Supervisor installation phase is {data.get('phase')}")
     verify_files(data)
     dependencies = unit_checks()
+    renewal = renew_timer_checks(data)
     if key_id(PUBLIC_KEY) != data['key_id']:
         raise ValueError('Receipt public key changed')
     reply = call('status')
@@ -178,11 +226,12 @@ def status():
     return dict(installed=True, vm_uuid=i.fence.PROOF_UUID, service='active/enabled', dependencies=dependencies,
                 files=data['files'], key_id=data['key_id'], public_key=str(PUBLIC_KEY),
                 accepting_launch=result['accepting_launch'], blockers=result['blockers'], active=result['active'],
-                boundary=result['boundary'],
+                boundary=result['boundary'], certificate_renewal=renewal,
                 notice='Supervisor installed; worker_ready requires the lifecycle proof (a3-probe-worker.py)')
 
 
 def rollback(written, previous):
+    subprocess.run(['systemctl', 'disable', '--now', RENEW_TIMER.name], capture_output=True, timeout=90)
     subprocess.run(['systemctl', 'disable', '--now', UNIT.name], capture_output=True, timeout=90)
     for path in written:
         if path in previous:
@@ -198,9 +247,9 @@ def install():
         i.secure(path)
     files = plan_files()
     with tempfile.TemporaryDirectory(prefix='pp-a3-supervisor-') as temp:
-        candidate = Path(temp) / UNIT.name
-        candidate.write_text(UNIT_TEXT)
-        i.execute(['systemd-analyze', 'verify', str(candidate)])
+        for path, text in ((UNIT, UNIT_TEXT), (RENEW_SERVICE, RENEW_SERVICE_TEXT), (RENEW_TIMER, RENEW_TIMER_TEXT)):
+            (Path(temp) / path.name).write_text(text)
+        i.execute(['systemd-analyze', 'verify', *(str(Path(temp) / p.name) for p in (UNIT, RENEW_SERVICE, RENEW_TIMER))])
         for name in SOURCES:
             compile(files[TARGET / name].decode('utf-8'), name, 'exec')  # Syntax only; nothing is written.
         if JOURNAL.exists():
@@ -242,6 +291,7 @@ def install():
         i.execute(['systemctl', 'daemon-reload'])
         i.execute(['systemctl', 'enable', '--now', UNIT.name])
         wait_status(kid)
+        i.execute(['systemctl', 'enable', '--now', RENEW_TIMER.name])
         return status()
     except BaseException:
         rollback(written, previous)
@@ -261,6 +311,8 @@ def remove():
         reply = None
     if reply and reply.get('ok') and reply['result']['active']:
         raise ValueError('A worker attempt is live; stop it through the operator socket first')
+    if str(RENEW_TIMER) in data['files']:
+        i.execute(['systemctl', 'disable', '--now', RENEW_TIMER.name])
     i.execute(['systemctl', 'disable', '--now', UNIT.name])
     if subprocess.run(['systemctl', 'is-active', UNIT.name], capture_output=True).returncode == 0:
         raise ValueError('Supervisor unit is still active')

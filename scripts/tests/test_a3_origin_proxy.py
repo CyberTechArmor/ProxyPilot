@@ -255,3 +255,144 @@ class OriginPolicyTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+REAL_RUN = subprocess.run
+
+
+@unittest.skipUnless(shutil.which('openssl'), 'openssl is required to issue the proxy certificate')
+class CertificateRenewalTests(unittest.TestCase):
+    """`renew` re-issues the proxy's self-signed certificate in place, with real
+    openssl and real journal writes; only systemctl and the VM are stubbed."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.commands = []
+        self.vm_status = 'Running'
+        self.paths = {name: self.root / name for name in ('script', 'cert', 'key', 'unit')}
+        self.journal = self.root / 'proxy-install.json'
+        self.patches = [patch.object(i, 'INSTALLED', self.paths['script']), patch.object(i, 'CERT', self.paths['cert']),
+                        patch.object(i, 'KEY', self.paths['key']), patch.object(i, 'UNIT', self.paths['unit']),
+                        patch.object(i, 'JOURNAL', self.journal), patch.object(i, 'validate_target', return_value={}),
+                        patch.object(i.p, 'LISTEN', ('127.0.0.1', 0)), patch.object(i.i, 'secure'),
+                        patch.object(i.i, 'execute', side_effect=self.execute),
+                        patch.object(i.i, 'status', side_effect=lambda: {'vm_status': self.vm_status})]
+        for item in self.patches:
+            item.start()
+        # An installed proxy exactly as install() leaves it.
+        with patch.object(i, 'status', return_value={'installed': True}):
+            i.install()
+        self.commands.clear()
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def execute(self, argv, **options):
+        if argv[0] == 'openssl':
+            return REAL_RUN(argv, check=True, capture_output=True, text=True, **options).stdout
+        self.commands.append(argv)
+        return ''
+
+    def snapshot(self):
+        return {name: path.read_text() for name, path in self.paths.items()}, json.loads(self.journal.read_text())
+
+    def renew(self, **options):
+        with patch.object(i, 'status', side_effect=lambda check_certificate=True: {'installed': True}):
+            return i.renew(**options)
+
+    def test_a_fresh_certificate_is_not_renewed(self):
+        before = self.snapshot()
+        result = self.renew(attempt=lambda: None)
+        self.assertEqual((result['renewed'], result['reason']), (False, 'not_due'))
+        self.assertEqual(result['renew_within_seconds'], 3 * 86400)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.commands, [])
+
+    def test_a_due_certificate_is_reissued_in_place_and_the_proxy_restarted(self):
+        before_files, before_journal = self.snapshot()
+        previous = i.spki(self.paths['cert'])
+        with patch.object(i, 'RENEW_BEFORE', 8 * 86400):   # a 7-day certificate is now inside the window
+            result = self.renew(attempt=lambda: None)
+        after_files, journal = self.snapshot()
+        self.assertTrue(result['renewed'])
+        self.assertEqual(result['previous_spki_sha256'], previous)
+        self.assertNotEqual(i.spki(self.paths['cert']), previous)
+        self.assertNotEqual(after_files['cert'], before_files['cert'])
+        self.assertNotEqual(after_files['key'], before_files['key'])
+        # Source and unit untouched; the journal records exactly the new pair.
+        self.assertEqual((after_files['script'], after_files['unit']), (before_files['script'], before_files['unit']))
+        self.assertNotIn('renewal', journal)
+        self.assertEqual(journal['phase'], 'installed')
+        for name, path in self.paths.items():
+            self.assertEqual(journal['files'][str(path)], i.i.digest(after_files[name]))
+        self.assertEqual(oct(self.paths['key'].stat().st_mode & 0o777), '0o600')
+        self.assertEqual(self.commands, [['systemctl', 'restart', self.paths['unit'].name]])
+        self.assertFalse(i.certificate_due())
+        self.assertEqual(REAL_RUN(['openssl', 'x509', '-in', str(self.paths['cert']), '-noout', '-subject'],
+                                  capture_output=True, text=True).stdout.strip().replace(' ', ''),
+                         'subject=CN=demo.fractionate.ai')
+
+    def test_nothing_changes_while_an_attempt_is_live_or_the_vm_is_stopped(self):
+        before = self.snapshot()
+        result = self.renew(force=True, attempt=lambda: {'attempt_id': 'a1'})
+        self.assertEqual((result['renewed'], result['reason'], result['attempt_id']), (False, 'attempt_live', 'a1'))
+        self.vm_status = 'Stopped'
+        self.assertEqual(self.renew(force=True, attempt=lambda: None), {'renewed': False, 'reason': 'vm_not_running'})
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.commands, [])
+
+    def test_an_interrupted_renewal_is_finished_and_tampering_is_refused(self):
+        _, journal = self.snapshot()
+        # Crash after the journal recorded the new pair and only the key was written.
+        with tempfile.TemporaryDirectory() as temp:
+            key, cert = i.issue_certificate(Path(temp))
+        journal['renewal'] = {str(self.paths['cert']): i.i.digest(cert), str(self.paths['key']): i.i.digest(key)}
+        self.journal.write_text(json.dumps(journal))
+        self.paths['key'].write_text(key)
+        result = self.renew(attempt=lambda: None)   # not forced: a pending renewal always completes
+        self.assertTrue(result['renewed'])
+        files, done = self.snapshot()
+        self.assertNotIn('renewal', done)
+        for name, path in self.paths.items():
+            self.assertEqual(done['files'][str(path)], i.i.digest(files[name]))
+        # A certificate that is neither the recorded one nor the pending one is refused, untouched.
+        done['renewal'] = {str(self.paths['cert']): 'a' * 64, str(self.paths['key']): 'b' * 64}
+        self.journal.write_text(json.dumps(done))
+        self.paths['cert'].write_text(cert)
+        with self.assertRaisesRegex(ValueError, 'outside a renewal'):
+            self.renew(attempt=lambda: None)
+        self.assertEqual(self.paths['cert'].read_text(), cert)
+
+    def test_live_attempt_reads_the_supervisor_operator_socket(self):
+        import socket as socket_module
+        import threading
+        self.assertIsNone(i.live_attempt(self.root / 'absent.sock'))
+        path = self.root / 'operator.sock'
+        for reply, expected in (({'ok': True, 'result': {'active': {'attempt_id': 'a2'}}}, {'attempt_id': 'a2'}),
+                                ({'ok': True, 'result': {'active': None}}, None),
+                                ({'ok': False, 'error': 'X'}, ValueError)):
+            server = socket_module.socket(socket_module.AF_UNIX)
+            server.bind(str(path))
+            server.listen(1)
+
+            def answer():
+                conn, _ = server.accept()
+                request = json.loads(conn.makefile().readline())
+                assert request == {'method': 'status', 'params': {}}, request
+                conn.sendall((json.dumps(reply) + '\n').encode())
+                conn.close()
+            thread = threading.Thread(target=answer)
+            thread.start()
+            try:
+                if expected is ValueError:
+                    with self.assertRaises(ValueError):
+                        i.live_attempt(path)
+                else:
+                    self.assertEqual(i.live_attempt(path), expected)
+            finally:
+                thread.join()
+                server.close()
+                path.unlink()

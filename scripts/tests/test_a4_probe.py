@@ -79,6 +79,158 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(sorted(Path(p).name for p in out['found']), ['Cookies', 'pp-a4-credential'])
 
 
+
+PROJECT = '11111111-1111-4111-8111-111111111111'
+PROFILE = '22222222-2222-4222-8222-222222222222'
+
+
+class FlowVault:
+    config = {'kv_mount': 'pp-kv', 'agent': 'a4-broker'}
+
+    def path(self, key):
+        return 'agents/a4-broker/' + key
+
+    def current_version(self, key):
+        return 1
+
+    def read(self, key, version):
+        return bytearray(b'sk-test-a4-flow-000111' if key == 'openai-api-key' else b'A4-flow-canary-Zt8pQ3')
+
+    def healthy(self):
+        return True
+
+
+class FlowHost:
+    """The provider as the broker sees it: one completion, or a 400 for the error proof."""
+
+    def __init__(self):
+        self.requests = 0
+
+    def provider(self, url, key, body):
+        self.requests += 1
+        if body['max_completion_tokens'] == 0:
+            return 400, {'error': {'type': 'invalid_request_error'}}
+        return 200, {'id': 'chatcmpl-flow-%d' % self.requests, 'model': 'gpt-6-luna-2026-09-23',
+                     'service_tier': 'default',
+                     'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'content': 'OK'}}],
+                     'usage': {'prompt_tokens': 30, 'completion_tokens': 1, 'total_tokens': 31,
+                               'prompt_tokens_details': {'cached_tokens': 0}}}
+
+
+class FlowSupervisor:
+    """The installed supervisor's rules that the proof depends on: ONE live attempt
+    at a time (ACTIVE_ATTEMPT), pinning at the broker at launch, and a broker
+    `check` before a bound submit."""
+
+    def __init__(self, real_broker):
+        self.broker = real_broker
+        self.live = None
+        self.actions = {}
+
+    def fail(self, code):
+        raise probe.op.CallFailed({'ok': False, 'error': code})
+
+    def __call__(self, method, params=None, timeout=180):
+        params = params or {}
+        if method == 'launch':
+            if self.live is not None:
+                self.fail('ACTIVE_ATTEMPT')
+            spend = {k: params['limits'][k] for k in ('max_tokens', 'max_usd') if k in params['limits']}
+            try:
+                self.broker.pin_run({'run_id': params['run_id'], 'project_limits_revision':
+                                     params['project_limits_revision'], 'limits': spend,
+                                     'credential': params.get('credential')})
+            except broker.Refused as error:
+                self.fail(error.code)
+            self.live = dict(params)
+            self.actions[params['attempt_id']] = []
+            return {'boot_id': 'boot-flow'}
+        if method == 'action':
+            if self.live is None or self.live['attempt_id'] != params['attempt_id']:
+                self.fail('ATTEMPT_NOT_ACTIVE')
+            if params['action'] == 'submit_bound_fixture':
+                try:
+                    self.broker.check({'run_id': params['run_id'], 'binding_id': params['binding_id']})
+                except broker.Refused as error:
+                    self.fail(error.code)
+            self.actions[params['attempt_id']].append({'action': params['action'], 'state': 'done'})
+            return {'result': {}}
+        if method == 'journal':
+            return {'attempt': {'actions': self.actions[params['attempt_id']]}}
+        if method == 'stop':
+            if self.live is None or self.live['attempt_id'] != params['attempt_id']:
+                self.fail('ATTEMPT_NOT_ACTIVE')
+            self.live = None
+            return {'receipt': {'payload': {}}}
+        if method == 'status':
+            return {'active': None if self.live is None else {k: self.live[k] for k in
+                                                              ('run_id', 'attempt_id', 'fence')}}
+        raise AssertionError(method)
+
+
+class ProofFlowTests(unittest.TestCase):
+    """The budget and revocation cases run end to end against the REAL broker
+    (its reply shapes and refusal codes) and a supervisor that allows one live
+    attempt, which is what the host run on 2026-09-28 exposed."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.patches = [patch.object(broker, 'secure', lambda path: None)]
+        for item in self.patches:
+            item.start()
+        self.host = FlowHost()
+        self.real = broker.Broker(host=self.host, vault=FlowVault(), journal=root / 'state.json')
+        self.real.price_set({'model': 'gpt-6-luna', 'input': '0.10', 'cached_input': '0.01', 'cache_write': '0.125',
+                             'output': '0.50'})
+        self.real.provider_bind({'vault_key': 'openai-api-key'})
+        self.real.bind({'binding_id': BINDING, 'project_id': PROJECT, 'profile_id': PROFILE,
+                        'username': 'a4-fixture@demo.fractionate.ai', 'vault_key': 'a4-fixture-password'})
+        self.supervisor = FlowSupervisor(self.real)
+
+        def via_broker(method, params=None, timeout=180):
+            try:
+                return self.real.dispatch(method, params or {})
+            except broker.Refused as error:
+                raise probe.bop.CallFailed({'ok': False, 'error': error.code})
+        for target, value in (('call', self.supervisor), ('broker', via_broker), ('OUT', root / 'out'),
+                              ('receipt_ok', lambda receipt: receipt['payload'])):
+            item = patch.object(probe, target, value)
+            item.start()
+            self.patches.append(item)
+        self.proof = probe.Proof(BINDING)
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def test_budget_runs_one_attempt_at_a_time_and_proves_every_refusal(self):
+        observed = self.proof.budget()
+        self.assertIsNone(self.supervisor.live)
+        self.assertEqual(observed['refusals']['budget_tokens'], 'BUDGET_EXHAUSTED')
+        self.assertEqual(observed['refusals']['budget_usd'], 'BUDGET_EXHAUSTED')
+        self.assertEqual(observed['refusals']['provider_error'], 'PROVIDER_ERROR')
+        self.assertEqual(observed['allowed_call']['state'], 'settled')
+        self.assertEqual(self.host.requests, 2)   # the allowed call and the provider-error proof, nothing else
+        self.assertEqual(self.real.status({})['prices']['revision'], 3)   # cleared, then restored
+
+    def test_revocation_reports_its_timings(self):
+        observed = self.proof.revocation()
+        self.assertIsNone(self.supervisor.live)
+        self.assertEqual((observed['broker_check'], observed['next_submit'], observed['new_launch']),
+                         ('BINDING_REVOKED',) * 3)
+        self.assertIsInstance(observed['revoked_at_epoch'], (int, float))
+        self.assertEqual(observed['binding_state'], 'revoked')
+        for key in ('revoke_call_ms', 'broker_check_ms', 'next_submit_refusal_ms'):
+            self.assertIsInstance(observed[key], int)
+
+    def test_a_failed_case_leaves_no_live_attempt(self):
+        self.proof.run_case('budget', lambda: (self.proof.launch({'max_usd': 0.001}), 1 / 0))
+        self.assertFalse(self.proof.results[-1]['passed'])
+        self.assertIsNone(self.supervisor.live)
+
 class CanaryTests(unittest.TestCase):
     def test_every_encoding_and_alignment_is_found(self):
         value = bytearray(SECRET.encode())

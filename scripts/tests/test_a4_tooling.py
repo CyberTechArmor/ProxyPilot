@@ -73,11 +73,13 @@ class InstallerTests(unittest.TestCase):
                                       agent='a4-broker')
             answers = iter(['role-123', 'secret-456'])
             with patch.object(installer.broker, 'CONFIG', target), patch.object(installer.broker, 'secure', lambda p: None), \
+                    patch.object(installer, 'JOURNAL', Path(temp) / 'no-install.json'), \
                     patch.object(installer.broker.Vault, '_token', lambda self: 'tok'), \
                     patch.object(installer.getpass, 'getpass', lambda _: next(answers)):
                 result = installer.configure(args)
             self.assertEqual(oct(target.stat().st_mode & 0o777), '0o600')
             self.assertNotIn('secret-456', json.dumps(result))
+            self.assertIs(result['broker_restarted'], False)
             self.assertEqual(json.loads(target.read_text())['secret_id'], 'secret-456')
             answers = iter(['role-123', 'wrong'])
 
@@ -85,12 +87,70 @@ class InstallerTests(unittest.TestCase):
                 raise installer.broker.Refused('VAULT_UNAVAILABLE')
             target.unlink()
             with patch.object(installer.broker, 'CONFIG', target), patch.object(installer.broker, 'secure', lambda p: None), \
+                    patch.object(installer, 'JOURNAL', Path(temp) / 'no-install.json'), \
                     patch.object(installer.broker.Vault, '_token', refuse), \
                     patch.object(installer.getpass, 'getpass', lambda _: next(answers)):
                 with self.assertRaisesRegex(ValueError, 'nothing was written'):
                     installer.configure(args)
             self.assertFalse(target.exists())
 
+
+    def test_configure_restarts_an_installed_broker_and_waits_for_it(self):
+        # Host run 2026-09-28: `systemctl restart` returned before the broker listened, and
+        # the status call that followed failed with ENOENT on the socket.
+        with tempfile.TemporaryDirectory() as temp:
+            journal = Path(temp) / 'broker-install.json'
+            journal.write_text(json.dumps({'version': 1, 'vm_uuid': installer.broker.VM_UUID, 'phase': 'installed',
+                                           'files': {str(installer.TARGET): 'ab' * 32}}))
+            args = argparse.Namespace(address='http://127.0.0.1:18200', approle_mount='pp-approle', kv_mount='pp-kv',
+                                      agent='a4-broker')
+            answers, ran, waited = iter(['role-123', 'secret-789']), [], []
+            with patch.object(installer.broker, 'CONFIG', Path(temp) / 'broker-config.json'), \
+                    patch.object(installer.broker, 'secure', lambda p: None), patch.object(installer, 'JOURNAL', journal), \
+                    patch.object(installer.broker.Vault, '_token', lambda self: 'tok'), \
+                    patch.object(installer.getpass, 'getpass', lambda _: next(answers)), \
+                    patch.object(installer, 'execute', ran.append), patch.object(installer, 'wait_status', waited.append):
+                result = installer.configure(args)
+            self.assertEqual(ran, [['systemctl', 'restart', installer.UNIT.name]])
+            self.assertEqual(waited, ['ab' * 32])
+            self.assertIs(result['broker_restarted'], True)
+
+    def test_status_waits_for_the_socket_and_reports_a_fresh_approle_login(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 's.sock'
+            config = Path(temp) / 'broker-config.json'
+            config.write_text('{}')
+            reply = {'broker': {'broker_sha256': 'ab' * 32}, 'vault_healthy': True, 'routes': ['gpt-6-luna'],
+                     'bindings': [], 'prices': {}, 'provider': None}
+            import threading
+
+            def late_server():
+                time.sleep(1.5)   # the socket appears only after the first attempts
+                server = socket.socket(socket.AF_UNIX)
+                server.bind(str(path))
+                server.listen(1)
+                conn, _ = server.accept()
+                conn.makefile().readline()
+                conn.sendall((json.dumps({'ok': True, 'result': reply}) + '\n').encode())
+                conn.close()
+                server.close()
+            thread = threading.Thread(target=late_server)
+            thread.start()
+
+            def refused_login(self):
+                raise installer.broker.Refused('VAULT_UNAVAILABLE', 'approle login refused')
+            with patch.object(installer.broker, 'SOCKET', path), patch.object(installer.broker, 'CONFIG', config), \
+                    patch.object(installer, 'read_journal', lambda: {'phase': 'installed',
+                                                                     'files': {str(installer.TARGET): 'ab' * 32}}), \
+                    patch.object(installer, 'verify_files', lambda data: None), \
+                    patch.object(installer, 'unit_checks', lambda: None), \
+                    patch.object(installer.broker, 'load_config', lambda: {}), \
+                    patch.object(installer.broker, 'Vault', type('V', (), {'__init__': lambda self, c: None,
+                                                                           '_token': refused_login})):
+                result = installer.status()
+            thread.join()
+            self.assertEqual(result['approle_login'], 'VAULT_UNAVAILABLE (approle login refused)')
+            self.assertIs(result['vault_healthy'], True)
 
 class OperatorTests(unittest.TestCase):
     def parse(self, *argv):

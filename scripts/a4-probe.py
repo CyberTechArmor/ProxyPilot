@@ -220,7 +220,8 @@ class Proof:
             entry['passed'] = True
         except Exception as error:  # noqa: BLE001 - every case is reported.
             entry['passed'] = False
-            entry['error'] = '%s: %s' % (type(error).__name__, str(error)[:600])
+            detail = getattr(error, 'detail', None)   # the broker's fixed short detail, never a value
+            entry['error'] = '%s: %s%s' % (type(error).__name__, str(error)[:600], ' (%s)' % detail if detail else '')
             entry['trace'] = traceback.format_exc()[-1500:]
             self.cleanup()
         entry['seconds'] = round(time.monotonic() - started, 1)
@@ -320,6 +321,8 @@ class Proof:
 
         def sent(run_id):
             return len([c for c in broker('ledger', {'run_id': run_id})['calls'] if c.get('http_status')])
+        # The supervisor allows one live attempt, so each run's calls happen while
+        # its own attempt is live and it is stopped before the next run launches.
         # Run A: room for exactly one worst case. One real call spends, its retry
         # replays without a second request, and the next call finds the budget spent.
         ref_a, _, _ = self.launch({'max_tokens': worst_tokens + 10, 'max_usd': 0.001})
@@ -331,6 +334,7 @@ class Proof:
             retry['provider_response_id'] == found['allowed_call']['provider_response_id']
         found['budget_tokens'] = refused(model, ref_a['run_id'], str(uuid.uuid4()))
         found['provider_requests_after_refusals'] = sent(ref_a['run_id'])
+        self.stop(ref_a)
         # Run B: policy refusals before any request, then one real provider error.
         ref_b, _, _ = self.launch({'max_tokens': 2000, 'max_usd': 0.001})
         found['not_allowlisted'] = refused(model, ref_b['run_id'], str(uuid.uuid4()), model='gpt-6-sol')
@@ -344,13 +348,13 @@ class Proof:
         before_error = sent(ref_b['run_id'])
         found['provider_error'] = refused(model, ref_b['run_id'], str(uuid.uuid4()), proof='provider_error')
         found['provider_error_requests'] = sent(ref_b['run_id']) - before_error
+        self.stop(ref_b)
         # Run C: a dollar budget below one worst case refuses before any request.
         ref_c, _, _ = self.launch({'max_usd': 0.000001})
         found['budget_usd'] = refused(model, ref_c['run_id'], str(uuid.uuid4()))
         found['budget_usd_requests'] = sent(ref_c['run_id'])
+        self.stop(ref_c)
         ledger = broker('ledger', {})
-        for ref in (ref_a, ref_b, ref_c):
-            self.stop(ref)
         evaluate_budget(found)
         assert found['provider_error_requests'] == 1 and found['budget_usd_requests'] == 0, found
         runs = {name: ledger['runs'][ref['run_id']] for name, ref in (('a', ref_a), ('b', ref_b), ('c', ref_c))}
@@ -413,8 +417,11 @@ class Proof:
         assert check == 'BINDING_REVOKED' and next_submit == 'BINDING_REVOKED' and relaunch == 'BINDING_REVOKED', \
             (check, next_submit, relaunch)
         assert not [a for a in journal['actions'] if a['action'] == 'submit_bound_fixture'], journal['actions']
-        return {'revoked_at': revoked['revoked_at'], 'revoke_call_ms': revoke_ms, 'broker_check': check,
-                'broker_check_ms': broker_ms, 'next_submit': next_submit, 'next_submit_refusal_ms': submit_ms,
+        state = next(r['state'] for r in broker('bindings')['bindings']
+                     if r['binding_id'] == record['binding_id'])
+        assert state == 'revoked', state
+        return {'revoked_at_epoch': revoked['revoked_at_epoch'], 'binding_state': state, 'revoke_call_ms': revoke_ms,
+                'broker_check': check, 'broker_check_ms': broker_ms, 'next_submit': next_submit, 'next_submit_refusal_ms': submit_ms,
                 'new_launch': relaunch, 'notice': 'The binding is terminal; authorize a new binding UUID to rerun.'}
 
     # ----------------------------------------------------------------- run

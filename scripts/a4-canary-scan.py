@@ -183,6 +183,8 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception as error:  # noqa: BLE001 - print a code or type, never data
-        print('A4 canary scan stopped: %s' % (getattr(error, 'code', None) or type(error).__name__), file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - print a code or type and the broker's fixed detail, never data
+        detail = getattr(error, 'detail', None)
+        print('A4 canary scan stopped: %s%s' % (getattr(error, 'code', None) or type(error).__name__,
+                                                ' (%s)' % detail if detail else ''), file=sys.stderr)
         sys.exit(1)

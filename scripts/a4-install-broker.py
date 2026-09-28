@@ -143,18 +143,29 @@ def wait_status(expected_sha):
     raise ValueError(f'Broker did not answer with the installed bytes: {last}')
 
 
+def approle_login(config=None):
+    """A fresh AppRole sign-in with the saved config: 'ok' or the refusal. `vault_healthy`
+    only says OpenBao answers; this says whether the broker's own secret ID still works
+    (the running broker may still hold a token issued before the secret ID was replaced)."""
+    try:
+        broker.Vault(config or broker.load_config())._token()
+        return 'ok'
+    except broker.Refused as error:
+        return error.code + (' (%s)' % error.detail if error.detail else '')
+
+
 def status():
     data = read_journal()
     if data.get('phase') != 'installed':
         raise ValueError(f"Broker installation phase is {data.get('phase')}")
     verify_files(data)
     unit_checks()
-    reply = call('status')
-    if not reply.get('ok'):
-        raise ValueError(f'Broker status refused: {reply}')
-    result = reply['result']
+    # Waits for the socket (a restart returns before the broker listens) and
+    # checks that the running broker is the installed copy.
+    result = wait_status(data['files'][str(TARGET)])
     return dict(installed=True, service='active/enabled', files=data['files'], socket=str(broker.SOCKET),
                 config_present=broker.CONFIG.is_file(), vault_healthy=result['vault_healthy'],
+                approle_login=approle_login() if broker.CONFIG.is_file() else None,
                 routes=result['routes'], bindings=result['bindings'], prices=result['prices'],
                 provider=result['provider'],
                 notice='Broker installed; A4 proof needs configure, bind, provider, price and a4-probe.py')
@@ -259,9 +270,16 @@ def configure(args):
     if login != 'ok':
         raise ValueError(f'AppRole login refused ({login}); nothing was written')
     broker.save(broker.CONFIG, json.dumps(config) + '\n', mode=0o600)
+    # The running broker keeps the config it loaded; restart it so it signs in with
+    # the new secret ID, and wait until it answers with the installed bytes.
+    restarted = False
+    if JOURNAL.exists() and read_journal().get('phase') == 'installed':
+        execute(['systemctl', 'restart', UNIT.name])
+        wait_status(read_journal()['files'][str(TARGET)])
+        restarted = True
     return dict(configured=True, config=str(broker.CONFIG), mode='0600', address=config['address'],
                 approle_mount=config['approle_mount'], kv_mount=config['kv_mount'], agent=config['agent'],
-                approle_login=login, restart='systemctl restart proxypilot-a4-broker.service (if installed)')
+                approle_login=login, broker_restarted=restarted)
 
 
 def main():

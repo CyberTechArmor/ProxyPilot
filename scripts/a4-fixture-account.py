@@ -146,6 +146,8 @@ if __name__ == '__main__':
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         print('A4 fixture operation refused: %s' % error, file=sys.stderr)
         sys.exit(1)
-    except Exception as error:  # noqa: BLE001 - the broker's Refused; print its code only
-        print('A4 fixture operation refused: %s' % getattr(error, 'code', type(error).__name__), file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - the broker's Refused: its code and fixed short detail only
+        detail = getattr(error, 'detail', None)
+        print('A4 fixture operation refused: %s%s' % (getattr(error, 'code', None) or type(error).__name__,
+                                                      ' (%s)' % detail if detail else ''), file=sys.stderr)
         sys.exit(1)

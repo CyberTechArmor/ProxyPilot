@@ -8,10 +8,15 @@ next work. Recheck every mutable value below (SHAs, services, VM boot) before
 acting. If this page and a later dated evidence entry disagree, the evidence
 wins.
 
-**Status in one line:** A3 is implemented but **not accepted**. The supervisor
-has not been installed on the host and the target proof has not run. Every
-gate stays open and fail-closed until `a3-probe-worker.py` passes on the proof
-VM and its output is reviewed.
+**Status in one line:** A3 is implemented but **not accepted**.
+
+- The supervisor is installed on the host from code commit `3cd80b70`.
+- The first target run passed 16 of 18 cases. `sessions` and `human_takeover`
+  failed on a runner timing defect, which is now fixed in `4c06bb38`, with a
+  probe correction in `0572dcff`.
+- The rerun with `0572dcff` is pending.
+- Every gate stays open and fail-closed until a full run passes and its output is
+  reviewed.
 
 ## Read first
 
@@ -45,10 +50,10 @@ VM and its output is reviewed.
 | Where | Revision | Notes |
 |---|---|---|
 | GitHub `main` | `12ad1392845630eec56705776bae444f54eac58a` | Base of the A3 branch. Contains migration 1108 and `inspect_a3_vm`. |
-| Branch `claude/step-a3-isolated-execution-yg80mx` | code `3cd80b70e971b484f442fbb96ac07f2ad8c66add`; later commits are docs only | No PR yet. All of the A3 code is in that one commit. |
+| Branch `claude/step-a3-isolated-execution-yg80mx` | code `3cd80b70` (installed), stager `9dade53b`, fixes `4c06bb38` and `0572dcff70a505bc2389da5b488c26455830f842` | No PR yet. `0572dcff` is the latest code commit to stage; the other commits are docs. |
 | PR #686 `agents-a3-isolation-continuation` | `cd4abbca`, draft, unmerged, GitHub `dirty` | Only its broker correction (`5cacdefb`) is carried in the branch; the rest is already on `main`. Keep it draft. |
 | ProxyPilot live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Not on GitHub. Carries live-only Nodus route-ingress tools that are not A3. |
-| ProxyPilot candidate (`pp-candidate`) | `7851c1a0d6084213e842151d37083d49ff204dd8`, 17 ahead | Holds the fence, proxy and probe scripts. **Not yet** holding the supervisor work. Last checks there: `backend-tests` ok. |
+| ProxyPilot candidate (`pp-candidate`) | `9a9c453a…` (stager commit on `7851c1a0`), 18 ahead, clean | Holds `3cd80b70`'s files. Checks were last recorded at `7851c1a0` and must be rerun at the new head. |
 | Windows workspace | `agents-a3-isolation-continuation` at `83387f7b` | Uncommitted work plus the untracked `scripts/tests/a3-vm-probe.zip`. Cloud sessions cannot reach it; never reset it or commit the zip. |
 
 ## Proof target (recheck before use)
@@ -57,10 +62,10 @@ VM and its output is reviewed.
 |---|---|
 | Incus name / MCP name | `pp-agents-a3-debian13-proof-20260927` / `agents-a3-debian13-proof-20260927` |
 | VM UUID | `49592202-a8b0-45af-9ac6-5439761d73e4` |
-| Guest boot ID at snapshot | `b08210f9-fe81-4e86-9362-926f5ee21e59` (a guest-crash proof changes it) |
+| Guest boot ID | `92a161fd-5fc8-473d-9d83-0cde6fc449dd` since the first run's guest-crash case (was `b08210f9…`); QEMU PID unchanged |
 | Shape | Incus 7.5.1, Debian 13.7, 2 vCPU, `4096MiB`, `12GiB` root, no swap. Autostart, guest API and nesting false. |
 | Network | `incusbr0`, TAP `ppa3proof0`, guest `10.185.17.179` on NIC `enp5s0`, MAC `10:66:6a:55:f6:3f`, gateway `10.185.17.1` |
-| Host units | `proxypilot-a3-fence.service` (active/exited), `proxypilot-a3-origin-proxy.service` (active/running on `10.185.17.1:18083`). `proxypilot-a3-supervisor.service` is not installed yet. |
+| Host units | `proxypilot-a3-fence.service` (active/exited), `proxypilot-a3-origin-proxy.service` (active/running on `10.185.17.1:18083`), `proxypilot-a3-supervisor.service` (active/running; key ID `c31fecee…`) |
 | Rollback snapshot | `pp-mcp-pre-network-20260927-222658`. Keep it; the fence installer also requires it. |
 | Proxy certificate | Self-signed, 7 days from install. Proxy `status` refuses with under 24 h left, so launches fail closed from about **2026-10-03** until the proxy is reinstalled and re-probed. |
 
@@ -164,9 +169,9 @@ Guest runner codes (`BROWSER_*`, `INVALID_*`) pass through on a failed action.
 | Fence drops host and routed IPv4/IPv6 (raw SYN counters) | Passed on the VM (user-run, earlier boot). |
 | Proxy CONNECT/path/Host/WebSocket refusals; approved GETs 200 | Passed on the VM (user-run). |
 | Nonroot sandboxed Chromium cold start; transient cgroup CPU/memory/tasks/time/tmpfs limits | Passed on the VM with fixture units, not the production launcher. |
-| Supervisor, runner, human path, receipts, recovery, no replay | Passed **locally only**: real Chromium through a local proxy, with systemd and `incus exec` simulated. |
-| Production launcher overruns, escapes, lifecycle, crash, human takeover on the VM | **Open.** Needs the `a3-probe-worker.py` output. |
-| Measured browser minimum and VM sizing | **Open.** Taken from the proof's session measurements. |
+| Production launcher on the VM: CPU/memory/tasks/disk/deadline/action overruns, detached descendant, escape and guest-root egress, lease expiry, stale fence, launch failure, backend refusals, supervisor crash without replay, guest crash with a new boot | **Passed** in the first target run (`3cd80b70`). The raw-socket line tested protocol 0 and is corrected in `0572dcff`. |
+| Browser sessions, human takeover click/Escape and runner-layer cross-origin refusals on the real origin | **Open.** They failed in the first run on the element-wait defect, fixed in `4c06bb38`/`0572dcff`; the rerun is pending. |
+| Measured browser minimum and VM sizing | **Open.** Needs the `sessions` case. Idle QEMU RSS was 1.45 GB; after the first run it was 2.26 GB (QEMU keeps touched guest pages). |
 | A real person using the human page | **Open.** |
 | Host reboot persistence (fence → proxy → supervisor) | **Open.** Never reboot the host without explicit approval. |
 | Backend socket mount and coordinator wiring | **Open**, deliberately. Activation stays off until A5. |
@@ -175,29 +180,33 @@ Guest runner codes (`BROWSER_*`, `INVALID_*`) pass through on a failed action.
 
 ## Commands
 
-The host command stages the exact code commit on the candidate, then installs
-and runs the proof. Root is required. It takes about 10 minutes and reboots
-the proof VM's guest once. Append `--skip-guest-crash` to the last step to skip
-that case.
+The host command stages the latest reviewed code commit on the candidate,
+reinstalls the supervisor from it, and runs the full proof. Root is required.
+It takes about 3–5 minutes and reboots the proof VM's guest once. Append
+`--skip-guest-crash` to the last step to skip that case.
 
 ```
-sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 9dade53bbcfb5c236d22fb2fa3d7b74a111857df FETCH_HEAD; git show 9dade53bbcfb5c236d22fb2fa3d7b74a111857df:scripts/a3-stage-candidate.sh | sh -s -- . 3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 0572dcff70a505bc2389da5b488c26455830f842 FETCH_HEAD; git show 0572dcff70a505bc2389da5b488c26455830f842:scripts/a3-stage-candidate.sh | sh -s -- . 0572dcff70a505bc2389da5b488c26455830f842; python3 scripts/a3-install-supervisor.py reinstall; python3 scripts/a3-probe-worker.py'
 ```
 
 Do **not** use `git cherry-pick` for this. The first host attempt stopped on eight add/add
 conflicts: the branch holds the mirrored A3 scripts as mode 100755, and the
-candidate holds identical bytes as 100644. The stager `scripts/a3-stage-candidate.sh`,
-pinned at `9dade53b`, does the following:
+candidate holds identical bytes as 100644. The stager `scripts/a3-stage-candidate.sh`
+(first used at `9dade53b`, pinned in the command above at the staged commit)
+does the following:
 
-- aborts that interrupted cherry-pick;
-- refuses uncommitted changes, any candidate file that differs from both the base
-  and the reviewed commit, and a policy without the self-check line;
+- aborts an interrupted cherry-pick;
+- refuses uncommitted changes, any candidate file that matches neither the base
+  nor a commit of the reviewed branch, and a policy without the self-check line;
 - checks out exactly the reviewed paths (the policy excepted), commits, and
   verifies them byte-for-byte.
 
 It was tested against a stand-in candidate reproducing the conflict: the same 30
-dirty paths, 37 paths staged exactly, and the candidate-only change preserved. It
-also has a unit test.
+dirty paths, 37 paths staged exactly, and the candidate-only change preserved.
+Staging `0572dcff` over that first staging was also simulated: 43 paths matched
+exactly. It has unit tests. Because the supervisor is already installed, the
+command uses `reinstall`: it refuses while an attempt is live, archives the old
+public key and creates a new key.
 
 Other operator commands (run on the host as root, from the candidate `scripts/` directory):
 

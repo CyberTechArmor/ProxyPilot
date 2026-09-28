@@ -1165,3 +1165,91 @@ Ordered rollback, which adds to the handoff's order:
 A code rollback is a revert of this branch. Migration 1109 is additive: keep it
 and its rows. Older writers do not set `vm_uuid`/`boot_id`, which is safe only
 while A3 is inactive.
+
+## 2026-09-28 first target run on the proof VM (16 of 18 passed; A3 still open)
+
+The user ran the pinned stager command in the ProxyPilot Host Terminal. The
+output was reviewed in the session and corroborated through MCP where possible.
+
+- **Staging.** The stager (`9dade53b`) aborted the interrupted cherry-pick and
+  staged code commit `3cd80b70` on the candidate: `7851c1a0` → `9a9c453a`,
+  "37 paths match exactly". `get_self_status` then read candidate `9a9c453a`,
+  clean, 18 ahead.
+- **Install.** `"installed": true`, unit `active/enabled`,
+  `Requires=proxypilot-a3-fence.service`, `After=` fence and proxy. Every
+  installed digest equals the reviewed commit's bytes (checked locally against
+  `git show 3cd80b70:…`):
+  - supervisor `cdd49b83…`, guest runner `71fa69be…`;
+  - the fence/proxy modules equal to their mirrored digests;
+  - unit `254ec0d5…`.
+
+  Key ID `c31fecee08f5ba925e69f575ce3795db2eeca411c4fb07f83542b6bdc9b3917b`.
+  `accepting_launch: true`, no blockers, boundary boot `b08210f9…`, SPKI
+  `u8bIwg5K…`. `get_host_services` shows `proxypilot-a3-supervisor.service`
+  active/running.
+- **Proof.** Report `/var/lib/proxypilot-a3-proof/proof/worker-proof-20260928T115550Z.json`.
+  Preflight key ID matched the installed public key.
+
+| Case | Result | Observation |
+|---|---|---|
+| sessions | **failed** | `BROWSER_ELEMENT_MISSING` at `open_login` (root cause below). No sizing measurements were taken. |
+| human_takeover | **failed** | `BROWSER_ELEMENT_MISSING` at `locate`. Checks passed before the failure: input refused before takeover, takeover state `human`, the model action refused with `TAKEN_OVER`. |
+| origin_refusals | passed | 8/8 page attempts refused. The runner's own refusals recorded only `demo.fractionate.ai` (login POST, unlisted path): the demo's CSP (`connect-src 'self'`, `img-src 'self' data:`) refuses the cross-origin page requests before the runner sees them. |
+| escape | passed | Only `10.185.17.1:18083` connected. Host/management/public IPv4, IPv6, loopback and DNS dropped (IP filter: TimeoutError, not EPERM). AF_PACKET/AF_VSOCK `97`. Incus agent dir, guest API, vsock, kvm, disks, D-Bus, systemd private socket, `/var/lib`, pid 1 environ `2`. Shadow, `/root`, `/home` write `13`. `/etc`, `/usr` write `30`. `setuid` `1`. CapEff all zero, NoNewPrivs 1, uid 65534. **Weak line:** `raw_ipv4_socket: refused:93` was EPROTONOSUPPORT for protocol 0 and did not test privilege; fixed below. |
+| guest_root_egress | passed | As guest root, only the proxy connected. Host/public TCP and UDP DNS timed out; IPv6 113. Fence counters: allowed_proxy +4, denied_ipv4 +26, denied_ipv6 +3, other 0. |
+| cpu | passed | `cpu: 1` → quota 100%; two spinners; usage/wall 1.007; 30 throttles, 2.94 s throttled. |
+| memory | passed | `memory_mib: 1024` → OOM kill after 960 MiB allocated; unit peak 1G, swap 0; result `oom-kill`; teardown receipt verified. |
+| tasks | passed | `pids.max` 512; 510 threads, then denied. |
+| disk | passed | `temporary_disk_mib: 64` → ENOSPC after 64 MiB. |
+| runtime | passed | `max_seconds: 15` → unit `timeout` at 15.087 s; stop reason `deadline` at 16.5 s from the launch call; relaunch in the same run refused `DEADLINE`. |
+| actions | passed | `max_actions: 3` → 4th refused `ACTION_LIMIT`; a new attempt in the same run refused `ACTION_LIMIT`. |
+| descendant | passed | setsid grandchild in the unit cgroup, gone after stop; unit not-found/inactive, cgroup absent, no members, uid or workspace mounts. |
+| lease_expiry | passed | Torn down `lease_expired` at about 31.8 s; renew `ATTEMPT_NOT_ACTIVE`. |
+| stale_fence | passed | Older fence action and same-fence new attempt both `STALE_FENCE`; higher fence launched. |
+| launch_failure | passed | `LAUNCH_FAILED`, receipt `launch_failed`, relaunch `ATTEMPT_EXISTS`. |
+| backend_refusals | passed | All 11 expected codes (operator methods, proof workload, argv, other origin, below minimum, credential action, unknown action, URL field, operator stop reason). |
+| supervisor_crash | passed | NRestarts 0 → 1; actions `open_landing` done, `read_session` **uncertain** and not replayed; receipt `supervisor_recovery`, uncertain [2]; guest unit inactive. |
+| guest_crash | passed | Boot `b08210f9…` → `92a161fd-5fc8-473d-9d83-0cde6fc449dd`, same QEMU PID. Receipt `worker_exited` with `guest_rebooted: true`; the relaunch was bound to the new boot; post-reboot fence deltas identical. |
+
+**Root cause of the two failures (my defect).** The deployed demo SPA renders
+"Preparing your workspace…" until its own `/api/session` and `/api/config`
+reads return through the proxy. The runner looked for the "Sign in" button
+once, right after the load event. The Playwright broker it replaced
+auto-waited, and the local fixture had a static button, so neither the local
+tests nor the review caught it.
+
+**Fix (`4c06bb38`):**
+- Button lookups wait in the page for up to 10 s, in one isolated-world call.
+- The fixture now renders its button after 700 ms. The old runner fails on it
+  with the same error, and the new one passes.
+- Because the page CSP pre-empts the runner for cross-origin page requests,
+  `egress_probe` also makes top-level navigations, which that CSP does not
+  govern, and reports the committed URL.
+- Chromium's HTTPS-Upgrades rewrites `http://demo…` to the approved `https`
+  origin before any request. That is recorded as `upgraded_to_approved_origin`
+  and never counted as reached.
+- The proof requires `example.com` and `1.1.1.1` among the runner's own
+  refusals.
+- The stager now also accepts a candidate file that matches an earlier commit of
+  the reviewed branch, so later fixes can be staged over this staging.
+
+`0572dcff` makes the raw-socket probe use `IPPROTO_ICMP` and require `EPERM`.
+
+**Sizing so far.** Idle QEMU tree RSS before the run was 1,446,420 KiB.
+After the run, `inspect_a3_vm` read 2,263,715,840 bytes for the same QEMU PID:
+QEMU keeps guest pages that the memory overrun and browsers touched, which
+matters for host headroom. Browser working set, pressure and headroom still
+need the `sessions` case.
+
+**Still open.**
+- The rerun with `0572dcff`: all 18 cases, including the sizing sessions and
+  human takeover.
+- A real person using the human page.
+- Host reboot persistence.
+- Candidate `run_self_checks` at the new head.
+- Security CI (needs a PR).
+- S6/SEC-01/SEC-04.
+
+The VM boot generation is now `92a161fd…`. The earlier fence, proxy and cgroup
+probes named the old boot, but the post-reboot fence deltas above re-observed
+the fence on the new boot.

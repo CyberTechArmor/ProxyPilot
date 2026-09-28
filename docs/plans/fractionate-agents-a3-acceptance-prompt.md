@@ -51,9 +51,10 @@ and A4 stays blocked.
      to the user.
 2. **Stage and check the candidate.**
    - If the user has not already done so, give them the reference's one host
-     command. It fetches the branch, checks that the pinned code commit is an
-     ancestor, cherry-picks exactly `12ad1392..3cd80b70`, installs and runs the
-     proof.
+     command. It fetches the branch, runs the pinned stager
+     `scripts/a3-stage-candidate.sh` from `9dade53b` against code commit
+     `3cd80b70` (never a plain cherry-pick: the mirrored scripts' file modes
+     differ), installs and runs the proof.
    - Then run `run_self_checks` with `backend-tests` and `frontend-build` on the
      exact candidate head. Record the totals, failures and skips. Never skip a
      database test; if the install drops the native binding, the candidate's

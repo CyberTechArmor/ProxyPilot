@@ -1127,12 +1127,30 @@ root-owned `/etc` and records their digests. The command pins the code commit
 (later branch commits are docs only), so new docs commits do not invalidate it:
 
 ```
-sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 3cd80b70e971b484f442fbb96ac07f2ad8c66add FETCH_HEAD; git -c user.name="ProxyPilot operator" -c user.email=operator@proxypilot cherry-pick 12ad1392845630eec56705776bae444f54eac58a..3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 9dade53bbcfb5c236d22fb2fa3d7b74a111857df FETCH_HEAD; git show 9dade53bbcfb5c236d22fb2fa3d7b74a111857df:scripts/a3-stage-candidate.sh | sh -s -- . 3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
 ```
 
-This one-commit `cherry-pick` was simulated against a stand-in candidate (GitHub
-`main` plus the candidate's identical A3 files and policy line). It applied
-cleanly and produced exactly the code commit's tree. Reference documents for
+**Correction (2026-09-28, after the first host attempt).** The earlier
+pinned-`cherry-pick` command stopped on the host with eight
+`CONFLICT (add/add)` lines, one for each mirrored A3 script. `set -e` aborted it
+before the installer or the proof ran. ProxyPilot then reported candidate
+`7851c1a0` with 30 dirty paths.
+
+The cause: this branch stores those scripts as mode 100755, while the candidate
+stores the same bytes as 100644. The earlier simulation copied the files from the
+commit itself, so the modes matched and the conflict never appeared. A
+reconstruction with 100644 files reproduced exactly 8 conflicts and 30 dirty paths.
+
+The replacement is `scripts/a3-stage-candidate.sh` (commit `9dade53b`, with
+`scripts/tests/test_a3_stage_candidate.py`):
+
+- It aborts the interrupted cherry-pick.
+- It refuses uncommitted changes, any candidate file that differs from both GitHub
+  `main` and the reviewed commit, and a policy without the self-check line.
+- It checks out the reviewed commit's 37 paths (the policy excepted) and verifies
+  them byte-for-byte.
+- Against the reproduced conflict it staged all 37 paths exactly and preserved the
+  candidate-only change. A second run was a no-op. Reference documents for
 later conversations: the [A3 reference](fractionate-agents-a3-reference.md),
 the [archived handoff](fractionate-agents-a3-claude-handoff.md) and the next
 [A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md).

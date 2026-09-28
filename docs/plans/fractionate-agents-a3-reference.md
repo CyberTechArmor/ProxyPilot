@@ -74,9 +74,10 @@ VM and its output is reviewed.
 | `scripts/a3-worker-supervisor.py` | **Host-owned supervisor** (root daemon). Installed copies only; journal, receipts, watchdog, recovery. |
 | `scripts/a3-worker-guest.py` | Fixed program in the guest worker unit. One Chromium over `--remote-debugging-pipe`; CDP `Fetch` origin policy; typed actions, human input and proof workloads. |
 | `scripts/a3-install-supervisor.py` | `install\|status\|remove\|reinstall`: byte-exact copies into `/etc/proxypilot-a3-proof/supervisor`, Ed25519 key, the unit, rollback. |
+| `scripts/a3-stage-candidate.sh` | Stages one reviewed commit's paths on the candidate slot with three-way guards (replaces the failed cherry-pick). |
 | `scripts/a3-worker-operator.py` | Root CLI: `status`, `journal`, `stop`, `takeover`, `view`, `verify-receipt`, `human` (loopback page). |
 | `scripts/a3-probe-worker.py` | **Target proof**: 18 cases against the installed supervisor. |
-| `scripts/tests/test_a3_*.py` | 69 local tests (45 mirrored + 24 new), including real-Chromium tests that skip without a local Chromium. |
+| `scripts/tests/test_a3_*.py` | 72 local tests (45 mirrored + 27 new), including real-Chromium tests that skip without a local Chromium. |
 | `admin/backend/src/lib/operational-worker-supervisor.js` | Backend socket client (5 methods) and `createTeardownVerifier`. |
 | `admin/backend/src/lib/operational-worker-boundary.js` | Launch contract (adds `workspace_id`, `project_limits_revision`); `createWorkerLauncher({client, vmUuid})` fails closed without a client; store binding in `markRunning(ref, binding)`/`finishStop`. |
 | `admin/backend/src/lib/operational-worker-binding-schema.js` | Migration **1109**: `ops_agent_worker_attempts.vm_uuid`, `boot_id` (additive). |
@@ -180,12 +181,23 @@ the proof VM's guest once. Append `--skip-guest-crash` to the last step to skip
 that case.
 
 ```
-sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 3cd80b70e971b484f442fbb96ac07f2ad8c66add FETCH_HEAD; git -c user.name="ProxyPilot operator" -c user.email=operator@proxypilot cherry-pick 12ad1392845630eec56705776bae444f54eac58a..3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 9dade53bbcfb5c236d22fb2fa3d7b74a111857df FETCH_HEAD; git show 9dade53bbcfb5c236d22fb2fa3d7b74a111857df:scripts/a3-stage-candidate.sh | sh -s -- . 3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
 ```
 
-This `cherry-pick` was simulated against a stand-in candidate (main plus the
-candidate's identical A3 files) and applied cleanly. If the real candidate has
-moved since `7851c1a0`, run `git cherry-pick --abort` and re-plan.
+Do **not** use `git cherry-pick` for this. The first host attempt stopped on eight add/add
+conflicts: the branch holds the mirrored A3 scripts as mode 100755, and the
+candidate holds identical bytes as 100644. The stager `scripts/a3-stage-candidate.sh`,
+pinned at `9dade53b`, does the following:
+
+- aborts that interrupted cherry-pick;
+- refuses uncommitted changes, any candidate file that differs from both the base
+  and the reviewed commit, and a policy without the self-check line;
+- checks out exactly the reviewed paths (the policy excepted), commits, and
+  verifies them byte-for-byte.
+
+It was tested against a stand-in candidate reproducing the conflict: the same 30
+dirty paths, 37 paths staged exactly, and the candidate-only change preserved. It
+also has a unit test.
 
 Other operator commands (run on the host as root, from the candidate `scripts/` directory):
 
@@ -237,5 +249,5 @@ while A3 is inactive.
   failure diagnostics. Do not claim a user-run result before reviewing its output.
 - Cloud sessions cannot upload repository content to `edge.fractionate.ai` (the
   session's data-exfiltration guard refuses it), and `workflow_dispatch` returns
-  403. Stage host code from GitHub with the pinned command above. Exact-head
+  403. Stage host code from GitHub with the pinned stager command above, never with a plain cherry-pick. Exact-head
   Security CI needs a pull request, which only the user can ask for.

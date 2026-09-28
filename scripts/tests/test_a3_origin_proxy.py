@@ -111,6 +111,42 @@ class OriginPolicyTests(unittest.TestCase):
             save.assert_not_called()
             execute.assert_not_called()
 
+    def test_install_after_a_completed_removal_reissues_instead_of_refusing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            journal = root / 'journal'
+            journal.write_text(json.dumps({'version': 1, 'phase': 'removed', 'files': {}}))
+            paths = {name: root / name for name in ('script', 'cert', 'key', 'unit')}
+            calls = []
+
+            def execute(argv, **options):
+                calls.append(argv)
+                if argv[:2] == ['openssl', 'req']:
+                    raise subprocess.CalledProcessError(1, argv)   # stop before writing anything
+                return ''
+            with patch.object(i, 'INSTALLED', paths['script']), patch.object(i, 'CERT', paths['cert']), \
+                    patch.object(i, 'KEY', paths['key']), patch.object(i, 'UNIT', paths['unit']), \
+                    patch.object(i, 'JOURNAL', journal), patch.object(i, 'validate_target', return_value={}), \
+                    patch.object(i.i, 'secure'), patch.object(i.i, 'execute', side_effect=execute), \
+                    patch.object(i.subprocess, 'run', side_effect=execute), \
+                    patch.object(i.socket, 'socket'):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    i.install()
+            self.assertTrue(any(argv[:2] == ['openssl', 'req'] for argv in calls), calls)
+            journal.write_text(json.dumps({'version': 1, 'phase': 'prepared', 'files': {}}))
+            with patch.object(i, 'JOURNAL', journal), patch.object(i, 'validate_target', return_value={}), \
+                    patch.object(i.i, 'secure'), patch.object(i.i, 'execute', return_value=''):
+                with self.assertRaisesRegex(ValueError, 'review journal'):
+                    i.install()
+
+    def test_removal_does_not_require_a_certificate_that_is_about_to_expire(self):
+        with patch.object(i, 'status') as status, patch.object(i.i, 'parse_json', side_effect=ValueError('stop')), \
+                patch.object(i, 'JOURNAL') as journal:
+            journal.read_text.return_value = '{}'
+            with self.assertRaises(ValueError):
+                i.remove()
+            status.assert_called_once_with(check_certificate=False)
+
     def test_proxy_unit_requires_installed_fence(self):
         self.assertIn('Requires=proxypilot-a3-fence.service', i.UNIT_TEXT)
         self.assertIn('After=proxypilot-a3-fence.service', i.UNIT_TEXT)

@@ -22,7 +22,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const HASH = /^[0-9a-f]{64}$/i;
 const ACTIVE = new Set(['prepared', 'starting', 'running']);
 const REQUIRED_ACTION = Object.freeze({open_landing:'navigate',open_login:'click',
-  read_workspace:'navigate',read_session:'read',read_files:'read',sign_out:'logout'});
+  submit_bound_fixture:'type',read_workspace:'navigate',read_session:'read',read_files:'read',sign_out:'logout'});
+// A4 launch pin: operator-authorized UUIDs and revisions only, never a value.
+const CREDENTIAL_FIELDS = Object.freeze(['project_id','profile_id','profile_revision','binding_id','binding_revision']);
 const fail = (code) => { const e = new Error(code); e.code = code; throw e; };
 const fields = (value, names) => value && typeof value === 'object' &&
   !Array.isArray(value) && Object.keys(value).sort().join(',') === [...names].sort().join(',');
@@ -41,9 +43,18 @@ export function workerInstallResources(limits) {
     root_disk_gib:WORKER_INSTALL_BASELINE.root_disk_gib});
 }
 
+function validCredential(value) {
+  return fields(value, CREDENTIAL_FIELDS) && validUuid(value.project_id) && validUuid(value.profile_id) &&
+    validUuid(value.binding_id) && Number.isSafeInteger(value.profile_revision) && value.profile_revision >= 1 &&
+    Number.isSafeInteger(value.binding_revision) && value.binding_revision >= 1;
+}
+
 export function validateWorkerLaunch(value) {
-  if (!fields(value, ['run_id','attempt_id','workspace_id','fence','policy_digest','project_limits_revision',
-    'origin','target','limits','install'])) fail('INVALID_LAUNCH');
+  const base = ['run_id','attempt_id','workspace_id','fence','policy_digest','project_limits_revision',
+    'origin','target','limits','install'];
+  if (!fields(value, base) && !fields(value, [...base,'credential'])) fail('INVALID_LAUNCH');
+  // The host supervisor accepts the credential field absent or valid, never null.
+  if ('credential' in value && !validCredential(value.credential)) fail('INVALID_LAUNCH');
   if (!validUuid(value.run_id) || !validUuid(value.attempt_id) || !validUuid(value.workspace_id) ||
       !Number.isSafeInteger(value.fence) || value.fence < 1 || !HASH.test(value.policy_digest || '') ||
       !Number.isSafeInteger(value.project_limits_revision) || value.project_limits_revision < 0 ||
@@ -52,12 +63,15 @@ export function validateWorkerLaunch(value) {
   const install=workerInstallResources(value.limits);
   if (!fields(value.install,Object.keys(WORKER_INSTALL_BASELINE)) ||
       Object.keys(install).some(key=>value.install[key]!==install[key])) fail('INVALID_LAUNCH');
-  return Object.freeze({...value, limits: Object.freeze({...value.limits}),install});
+  return Object.freeze({...value, limits: Object.freeze({...value.limits}),install,
+    ...('credential' in value ? {credential:Object.freeze({...value.credential})} : {})});
 }
 
+// submit_bound_fixture names its binding; every other action has no extra field.
 export function validateBrowserAction(value) {
-  if (!fields(value, ['run_id','attempt_id','fence','action']) ||
-      !validUuid(value.run_id) || !validUuid(value.attempt_id) ||
+  const submit = value?.action === 'submit_bound_fixture';
+  if (!fields(value, submit ? ['run_id','attempt_id','fence','action','binding_id'] : ['run_id','attempt_id','fence','action']) ||
+      (submit && !validUuid(value.binding_id)) || !validUuid(value.run_id) || !validUuid(value.attempt_id) ||
       !Number.isSafeInteger(value.fence) || value.fence < 1 ||
       !BROWSER_ACTIONS.includes(value.action)) fail('INVALID_BROWSER_ACTION');
   return value;
@@ -93,9 +107,14 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
     // result is untrusted page data, never an instruction.
     async action(request) {
       validateBrowserAction(request);
+      const submit=request.action==='submit_bound_fixture';
       const result=await connected().request('action', {run_id:request.run_id,attempt_id:request.attempt_id,
-        fence:request.fence,action:request.action});
+        fence:request.fence,action:request.action,...(submit?{binding_id:request.binding_id}:{})});
       if (!result || !Number.isSafeInteger(result.ordinal) || result.untrusted!==true) fail('SUPERVISOR_PROTOCOL');
+      // A submit result names the binding, revision and outcome; nothing else is expected back.
+      if (submit && (result.result?.binding_id!==request.binding_id ||
+          !Number.isSafeInteger(result.result?.binding_revision) ||
+          !['signed_in','rejected','unknown'].includes(result.result?.outcome))) fail('SUPERVISOR_PROTOCOL');
       return result;
     },
     async stop(ref, reason='cancelled') {
@@ -124,6 +143,14 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
   const event = (runId, attemptId, kind) => run(
     'INSERT INTO ops_agent_worker_events(run_id,attempt_id,kind,created_at) VALUES(?,?,?,?)',
     runId, attemptId, kind, stamp());
+  function assertPinnedBinding(r) {
+    if (r.credential_binding_id == null) return null;
+    const binding=one('SELECT * FROM ops_agent_credential_bindings WHERE id=?',r.credential_binding_id);
+    if (!binding || binding.project_id!==r.project_id || binding.profile_id!==r.profile_id) fail('CREDENTIAL_BINDING_STALE');
+    if (binding.state!=='active') fail('CREDENTIAL_BINDING_REVOKED');
+    if (binding.revision!==r.credential_binding_revision) fail('CREDENTIAL_REVISION_MISMATCH');
+    return binding;
+  }
   function assertPinnedConfiguration(r) {
     const p=one('SELECT * FROM ops_projects WHERE id=?',r.project_id);
     const profile=one('SELECT * FROM ops_agent_profiles WHERE project_id=? AND id=? AND deleted_at IS NULL',r.project_id,r.profile_id);
@@ -135,7 +162,9 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
         profile.guide_hash!==r.guide_hash || profile.assigned_site_revision!==r.site_revision ||
         !guide || withdrawn || guide.id!==r.guide_version_id || guide.content_hash!==r.guide_hash)
       fail('STALE_CONFIGURATION');
-    return {profile,project:p};
+    // Rotation or revocation refuses the pinned revision at launch and at every use.
+    const binding=assertPinnedBinding(r);
+    return {profile,project:p,binding};
   }
   function profilePolicy(profile, origin) {
     let origins, actions;
@@ -167,8 +196,10 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
   return {
     // Only an internal test/coordinator may call this; no route or starter exists.
     prepare(input) {
-      if (!fields(input, ['project_id','profile_id','profile_revision','site_origin','site_revision',
-        'guide_version_id','guide_hash','policy_digest']) ||
+      const names=['project_id','profile_id','profile_revision','site_origin','site_revision',
+        'guide_version_id','guide_hash','policy_digest'];
+      if (!(fields(input, names) || (fields(input, [...names,'credential_binding_id']) &&
+          validUuid(input.credential_binding_id))) ||
         ![input.project_id,input.profile_id,input.guide_version_id].every(validUuid) ||
         !Number.isSafeInteger(input.profile_revision) || input.profile_revision < 1 ||
         !Number.isSafeInteger(input.site_revision) || input.site_revision < 1 ||
@@ -185,7 +216,15 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
             p.assigned_site_revision !== input.site_revision ||
             project.site_origin !== input.site_origin || project.site_revision !== input.site_revision)
           fail('STALE_CONFIGURATION');
-        profilePolicy(p,input.site_origin);
+        const {actions}=profilePolicy(p,input.site_origin);
+        let binding=null;
+        if (input.credential_binding_id) {
+          binding=one('SELECT * FROM ops_agent_credential_bindings WHERE id=?',input.credential_binding_id);
+          if (!binding || binding.project_id!==input.project_id || binding.profile_id!==input.profile_id ||
+              binding.origin!==input.site_origin) fail('CREDENTIAL_BINDING_STALE');
+          if (binding.state!=='active') fail('CREDENTIAL_BINDING_REVOKED');
+          if (!actions.includes('type')) fail('ACTION_NOT_CONFIGURED');
+        }
         const limits=projectLimits(project);
         workerInstallResources(limits);
         const id = uuid(), now = clock();
@@ -193,13 +232,14 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
         if (deadlineMs != null && (!Number.isFinite(deadlineMs) || deadlineMs > 8.64e15)) fail('INVALID_PROJECT_LIMITS');
         const deadline=deadlineMs == null ? null : new Date(deadlineMs).toISOString();
         run(`INSERT INTO ops_agent_runs(id,project_id,profile_id,profile_revision,site_origin,site_revision,
-          guide_version_id,guide_hash,policy_digest,project_limits_revision,max_seconds,max_actions,state,started_at,deadline_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?,?)`, id,input.project_id,input.profile_id,input.profile_revision,
+          guide_version_id,guide_hash,policy_digest,project_limits_revision,max_seconds,max_actions,state,started_at,deadline_at,updated_at,
+          credential_binding_id,credential_binding_revision)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'prepared',?,?,?,?,?)`, id,input.project_id,input.profile_id,input.profile_revision,
           input.site_origin,input.site_revision,input.guide_version_id,input.guide_hash,input.policy_digest,
           project.agent_limits_revision,limits.max_seconds??null,limits.max_actions??null,
-          now.toISOString(),deadline,now.toISOString());
+          now.toISOString(),deadline,now.toISOString(),binding?.id??null,binding?.revision??null);
         event(id,null,'prepared');
-        return {run_id:id,deadline_at:deadline};
+        return {run_id:id,deadline_at:deadline,credential_binding_revision:binding?.revision??null};
       });
     },
     reserveAttempt(runId) {
@@ -249,17 +289,22 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
       if (!r || !a || r.state!=='starting' || a.state!=='starting' ||
           r.fence!==ref.fence || a.fence!==ref.fence || stamp()>=a.lease_expires_at ||
           (r.deadline_at && stamp()>=r.deadline_at)) fail('STALE_WORKER');
-      const {project}=assertPinnedConfiguration(r);
+      const {project,binding}=assertPinnedConfiguration(r);
       const limits=projectLimits(project);
       return validateWorkerLaunch({run_id:r.id,attempt_id:a.id,workspace_id:a.workspace_id,fence:a.fence,
         policy_digest:r.policy_digest,project_limits_revision:r.project_limits_revision,
-        origin:r.site_origin,target:WORKER_TARGET,limits,install:workerInstallResources(limits)});
+        origin:r.site_origin,target:WORKER_TARGET,limits,install:workerInstallResources(limits),
+        ...(binding ? {credential:{project_id:r.project_id,profile_id:r.profile_id,profile_revision:r.profile_revision,
+          binding_id:binding.id,binding_revision:r.credential_binding_revision}} : {})});
     },
     authorizeAction(request) {
       validateBrowserAction(request);
       return tx(() => {
         const {r,profile}=current(request.run_id,request.attempt_id,request.fence);
-        if (request.action==='submit_bound_fixture') fail('CREDENTIAL_BROKER_UNAVAILABLE');
+        if (request.action==='submit_bound_fixture') {
+          if (r.credential_binding_id==null) fail('CREDENTIAL_NOT_BOUND');
+          if (request.binding_id!==r.credential_binding_id) fail('BINDING_MISMATCH');
+        }
         const {actions}=profilePolicy(profile,r.site_origin);
         if (!actions.includes(REQUIRED_ACTION[request.action])) fail('ACTION_NOT_CONFIGURED');
         if (r.max_actions != null && r.action_count >= r.max_actions) fail('ACTION_LIMIT');

@@ -72,7 +72,7 @@ def spki(cert):
     return base64.b64encode(hashlib.sha256(der).digest()).decode('ascii')
 
 
-def status():
+def status(check_certificate=True):
     validate_target()
     data = i.parse_json(JOURNAL.read_text(), str(JOURNAL))
     if data.get('version') != 1 or data.get('phase') != 'installed' or data.get('vm_uuid') != i.fence.PROOF_UUID:
@@ -89,7 +89,8 @@ def status():
         raise ValueError('Unexpected proxy unit override')
     if i.execute(['systemctl', 'show', UNIT.name, '--property=NeedDaemonReload', '--value']).strip() != 'no':
         raise ValueError('Proxy unit requires reload')
-    i.execute(['openssl', 'x509', '-in', str(CERT), '-checkend', '86400', '-noout'])
+    if check_certificate:
+        i.execute(['openssl', 'x509', '-in', str(CERT), '-checkend', '86400', '-noout'])
     return dict(installed=True, vm_uuid=i.fence.PROOF_UUID, listen='10.185.17.1:18083',
                 allowed_origin='https://demo.fractionate.ai',
                 certificate_spki_sha256=spki(CERT), service='active/enabled',
@@ -111,7 +112,10 @@ def install():
             data = i.parse_json(JOURNAL.read_text(), str(JOURNAL))
             if data.get('phase') == 'installed':
                 return status()
-            raise ValueError('Incomplete proxy installation; review journal before recovery')
+            # A completed removal (every owned file gone) may be reinstalled with a
+            # fresh certificate; anything else needs review first.
+            if data.get('phase') != 'removed':
+                raise ValueError('Incomplete proxy installation; review journal before recovery')
         if any(path.exists() for path in (INSTALLED, CERT, KEY, UNIT)):
             raise ValueError('Unowned proxy file exists')
         with socket.socket() as test:
@@ -143,8 +147,9 @@ def install():
 
 def remove():
     # Verify every owned artifact and the exact service before removing only
-    # this proxy. The VM remains fenced when the listener is removed.
-    status()
+    # this proxy. The VM remains fenced when the listener is removed. An expiring
+    # certificate does not block removal: removal then install re-issues it.
+    status(check_certificate=False)
     data = i.parse_json(JOURNAL.read_text(), str(JOURNAL))
     i.execute(['systemctl', 'disable', '--now', UNIT.name])
     for path in (UNIT, INSTALLED, CERT, KEY):
@@ -160,7 +165,7 @@ def remove():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('install', 'status', 'remove'))
+    parser.add_argument('action', choices=('install', 'status', 'remove', 'reinstall'))
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
@@ -169,7 +174,12 @@ def main():
     i.secure(lock)
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print(json.dumps({'install': install, 'status': status, 'remove': remove}[args.action](), indent=2))
+        if args.action == 'reinstall':
+            # A reviewed proxy change or a certificate re-issue: remove, then install fresh.
+            removed = remove()
+            print(json.dumps(dict(install(), previous_removed=removed), indent=2))
+        else:
+            print(json.dumps({'install': install, 'status': status, 'remove': remove}[args.action](), indent=2))
 
 
 if __name__ == '__main__':

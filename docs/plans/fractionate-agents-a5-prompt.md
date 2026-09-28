@@ -75,41 +75,106 @@ The A1 criteria for A5 apply in full:
 Every input is untrusted. Guide, evidence, page or model text never expands
 policy.
 
-## Decisions to put to the user before writing code
+## Decisions (user answers 2026-09-28)
 
-Ask these with a recommendation each. Do not guess them.
+### 1. Where the coordinator runs: still open, ask first
 
-1. **Where the proof coordinator runs.**
-   - A5 changes backend code. The live backend runs `33528751`, and promotion
-     is a deployment the user has not authorized.
-   - **Recommended:** a root proof harness on the host. It runs the
-     candidate's coordinator module with a temporary proof SQLite database
-     against the real supervisor backend socket, which accepts root peers
-     only, like the backend container. That proves the coordinator without
-     promoting anything.
-   - The backend container's socket mount stays an A8 item. The alternatives
-     are promoting the candidate, or a separate candidate backend container;
-     both are the user's call.
-2. **How the loop reaches the model route.**
-   - The broker socket is never mounted into the backend. The backend socket
-     has no model method today (`status`, `launch`, `renew`, `action`,
-     `stop`).
-   - **Recommended:** one typed `model_step` method on the backend socket. It
-     is bound to the live attempt, fence and pinned run. The supervisor
-     forwards it to the broker's `model_call` under the run's pinned
-     limits, and returns only a choice from the closed action set, or a
-     refusal. Free text never goes back as an instruction.
-   - This is a deliberate widening of the A3 socket, so it needs the user's
-     yes. The alternative is a fixed action plan with no model in A5; the
-     model then moves to a later section and the provider/budget tests run
-     only at the broker (already proven in A4).
-3. **Scope of the fixture changes.**
-   - The injection and sign-in cases need fixture content, for example page or
-     file text that tries to instruct the model.
-   - **Recommended:** add it only inside the paths the origin proxy already
-     allows (`/`, `/workspace`, `/api/config`, `/api/session`, `/api/files`,
-     `/assets/*`). Deploy it like A4's demo change: a reviewed `server.mjs`,
-     kept backup, operator-run `deploy-server`. No new proxy path.
+A5 changes backend code. The live backend runs `33528751`; the candidate
+(`80721952`) is it plus the staged A3/A4 work.
+
+**Option A, the proof harness (recommended).** A root script on the host runs
+the candidate's coordinator module with a temporary proof SQLite database,
+against the real supervisor backend socket. That socket accepts root peers
+only, exactly like the backend container.
+- Nothing live changes.
+- The container socket mount stays an A8 item.
+
+**Option B, deploy (`promote_self`).** This would put the candidate, and later
+A5, into the live backend. The risks, as explained to the user:
+- **Downtime and a single point of failure.** `update.sh` rebuilds and
+  restarts the backend container. The dashboard, the API and the MCP surface
+  are down for the rebuild; Caddy keeps serving sites. A failed build on the
+  low-memory host leaves the dashboard down until `rollback_self`.
+- **Irreversible schema.** Migrations 1109 and 1110 (and A5's) apply to the
+  live database. They are additive, and old code ignores them, but a rollback
+  does not remove them. `update.sh` takes a database backup first.
+- **Skipped release gates.** The A3/A4/A5 code is on draft PRs that no person
+  has reviewed. A8 is where release happens: final-head review, backup,
+  restore and rollback proof, S6/SEC resolution. Deploying now moves unreviewed
+  code to live ahead of those gates.
+- **The socket mount.** Running A5 live needs the supervisor backend socket
+  mounted into the live backend container (a `docker compose` change). The
+  marginal security risk is small, because the backend is already
+  root-equivalent (S6 open). But any coordinator bug then runs inside the live
+  product process.
+- **What stays safe either way.** Activation is off, with no routes or starter,
+  so the deployed A3/A4 code does nothing until enabled.
+
+Ask the user to choose A or B before writing code. If they choose B, deploy
+only after the local suites and `run_self_checks` pass on the exact candidate,
+with a database backup and a stated rollback. Promotion stays a separate,
+explicit user step.
+
+### 2. Who decides the next action: hybrid (decided)
+
+The AI decides, informed by the project's approved guide and its documents.
+Operator-set **hard rules** decide wherever they apply, with no model
+involved. Precedence, highest first:
+
+1. **A3/A4 boundaries.** The supervisor, runner, proxy and broker refuse
+   everything outside the pinned launch and policy, whatever anyone asks.
+2. **Hard rules.** A typed, versioned, human-approved rule set for the
+   project and profile. Its hash is the run's `policy_digest`, which is
+   already pinned at `prepare` and at launch (`RUN_POLICY_MISMATCH` on
+   change). Hard rules are enforced by code and never interpreted by the
+   model. They can:
+   - fix automated steps (for example: always land, then open sign-in, then
+     sign out at stop);
+   - forbid actions;
+   - require a human approval before named actions (always before
+     `submit_bound_fixture`);
+   - set stop conditions (for example: stop once the verified account
+     indicator is seen);
+   - cap steps and spend.
+
+   When the rules fully determine the next step, **no model call is made**.
+3. **Guide and documents.** The approved guide version (`ops_guide_versions`:
+   the instructions and their `content_hash`, pinned as `guide_hash`) and the
+   evidence documents it references. They tell the model *how* to do the job
+   inside what the rules leave open. They can never add an action, an origin,
+   a credential or an approval (A1 cross-cutting rule).
+4. **The model** (`gpt-6-luna`, through the broker). It picks one action from
+   the set the rules leave open. It sees the guide, the redacted page claims
+   and that allowed set; its answer is validated before use.
+
+**Path to the model.** Add one typed `model_step` method on the supervisor's
+backend socket. This is the only approved widening of the A3 socket.
+- It is bound to the live attempt, fence and pinned run.
+- The supervisor forwards it to the broker's `model_call` under the run's
+  pinned limits.
+- It returns only one action name from the allowed set, or a refusal. Free
+  text never comes back as an instruction.
+- The guide text it carries must hash to the run's pinned `guide_hash`, so the
+  model sees exactly the approved version.
+
+**Consequences to handle:**
+- **Prompt size.** The broker's `MAX_PROMPT_BYTES` (4000) is too small for a
+  guide. Raising it, with the reservation arithmetic kept exact, changes the
+  broker. That means a broker reinstall and the A4 proof again.
+- **Where the guide goes.** Guide and document text is sent to OpenAI
+  (`store: false`). Record per profile whether its guide may be sent to the
+  provider, and refuse model steps when it may not.
+- **Where the rules come from.** Propose them either as a structured section
+  of the guide (reviewed and hashed with it) or as a separate reviewed rules
+  document. Keep one reviewer path and never self-approval.
+
+### 3. Fixture content (decided: as recommended)
+
+Put the injection and outcome fixtures only inside paths the origin proxy
+already allows: `/`, `/workspace`, `/api/config`, `/api/session`,
+`/api/files`, `/assets/*`. Examples are a file entry or page text in the demo's
+synthetic data. Deploy it like A4's demo change: a reviewed `server.mjs`, a
+kept backup, an operator-run `deploy-server`. No new proxy path.
 
 ## Preserve
 
@@ -127,7 +192,8 @@ Ask these with a recommendation each. Do not guess them.
   `--upgrade-incus` or an Incus archive. Never bypass managed-LXC refusals.
 - **Migrations.** 1100–1110 are immutable. New migrations take the next free
   numbers in the reserved range (check `db.js`).
-- **A3/A4 boundaries do not widen**, except where decision 2 is approved.
+- **A3/A4 boundaries do not widen**, except for the one `model_step` method
+  approved in decision 2 and the broker prompt-size change it needs.
   That covers:
   - the socket methods and the root-peer rule;
   - the fence;
@@ -151,16 +217,20 @@ Ask these with a recommendation each. Do not guess them.
      and `fence` / `finishStop` / `recover`.
    - Run state, events and results are durable. It allows one active run per
      project and profile, and refuses a duplicate start.
-2. **Typed action loop.**
-   - The loop moves through a closed action set (`BROWSER_ACTIONS`), with a
-     durable reservation before every action.
-   - Results are recorded as untrusted and redacted:
-     - the page claims the runner already reduces to typed fields;
-     - no raw page text in the database or logs;
-     - no value, cookie or session token anywhere.
-   - If decision 2 is approved, the model sees only typed action names and
-     those redacted claims. Its choice is validated against the plan and
-     policy before use.
+2. **Hybrid action loop** (decision 2).
+   - Each step:
+     1. evaluate the hard rules;
+     2. if they determine the step, take it;
+     3. otherwise call `model_step` with the guide, the redacted claims and the
+        rule-filtered allowed set;
+     4. validate the choice;
+     5. `authorizeAction` (a durable reservation);
+     6. the supervisor action;
+     7. record the untrusted, redacted result.
+   - Record which steps were rule-decided and which were model-decided.
+   - Nothing enters the database or logs beyond the typed fields the runner
+     already reduces page claims to: no raw page text, no value, no cookie, no
+     session token.
 3. **Approval checkpoint.**
    - A human approval is required before `submit_bound_fixture`. The approval
      row stores a digest over the run ID, attempt, fence, action, binding ID
@@ -258,6 +328,12 @@ Ask these with a recommendation each. Do not guess them.
     - coordinator restart mid-run;
   - the sign-in outcome classes that the demo fixture can produce without
     tripping the shared rate limit;
+  - the hybrid cases:
+    - a rule-decided step makes no model call;
+    - a model choice outside the rule-filtered set is refused;
+    - a guide whose hash differs from the pin is refused;
+    - a profile that may not send its guide to the provider is refused a
+      model step;
   - the canary scan: 0 matches in every sink, now including the coordinator's
     proof database and its logs.
 - **CI:** exact-head Security CI on a draft PR, only if the user authorizes

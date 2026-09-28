@@ -82,6 +82,24 @@ MCP guest-name and token-scope checks, and no call starts or changes a guest.
 This remains a root-equivalent backend read path and does not prove A3 network
 or process isolation. The underlying host adapter still needs a typed
 least-privilege replacement for S6.
+
+The A3 worker supervisor (`scripts/a3-worker-supervisor.py`, installed by
+`scripts/a3-install-supervisor.py`) is a host-owned, root-only daemon that the
+backend does **not** control: the operator installs reviewed copies under
+`/etc/proxypilot-a3-proof/supervisor`, its unit requires the installed A3
+fence, and it refuses to serve unless its own files match the install journal.
+Its backend socket (`/run/proxypilot-a3/supervisor.sock`, uid 0 peer only)
+accepts exactly `status`, a typed `launch`, `renew`, one of the fixed browser
+actions, and `stop`; there is no argv, URL, path, unit property, Incus call or
+browser endpoint in that contract. Proof workloads, takeover and human
+view/control exist only on the separate operator socket. Teardown receipts are
+signed with a host-held Ed25519 key; the backend holds only the public key
+(`lib/operational-worker-supervisor.js`). No route constructs the client and the
+socket is not mounted into the backend container, so this adds no reachable
+backend host call while A3 activation is off. It narrows the future worker path;
+it does not close S6, because the backend keeps its other root-equivalent
+interfaces and a compromised backend could still request launches within the
+pinned project budgets.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

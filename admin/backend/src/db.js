@@ -32,6 +32,7 @@ import { operationalEvidenceMigration1105 } from './lib/operational-evidence-gui
 import { operationalAgentsMigration1106 } from './lib/operational-agents-schema.js';
 import { operationalWorkerMigration1107 } from './lib/operational-worker-schema.js';
 import { operationalAgentLimitsMigration1108 } from './lib/operational-agent-limits-schema.js';
+import { operationalWorkerBindingMigration1109 } from './lib/operational-worker-binding-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
 const __dbDirname = dirname(__dbFilename);
@@ -154,6 +155,7 @@ export function getDb() {
 //   1106 Operations — project discovery, optional site origin and disabled agent profiles.
 //   1107 Operations — closed A3 run/worker identity and fence records.
 //   1108 Operations — project-owned optional agent limits; remove pilot run caps.
+//   1109 Operations — bind A3 worker attempts to the supervisor's VM and guest boot.
 //   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
@@ -2036,6 +2038,7 @@ export function initDatabase() {
   runMigration(db, 1106, 'operational_agents_metadata', operationalAgentsMigration1106);
   runMigration(db, 1107, 'operational_worker_fences', operationalWorkerMigration1107);
   runMigration(db, 1108, 'operational_project_agent_limits', operationalAgentLimitsMigration1108, { disableFks: true });
+  runMigration(db, 1109, 'operational_worker_vm_binding', operationalWorkerBindingMigration1109);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

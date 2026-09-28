@@ -1,19 +1,19 @@
 # A4 credentials and provider route — evidence
 
-**A4 is implemented and locally verified, and not accepted.** On the proof
-host:
-- The proxy proof (21 cases) and the full A3 proof (19/19) passed again.
-- The bound sign-in (`login`), rotation and egress cases passed.
-- The canary scan found 0 matches in all 13 sinks.
+**A4 is ACCEPTED (2026-09-28).** Every gate has observed, reviewed evidence on
+the proof host with the installed broker (`97e0a207…`), supervisor
+(`0850c329…`), runner (`de4f44d6…`) and origin proxy (`f5e63612…`).
+- The full A3 proof passed again (19/19), and the proxy proof passed (21
+  cases).
+- The final A4 proof `a4-proof-20260928T161223Z.json` passed all six cases.
+- A canary scan after it found 0 matches in all 13 sinks.
 
-Two proof cases, `budget` and `revocation`, failed on defects in the proof
-harness itself, fixed in `d052e416` (third host run, last section). They must
-pass on the host, followed by a final canary scan. The
+The decision is in the last section. The
 [A4 reference](fractionate-agents-a4-reference.md) is the orientation page,
-and this file is the record. A2, A3 and Operations activation stay off. PR #686
-stays draft. The only live change is the demo's reviewed `server.mjs`, which
-the operator deployed with a kept backup; it now also accepts the synthetic
-test account.
+and this file is the record. A2, A3 and Operations activation stay off.
+PR #686 stays draft and PR #699 stays draft; nothing was merged or promoted.
+The only live change is the demo's reviewed `server.mjs`, which the operator
+deployed with a kept backup; it now also accepts the synthetic test account.
 
 ## 2026-09-28 gate check, implementation and local verification
 
@@ -301,9 +301,10 @@ with a kept backup and `rollback-server`) so it can verify the synthetic
 account. That is a change to a live site, which the operator makes
 deliberately.
 
-### Acceptance decision (2026-09-28): A4 is NOT accepted
+### Acceptance decision (2026-09-28, at implementation): A4 was NOT accepted
 
-Open gates, each needing observed, reviewed evidence on the proof host:
+Superseded: every gate below passed on the host, and A4 was **accepted** in the
+fourth host run (last section). The gates as they stood at implementation:
 1. ~~Staging on the candidate, the proxy reinstall, the supervisor reinstall
    and the broker install, with readback~~: **passed** on the second host run.
 2. ~~The full A3 proof again (18 cases plus `minimums`), because the supervisor
@@ -311,7 +312,8 @@ Open gates, each needing observed, reviewed evidence on the proof host:
 3. ~~`a3-probe-proxy.py`: 21 cases (A3's 7, 12 refused POST/path variants, and
    the two positives: the bounded sign-in POST and the empty logout)~~:
    **passed** on the second host run.
-4. `a4-probe.py`, where every case must pass:
+4. ~~`a4-probe.py`, where every case must pass~~: **passed**,
+   `a4-proof-20260928T161223Z.json` (fourth host run):
    - `login` (signed in, `read_files`, logout `done`, receipt credential block,
      no profile or cookie file in the guest after stop);
    - `egress` (provider, vault and DNS refused; fence counters move);
@@ -319,7 +321,8 @@ Open gates, each needing observed, reviewed evidence on the proof host:
      tokens and dollars exhausted; unknown price; not allowlisted; revision
      mismatch; provider error);
    - `rotation` and `revocation` (with timings).
-5. `a4-canary-scan.py`: every sink `scanned: true` with **0** matches.
+5. ~~`a4-canary-scan.py`: every sink `scanned: true` with **0** matches~~:
+   **passed** after the final proof (fourth host run).
 6. ~~Exact-head Security CI on the draft PR~~: **passed** at `ae8c8db1` (run
    `36436717665`). It must pass again on any later code head.
 
@@ -744,3 +747,193 @@ A4 remains **not accepted**. The `login` and `rotation` cases have passed on
 the host (gate 4 in part), and a canary scan has passed (gate 5), but
 `budget` and `revocation` must pass, and the canary must pass again after the
 final run.
+
+## 2026-09-28 fourth host run: the full A4 proof and the canary pass; acceptance
+
+The user pasted every output. No value appears in any of it.
+
+### Staging and binding
+
+- **Staging `d052e416`.** `staged b6cae65e193f778d7bff632e3d5ab14ceee9366f (was
+  79539297…) from d052e416…; 63 paths match exactly`.
+- **Status after staging.** The installed files are unchanged (`97e0a207…`,
+  `23aeff46…`), `vault_healthy: true`, and **`approle_login: ok`** (the new
+  check).
+- **Step 2c.**
+  - Revoking `87698f27…` was refused with `BINDING_REVOKED` (the proof had
+    revoked it); its ID file was kept.
+  - Provider revision 3 (vault version 1, 16:11:31Z).
+  - New binding `fae88e7f-3732-4c99-80e9-60645c37ffaa` (project `ba73a818-…`,
+    profile `9e72c127-…`), revision 1, active.
+  - `"provisioned": true`: verifier 197 bytes at binding revision 1.
+  - Status: `approle_login: ok`.
+
+### Final A4 proof: `a4-proof-20260928T161223Z.json`, `a4_proof: passed`
+
+| Case | Seconds | Observed |
+|---|---|---|
+| `proxy_policy` | 0.6 | 21 codes as installed |
+| `login` | 2.0 | `signed_in`; delivery at 16:12:25 (run `ff87f168…`, revision 1) |
+| `egress` | 4.1 | guest root refused to provider, vault and DNS |
+| `budget` | 4.8 | below |
+| `rotation` | 3.4 | revision 2 delivery at 16:12:37 (run `0b6bf69f…`) |
+| `revocation` | 1.5 | below |
+
+**`budget`.** Each run stopped before the next launched.
+- **Run A** (`901d7d0b…`, `max_tokens` 145 = worst case 135 + 10, `max_usd`
+  0.001):
+  - **The real call** `2a955d91…`: HTTP 200, provider response
+    `chatcmpl-ET8FsfxsXXEIdkcHy8ChwxnX9ZGIA`, model `gpt-6-luna`, service tier
+    `default`, `finish_reason: stop`, reply excerpt "OK" (untrusted), 2135 ms.
+  - **Usage and cost.** Usage: 21 prompt tokens, 4 completion, 0 cached, 0
+    reasoning. Reserved $0.000022875 (135 tokens) before sending; settled
+    $0.000004625 at price table revision 1.
+  - **Retry.** The retry replayed the same response ID without a second
+    request (`retry_replayed: true`).
+  - **Budget.** The next call was refused with `BUDGET_EXHAUSTED` (tokens:
+    25 settled + 135 worst case > 145). Provider requests: 1 before the
+    refusals, 1 after.
+- **Run B** (`e9da6759…`, 2000 tokens, $0.001):
+  - `MODEL_NOT_ALLOWED` (`gpt-6-sol`).
+  - `REVISION_MISMATCH` (project limits revision 2 against pinned 1).
+  - `PRICE_UNKNOWN`, with the price table cleared at revision 2, then restored
+    at revision 3.
+  - `PROVIDER_ERROR`: one request answered HTTP 400 `invalid_request_error` /
+    `integer_below_min_value` in 313 ms; the reservation was released (run B
+    settled 0).
+- **Run C** (`e2280e26…`, `max_usd` 0.000001): `BUDGET_EXHAUSTED` before any
+  request (`budget_usd_requests: 0`).
+- **Settlement arithmetic.**
+  - 21 × $0.125/M + 4 × $0.50/M = $0.000004625. Uncached input is charged at
+    the higher of the input and cache-write prices, because the response
+    cannot show that no cache write happened: fail-closed, never
+    under-charged.
+  - The reservation: (71 prompt bytes + 16 + 32) = 119 input tokens × $0.125/M
+    + 16 × $0.50/M = $0.000022875.
+- **Real spend.** The ledger holds three settled real calls from today's runs
+  (15:53, 16:01 and 16:12), $0.000013875 in the broker's accounting, plus one
+  provider 400 that settled nothing.
+
+**`revocation`.** The revoke call took 3 ms. Each of these was then refused
+with `BINDING_REVOKED`, and no submit was journalled:
+
+| After revoke | Time |
+|---|---|
+| broker `check` | 0 ms |
+| the running attempt's next submit | 4 ms |
+| a new launch | — |
+
+The binding's state reads back `revoked` (revoked at epoch 1790611959.516).
+
+**Ledger readback.**
+- **Deliveries:** five `delivered` records across the three runs, each with the
+  binding ID, revision, run and attempt only:
+  - 15:53:44: `29532439…` revision 1, the run-1 sign-in the demo rejected;
+  - 16:01:11 and 16:01:22: `87698f27…` revisions 1 and 2;
+  - 16:12:25 and 16:12:37: `fae88e7f…` revisions 1 and 2.
+- **Run pins:** one per launch, with the credential pin where the launch
+  carried one. The A3 regression's launches are pinned with `credential: null`
+  and no spend.
+
+### Canary scan after the final proof: passed
+
+`"canary_scan": "passed"`, `canary_exit=0`, binding `fae88e7f…` revision 2,
+vault version 1, `encodings_searched: 4`. Every sink is `scanned: true` with
+0 matches:
+
+| Sink | Bytes | Matches |
+|---|---|---|
+| supervisor unit journal | 4,415 | 0 |
+| broker unit journal | 776 | 0 |
+| proxy unit journal | 486 | 0 |
+| whole host journal (2 days) | 12,716,800 | 0 |
+| guest journal | 601,497 | 0 |
+| backend container logs (48 h) | 26,796 | 0 |
+| receipts and supervisor state journal | 440,195 | 0 |
+| broker journal and model records | 33,622 | 0 |
+| page reads and proof reports | 100,115 | 0 |
+| Incus logs | 150,077 | 0 |
+| database files | 12,959,248 | 0 |
+| database dump | 7,014,079 | 0 |
+| MCP ledger | 262,486 | 0 |
+
+The same value was delivered in five sign-ins across three proof runs and
+entered once in the dashboard.
+
+### Read back from the session (MCP, after the run)
+
+- **`inspect_a3_vm`:** Running, VM UUID `49592202-…73e4`, boot `728c93ce…`
+  (unchanged; A4 does not reboot the guest), QEMU PID 272179, 2 CPUs,
+  4096 MiB, 12 GiB, swap off.
+- **`get_host_services proxypilot-a`:** the fence is active/exited; the origin
+  proxy, supervisor and A4 broker are active/running.
+- **`test_route demo.fractionate.ai`:** edge 200, upstream 200.
+- **`get_self_status`:** live `33528751` (unchanged, clean); candidate
+  `b6cae65e`, 24 ahead, clean.
+- **`run_self_checks`** (`backend-tests`, `backend-syntax`,
+  `skip_install: true`) on candidate `b6cae65e`: `ok`. `backend-tests`: 3,339
+  tests, 3,328 pass, 0 fail, 11 skipped (the native-module files).
+  `backend-syntax`: exit 0. It was not promoted.
+
+### Exact-head Security CI
+
+- Run `36444990456` on `79817dfa` (docs): 7/7 success.
+- Run `36449054256` on `c2c02aaa`, which carries the code at `d052e416`: 7/7
+  success (three audits, `agent`, `backend`, `frontend`, and the base-app
+  audit).
+
+### Acceptance decision: A4 is ACCEPTED (2026-09-28)
+
+| Gate | Evidence |
+|---|---|
+| Staging, proxy and supervisor reinstall, broker install, with readback | Second host run (file digests, key `062aa93b…`, SPKI `NdkAJzLx…`); fourth run status |
+| Full A3 proof again (18 cases plus `minimums`) after the supervisor and runner change | `worker-proof-20260928T152421Z.json`, 19/19, at the installed `0850c329…` / `de4f44d6…`, which are unchanged since |
+| Proxy policy: exactly one bounded JSON `POST /api/login`, 12 refused variants, empty logout | `a3-probe-proxy.py` 21 cases (second run) and `proxy_policy` in the final proof |
+| One bound credential reaches the approved login form through the host broker, and never the model context, runner channel, page reads, logs, receipts, journals, ledger or DB | `login` (`signed_in`; receipt and journal carry ID, revision and outcome only); canary 0 matches in 13 sinks after five deliveries |
+| Rotation and revocation, timed | `rotation` passed in the final proof (the third run's readback, same assertions: old revision refused at the next submit in 5 ms, at relaunch and for a new run; the new revision signs in); `revocation` (refused at the broker in 0 ms and at the next submit in 4 ms; relaunch refused) |
+| Logout at stop, cookie-jar disposal | `login`: `logout: done`; no guest profile or cookie file after the stop; unit inactive |
+| Egress | `egress`: guest root refused to provider, vault and DNS; fence counters moved |
+| One allowlisted model route under the pinned token and spend policy, fail-closed | `budget`: one real `gpt-6-luna` call reserved, then settled with its response ID, usage, cost and price-table revision; idempotent replay; refusals `BUDGET_EXHAUSTED` (tokens and dollars), `MODEL_NOT_ALLOWED`, `PRICE_UNKNOWN`, `REVISION_MISMATCH`, `PROVIDER_ERROR` (reservation released) |
+| Local suites and candidate checks | 154 script tests at `d052e416`; Operations Node 79; inventory exit 0; candidate `b6cae65e` `backend-tests` 0 fail |
+| Exact-head Security CI | Run `36449054256` on `c2c02aaa` (code `d052e416`), 7/7 |
+
+**Who can read the value** (unchanged, restated):
+- The OpenBao AppRole `agent-a4-broker`, used by the root broker; its config
+  is a root-only 0600 file on the host.
+- Host root, and so the root-equivalent backend (S6 is open).
+- OpenBao's own root custody.
+- The demo origin, which verifies it against an scrypt verifier and never
+  stores it.
+- The page's own JavaScript inside the browser, while the form is filled.
+
+The broker keeps it from the model, the runner's channel, page reads, logs,
+receipts, journals, the ledger and the database.
+
+**Open by name, allowed by the criteria:**
+- **Host reboot persistence** of the fence, proxy, supervisor and now broker
+  ordering. It needs explicit approval and a time window.
+- **The backend container socket mount and coordinator wiring (A5);**
+  activation stays off.
+- **S6 / SEC-01 / SEC-04.**
+- **Secret-ID rotation is not an immediate stop.** Issuing a new AppRole
+  secret ID leaves tokens already issued valid for up to their TTL (1 h,
+  max 4 h). Binding revocation is the immediate stop.
+
+**Operational items:**
+- **Proxy certificate.** The certificate from the second host run lasts 7
+  days, to about 2026-10-05. Launches fail closed after that until
+  `a3-install-proxy.py reinstall` and `a3-probe-proxy.py`.
+- **`AgentKeys`.** The agent `a4-broker` also holds a credential named
+  `AgentKeys`, which A4 does not use. The AppRole can read it; remove it
+  unless it is meant for this agent.
+- **Synthetic account.** It stays valid on the demo for the last verifier
+  (binding `fae88e7f…`, revoked at the broker). To retire it, delete
+  `/opt/app/demo/synthetic-account.json` in `pp-fractionate-demo` (the server
+  then ignores it), or run `a4-fixture-account.py rollback-server`.
+- **Broker state.** Three revoked bindings and a run pin for every launch
+  since the install remain as history; no binding is active.
+
+Accepting A4 does not authorize A5, activation, deployment, or promotion of the
+candidate to live; each is a separate user decision. The
+[A5 prompt](fractionate-agents-a5-prompt.md) is now eligible, and work stops
+here for review before any A5 work.

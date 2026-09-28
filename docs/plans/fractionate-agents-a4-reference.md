@@ -1,21 +1,21 @@
 # A4 reference: current state for any conversation
 
-Snapshot: 2026-09-28, after the third host run (bound sign-in, rotation, egress
-and canary passed; the budget and revocation harness defects are fixed in
-`d052e416`).
+Snapshot: 2026-09-28, after A4 was **accepted** on the proof host (fourth host
+run).
 This file is the orientation page. The dated [A4 evidence](fractionate-agents-a4-evidence.md)
 is the record; if the two disagree, the evidence wins. Recheck every mutable
 value below (SHAs, services, VM boot) before acting.
 
-**Status in one line:** A4 is implemented, every local suite passes, and
-exact-head Security CI passed on draft PR #699. On the host:
-- The proxy proof (21 cases), the full A3 proof (19/19), and the A4 `login`,
-  `rotation` and `egress` cases passed.
-- The canary scan found 0 matches in 13 sinks.
+**Status in one line:** A4 is **accepted (2026-09-28)**. On the proof host:
+- The full A3 proof (19/19) and the proxy proof (21 cases) passed.
+- The final A4 proof `a4-proof-20260928T161223Z.json` passed all six cases:
+  bound sign-in, egress, budget with one real `gpt-6-luna` call, rotation,
+  revocation and proxy policy.
+- The canary scan after it found 0 matches in 13 sinks.
 
-A4 is **not accepted**. `budget` and `revocation` failed on proof-harness
-defects, which are fixed in `d052e416`. The next step is **Resume here**
-below.
+Exact-head Security CI passed on draft PR #699 (run `36449054256`, code
+`d052e416`). Nothing is activated, merged, deployed or promoted. A5 is eligible
+and not started; open items are in the evidence's acceptance section.
 
 ## Read first
 
@@ -35,7 +35,7 @@ below.
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted (PR #698). Base of A4. |
 | Branch `claude/serene-franklin-eteidj` | code `d052e416e6b63dfae756f5a6f7c226d4c7aa1145`; later commits are docs | Stage `d052e416` (probe `budget`/`revocation` fix, installer `configure`/`status` fix). The installed broker, supervisor, runner and proxy are byte-identical to `9ef3af56`, so nothing is reinstalled. Draft PR #699 carries Security CI. |
 | ProxyPilot live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged. Promotion is a separate user decision. |
-| ProxyPilot candidate (`pp-candidate`) | `795392979b7c68c1ce6bbe1f981548c77d2af027` (staged `9ef3af56` in the second host run), 23 ahead, clean; stage `d052e416` next | Installed: supervisor `0850c329…`, runner `de4f44d6…`, proxy `f5e63612…`, broker `97e0a207…`, supervisor key `062aa93b…`, proxy SPKI `NdkAJzLx…qwyM=`. Demo `server.mjs` `8bb06506…` (backup `server.mjs.pre-a4`). |
+| ProxyPilot candidate (`pp-candidate`) | `b6cae65e193f778d7bff632e3d5ab14ceee9366f` (staged `d052e416` in the fourth host run), 24 ahead, clean; `backend-tests` and `backend-syntax` ok on `b6cae65e` (0 fail); not promoted | Installed: supervisor `0850c329…`, runner `de4f44d6…`, proxy `f5e63612…`, broker `97e0a207…`, supervisor key `062aa93b…`, proxy SPKI `NdkAJzLx…qwyM=`. Demo `server.mjs` `8bb06506…` (backup `server.mjs.pre-a4`). |
 | PR #686 | draft, unmerged | Keep draft. |
 
 ## Proof target
@@ -289,16 +289,18 @@ run did). Its expected output is step 3 items 3–5.
 sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; test -s /var/lib/proxypilot-a4/proof-binding || { echo "no binding yet: finish step 2b"; exit 1; }; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B"; echo "canary_exit=$?"'
 ```
 
-**Resume here (after the third host run).** Binding `87698f27…` was revoked by
-the `revocation` case, so a new binding is needed. Run these in order:
+**To rerun the A4 proof** (history: the path the accepted fourth run took).
+Every proof run ends by revoking its binding, so each rerun needs a new one.
+Run these in order:
 
 1. Stage `d052e416`. The code fix is only in the proof and host tools, so there
    is no reinstall.
    ```
    sudo sh -c 'set -e; C=d052e416e6b63dfae756f5a6f7c226d4c7aa1145; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/serene-franklin-eteidj; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a4-install-broker.py status'
    ```
-   Expected: `staged <sha> (was 79539297…) from d052e416…; 63 paths match
-   exactly`, then the new HEAD. The status shows files `97e0a207…` and
+   On 2026-09-28 this gave `staged b6cae65e… (was 79539297…) from d052e416…;
+   63 paths match exactly`. On a candidate that already carries `d052e416` it
+   says `candidate already matches`. The status shows files `97e0a207…` and
    `23aeff46…`, `"vault_healthy": true`, **`"approle_login": "ok"`**, and
    provider revision 2.
    - `approle_login` shows `VAULT_UNAVAILABLE (approle login refused)`: the

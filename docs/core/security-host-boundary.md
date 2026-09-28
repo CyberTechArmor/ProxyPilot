@@ -118,6 +118,11 @@ guest command channel; it does not hide it from the AppRole, from host root, or
 from the root-equivalent backend while S6 is open (the AppRole file is on the
 host), and it adds no reachable backend host call while activation is off. The
 origin proxy's only A4 widening is one bounded JSON `POST /api/login` per tunnel.
+The immediate stop is revoking a binding at the broker (observed on the host:
+refused at the broker in 0 ms and at the next submit in 4 ms). Replacing the
+AppRole secret ID in the dashboard is not one: tokens already issued stay valid
+for their TTL (1 h, max 4 h), and the running broker kept reading on its cached
+token until it was restarted.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

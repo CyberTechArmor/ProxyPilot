@@ -263,6 +263,8 @@ class Proof:
         assert not leaks, leaks
         assert found['capabilities_effective'] == '0000000000000000' and found['no_new_privs'] == '1'
         assert found['uid'] == 65534
+        # EPERM: no CAP_NET_RAW (EPROTONOSUPPORT would not test privilege).
+        assert found['raw_ipv4_socket'] == 'refused:1', found['raw_ipv4_socket']
         return found
 
     def guest_root_egress(self):

@@ -782,11 +782,13 @@ def proof_escape(channel):
         results['host_dns_udp'] = 'answered'
     except OSError as error:
         results['host_dns_udp'] = 'refused:%s' % error.errno
-    for name, family, kind in (('packet_socket', getattr(socket, 'AF_PACKET', 17), socket.SOCK_RAW),
-                               ('vsock_socket', getattr(socket, 'AF_VSOCK', 40), socket.SOCK_STREAM),
-                               ('raw_ipv4_socket', socket.AF_INET, socket.SOCK_RAW)):
+    # Raw IPv4 needs a real protocol: protocol 0 fails EPROTONOSUPPORT before
+    # any privilege check (the first target run recorded exactly that).
+    for name, family, kind, proto in (('packet_socket', getattr(socket, 'AF_PACKET', 17), socket.SOCK_RAW, 0),
+                                      ('vsock_socket', getattr(socket, 'AF_VSOCK', 40), socket.SOCK_STREAM, 0),
+                                      ('raw_ipv4_socket', socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)):
         try:
-            socket.socket(family, kind).close()
+            socket.socket(family, kind, proto).close()
             results[name] = 'created'
         except OSError as error:
             results[name] = 'refused:%s' % error.errno

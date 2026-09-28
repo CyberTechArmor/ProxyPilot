@@ -106,7 +106,10 @@ $('f').onsubmit = async e => {
   e.preventDefault();
   const r = await fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({email: $('em').value, password: $('pw').value})});
-  if (r.ok) { $('dlg').style.display = 'none'; $('ws').style.display = 'block'; }
+  // Like the real demo's workspace: after a sign-in the page loads resources the
+  // runner's policy refuses (web fonts). That is not a redirect of the sign-in.
+  if (r.ok) { $('dlg').style.display = 'none'; $('ws').style.display = 'block';
+    const font = new Image(); font.src = 'https://fonts.googleapis.com/css2?family=Inter'; }
 };
 window.rogue = () => fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
   body: '{"email":"x","password":"y"}'}).then(() => 'reached', () => 'refused');
@@ -436,6 +439,13 @@ class RealProxyBrowserTests(unittest.TestCase):
                 result = browser.action('submit_bound_fixture', BINDING)
                 writer.join(5)
                 seen[mode] = result['outcome']
+                if mode in ('normal', 'challenge'):
+                    # The page then loaded a font the policy refuses: not a redirect of the sign-in.
+                    deadline = time.monotonic() + 5
+                    while not any(b.get('host') == 'fonts.googleapis.com' for b in browser.blocked) \
+                            and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    self.assertTrue(any(b.get('host') == 'fonts.googleapis.com' for b in browser.blocked), mode)
                 self.assertEqual(result['login_requests'], 1, mode)
                 self.assertEqual(result['untrusted_page_claim_authenticated_as_bound_account'], mode == 'normal', mode)
                 session = browser.action('read_session')

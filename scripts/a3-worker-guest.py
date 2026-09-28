@@ -486,7 +486,8 @@ class Browser:
         self.channel = channel
         self.statuses = {}
         self.blocked = []
-        self.refused_requests = 0
+        # A5: set when the armed sign-in request itself was redirected.
+        self.login_redirected = False
         self.allowed = 0
         self.main_target = None
         # One-shot sign-in gate: only submit_bound_fixture arms it, for one POST.
@@ -537,6 +538,7 @@ class Browser:
         self.cdp = Cdp(to_w, from_r)
         self.cdp.on('Fetch.requestPaused', self._paused)
         self.cdp.on('Network.responseReceived', self._response)
+        self.cdp.on('Network.requestWillBeSent', self._request)
         self.cdp.on('Target.targetCreated', self._created)
         self.cdp.on('Target.attachedToTarget', self._attached)
         try:
@@ -590,7 +592,6 @@ class Browser:
             self.allowed += 1
             self.cdp.notify('Fetch.continueRequest', {'requestId': params.get('requestId')}, session)
             return
-        self.refused_requests += 1
         if len(self.blocked) < 50:
             try:
                 parts = urlsplit(url or '')
@@ -601,6 +602,15 @@ class Browser:
                 self.blocked.append({'method': str(method)[:8], 'unparsable': True})
         self.cdp.notify('Fetch.failRequest', {'requestId': params.get('requestId'),
                                                'errorReason': 'BlockedByClient'}, session)
+
+    def _request(self, params, session):
+        # A redirect of the sign-in request arrives as a new request carrying the
+        # login's redirect response. Other page loads after a sign-in (fonts,
+        # images) are refused by the policy too, but they are not the sign-in.
+        redirect = params.get('redirectResponse')
+        if (isinstance(redirect, dict) and redirect.get('url') == ORIGIN + LOGIN_PATH
+                and self.login_posts and not self.login_redirected):
+            self.login_redirected = True
 
     def _response(self, params, session):
         response = params.get('response', {})
@@ -694,11 +704,10 @@ class Browser:
             self.login_status, self.login_posts, self.login_armed = None, 0, 1
             self.submitted = True
             self.bound_email = username.decode('ascii').lower()
-            refused_before = self.refused_requests
+            self.login_redirected = False
             self.login_form('submit')
             deadline = time.monotonic() + STEP_SECONDS
-            while (self.login_status is None and self.refused_requests == refused_before
-                   and time.monotonic() < deadline):
+            while self.login_status is None and not self.login_redirected and time.monotonic() < deadline:
                 time.sleep(0.1)
             self.login_armed = 0
             status = self.login_status
@@ -709,8 +718,8 @@ class Browser:
             as_bound = (isinstance(session, dict) and session.get('authenticated') is True and
                         session.get('email') == username.decode('ascii').lower())
             challenge = session.get('challenge') if isinstance(session, dict) else None
-            # A redirect or request the sign-in caused outside the fixed origin policy.
-            off_origin = self.refused_requests > refused_before
+            # The sign-in itself was redirected (a 3xx status is also caught below).
+            off_origin = self.login_redirected
         finally:
             self.login_armed = 0
             wipe(username)

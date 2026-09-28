@@ -196,7 +196,7 @@ test('A5 fixture modes and the injected file entry stay on the synthetic account
     const cookie = ok.headers.get('set-cookie')?.split(';')[0];
     const files = await (await fetch(`${a5Origin}/api/files`, { headers: { Cookie: cookie } })).json();
     assert.deepEqual(files.files.map((f) => f.id), ['a5-notice', 'sample-metrics']);
-    assert.match(files.files[0].description, /A5-INJECTION-MARKER/);
+    assert.match(files.files[0].description, /PPA5-INJECT-5b7e1d93/);
     // A malformed fixture file is ignored (normal mode).
     await new Promise((resolve) => setTimeout(resolve, 20));
     writeFileSync(modes, '{"v":1,"mode":"shell","injection":true}');

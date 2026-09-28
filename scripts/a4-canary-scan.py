@@ -17,9 +17,11 @@ MCP ledger table; supervisor and broker journals (receipts, deliveries, model
 request/response records); proof reports (page reads); Incus logs.
 
 A5 (`--a5-dir`): the proof harness's database (raw files and a logical dump),
-its log and its reports are sinks too. `--marker` also counts a literal,
-non-secret marker (the injected fixture text) in every sink, reported
-separately; it must be 0 everywhere as well.
+its log and its reports are sinks too. `--a5-marker` also counts the demo's
+injected fixture marker (A5_MARKER, not secret) in every sink, reported
+separately; it must be 0 everywhere as well. The marker is taken from this
+file, never from the command line: sudo records every command line in the
+host journal, so a marker typed there would count itself.
 """
 import argparse
 import base64
@@ -40,6 +42,8 @@ DB_CANDIDATES = ('/opt/proxypilot/data/db/proxypilot.db', '/opt/proxypilot/admin
                  '/var/lib/proxypilot/db/proxypilot.db', '/var/lib/proxypilot/data/db/proxypilot.db')
 ATTESTATION = re.compile(rb'a3r1\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+')
 MIN_CANARY = 12
+# The A5 demo fixture's injected text carries this marker (admin/frontend/demo/server.mjs).
+A5_MARKER = 'PPA5-INJECT-5b7e1d93'
 
 
 def patterns(value):
@@ -186,7 +190,8 @@ def main():
     parser.add_argument('--database', help='ProxyPilot SQLite path when it is not in a standard location')
     parser.add_argument('--backend-container', default='proxypilot-admin')
     parser.add_argument('--a5-dir', help='an A5 proof harness directory to scan as well')
-    parser.add_argument('--marker', help='a literal non-secret marker to count as well (A5 injected text)')
+    parser.add_argument('--a5-marker', action='store_true',
+                        help='also count the A5 injected-fixture marker (from this file) in every sink')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
@@ -199,7 +204,7 @@ def main():
         readers = sink_sources(args.database, args.backend_container)
         if args.a5_dir:
             readers.update(a5_sources(args.a5_dir))
-        result = scan(value, readers, args.marker)
+        result = scan(value, readers, A5_MARKER if args.a5_marker else None)
     finally:
         broker.wipe(value)
     result.update(binding_id=args.binding, binding_revision=record['revision'],

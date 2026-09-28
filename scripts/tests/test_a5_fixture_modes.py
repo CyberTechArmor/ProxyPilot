@@ -128,12 +128,15 @@ class A5CanaryTests(unittest.TestCase):
             readers = canary.a5_sources(root)
             self.assertEqual(set(readers), {'a5_proof_database_files', 'a5_proof_database_dump',
                                             'a5_harness_log_and_reports'})
-            clean = canary.scan(bytearray(VALUE.encode()), readers, 'A5-INJECTION-MARKER')
+            clean = canary.scan(bytearray(VALUE.encode()), readers, canary.A5_MARKER)
             self.assertEqual(clean['canary_scan'], 'passed', clean)
             self.assertTrue(all(r['marker_matches'] == 0 for r in clean['sinks'].values()))
-            (root / 'harness.log').write_text('A5-INJECTION-MARKER leaked\n')
-            dirty = canary.scan(bytearray(VALUE.encode()), canary.a5_sources(root), 'A5-INJECTION-MARKER')
+            (root / 'harness.log').write_text('PPA5-INJECT-5b7e1d93 leaked\n')
+            dirty = canary.scan(bytearray(VALUE.encode()), canary.a5_sources(root), canary.A5_MARKER)
             self.assertEqual(dirty['canary_scan'], 'failed')
             self.assertEqual(dirty['sinks']['a5_harness_log_and_reports']['marker_matches'], 1)
+            # The canary's marker is the one the demo server serves.
+            server = (ROOT.parent / 'admin' / 'frontend' / 'demo' / 'server.mjs').read_text()
+            self.assertIn(canary.A5_MARKER, server)
             missing = canary.scan(bytearray(VALUE.encode()), canary.a5_sources(root / 'absent'))
             self.assertEqual(missing['canary_scan'], 'failed')

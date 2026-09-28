@@ -138,14 +138,10 @@ class ProviderHost(cred_tests.DeliveryHost):
         if body['max_completion_tokens'] == 0:
             return 400, {'error': {'type': 'invalid_request_error', 'code': 'max_tokens'}}
         allowed = re.search(r'ALLOWED: (.*)', prompt).group(1).split(', ')
-        # Like the real model: it answers inside ALLOWED; under a one-token cap
-        # the reply is cut to its first token, which spells no action name.
+        # Like the real model: it answers inside ALLOWED.
         answer = 'submit_bound_fixture' if 'submit_bound_fixture' in allowed else 'read_files'
-        finish, tokens = 'stop', 3
-        if body['max_completion_tokens'] == 1:
-            answer, finish, tokens = answer.split('_')[0], 'length', 1
-        return broker_tests.completion(prompt=len(prompt) // 4, completion_tokens=tokens,
-                                       choices=[{'index': 0, 'finish_reason': finish,
+        return broker_tests.completion(prompt=len(prompt) // 4, completion_tokens=3,
+                                       choices=[{'index': 0, 'finish_reason': 'stop',
                                                  'message': {'role': 'assistant', 'content': answer}}])
 
 
@@ -214,9 +210,10 @@ class ProbeHarnessTests(unittest.TestCase):
                 buffer += chunk
                 seen['text'] += chunk
                 match = re.search(r'approval digest: ([0-9a-f]{64})', buffer)
-                if match and 'Type the first 12' in buffer:
+                if match and 'Type at least the first 12' in buffer:
                     seen['prompts'] += 1
-                    os.write(master, ((match.group(1)[:12] if answer else 'no') + '\n').encode())
+                    # 13 characters, as a person typed on the host: any correct prefix of 12+ approves.
+                    os.write(master, ((match.group(1)[:13] if answer else match.group(1)[:11]) + '\n').encode())
                     buffer = ''
         done = threading.Event()
         thread = threading.Thread(target=person, daemon=True)
@@ -260,7 +257,7 @@ class ProbeHarnessTests(unittest.TestCase):
         self.assertIsNone(self.sup.state['active'])
         os.chmod(proof_dir, 0o700)
 
-    def test_a_person_who_refuses_stops_the_run_and_the_proof_fails(self):
+    def test_a_person_who_types_too_little_refuses_and_the_run_stops(self):
         result, lines, seen = self.run_harness('--only', 'supervised_run', answer=False)
         self.assertEqual(seen['prompts'], 1)
         self.assertEqual(lines[-1]['a5_proof'], 'failed')

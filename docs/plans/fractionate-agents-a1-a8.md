@@ -1,10 +1,18 @@
 # Official bounded plan: first usable supervised agent
 
-> **A2 source status (2026-09-25):** Project discovery, optional owner-managed
-> site origin and disabled agent profile metadata are implemented in the A2
-> revision. Migration 1106 is additive and its gate defaults off. A3 worker
-> isolation and every run/release gate remain open. The bounded next prompt is
-> [A3 isolated worker](fractionate-agents-a3-prompt.md).
+> **Status (2026-09-28):** A2 merged as PR #677; migration 1106 is additive and
+> its metadata gate defaults off. A3 is **in progress, not accepted**: the host
+> fence, fixed-origin proxy, disposable Chromium and fixed cgroup probes pass on
+> the proof VM, and the host-owned worker supervisor, guest runner, typed
+> backend client and signed teardown receipts are implemented. The supervisor is
+> installed on the proof VM, and every automated target case has passed (18/18
+> lifecycle, negative and overrun cases, plus the confirmed worker minimums).
+> Acceptance still needs a real person on the human page and the candidate
+> frontend build; see the
+> dated [A3 evidence](fractionate-agents-a3-evidence.md), the orientation page
+> [A3 reference](fractionate-agents-a3-reference.md) and the next bounded
+> [A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md). A4 stays
+> gated on A3.
 
 Approved sequence by user direction, 2026-09-25. This plan supersedes the earlier
 suggested next step of D5 and the unbounded future-agent sequence. It establishes
@@ -34,8 +42,8 @@ new blocking dependency and place it under the affected section for review.
 | Section | Bounded work | Completion evidence | Status |
 |---|---|---|---|
 | A1 — Scope and architecture | Select one useful workflow/application; define success, permitted actions, human approvals, trust boundaries, identity/state model, reuse and dependencies. Refine A2–A8 contracts without implementing runtime. | Source-grounded architecture, acceptance matrix, security dependency map, selected synthetic pilot, and executable A2 prompt. | **Design complete:** live demo verified; site/project/guide/human bindings and live authority remain later gates |
-| A2 — Project access and agent profiles | Optional owner-managed project site origin, hidden/read-only/collaborative discovery with explicit member roles; stable project/profile/run/worker/binding identities; profile CRUD and optional scoped guide assignment; current-user authority, no privilege inheritance from names or broad management roles. | Hidden-project non-disclosure, site validation/change, native authorization, cross-project, stale grant/account and audit tests; accessible access/profile UI; no compute from profile creation. | Ready for separate implementation request |
-| A3 — Isolated execution environment | One selected worker/browser environment; typed launch/stop contracts, private run workspace, egress/tool limits, hard resource budgets and cleanup. Resolve relevant host-boundary blockers. | Escape/unauthorized-operation refusals, cancellation/cleanup and target isolation checks; no host-root execution available to the model. | Pending A2 |
+| A2 — Project access and agent profiles | Optional owner-managed project site origin, hidden/read-only/collaborative discovery with explicit member roles; stable project/profile/run/worker/binding identities; profile CRUD and optional scoped guide assignment; current-user authority, no privilege inheritance from names or broad management roles. | Hidden-project non-disclosure, site validation/change, native authorization, cross-project, stale grant/account and audit tests; accessible access/profile UI; no compute from profile creation. | **Merged** (PR #677); metadata gate off |
+| A3 — Isolated execution environment | One selected worker/browser environment; typed launch/stop contracts, private run workspace, egress/tool limits, hard resource budgets and cleanup. Resolve relevant host-boundary blockers. | Escape/unauthorized-operation refusals, cancellation/cleanup and target isolation checks; no host-root execution available to the model. | **In progress:** supervisor installed; 18/18 target cases and minimums pass; real-person human page and candidate frontend build open |
 | A4 — Credentials and provider connection | One initial provider; contributor-specific project credential intake into OpenBao, separately granted Infisical/Vaultwarden destination feasibility, scoped agent binding, brokered access, rotation/revocation and bounded provider spending. Retain administrator re-authentication/MFA boundaries. | Positive/negative credential access, destination consistency and real cancellation/revocation tests in the authorized environment; no secrets in model context, logs or browser output where non-disclosure is claimed. | Pending A3; vault cascade requires reviewed feasibility |
 | A5 — Core execution loop | Explicit run start, pin approved guide version, bounded tool/action loop, durable state/progress/results, approval checkpoints and refusal outside permitted actions. | One synthetic workflow completes; tool errors, stale authority, prompt injection/untrusted page content, budgets and stop requests fail safely; no implicit authority from guide/evidence content. | Pending A4 |
 | A6 — Supervision UI | Minimal Agents/Flightdeck views for the selected workflow: start/stop, view-only observation, progress, help/approval requests and result inspection. | Real role-based browser journeys, keyboard/accessibility, 375px form completion and existing six-width/two-theme checks; no dead controls or redesign of Dev Studio. | Pending A5 |

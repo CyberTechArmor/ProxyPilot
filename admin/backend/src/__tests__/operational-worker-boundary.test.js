@@ -2,25 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { operationsFixture } from './helpers/operations-fixture.js';
-import { BROWSER_ACTIONS, WORKER_INSTALL_BASELINE, WORKER_TARGET, createOperationalWorkerStore,
+import { BROWSER_ACTIONS, WORKER_INSTALL_BASELINE, WORKER_MINIMUM, WORKER_TARGET, createOperationalWorkerStore,
   createWorkerLauncher, validateBrowserAction, validateWorkerLaunch, workerInstallResources } from '../lib/operational-worker-boundary.js';
 import { createSyntheticSignInBrowserBroker, permitsSyntheticRequest } from '../lib/operational-browser-broker.js';
 
 const hash = 'a'.repeat(64);
-const launch = () => ({run_id:randomUUID(),attempt_id:randomUUID(),fence:1,
-  policy_digest:hash,origin:'https://demo.fractionate.ai',target:WORKER_TARGET,limits:{},
+const launch = () => ({run_id:randomUUID(),attempt_id:randomUUID(),workspace_id:randomUUID(),fence:1,
+  policy_digest:hash,project_limits_revision:1,origin:'https://demo.fractionate.ai',target:WORKER_TARGET,limits:{},
   install:{...WORKER_INSTALL_BASELINE}});
 
 test('typed launch and browser broker refuse caller-selected capabilities; absent OS runner fails closed', async () => {
   const spec=launch();
   assert.equal(validateWorkerLaunch(spec).target,WORKER_TARGET);
   assert.deepEqual(validateWorkerLaunch(spec).install,WORKER_INSTALL_BASELINE);
-  assert.equal(validateWorkerLaunch({...spec,limits:{cpu:2,memory_mib:4096,max_seconds:3600}}).limits.max_seconds,3600);
-  assert.deepEqual(workerInstallResources({cpu:4,memory_mib:8192}),
-    {cpu:4,memory_mib:8192,root_disk_gib:12});
+  const limited={cpu:1,memory_mib:1024,temporary_disk_mib:64,max_seconds:3600};
+  assert.equal(validateWorkerLaunch({...spec,limits:limited,install:workerInstallResources(limited)}).limits.max_seconds,3600);
+  // Worker limits apply inside the installed VM; the VM shape keeps its floor
+  // plus guest headroom, and a limit is never raised to fit.
+  assert.deepEqual(workerInstallResources(limited),WORKER_INSTALL_BASELINE);
+  assert.deepEqual(workerInstallResources({cpu:4,memory_mib:8192}),{cpu:4,memory_mib:9216,root_disk_gib:12});
+  assert.deepEqual(WORKER_MINIMUM,{cpu:1,memory_mib:1024,temporary_disk_mib:64});
+  for (const low of [{memory_mib:1023},{temporary_disk_mib:63}])
+    assert.throws(()=>workerInstallResources(low),{code:'PROJECT_LIMIT_BELOW_WORKER_MINIMUM'});
   for (const patch of [{argv:['sh']},{origin:'https://other.test'},{limits:{memory_mib:-1}},
-    {limits:{shell:true}},{limits:{cpu:1}},{limits:{memory_mib:2048}},
-    {install:{cpu:1,memory_mib:4096,root_disk_gib:12}},
+    {limits:{shell:true}},{limits:{memory_mib:512}},{limits:{temporary_disk_mib:32}},
+    {limits:{memory_mib:4096}},{install:{cpu:1,memory_mib:4096,root_disk_gib:12}},
+    {workspace_id:'not-a-uuid'},{project_limits_revision:-1},{project_limits_revision:undefined},
     {target:'host-root'},{policy_digest:'bad'}])
     assert.throws(()=>validateWorkerLaunch({...spec,...patch}));
   const action={run_id:spec.run_id,attempt_id:spec.attempt_id,fence:1,action:'open_landing'};
@@ -67,6 +74,27 @@ test('browser broker refuses an unverified routing capability and closes its con
   assert.equal(closed,1);
 });
 
+test('browser broker delegates project action totals to the durable reservation', async () => {
+  let reserved=0, closed=0;
+  const page={setDefaultTimeout(){},setDefaultNavigationTimeout(){},
+    evaluate:async()=>({authenticated:false})};
+  const context={route:async()=>{},routeWebSocket:async()=>{},on(){},
+    newPage:async()=>page,close:async()=>{closed++;}};
+  const broker=await createSyntheticSignInBrowserBroker({browser:{newContext:async()=>context},
+    reserveAction:async()=>{if (++reserved>25) {
+      const error=new Error('ACTION_LIMIT'); error.code='ACTION_LIMIT'; throw error;
+    }}});
+  const request={...launch(),action:'read_session'};
+  const action={run_id:request.run_id,attempt_id:request.attempt_id,fence:request.fence,
+    action:request.action};
+  for(let i=0;i<25;i++)
+    assert.deepEqual(await broker.perform(action),{untrusted_page_claim_authenticated:false});
+  await assert.rejects(broker.perform(action),{code:'ACTION_LIMIT'});
+  assert.equal(reserved,26);
+  await broker.close();
+  assert.equal(closed,1);
+});
+
 test('durable single profile run, attempt fence, action quota, launch failure and restart block', async () => {
   const f=operationsFixture();
   try {
@@ -97,7 +125,9 @@ test('durable single profile run, attempt fence, action quota, launch failure an
     const a=workers.reserveAttempt(r.run_id);
     assert.deepEqual(workers.launchSpec(a).limits,
       {cpu:2,memory_mib:4096,temporary_disk_mib:256,max_seconds:300,max_actions:20});
-    assert.deepEqual(workers.launchSpec(a).install,WORKER_INSTALL_BASELINE);
+    assert.deepEqual(workers.launchSpec(a).install,{cpu:2,memory_mib:5120,root_disk_gib:12});
+    assert.equal(workers.launchSpec(a).workspace_id,a.workspace_id);
+    assert.equal(workers.launchSpec(a).project_limits_revision,f.store.get(owner,p.id).agent_limits_revision);
     const actionRef={run_id:a.run_id,attempt_id:a.attempt_id,fence:a.fence};
     assert.throws(()=>workers.reserveAttempt(r.run_id),{code:'RUN_NOT_PREPARED'});
     workers.markRunning(a);
@@ -165,7 +195,7 @@ test('durable single profile run, attempt fence, action quota, launch failure an
     assert.throws(()=>workers.authorizeAction(unboundedAction),{code:'STALE_CONFIGURATION'});
     assert.deepEqual(workers.recover(),[unbounded.run_id]);
     workers.finishStop(unbounded.run_id,'blocked',teardown(unbounded.run_id,unboundedAttempt));
-    f.store.agentLimits(owner,p.id,f.store.get(owner,p.id).revision,{limits:{cpu:1}});
+    f.store.agentLimits(owner,p.id,f.store.get(owner,p.id).revision,{limits:{memory_mib:512}});
     assert.throws(()=>workers.prepare(config),{code:'PROJECT_LIMIT_BELOW_WORKER_MINIMUM'});
     f.store.agentLimits(owner,p.id,f.store.get(owner,p.id).revision,{limits:{max_actions:1}});
     const siteChange=workers.prepare(config), siteAttempt=workers.reserveAttempt(siteChange.run_id);

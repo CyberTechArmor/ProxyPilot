@@ -41,7 +41,9 @@ const fixture = (redirect=false, subresource=false) => ({
 
 try {
   const broker = await createSyntheticSignInBrowserBroker({browser:fixture(false,true),
-    reserveAction:async()=>{reserved++;}});
+    reserveAction:async()=>{if (++reserved>25) {
+      const error=new Error('ACTION_LIMIT'); error.code='ACTION_LIMIT'; throw error;
+    }}});
   try {
     assert.deepEqual(await broker.perform({...ref,action:'open_landing'}),{at:'landing'});
     assert.deepEqual(await broker.perform({...ref,action:'open_login'}),{at:'login_dialog'});
@@ -49,13 +51,13 @@ try {
     assert.deepEqual(await broker.perform({...ref,action:'read_files'}),{untrusted_page_claim_sample_present:true});
     await assert.rejects(broker.perform({...ref,action:'submit_bound_fixture'}),
       {code:'CREDENTIAL_BROKER_UNAVAILABLE'});
-    for (let i=0;i<16;i++) await broker.perform({...ref,action:'read_session'});
+    for (let i=0;i<21;i++) await broker.perform({...ref,action:'read_session'});
     await assert.rejects(broker.perform({...ref,action:'read_session'}),{code:'ACTION_LIMIT'});
-    assert.equal(reserved,20);
+    assert.equal(reserved,26);
   } finally {await broker.close();}
 
   const redirectBroker = await createSyntheticSignInBrowserBroker({browser:fixture(true),
-    reserveAction:async()=>{reserved++;}});
+    reserveAction:async()=>{}});
   try {await assert.rejects(redirectBroker.perform({...ref,action:'open_landing'}));}
   finally {await redirectBroker.close();}
   assert.ok(approved >= 4);

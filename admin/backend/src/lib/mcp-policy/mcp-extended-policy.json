@@ -61,7 +61,7 @@
     "state_file": "/var/lib/proxypilot/self/state.json",
     "candidate_branch": "pp-candidate",
     "checks": {
-      "backend-tests": { "cwd": "admin/backend", "argv": ["npm", "test"], "timeout_seconds": 900, "install": ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"] },
+      "backend-tests": { "cwd": "admin/backend", "argv": ["npm", "test"], "timeout_seconds": 900, "install": ["sh", "-c", "npm ci --ignore-scripts --no-audit --no-fund && node ../../scripts/prepare-self-check-native.mjs"] },
       "backend-syntax": { "cwd": "admin/backend", "argv": ["node", "--check-changed"], "timeout_seconds": 120 },
       "frontend-build": { "cwd": "admin/frontend", "argv": ["npm", "run", "build"], "timeout_seconds": 1500, "install": ["npm", "ci", "--no-audit", "--no-fund"] },
       "shellcheck": { "cwd": ".", "argv": ["shellcheck", "-S", "error", "install.sh", "update.sh", "scripts/update-runner.sh"], "timeout_seconds": 120, "optional_binary": "shellcheck" }

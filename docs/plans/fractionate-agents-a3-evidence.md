@@ -900,3 +900,660 @@ Actual image fingerprint, host QEMU RSS, browser latency and the host network
 boundary remain unmeasured until this tool is deployed and the VM can be
 started behind a verified deny-by-default fence. The older-writer and
 S6/SEC-01/SEC-04 limits above still apply.
+
+## 2026-09-28 host-owned worker supervisor (implementation; target proof open)
+
+**A3 remains in progress and is not accepted.** This continuation implements the
+host-owned supervisor, the guest worker runner, the human view/control path, the
+proof runner and the typed backend client. It proves them locally against a real
+Chromium. It has **not** yet run on the proof VM: installing the supervisor and
+running the lifecycle proof need one host-root command (below). Every earlier
+open gate stays open until that output is reviewed. No feature flag, route,
+provider, credential, vault, live identity or deployment was activated, and
+`pp-nodus` was not read or touched.
+
+### Reconciliation before editing
+
+- Work ran in a cloud session on branch `claude/step-a3-isolated-execution-yg80mx`,
+  created from GitHub `main` `12ad1392845630eec56705776bae444f54eac58a` (clean).
+  The Windows workspace (`agents-a3-isolation-continuation` at `83387f7b`, with its
+  uncommitted work and the untracked `scripts/tests/a3-vm-probe.zip`) is not
+  reachable from this session. Nothing from it is claimed, copied or overwritten.
+- `get_self_status`: live `main` `33528751b0b68771a768a69ef42c0bd614069498`
+  (clean, 1.4.0); candidate `pp-candidate` `7851c1a0d6084213e842151d37083d49ff204dd8`
+  on that base, 17 ahead, 0 dirty, with `backend-tests` ok and `backend-syntax`
+  skipped at that exact head. Neither SHA exists on GitHub.
+- PR #686 is still open, draft and unmerged at `cd4abbca`, base `d3de8659`, and
+  GitHub reports it `dirty` (conflicting). This branch carries only its small broker
+  correction (`5cacdefb`: no broker-local 20-action/300-second cap; the durable
+  reservation owns totals). The rest of #686 is already in `main` through #695.
+- `inspect_a3_vm` read back the handoff's exact target: Incus 7.5.1, Debian 13.7,
+  UUID `49592202-a8b0-45af-9ac6-5439761d73e4`, boot `b08210f9-fe81-4e86-9362-926f5ee21e59`,
+  QEMU PID 272179, 2 vCPU, `4096MiB`, `12GiB` root (guest filesystem
+  12,307,730,432 bytes), swap 0. `eth0` is on `incusbr0` with host name `ppa3proof0`
+  and MAC `10:66:6a:55:f6:3f`; image fingerprint `4e38eb6d…9840a`; QEMU tree RSS
+  1,481,121,792 bytes. `get_host_services`: `proxypilot-a3-fence.service`
+  active/exited and `proxypilot-a3-origin-proxy.service` active/running. The fence,
+  proxy, cold-browser and cgroup probe outputs in the handoff are user-reported;
+  this session corroborated the services and VM identity but did not rerun those
+  probes.
+- The candidate's A3 backend files are byte-identical to GitHub `main`
+  (`operational-worker-boundary.js` `89293cb3…`, `operational-browser-broker.js`
+  `87798b0e…`, `operational-agents-store.js` `53a23a51…`, `db.js` `1860024a…`,
+  the boundary test `739af82e…`, `host-boundary-inventory.py` `c76d4b25…`,
+  `self-edit.js` `05e9b766…`, `CLAUDE.md` `39077531…`, this evidence file
+  `6f4dfe8e…`).
+- Candidate-only A3 files were mirrored into this branch, each verified against the
+  candidate's `read_self_file` sha256 and size: `a3-network-fence.py` `8d756bd2…`,
+  `a3-install-fence.py` `314b7766…`, `a3-origin-proxy.py` `0a48a12b…`,
+  `a3-install-proxy.py` `d4cb9bb8…`, `a3-probe-fence.py` `26e7fc14…`,
+  `a3-probe-proxy.py` `06125dc3…`, `a3-probe-browser.py` `75f95b3f…`,
+  `a3-probe-guest-cgroups.py` `57b42de7…`, `prepare-self-check-native.mjs`
+  `e61c52cf…`, and tests `test_a3_network_fence.py` `2d0745a6…`,
+  `test_a3_install_fence.py` `cc759291…`, `test_a3_origin_proxy.py` `16e6a457…`,
+  `test_a3_probe_fence.py` `ddee0782…`, `test_a3_guest_cgroups.py` `20b2712c…`,
+  `test_a3_browser_probe.py` `f47c7e34…`. From the candidate policy file only the
+  `backend-tests` install line (`prepare-self-check-native.mjs`) was carried over.
+  That file also lists live-only Nodus route-ingress tools, which are not A3 work
+  and were not copied.
+
+### What was built
+
+- `scripts/a3-worker-supervisor.py` is a root-only daemon. The installer copies
+  reviewed files into `/etc/proxypilot-a3-proof/supervisor`, and the daemon refuses
+  to serve unless its own files match the install journal.
+  - **Backend socket** `/run/proxypilot-a3/supervisor.sock` (uid 0 peers only):
+    `status`, a typed `launch`, `renew`, one fixed browser `action`, and `stop`
+    (`cancelled|blocked|failed`).
+  - **Operator socket** `operator.sock`: adds the proof workloads, `takeover`,
+    `view`, typed `input`, `observe`/`locate` proof readbacks, `egress_probe`,
+    `unit_stats`, `journal` and a crash-mid-action proof hook.
+  - **Launch preconditions:** the installed fence and proxy (`a3-install-proxy.py`
+    `status()`, which includes the fence status), the exact VM UUID, a running
+    QEMU, the guest NIC MAC, a readable boot ID and the install shape.
+  - **Binding and budgets.** Each attempt binds run, attempt, workspace, fence,
+    policy digest, project-limits revision, VM UUID, boot ID and QEMU PID in a
+    host journal that is written durably before any guest effect. Only one attempt
+    may be live. A run pins its policy, deadline (first launch + `max_seconds`) and
+    `max_actions` on first launch. A later attempt, a lease renewal or a restart
+    cannot reset them, and a policy mismatch or a non-increasing fence is refused.
+  - **The worker unit.** Each attempt is one transient guest unit started through
+    `incus exec … systemd-run --pipe --wait --collect`:
+    - identity: `User=nobody`, `NoNewPrivileges`, empty capability bounding set;
+    - filesystem and devices: `ProtectSystem=strict`, `ProtectHome`,
+      `PrivateDevices`, `PrivateIPC`, `ProtectProc=invisible`, the kernel
+      protections, empty read-only tmpfs over `/run` and `/var`, and the
+      inaccessible paths;
+    - network: `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK` and
+      `IPAddressDeny=any` except `10.185.17.1/32`;
+    - workspace: private tmpfs `/tmp` sized to the temporary-disk limit, plus a
+      128 MiB `/dev/shm`;
+    - limits: `MemoryMax` (the limit, or the guest's MemTotal − 768 MiB),
+      `MemorySwapMax=0`, `TasksMax=512`, `CPUQuota` = cpu×100% when configured,
+      `RuntimeMaxSec` = time left to the pinned deadline, `OOMPolicy=kill` and
+      `KillMode=control-group`.
+
+    The supervisor reads back the unit's cgroup `memory.max`, `memory.swap.max`,
+    `pids.max`, `cpu.max` and its sandbox properties, and refuses the launch on any
+    mismatch.
+  - **Lease and watchdog.** The lease is 30 s. Every 10 s a light health check
+    compares the fence table fingerprint, fence/proxy liveness and the VM
+    UUID/QEMU PID. A lost lease, a passed deadline, a worker exit or a lost boundary
+    tears the attempt down.
+  - **Teardown and receipts.** Every stop is followed by guest readback: the unit
+    is inactive or collected, the cgroup is empty, no process is in it or runs as
+    the worker uid, and no mount of the workspace tmpfs device remains. A stopped
+    VM or a new boot ID also counts as proof. A Frozen VM does not; it stays
+    unverified and is retried. Only then is a receipt signed with the host-held
+    Ed25519 key (`a3r1.<payload>.<sig>`). An unverified teardown keeps the attempt
+    `stopping`, which blocks every new launch.
+  - **Recovery.** Actions are journaled `started` before they are sent. After a
+    restart, recovery tears down every non-terminal attempt, marks any in-flight
+    action `uncertain` and never replays it, and stops orphan `pp-a3-worker-*`
+    units. A `stop` for an attempt this supervisor never started returns a signed
+    "never launched" receipt, and that attempt can never be started later.
+- `scripts/a3-worker-guest.py` is the fixed program the unit runs. It drives
+  exactly one Chromium over `--remote-debugging-pipe`, so no DevTools socket
+  exists, and keeps Chromium's own sandbox (no `--no-sandbox`). Every request from
+  the page, its frames and its workers passes CDP `Fetch` with the broker's
+  same-origin read-only policy, including redirect hops. Other page targets are
+  closed and downloads are denied. The browser uses the host proxy
+  (`<-loopback>`, `MAP * ~NOTFOUND`) with the pinned SPKI. It serves the six typed
+  actions (`submit_bound_fixture` is refused as `CREDENTIAL_BROKER_UNAVAILABLE`),
+  screenshots, typed human input (a point, 8 fixed keys, ≤256 printable characters,
+  bounded scroll) and fixed proof workloads. It exits after 20 s without host
+  contact or when its channel closes. Page reads run in an isolated world and are
+  labelled untrusted.
+- `scripts/a3-install-supervisor.py install|status|remove|reinstall` copies the
+  reviewed files byte-exact with digest readback, generates the Ed25519 key (0600)
+  and installs `proxypilot-a3-supervisor.service`. That unit has
+  `Requires=proxypilot-a3-fence.service` and is ordered after the fence and proxy.
+  Activation is verified by a live `status` carrying the new key ID, and a failed
+  activation rolls back every file it wrote. `remove` refuses while an attempt is
+  live and archives the public key so old receipts stay verifiable. It never
+  touches the VM, the fence, the proxy, Incus profiles or firewall tables.
+- `scripts/a3-worker-operator.py` is the root operator CLI. Its `human` page is the
+  smallest usable human view/control path. It binds to loopback only (reach it with
+  an SSH local forward), requires a per-run token and a loopback Host header, and
+  sets a strict CSP. It shows the screenshot and sends only typed input, and only
+  after Take over. It has no URL bar, no script input and no DevTools.
+- `scripts/a3-probe-worker.py` is the target proof. It runs against the
+  **installed** supervisor through its real sockets:
+  - three measured browser sessions;
+  - human takeover;
+  - page-level origin refusals;
+  - in-unit escape;
+  - guest-root IPv4/IPv6 egress with nft counter deltas;
+  - forced CPU, memory, process, disk, time and action overruns, using proof
+    workloads under the production unit builder;
+  - a detached descendant;
+  - lease expiry, stale fence and launch failure;
+  - backend-socket refusals;
+  - a supervisor crash between the durable action reservation and delivery;
+  - a guest crash (sync, then sysrq reboot), followed by the post-reboot fence and a
+    relaunch.
+
+  Receipts are verified with the public key. The full JSON and screenshots are
+  written to `/var/lib/proxypilot-a3-proof/proof/`. A host reboot is deliberately
+  not performed.
+- Backend. `lib/operational-worker-supervisor.js` holds a typed Unix-socket client
+  (backend methods only) and `createTeardownVerifier`: Ed25519 verification pinned
+  to the proof VM UUID and the attempt's bound boot. `createWorkerLauncher({client, vmUuid})`
+  keeps `BOUNDARY_UNVERIFIED` when it has no client and checks the supervisor's
+  launch readback. The launch contract adds `workspace_id` and
+  `project_limits_revision`. Additive migration **1109** gives
+  `ops_agent_worker_attempts` the columns `vm_uuid` and `boot_id`, set by
+  `markRunning(ref, binding)` and checked by `finishStop`. Nothing in the routes
+  constructs a client, and the socket is not mounted into the backend container.
+- **Limit semantics correction (for review).** Project `cpu`, `memory_mib` and
+  `temporary_disk_mib` now limit the worker unit *inside* the VM. The previous rule
+  compared them with the VM floor, and that made CPU and memory enforcement
+  unprovable on the fixed 2-vCPU/4-GiB proof VM. Worker minimums are CPU 1,
+  memory 1024 MiB and temporary disk 64 MiB. They are **provisional** until the
+  proof's measured browser peak confirms them. A configured value below a minimum
+  refuses launch and is never raised. The install shape stays at least
+  2 vCPU / 4096 MiB / 12 GiB, and above that it is `cpu` and `memory_mib + 1024`.
+  A limit larger than the installed VM fails with `VM_CAPACITY_INSUFFICIENT`
+  instead of a silent resize. The dashboard text in `AccessPolicy.jsx` states this.
+
+### Local verification (this session)
+
+| Command | Result |
+|---|---|
+| `python3 -m unittest discover -s scripts/tests -p 'test_a3*py'` | **69 passed** (45 mirrored + 24 new). Includes real Chromium 141 over the private pipe through a local CONNECT proxy to a locally pinned TLS origin: actions, screenshot, human click/Escape, 8/8 page escape attempts refused, a cross-origin redirect refused, only the approved Host reached, browser tree gone after stop. Also includes the real supervisor → runner → Chromium path with takeover and a verified receipt. |
+| `node --test src/__tests__/operational-*.test.js` (admin/backend) | **73 passed** (68 existing and updated + 5 new supervisor/verifier/binding tests). A receipt produced by the Python supervisor code verifies with the Node verifier. |
+| `npm test` (admin/backend, native `better-sqlite3` rebuilt) | Branch 3374 tests: 3348 pass, 12 fail, 14 skipped. Clean `origin/main` in the same sandbox: 3368 tests: 3343 pass, 11 fail, 14 skipped. The 11 shared failures are identical sandbox failures (root-only bootstrap/recovery, `vpn-mtu`, several ratchets). The one branch-only failure, `setup-deploy.test.js`, came from running both suites concurrently; alone it passed 18/18 three times. |
+| `npm run build` (admin/frontend) | Passed (1,972 modules; existing chunk warnings). The only UI change is explanatory text. |
+| `python3 scripts/host-boundary-inventory.py` | 96 candidate backend files; S6 remains open; no suppression. |
+| `systemd-analyze verify` (systemd 255) on the worker unit's properties and the supervisor unit | All worker properties parsed. Expected warning: `User=nobody` is shared (kept because the earlier guest probes proved Chromium under uid 65534). The supervisor unit failed only on the absent local fence unit. |
+
+### Still open (every item needs observed target evidence)
+
+- Supervisor installation on the host and the full `a3-probe-worker.py` result on
+  the proof VM: every lifecycle, overrun, escape, crash and human-control case above.
+- Measured browser minimum and VM sizing: unit `memory.peak`, `pids.peak`, host
+  QEMU tree RSS, guest memory and pressure, free disk and log growth across the
+  three sessions. The minimums above are provisional until then.
+- A real human (not the automated operator path) using the `human` page.
+- Host reboot persistence of the fence → proxy → supervisor ordering.
+- Backend wiring: the socket mount into the container and a coordinator (A5).
+  Activation stays off.
+- The origin-proxy certificate is valid for 7 days from its install and
+  `a3-install-proxy.py status` refuses under 24 h of validity. A launch will fail
+  closed after about 2026-10-03 until the proxy certificate is re-issued (proxy
+  `remove`/`install`, then a fresh proxy probe).
+- S6/SEC-01/SEC-04 remain open. The supervisor narrows the worker path, but a
+  compromised root-equivalent backend keeps its other host interfaces.
+
+### Submission state
+
+- Branch `claude/step-a3-isolated-execution-yg80mx` was pushed with the code at
+  `3cd80b70e971b484f442fbb96ac07f2ad8c66add`.
+- Exact-head Security CI was **not** run. A `workflow_dispatch` of
+  `security-regression.yml` returned HTTP 403 for this integration, and the workflow
+  otherwise runs only on a pull request, which was not requested. The same Python
+  suite and inventory steps it runs passed locally (above).
+- The ProxyPilot candidate was **not** patched from this session. Sending this diff
+  to the host's upload endpoint was refused by the session's data-exfiltration
+  guard, so the candidate is still `7851c1a0`. The host can take the exact pushed
+  commits from GitHub instead (below); then `run_self_checks` can run on that
+  candidate head.
+
+### Operator commands and rollback
+
+On the host, stage the exact code commit on the candidate, install the
+supervisor and run the target proof. The installer copies reviewed bytes into
+root-owned `/etc` and records their digests. The command pins the code commit
+(later branch commits are docs only), so new docs commits do not invalidate it:
+
+```
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; git merge-base --is-ancestor 9dade53bbcfb5c236d22fb2fa3d7b74a111857df FETCH_HEAD; git show 9dade53bbcfb5c236d22fb2fa3d7b74a111857df:scripts/a3-stage-candidate.sh | sh -s -- . 3cd80b70e971b484f442fbb96ac07f2ad8c66add; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
+```
+
+**Correction (2026-09-28, after the first host attempt).** The earlier
+pinned-`cherry-pick` command stopped on the host with eight
+`CONFLICT (add/add)` lines, one for each mirrored A3 script. `set -e` aborted it
+before the installer or the proof ran. ProxyPilot then reported candidate
+`7851c1a0` with 30 dirty paths.
+
+The cause: this branch stores those scripts as mode 100755, while the candidate
+stores the same bytes as 100644. The earlier simulation copied the files from the
+commit itself, so the modes matched and the conflict never appeared. A
+reconstruction with 100644 files reproduced exactly 8 conflicts and 30 dirty paths.
+
+The replacement is `scripts/a3-stage-candidate.sh` (commit `9dade53b`, with
+`scripts/tests/test_a3_stage_candidate.py`):
+
+- It aborts the interrupted cherry-pick.
+- It refuses uncommitted changes, any candidate file that differs from both GitHub
+  `main` and the reviewed commit, and a policy without the self-check line.
+- It checks out the reviewed commit's 37 paths (the policy excepted) and verifies
+  them byte-for-byte.
+- Against the reproduced conflict it staged all 37 paths exactly and preserved the
+  candidate-only change. A second run was a no-op. Reference documents for
+later conversations: the [A3 reference](fractionate-agents-a3-reference.md),
+the [archived handoff](fractionate-agents-a3-claude-handoff.md) and the next
+[A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md).
+
+Ordered rollback, which adds to the handoff's order:
+
+1. Keep A3/Operations flags off.
+2. `a3-worker-operator.py status`. Stop any live attempt with `a3-worker-operator.py stop <run> <attempt> <fence>` and check its receipt with `verify-receipt`.
+3. `a3-install-supervisor.py remove`. It refuses while an attempt is live, and it keeps the state journal and the archived public key.
+4. The proxy and fence rollback steps are unchanged.
+
+A code rollback is a revert of this branch. Migration 1109 is additive: keep it
+and its rows. Older writers do not set `vm_uuid`/`boot_id`, which is safe only
+while A3 is inactive.
+
+## 2026-09-28 first target run on the proof VM (16 of 18 passed; A3 still open)
+
+The user ran the pinned stager command in the ProxyPilot Host Terminal. The
+output was reviewed in the session and corroborated through MCP where possible.
+
+- **Staging.** The stager (`9dade53b`) aborted the interrupted cherry-pick and
+  staged code commit `3cd80b70` on the candidate: `7851c1a0` → `9a9c453a`,
+  "37 paths match exactly". `get_self_status` then read candidate `9a9c453a`,
+  clean, 18 ahead.
+- **Install.** `"installed": true`, unit `active/enabled`,
+  `Requires=proxypilot-a3-fence.service`, `After=` fence and proxy. Every
+  installed digest equals the reviewed commit's bytes (checked locally against
+  `git show 3cd80b70:…`):
+  - supervisor `cdd49b83…`, guest runner `71fa69be…`;
+  - the fence/proxy modules equal to their mirrored digests;
+  - unit `254ec0d5…`.
+
+  Key ID `c31fecee08f5ba925e69f575ce3795db2eeca411c4fb07f83542b6bdc9b3917b`.
+  `accepting_launch: true`, no blockers, boundary boot `b08210f9…`, SPKI
+  `u8bIwg5K…`. `get_host_services` shows `proxypilot-a3-supervisor.service`
+  active/running.
+- **Proof.** Report `/var/lib/proxypilot-a3-proof/proof/worker-proof-20260928T115550Z.json`.
+  Preflight key ID matched the installed public key.
+
+| Case | Result | Observation |
+|---|---|---|
+| sessions | **failed** | `BROWSER_ELEMENT_MISSING` at `open_login` (root cause below). No sizing measurements were taken. |
+| human_takeover | **failed** | `BROWSER_ELEMENT_MISSING` at `locate`. Checks passed before the failure: input refused before takeover, takeover state `human`, the model action refused with `TAKEN_OVER`. |
+| origin_refusals | passed | 8/8 page attempts refused. The runner's own refusals recorded only `demo.fractionate.ai` (login POST, unlisted path): the demo's CSP (`connect-src 'self'`, `img-src 'self' data:`) refuses the cross-origin page requests before the runner sees them. |
+| escape | passed | Only `10.185.17.1:18083` connected. Host/management/public IPv4, IPv6, loopback and DNS dropped (IP filter: TimeoutError, not EPERM). AF_PACKET/AF_VSOCK `97`. Incus agent dir, guest API, vsock, kvm, disks, D-Bus, systemd private socket, `/var/lib`, pid 1 environ `2`. Shadow, `/root`, `/home` write `13`. `/etc`, `/usr` write `30`. `setuid` `1`. CapEff all zero, NoNewPrivs 1, uid 65534. **Weak line:** `raw_ipv4_socket: refused:93` was EPROTONOSUPPORT for protocol 0 and did not test privilege; fixed below. |
+| guest_root_egress | passed | As guest root, only the proxy connected. Host/public TCP and UDP DNS timed out; IPv6 113. Fence counters: allowed_proxy +4, denied_ipv4 +26, denied_ipv6 +3, other 0. |
+| cpu | passed | `cpu: 1` → quota 100%; two spinners; usage/wall 1.007; 30 throttles, 2.94 s throttled. |
+| memory | passed | `memory_mib: 1024` → OOM kill after 960 MiB allocated; unit peak 1G, swap 0; result `oom-kill`; teardown receipt verified. |
+| tasks | passed | `pids.max` 512; 510 threads, then denied. |
+| disk | passed | `temporary_disk_mib: 64` → ENOSPC after 64 MiB. |
+| runtime | passed | `max_seconds: 15` → unit `timeout` at 15.087 s; stop reason `deadline` at 16.5 s from the launch call; relaunch in the same run refused `DEADLINE`. |
+| actions | passed | `max_actions: 3` → 4th refused `ACTION_LIMIT`; a new attempt in the same run refused `ACTION_LIMIT`. |
+| descendant | passed | setsid grandchild in the unit cgroup, gone after stop; unit not-found/inactive, cgroup absent, no members, uid or workspace mounts. |
+| lease_expiry | passed | Torn down `lease_expired` at about 31.8 s; renew `ATTEMPT_NOT_ACTIVE`. |
+| stale_fence | passed | Older fence action and same-fence new attempt both `STALE_FENCE`; higher fence launched. |
+| launch_failure | passed | `LAUNCH_FAILED`, receipt `launch_failed`, relaunch `ATTEMPT_EXISTS`. |
+| backend_refusals | passed | All 11 expected codes (operator methods, proof workload, argv, other origin, below minimum, credential action, unknown action, URL field, operator stop reason). |
+| supervisor_crash | passed | NRestarts 0 → 1; actions `open_landing` done, `read_session` **uncertain** and not replayed; receipt `supervisor_recovery`, uncertain [2]; guest unit inactive. |
+| guest_crash | passed | Boot `b08210f9…` → `92a161fd-5fc8-473d-9d83-0cde6fc449dd`, same QEMU PID. Receipt `worker_exited` with `guest_rebooted: true`; the relaunch was bound to the new boot; post-reboot fence deltas identical. |
+
+**Root cause of the two failures (my defect).** The deployed demo SPA renders
+"Preparing your workspace…" until its own `/api/session` and `/api/config`
+reads return through the proxy. The runner looked for the "Sign in" button
+once, right after the load event. The Playwright broker it replaced
+auto-waited, and the local fixture had a static button, so neither the local
+tests nor the review caught it.
+
+**Fix (`4c06bb38`):**
+- Button lookups wait in the page for up to 10 s, in one isolated-world call.
+- The fixture now renders its button after 700 ms. The old runner fails on it
+  with the same error, and the new one passes.
+- Because the page CSP pre-empts the runner for cross-origin page requests,
+  `egress_probe` also makes top-level navigations, which that CSP does not
+  govern, and reports the committed URL.
+- Chromium's HTTPS-Upgrades rewrites `http://demo…` to the approved `https`
+  origin before any request. That is recorded as `upgraded_to_approved_origin`
+  and never counted as reached.
+- The proof requires `example.com` and `1.1.1.1` among the runner's own
+  refusals.
+- The stager now also accepts a candidate file that matches an earlier commit of
+  the reviewed branch, so later fixes can be staged over this staging.
+
+`0572dcff` makes the raw-socket probe use `IPPROTO_ICMP` and require `EPERM`.
+
+**Sizing so far.** Idle QEMU tree RSS before the run was 1,446,420 KiB.
+After the run, `inspect_a3_vm` read 2,263,715,840 bytes for the same QEMU PID:
+QEMU keeps guest pages that the memory overrun and browsers touched, which
+matters for host headroom. Browser working set, pressure and headroom still
+need the `sessions` case.
+
+**Still open.**
+- The rerun with `0572dcff`: all 18 cases, including the sizing sessions and
+  human takeover.
+- A real person using the human page.
+- Host reboot persistence.
+- Candidate `run_self_checks` at the new head.
+- Security CI (needs a PR).
+- S6/SEC-01/SEC-04.
+
+The VM boot generation is now `92a161fd…`. The earlier fence, proxy and cgroup
+probes named the old boot, but the post-reboot fence deltas above re-observed
+the fence on the new boot.
+
+## 2026-09-28 second target run: all 18 cases passed
+
+User-run in the Host Terminal and reviewed in the session. Report:
+`/var/lib/proxypilot-a3-proof/proof/worker-proof-20260928T121140Z.json`.
+
+- **Staging and install.**
+  - The stager (pinned at `0572dcff`) moved the candidate `9a9c453a` → `e5cf67b6`,
+    "43 paths match exactly".
+  - `reinstall` archived the old key
+    (`supervisor-keys/c31fecee….pem`), kept the state journal and installed the new
+    key `d6817618265ac253ea341b9f3f69dfe102ba9f1077e597f9accda4e113d0d517`.
+  - The installed runner `0cee977c…` and supervisor `cdd49b83…` equal
+    `git show 0572dcff:…`. Preflight key ID matched.
+  - MCP corroboration: all three A3 units active; `inspect_a3_vm` shows the same
+    UUID and QEMU PID 272179 with the new boot `524515b5-6576-4479-8b0f-07fa4d9205c6`;
+    candidate `e5cf67b6` clean.
+- **Browser and human path (were failing, now pass).**
+  - `sessions`: three cold starts. Launch 0.45–0.54 s, Chromium ready 0.15 s, unit
+    memory peak **217–224 MiB**, pids peak 111–114, guest MemAvailable 3,237–3,255
+    MiB, root free 9,913 MiB.
+  - `human_takeover`: the human click at (1193, 43) opened the dialog, and Escape
+    closed it (the report field `escape_closed: false` meant "dialog open: false";
+    renamed in `1c5f486b`). The model's action after takeover was refused
+    `TAKEN_OVER`, and the receipt reason was `taken_over`.
+- **Origin refusals.** 8/8 page attempts refused. Top-level navigations to
+  `example.com`, `1.1.1.1` and `:8443` were refused by the runner's own policy.
+  `http://demo…` was upgraded by Chromium to the approved `https` origin. The
+  runner-layer refusal list also shows the page's Google Fonts request
+  (`fonts.googleapis.com`), which is denied, so local font fallback is used.
+- **Escape.** `raw_ipv4_socket: refused:1` (EPERM; no CAP_NET_RAW), now a real
+  privilege test. Everything else as in the first run.
+- **Every other case passed again** with the same outcomes:
+  - guest-root egress with fence deltas;
+  - CPU usage/wall 1.024 with 30 throttles;
+  - OOM at 1024 MiB after 960 MiB;
+  - tasks denied at 510/512;
+  - ENOSPC at 64 MiB;
+  - runtime `timeout` at 15.054 s, then relaunch `DEADLINE`;
+  - the action limit across attempts;
+  - the detached descendant killed;
+  - lease expiry at about 31.7 s;
+  - stale fence;
+  - launch failure;
+  - 11 backend refusals;
+  - supervisor crash (NRestarts 0 → 1, action 2 `uncertain`, not replayed);
+  - guest crash (`92a161fd…` → `524515b5…`, relaunch bound to the new boot, fence
+    re-observed).
+- **Host memory.** QEMU tree RSS was 2,210,660 KiB idle and during the sessions.
+  `inspect_a3_vm` read 2,303,156,224 bytes afterwards: QEMU keeps pages the guest
+  touched, bounded by the 4 GiB VM plus overhead.
+
+**Gap found in review.** These sessions ran at default limits (memory 3,077
+MiB, temporary disk 512 MiB, no CPU quota). They measure the browser's need, but
+they do not show that a project set exactly at the provisional minimums (CPU 1,
+1024 MiB, 64 MiB) can run the flow. `1c5f486b` adds a `minimums` case: two
+sessions at those limits, each with 15 extra rounds of a model read plus a human
+screenshot, which must finish with no OOM kill. It was validated locally through
+the real supervisor, runner and Chromium. Only the probe script changed, so the
+installed supervisor and runner stay the reviewed `0572dcff` bytes.
+
+**Candidate checks at `e5cf67b6`:** `backend-syntax` passed. `backend-tests`
+failed before any assertion about this change, with "Could not locate the bindings
+file" for `better-sqlite3` (for example in `security-mcp-recovery-migration.test.js`).
+The cause: the running live backend installs with its own policy
+(`npm ci --ignore-scripts`), which removes the native addon, and the candidate's
+repair line is not on live. The handoff records the same condition. The repair is
+`scripts/prepare-self-check-native.mjs`, run inside `proxypilot-admin`, followed
+by `run_self_checks` with `skip_install: true`. No test is skipped or weakened.
+
+## 2026-09-28 third target run: minimums confirmed, candidate checks, human-session tool
+
+User-run in the Host Terminal and reviewed in the session. Report:
+`/var/lib/proxypilot-a3-proof/proof/worker-proof-20260928T124209Z.json`.
+
+**Command.** Stage `1c5f486b` with the pinned stager, then
+`a3-probe-worker.py --only sessions minimums human_takeover`, then the
+candidate's `prepare-self-check-native.mjs` inside `proxypilot-admin`. No
+reinstall: only the probe changed, so the installed supervisor and runner stay
+the reviewed `0572dcff` bytes.
+
+- **Staging.** `staged 228fdd12… (was e5cf67b6…) from 1c5f486b…; 43 paths match
+  exactly`. `get_self_status`: candidate `228fdd12`, clean, 20 ahead of live
+  `33528751`.
+- **Preflight.** `accepting_launch: true`, no blockers, `key_id_matches: true`,
+  boundary VM `49592202-…`, boot `524515b5-…`, SPKI `u8bIwg5K…`.
+- **`sessions` (default limits), three cold starts.**
+  - Launch 0.469–0.576 s; Chromium ready 0.156–0.171 s.
+  - Unit memory peak 222.2–227.6 MiB; shmem 14.5–23.9 MiB.
+  - pids peak 103–111; OOM kills 0; no CPU throttling.
+  - Guest MemAvailable 3,244–3,261 MiB; root free 9,905 MiB.
+  - Host QEMU tree RSS 2,248,664 KiB, idle and during the sessions.
+- **`minimums` (CPU 1, 1024 MiB, 64 MiB), two sessions of 15 extra rounds each.**
+  Each round is a model read plus a human screenshot.
+  - Applied limits read back as `cpu_quota_percent: 100`, 1024 MiB and 64 MiB.
+  - Unit memory peak 221.0–225.1 MiB; shmem 13.2 MiB.
+  - pids peak 106–112; OOM kills `[0, 0]`.
+  - Throttled 339,925 and 365,183 µs over about 20 s sessions (under 2%).
+  - Launch 0.552–0.646 s; Chromium ready 0.24 s.
+- **`human_takeover`.**
+  - The human click at (1193, 43) opened the dialog, and Escape closed it
+    (`dialog_open_after_escape: false`).
+  - The model's action after takeover was refused `TAKEN_OVER`; receipt reason
+    `taken_over`.
+  - Screenshots `20260928T124209Z-human-{before,dialog}.png` (sha256 `c86f7b0c…`,
+    `6c5a9d65…`).
+- **Exits.** `worker_proof: passed`, `probe_exit=0`.
+- **MCP corroboration after the run.**
+  - All three A3 units active (fence active/exited; proxy and supervisor
+    running).
+  - `inspect_a3_vm`: same UUID, boot `524515b5-…` (no guest-crash case in this
+    run), QEMU PID 272179, 2 vCPU, 4096 MiB (guest MemTotal 3,845 MiB), 12 GiB,
+    no swap, QEMU RSS 2,302,631,936 bytes.
+
+**Sizing decision.** The minimums are confirmed as measured, and their values
+do not change.
+
+| Limit | Minimum | Measured need | Headroom |
+|---|---|---|---|
+| Memory | 1024 MiB | 225 MiB browser peak at the minimum | About 4.5×; room for a full browser restart (another ~225 MiB) with more than 500 MiB to spare |
+| Tasks | 512 | Peak 112 | Fixed limit; ample |
+| Temporary disk | 64 MiB | Unit shmem, including `/dev/shm`, peaked at 13.2 MiB | About 4.8× |
+| CPU | 1 | Throttled under 2% of wall time | 1 CPU is enough for this flow; slower pages would throttle more, not fail |
+
+VM shape (2 vCPU / 4096 MiB / 12 GiB, install formula `max(2, cpu)` and
+`max(4096, memory_mib + 1024)`) is confirmed for one worker:
+- guest MemAvailable stays above 3.2 GiB during a session;
+- root has 9.9 GiB free;
+- host QEMU RSS settles at about 2.2–2.3 GB. QEMU keeps pages the guest
+  touched, bounded by the VM size.
+
+The code comments that call the minimums "provisional until the lifecycle proof
+confirms them" are now satisfied by this record. They are left unchanged so the
+installed bytes stay the reviewed ones.
+
+**Native binding and candidate checks at `228fdd12`.**
+- `prepare-self-check-native.mjs` in `proxypilot-admin` printed
+  `Candidate better-sqlite3 12.11.1 native probe passed` (`native_exit=0`).
+- `run_self_checks` with `backend-tests` and `backend-syntax`
+  (`skip_install: true`, so the live policy's install could not remove the addon
+  again), run twice with the same result:
+  - `backend-tests`: **3333 tests, 3322 pass, 0 fail, 11 skipped**, 24.3 s.
+  - `backend-syntax`: passed. `promote_ready: true`.
+  - That tool's `backend-tests` runs every test file except the six named in
+    `docs/known-issues.md` (`cve-research`, `cves`, `incus`, `webauthn`,
+    `vpn-mtu`, `ldap`). The exclusion is hard-coded in `routes/mcp-tools/self-edit.js`
+    and predates A3; none of those files touches Operations or A3 code.
+  - The 11 skips are the suite's own environment guards (Playwright, live
+    OpenBao/Keycloak/Infisical binaries, root-only runner functions, loop
+    devices, `openssl`, `python3`). The tail does not name them individually.
+    The one A3 test behind such a guard is the cross-language receipt test in
+    `operational-worker-supervisor.test.js` (skips without `python3`). It
+    passed locally on the same bytes (73/73 Operations tests, 0 skipped).
+- `frontend-build` **failed in the container with `sh: vite: not found`
+  (exit 127)**, with and without install.
+  - Cause: the dashboard image sets `NODE_ENV=production` (`admin/Dockerfile`),
+    so the policy's `npm ci` omits devDependencies, which include `vite`.
+  - This is a pre-existing defect in that check's environment, not an A3
+    result. A3's only frontend change is the limits text in `AccessPolicy.jsx`.
+  - The branch's frontend, byte-identical to `1c5f486b`, builds locally
+    (`vite build`, 12.7 s).
+  - The exact-candidate build is in the next host command
+    (`npm ci --include=dev`, then `npm run build`, in the candidate).
+  - The recorded check state was restored afterwards by re-running
+    `backend-tests` and `backend-syntax`.
+
+**Local suites at `44c630fb`.**
+- `python3 -m unittest discover -s scripts/tests -p 'test_a3*py'`: 74 tests OK.
+- `node --test src/__tests__/operational-*.test.js`: 73/73.
+- `python3 scripts/host-boundary-inventory.py`: exit 0, "96 candidate backend
+  files inventoried; S6 remains open", no suppression.
+
+**Human page for a real person (`44c630fb`).** The operator CLI's `human`
+subcommand needs a live attempt, and nothing could launch one for a person. The
+new `a3-probe-worker.py --human-session` mode is not a proof case, and the
+supervisor and runner are unchanged. It does the following:
+- launches one browser attempt through the installed supervisor and opens the
+  landing page;
+- serves the existing loopback page (token path, loopback Host check) and
+  renews the lease only while the attempt is still the model's;
+- after takeover, only the person's page keeps it alive (every screenshot
+  refresh renews a `human` attempt). If they close it, the lease expires in
+  30 s and the attempt is torn down with a receipt;
+- checks that a backend (model) action is refused `TAKEN_OVER`;
+- writes `human-session-<stamp>.json` with the attempt log and the verified
+  receipt.
+
+It has a unit test.
+
+**Acceptance state.** A3 is **not yet accepted**.
+
+- **Observed on the VM with the installed supervisor:**
+  - every automated criterion (18 cases in the second run, plus the minimums
+    and three more measured sessions here);
+  - candidate `backend-tests`;
+  - the local suites and the inventory.
+- **Required and still open:**
+  1. A real person using the human page (`--human-session`).
+  2. The candidate frontend build on the host.
+- **Security CI:** recorded open unless the user asks for a draft PR, which the
+  criteria allow.
+- **May stay open if named:** the host reboot proof, the backend socket mount and
+  coordinator (A5), and S6/SEC-01/SEC-04.
+- **Deadline:** the proxy certificate expires around 2026-10-03, and launches
+  refuse after that until it is re-issued.
+
+## 2026-09-28 real-person human session and A3 acceptance decision
+
+**Human session (user-run, reviewed).** `a3-probe-worker.py --human-session`
+from the candidate at `ba5c6363` (staged `44c630fb`, "43 paths match
+exactly"). Report: `/var/lib/proxypilot-a3-proof/proof/human-session-20260928T131206Z.json`.
+
+- Preflight: `accepting_launch: true`, no blockers, `key_id_matches: true`, VM
+  `49592202-…`, boot `524515b5-…`, SPKI `u8bIwg5K…`.
+- Attempt `2fb857d7-133d-46c6-a871-a2ef23081ca0` (run `7e2d86a3-…`, fence 1):
+  - launched and running at 13:12:07Z; the probe renewed the lease while it was
+    the model's;
+  - the person pressed **Take over** at 13:16:37Z;
+  - they pressed **Stop and tear down** on the page at 13:17:30Z (reason
+    `taken_over`);
+  - receipt at 13:17:31Z.
+- `states_seen: running → human → stopped`.
+- `model_action_after_takeover: TAKEN_OVER`: a backend (model) action during
+  human control was refused.
+- `receipt_verified: true`, `actions_performed: 1` (the probe's `open_landing`),
+  bound boot `524515b5-…`.
+- The supervisor journals takeover and stop, not each human click or keystroke.
+  Individual inputs are therefore not in the record, and the user did not
+  describe what the page showed. The click, dialog and Escape mechanics
+  themselves are proven by the automated `human_takeover` case (twice).
+
+**Reaching the page.** The user was not on the host, so the loopback page was
+published for this session only, as a deliberate operator ingress. The worker
+boundary did not change.
+- `set_route a3-human.fractionate.ai → 127.0.0.1:18090` (the existing wildcard
+  DNS already resolves it; Let's Encrypt certificate issued).
+- `set_route_options`: Caddy basic auth (user `a3`, random password, bcrypt at
+  rest), `host_header_override: 127.0.0.1:18090` so the page's loopback Host
+  check still admits only requests that come through that route,
+  `Referrer-Policy: no-referrer` and `X-Robots-Tag: noindex, nofollow`.
+- Every request still needed the per-session 192-bit URL token printed only in
+  the root terminal.
+- The route drew about 130 requests within minutes of creation (most likely
+  certificate-transparency scanners). The 90 of them that got 502 came before
+  the password was applied, and nothing was listening at that time.
+- **Removed after the session** with `delete_route`: `test_route` now fails TLS
+  for the hostname, and `iam.fractionate.ai` still serves through
+  `127.0.0.1:18080`. The password was shared in the chat and died with the
+  route.
+- Side finding: `set_route` attached the route to the existing service row that
+  shares 127.0.0.1 (`pp-platform-keycloak`) without changing that row. It was
+  queued as a separate follow-up, not changed here.
+
+**Candidate checks at the exact head `ba5c6363`.**
+- `run_self_checks` with `backend-tests` and `backend-syntax`
+  (`skip_install: true`): 3333 tests, 3322 pass, **0 fail**, 11 skipped (the same
+  environment guards as at `228fdd12`); syntax passed; `promote_ready: true`.
+- Candidate frontend: `admin/frontend/dist/index.html` now exists in the
+  candidate (sha256 `2ffe3b60…`, entry `assets/index-zF3MlEXD.js`), produced by the
+  host command's `npm ci --include=dev && npm run build`. Its
+  `frontend_build_exit=` line was not in the pasted output. The branch build
+  passed locally, and a frontend build is not among the acceptance criteria.
+
+### Acceptance decision: A3 is ACCEPTED (2026-09-28)
+
+Every required criterion in the
+[acceptance prompt](fractionate-agents-a3-acceptance-prompt.md) has observed,
+reviewed evidence on the proof VM with the installed production supervisor
+(`0572dcff`, key `d6817618…`).
+
+| Criterion | Evidence |
+|---|---|
+| Approved-origin session (landing, dialog, session readback, workspace) in three measured cold starts | `sessions`, second and third runs |
+| Page-level cross-origin, raw-IP, alternate-port, plain-HTTP, login submission, unlisted path, WebSocket, cross-origin subresource | `origin_refusals` (8/8 page attempts refused; navigations refused or upgraded to the approved origin), plus the proxy probe |
+| In-unit network, file, socket and device refusals, read-only system paths, no capabilities, `NoNewPrivs` | `escape` (raw socket EPERM, only the proxy port reachable, caps 0, `no_new_privs` 1, uid 65534) |
+| Guest-root fence drops with counter deltas | `guest_root_egress` |
+| CPU, memory, tasks, temporary disk, deadline, action limit, detached descendant | `cpu`, `memory`, `tasks`, `disk`, `runtime`, `actions`, `descendant` |
+| Cancellation, lease expiry, stale fence, launch failure | `backend_refusals` (backend `stop` `cancelled`), `lease_expiry`, `stale_fence`, `launch_failure` |
+| Supervisor crash (`uncertain`, not replayed); guest crash (new boot, verified teardown, relaunch bound) | `supervisor_crash`, `guest_crash` |
+| Every receipt verifies; no attempt revives | `receipt_ok` on every stop; `ATTEMPT_EXISTS` / `ATTEMPT_NOT_ACTIVE` checks |
+| Backend-socket refusals (operator methods, proof workloads, extra fields, other origins, below-minimum limits, credential submission) | `backend_refusals` (11) |
+| Human takeover: automated path and a real person | `human_takeover` (twice) and this human session |
+| Measured worker minimum and VM sizing with headroom | third-run evidence (`minimums`; 225 MiB peak at 1024 MiB) |
+| Local suites, inventory without suppression, candidate `backend-tests` on the exact heads | 74 Python and 73 Operations tests at `44c630fb`; inventory exit 0; candidate `ba5c6363` 0 fail |
+
+**Open by name, allowed by the criteria:**
+- The host reboot proof. It needs explicit approval and a time window.
+- The backend container socket mount and coordinator wiring (A5); activation
+  stays off.
+- S6 / SEC-01 / SEC-04.
+- Exact-head Security CI: no PR was authorized. `workflow_dispatch` returns 403.
+
+**Operational items:**
+- The proxy certificate expires around 2026-10-03, and launches fail closed
+  after that until `a3-install-proxy.py remove` → `install` → `a3-probe-proxy.py`.
+- The candidate `frontend_build_exit` line should be confirmed.
+- Two queued follow-ups outside A3: the `frontend-build` self-check (dashboard
+  `NODE_ENV=production` omits `vite`) and the `set_route` shared-IP service
+  attachment.
+
+Accepting A3 does not authorize A4 activation, deployment, or promotion of the
+candidate to live; promotion is a separate user decision. The
+[A4 prompt](fractionate-agents-a4-prompt.md) is now eligible, and work stops
+here for review before any A4 work.

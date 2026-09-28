@@ -4,6 +4,7 @@ import { operationalProjectsMigration1100, operationalProjectsMigration1101, ope
 import { operationalAgentsMigration1106 } from '../../lib/operational-agents-schema.js';
 import { operationalWorkerMigration1107 } from '../../lib/operational-worker-schema.js';
 import { operationalAgentLimitsMigration1108 } from '../../lib/operational-agent-limits-schema.js';
+import { operationalWorkerBindingMigration1109 } from '../../lib/operational-worker-binding-schema.js';
 import { createOperationsStore } from '../../lib/operational-projects-store.js';
 
 export function operationsFixture() {
@@ -40,6 +41,7 @@ export function operationsFixture() {
   db.exec('PRAGMA foreign_keys=OFF');
   operationalAgentLimitsMigration1108(adapter);
   db.exec('PRAGMA foreign_keys=ON');
+  operationalWorkerBindingMigration1109(adapter);
   let time = Date.now();
   const store = createOperationsStore(adapter, { now: () => new Date(time).toISOString() });
   const addUser = (role = 'user') => {

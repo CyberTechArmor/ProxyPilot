@@ -1458,3 +1458,102 @@ It has a unit test.
   coordinator (A5), and S6/SEC-01/SEC-04.
 - **Deadline:** the proxy certificate expires around 2026-10-03, and launches
   refuse after that until it is re-issued.
+
+## 2026-09-28 real-person human session and A3 acceptance decision
+
+**Human session (user-run, reviewed).** `a3-probe-worker.py --human-session`
+from the candidate at `ba5c6363` (staged `44c630fb`, "43 paths match
+exactly"). Report: `/var/lib/proxypilot-a3-proof/proof/human-session-20260928T131206Z.json`.
+
+- Preflight: `accepting_launch: true`, no blockers, `key_id_matches: true`, VM
+  `49592202-…`, boot `524515b5-…`, SPKI `u8bIwg5K…`.
+- Attempt `2fb857d7-133d-46c6-a871-a2ef23081ca0` (run `7e2d86a3-…`, fence 1):
+  - launched and running at 13:12:07Z; the probe renewed the lease while it was
+    the model's;
+  - the person pressed **Take over** at 13:16:37Z;
+  - they pressed **Stop and tear down** on the page at 13:17:30Z (reason
+    `taken_over`);
+  - receipt at 13:17:31Z.
+- `states_seen: running → human → stopped`.
+- `model_action_after_takeover: TAKEN_OVER`: a backend (model) action during
+  human control was refused.
+- `receipt_verified: true`, `actions_performed: 1` (the probe's `open_landing`),
+  bound boot `524515b5-…`.
+- The supervisor journals takeover and stop, not each human click or keystroke.
+  Individual inputs are therefore not in the record, and the user did not
+  describe what the page showed. The click, dialog and Escape mechanics
+  themselves are proven by the automated `human_takeover` case (twice).
+
+**Reaching the page.** The user was not on the host, so the loopback page was
+published for this session only, as a deliberate operator ingress. The worker
+boundary did not change.
+- `set_route a3-human.fractionate.ai → 127.0.0.1:18090` (the existing wildcard
+  DNS already resolves it; Let's Encrypt certificate issued).
+- `set_route_options`: Caddy basic auth (user `a3`, random password, bcrypt at
+  rest), `host_header_override: 127.0.0.1:18090` so the page's loopback Host
+  check still admits only requests that come through that route,
+  `Referrer-Policy: no-referrer` and `X-Robots-Tag: noindex, nofollow`.
+- Every request still needed the per-session 192-bit URL token printed only in
+  the root terminal.
+- The route drew about 130 requests within minutes of creation (most likely
+  certificate-transparency scanners). The 90 of them that got 502 came before
+  the password was applied, and nothing was listening at that time.
+- **Removed after the session** with `delete_route`: `test_route` now fails TLS
+  for the hostname, and `iam.fractionate.ai` still serves through
+  `127.0.0.1:18080`. The password was shared in the chat and died with the
+  route.
+- Side finding: `set_route` attached the route to the existing service row that
+  shares 127.0.0.1 (`pp-platform-keycloak`) without changing that row. It was
+  queued as a separate follow-up, not changed here.
+
+**Candidate checks at the exact head `ba5c6363`.**
+- `run_self_checks` with `backend-tests` and `backend-syntax`
+  (`skip_install: true`): 3333 tests, 3322 pass, **0 fail**, 11 skipped (the same
+  environment guards as at `228fdd12`); syntax passed; `promote_ready: true`.
+- Candidate frontend: `admin/frontend/dist/index.html` now exists in the
+  candidate (sha256 `2ffe3b60…`, entry `assets/index-zF3MlEXD.js`), produced by the
+  host command's `npm ci --include=dev && npm run build`. Its
+  `frontend_build_exit=` line was not in the pasted output. The branch build
+  passed locally, and a frontend build is not among the acceptance criteria.
+
+### Acceptance decision: A3 is ACCEPTED (2026-09-28)
+
+Every required criterion in the
+[acceptance prompt](fractionate-agents-a3-acceptance-prompt.md) has observed,
+reviewed evidence on the proof VM with the installed production supervisor
+(`0572dcff`, key `d6817618…`).
+
+| Criterion | Evidence |
+|---|---|
+| Approved-origin session (landing, dialog, session readback, workspace) in three measured cold starts | `sessions`, second and third runs |
+| Page-level cross-origin, raw-IP, alternate-port, plain-HTTP, login submission, unlisted path, WebSocket, cross-origin subresource | `origin_refusals` (8/8 page attempts refused; navigations refused or upgraded to the approved origin), plus the proxy probe |
+| In-unit network, file, socket and device refusals, read-only system paths, no capabilities, `NoNewPrivs` | `escape` (raw socket EPERM, only the proxy port reachable, caps 0, `no_new_privs` 1, uid 65534) |
+| Guest-root fence drops with counter deltas | `guest_root_egress` |
+| CPU, memory, tasks, temporary disk, deadline, action limit, detached descendant | `cpu`, `memory`, `tasks`, `disk`, `runtime`, `actions`, `descendant` |
+| Cancellation, lease expiry, stale fence, launch failure | `backend_refusals` (backend `stop` `cancelled`), `lease_expiry`, `stale_fence`, `launch_failure` |
+| Supervisor crash (`uncertain`, not replayed); guest crash (new boot, verified teardown, relaunch bound) | `supervisor_crash`, `guest_crash` |
+| Every receipt verifies; no attempt revives | `receipt_ok` on every stop; `ATTEMPT_EXISTS` / `ATTEMPT_NOT_ACTIVE` checks |
+| Backend-socket refusals (operator methods, proof workloads, extra fields, other origins, below-minimum limits, credential submission) | `backend_refusals` (11) |
+| Human takeover: automated path and a real person | `human_takeover` (twice) and this human session |
+| Measured worker minimum and VM sizing with headroom | third-run evidence (`minimums`; 225 MiB peak at 1024 MiB) |
+| Local suites, inventory without suppression, candidate `backend-tests` on the exact heads | 74 Python and 73 Operations tests at `44c630fb`; inventory exit 0; candidate `ba5c6363` 0 fail |
+
+**Open by name, allowed by the criteria:**
+- The host reboot proof. It needs explicit approval and a time window.
+- The backend container socket mount and coordinator wiring (A5); activation
+  stays off.
+- S6 / SEC-01 / SEC-04.
+- Exact-head Security CI: no PR was authorized. `workflow_dispatch` returns 403.
+
+**Operational items:**
+- The proxy certificate expires around 2026-10-03, and launches fail closed
+  after that until `a3-install-proxy.py remove` → `install` → `a3-probe-proxy.py`.
+- The candidate `frontend_build_exit` line should be confirmed.
+- Two queued follow-ups outside A3: the `frontend-build` self-check (dashboard
+  `NODE_ENV=production` omits `vite`) and the `set_route` shared-IP service
+  attachment.
+
+Accepting A3 does not authorize A4 activation, deployment, or promotion of the
+candidate to live; promotion is a separate user decision. The
+[A4 prompt](fractionate-agents-a4-prompt.md) is now eligible, and work stops
+here for review before any A4 work.

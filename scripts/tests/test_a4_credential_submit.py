@@ -317,5 +317,105 @@ class CredentialBrowserTests(unittest.TestCase):
             browser.close()
 
 
+
+proxy_spec = importlib.util.spec_from_file_location('a4_submit_origin_proxy', ROOT / 'a3-origin-proxy.py')
+origin_proxy = importlib.util.module_from_spec(proxy_spec)
+proxy_spec.loader.exec_module(origin_proxy)
+
+
+@unittest.skipUnless(Path(helpers.LOCAL_CHROMIUM).exists() and shutil.which('openssl'),
+                     'local Chromium and openssl are required for the real-proxy test')
+class RealProxyBrowserTests(unittest.TestCase):
+    """Chromium -> the REAL origin-proxy policy (TLS terminated, SPKI pinned) -> a local origin.
+
+    Proves the runner's own sign-in and logout requests pass the exact A4
+    proxy policy (JSON body with Content-Length; empty logout), not only a relay.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import http.client
+        import socket
+        cls.temp = tempfile.TemporaryDirectory()
+        root = Path(cls.temp.name)
+        certs = {}
+        for name in ('origin', 'proxy'):
+            key, cert = root / (name + '.key'), root / (name + '.pem')
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                            '-subj', '/CN=demo.fractionate.ai', '-addext', 'subjectAltName=DNS:demo.fractionate.ai',
+                            '-keyout', str(key), '-out', str(cert)], check=True, capture_output=True)
+            certs[name] = (cert, key)
+        pub = subprocess.run(['openssl', 'x509', '-in', str(certs['proxy'][0]), '-pubkey', '-noout'],
+                             check=True, capture_output=True).stdout
+        der = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=pub,
+                             check=True, capture_output=True).stdout
+        cls.spki = base64.b64encode(hashlib.sha256(der).digest()).decode()
+        cls.origin = ThreadingHTTPServer(('127.0.0.1', 0), LoginOrigin)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(certs['origin'][0]), str(certs['origin'][1]))
+        cls.origin.socket = context.wrap_socket(cls.origin.socket, server_side=True)
+        threading.Thread(target=cls.origin.serve_forever, daemon=True).start()
+        port = cls.origin.server_address[1]
+        trusted = ssl.create_default_context(cafile=str(certs['origin'][0]))
+
+        class LocalConnection(http.client.HTTPSConnection):
+            def __init__(self, address):
+                super().__init__(origin_proxy.ORIGIN, 443, timeout=8, context=trusted)
+
+            def connect(self):
+                self.sock = self._context.wrap_socket(socket.create_connection(('127.0.0.1', port), timeout=8),
+                                                      server_hostname=origin_proxy.ORIGIN)
+        cls.patches = [patch.object(origin_proxy, 'PEER', '127.0.0.1'),
+                       patch.object(origin_proxy, 'FixedConnection', LocalConnection),
+                       patch.object(origin_proxy, 'public_addresses', lambda: [(socket.AF_INET, '127.0.0.1')])]
+        for item in cls.patches:
+            item.start()
+        cls.proxy = origin_proxy.Server(('127.0.0.1', 0), origin_proxy.Handler)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.set_alpn_protocols(['http/1.1'])
+        tls.load_cert_chain(str(certs['proxy'][0]), str(certs['proxy'][1]))
+        cls.proxy.tls = tls
+        threading.Thread(target=cls.proxy.serve_forever, daemon=True).start()
+        wrapper = root / 'chromium'
+        wrapper.write_text('#!/bin/sh\nexec %s --no-sandbox "$@"\n' % helpers.LOCAL_CHROMIUM)
+        wrapper.chmod(0o755)
+        cls.saved = (g.PROXY, g.CHROMIUM, g.WORKSPACE)
+        cls.workspace = root / 'workspace'
+        cls.workspace.mkdir()
+        g.PROXY = '127.0.0.1:%d' % cls.proxy.server_address[1]
+        g.CHROMIUM, g.WORKSPACE = str(wrapper), str(cls.workspace)
+
+    @classmethod
+    def tearDownClass(cls):
+        g.PROXY, g.CHROMIUM, g.WORKSPACE = cls.saved
+        cls.proxy.shutdown()
+        cls.proxy.server_close()
+        cls.origin.shutdown()
+        for item in cls.patches:
+            item.stop()
+        cls.temp.cleanup()
+
+    def test_sign_in_and_logout_pass_the_exact_proxy_policy(self):
+        LoginOrigin.password = 'A4-canary-' + secrets.token_urlsafe(18)
+        LoginOrigin.sessions.clear()
+        LoginOrigin.logins.clear()
+        channel = g.Channel(open(os.devnull, 'w'))
+        browser = g.Browser(self.spki, channel)
+        try:
+            browser.action('open_landing')
+            browser.action('open_login')
+            fifo = str(self.workspace / g.CREDENTIAL_FIFO)
+            writer = threading.Thread(target=deliver, args=(fifo, frame(USERNAME, LoginOrigin.password)))
+            writer.start()
+            result = browser.action('submit_bound_fixture', BINDING)
+            writer.join(5)
+            self.assertEqual(result['outcome'], 'signed_in', result)
+            self.assertEqual(browser.logout(), 'done')
+            self.assertEqual(LoginOrigin.logins, ['accepted', 'logout'])
+            self.assertEqual(LoginOrigin.sessions, set())
+        finally:
+            browser.close()
+
+
 if __name__ == '__main__':
     unittest.main()

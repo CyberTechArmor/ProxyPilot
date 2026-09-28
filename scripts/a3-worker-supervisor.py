@@ -83,7 +83,8 @@ BACKEND_SOCKET = RUN_DIR / 'supervisor.sock'
 OPERATOR_SOCKET = RUN_DIR / 'operator.sock'
 BROKER_SOCKET = Path('/run/proxypilot-a4/broker.sock')
 CREDENTIAL_FIELDS = ('project_id', 'profile_id', 'profile_revision', 'binding_id', 'binding_revision')
-DELIVERY_SECONDS = 40
+# Longer than the runner's FIFO wait, so a late broker write finds no reader and writes nothing.
+DELIVERY_SECONDS = 90
 STOP_SECONDS = 12
 UNIT_PREFIX = 'pp-a3-worker-'
 LEASE_SECONDS = 30

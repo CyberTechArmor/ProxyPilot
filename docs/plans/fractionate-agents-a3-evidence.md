@@ -1105,14 +1105,29 @@ provider, credential, vault, live identity or deployment was activated, and
 - S6/SEC-01/SEC-04 remain open. The supervisor narrows the worker path, but a
   compromised root-equivalent backend keeps its other host interfaces.
 
+### Submission state
+
+- Branch `claude/step-a3-isolated-execution-yg80mx` was pushed with the code at
+  `3cd80b70e971b484f442fbb96ac07f2ad8c66add`.
+- Exact-head Security CI was **not** run. A `workflow_dispatch` of
+  `security-regression.yml` returned HTTP 403 for this integration, and the workflow
+  otherwise runs only on a pull request, which was not requested. The same Python
+  suite and inventory steps it runs passed locally (above).
+- The ProxyPilot candidate was **not** patched from this session. Sending this diff
+  to the host's upload endpoint was refused by the session's data-exfiltration
+  guard, so the candidate is still `7851c1a0`. The host can take the exact pushed
+  commits from GitHub instead (below); then `run_self_checks` can run on that
+  candidate head.
+
 ### Operator commands and rollback
 
-The installation and proof run from the candidate checkout (the installer copies
-reviewed bytes into root-owned `/etc`, and the journal records their digests):
+On the host, stage the exact pushed commits on the candidate, install the
+supervisor and run the target proof. The installer copies reviewed bytes into
+root-owned `/etc` and records their digests. Replace `<TIP>` with the branch tip
+reported with this change:
 
 ```
-sudo python3 /var/lib/proxypilot/self/candidate/scripts/a3-install-supervisor.py install
-sudo python3 /var/lib/proxypilot/self/candidate/scripts/a3-probe-worker.py
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/step-a3-isolated-execution-yg80mx; test "$(git rev-parse FETCH_HEAD)" = <TIP>; git -c user.name="ProxyPilot operator" -c user.email=operator@proxypilot cherry-pick 12ad1392845630eec56705776bae444f54eac58a..<TIP>; python3 scripts/a3-install-supervisor.py install; python3 scripts/a3-probe-worker.py'
 ```
 
 Ordered rollback, which adds to the handoff's order:

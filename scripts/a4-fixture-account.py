@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 INSTANCE = 'pp-fractionate-demo'
 DEMO_DIR = '/opt/app/demo'
@@ -64,8 +65,14 @@ def guest_sha256(path, instance=INSTANCE):
 
 
 def push(data, path, instance=INSTANCE, mode='0644'):
-    run(['incus', 'file', 'push', '-', '%s%s' % (instance, path), '--uid', '0', '--gid', '0', '--mode', mode],
-        data=data)
+    """Push bytes that are not secret (a verifier or reviewed source) from a 0600
+    temporary host file, then read them back byte-exact from the guest."""
+    with tempfile.NamedTemporaryFile(prefix='pp-a4-fixture-') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(data)
+        stream.flush()
+        run(['incus', 'file', 'push', stream.name, '%s%s' % (instance, path), '--uid', '0', '--gid', '0',
+             '--mode', mode])
     if guest_sha256(path, instance) != hashlib.sha256(data).hexdigest():
         raise ValueError('pushed file does not read back byte-exact: ' + path)
 

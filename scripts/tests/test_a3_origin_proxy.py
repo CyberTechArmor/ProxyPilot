@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import shutil
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -111,33 +112,65 @@ class OriginPolicyTests(unittest.TestCase):
             save.assert_not_called()
             execute.assert_not_called()
 
+    def run_install(self, root, journal_data):
+        """install() end to end on temp paths: real openssl and real journal writes."""
+        paths = {name: root / name for name in ('script', 'cert', 'key', 'unit')}
+        journal = root / 'proxy-install.json'
+        if journal_data is not None:
+            journal.write_text(json.dumps(journal_data, indent=2) + '\n')
+        commands = []
+
+        def execute(argv, **options):
+            commands.append(argv)
+            return ''
+        with patch.object(i, 'INSTALLED', paths['script']), patch.object(i, 'CERT', paths['cert']), \
+                patch.object(i, 'KEY', paths['key']), patch.object(i, 'UNIT', paths['unit']), \
+                patch.object(i, 'JOURNAL', journal), patch.object(i, 'validate_target', return_value={}), \
+                patch.object(i, 'status', return_value={'installed': True}), \
+                patch.object(i.p, 'LISTEN', ('127.0.0.1', 0)), \
+                patch.object(i.i, 'secure'), patch.object(i.i, 'execute', side_effect=execute):
+            result = i.install()
+        return result, journal, paths, commands
+
+    @unittest.skipUnless(shutil.which('openssl'), 'openssl is required to issue the proxy certificate')
     def test_install_after_a_completed_removal_reissues_instead_of_refusing(self):
+        # The first host reinstall stopped here: "Refusing to replace unrelated file:
+        # .../proxy-install.json" after remove() had left phase `removed`.
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            journal = root / 'journal'
-            journal.write_text(json.dumps({'version': 1, 'phase': 'removed', 'files': {}}))
-            paths = {name: root / name for name in ('script', 'cert', 'key', 'unit')}
-            calls = []
+            removed = {'version': 1, 'phase': 'removed', 'vm_uuid': i.i.fence.PROOF_UUID,
+                       'files': {'/etc/proxypilot-a3-proof/origin-proxy.py': 'a' * 64}}
+            result, journal, paths, commands = self.run_install(root, removed)
+            self.assertEqual(result, {'installed': True})
+            data = json.loads(journal.read_text())
+            self.assertEqual((data['phase'], data['vm_uuid']), ('installed', i.i.fence.PROOF_UUID))
+            self.assertEqual(set(data['files']), {str(path) for path in paths.values()})
+            for path in paths.values():
+                self.assertEqual(i.i.digest(path.read_text()), data['files'][str(path)])
+            self.assertIn('BEGIN CERTIFICATE', paths['cert'].read_text())
+            self.assertIn(['systemctl', 'enable', '--now', paths['unit'].name], commands)
+        # A fresh host (no journal) installs as before.
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertEqual(self.run_install(Path(temp), None)[0], {'installed': True})
+        # Anything but a completed removal still needs review, and nothing is replaced.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            prepared = {'version': 1, 'phase': 'prepared', 'files': {}}
+            with self.assertRaisesRegex(ValueError, 'review journal'):
+                self.run_install(root, prepared)
+            self.assertEqual(json.loads((root / 'proxy-install.json').read_text()), prepared)
 
-            def execute(argv, **options):
-                calls.append(argv)
-                if argv[:2] == ['openssl', 'req']:
-                    raise subprocess.CalledProcessError(1, argv)   # stop before writing anything
-                return ''
-            with patch.object(i, 'INSTALLED', paths['script']), patch.object(i, 'CERT', paths['cert']), \
-                    patch.object(i, 'KEY', paths['key']), patch.object(i, 'UNIT', paths['unit']), \
-                    patch.object(i, 'JOURNAL', journal), patch.object(i, 'validate_target', return_value={}), \
-                    patch.object(i.i, 'secure'), patch.object(i.i, 'execute', side_effect=execute), \
-                    patch.object(i.subprocess, 'run', side_effect=execute), \
-                    patch.object(i.socket, 'socket'):
-                with self.assertRaises(subprocess.CalledProcessError):
-                    i.install()
-            self.assertTrue(any(argv[:2] == ['openssl', 'req'] for argv in calls), calls)
-            journal.write_text(json.dumps({'version': 1, 'phase': 'prepared', 'files': {}}))
-            with patch.object(i, 'JOURNAL', journal), patch.object(i, 'validate_target', return_value={}), \
-                    patch.object(i.i, 'secure'), patch.object(i.i, 'execute', return_value=''):
-                with self.assertRaisesRegex(ValueError, 'review journal'):
-                    i.install()
+    def test_reinstall_skips_removal_when_the_proxy_is_already_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            journal = Path(temp) / 'proxy-install.json'
+            for phase, removes in (('removed', False), ('installed', True)):
+                journal.write_text(json.dumps({'version': 1, 'phase': phase}))
+                with patch.object(i, 'JOURNAL', journal), \
+                        patch.object(i, 'remove', return_value={'removed': True}) as remove, \
+                        patch.object(i, 'install', return_value={'installed': True}):
+                    result = i.reinstall()
+                self.assertEqual(remove.called, removes)
+                self.assertEqual(result['previous_removed'], {'removed': True} if removes else None)
 
     def test_removal_does_not_require_a_certificate_that_is_about_to_expire(self):
         with patch.object(i, 'status') as status, patch.object(i.i, 'parse_json', side_effect=ValueError('stop')), \

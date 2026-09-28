@@ -174,6 +174,25 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(broker.handed[0], bytearray(len(SECRET)))
         self.assertEqual((result['binding_revision'], result['vault_version']), (3, 5))
 
+    def test_push_uses_a_private_temp_file_and_reads_back(self):
+        seen = {}
+
+        def run(argv, data=None, timeout=60):
+            source = Path(argv[3])
+            seen.update(argv=argv, mode=oct(source.stat().st_mode & 0o777), content=source.read_bytes(), data=data)
+        data = b'{"v":1}\n'
+        with patch.object(fixture, 'run', run), \
+                patch.object(fixture, 'guest_sha256', lambda path, instance='x': hashlib.sha256(data).hexdigest()):
+            fixture.push(data, '/opt/app/demo/synthetic-account.json', 'pp-fractionate-demo')
+        self.assertEqual(seen['argv'][:3], ['incus', 'file', 'push'])
+        self.assertEqual(seen['argv'][4:], ['pp-fractionate-demo/opt/app/demo/synthetic-account.json', '--uid', '0',
+                                            '--gid', '0', '--mode', '0644'])
+        self.assertEqual((seen['mode'], seen['content'], seen['data']), ('0o600', data, None))
+        self.assertFalse(Path(seen['argv'][3]).exists())
+        with patch.object(fixture, 'run', run), patch.object(fixture, 'guest_sha256', lambda path, instance='x': 'bad'):
+            with self.assertRaisesRegex(ValueError, 'byte-exact'):
+                fixture.push(data, '/opt/app/demo/server.mjs', 'pp-fractionate-demo')
+
     @unittest.skipUnless(shutil.which('node') and (ROOT.parent / 'admin' / 'frontend' / 'dist-demo' / 'index.html').exists(),
                          'node and a built demo (npm run demo:build) are required for the cross-language check')
     def test_the_demo_server_accepts_the_python_verifier(self):

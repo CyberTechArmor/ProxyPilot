@@ -108,6 +108,7 @@ def install():
         candidate_unit = tmp / UNIT.name
         candidate_unit.write_text(unit)
         i.execute(['systemd-analyze', 'verify', str(candidate_unit)])
+        reinstall = False
         if JOURNAL.exists():
             data = i.parse_json(JOURNAL.read_text(), str(JOURNAL))
             if data.get('phase') == 'installed':
@@ -116,6 +117,7 @@ def install():
             # fresh certificate; anything else needs review first.
             if data.get('phase') != 'removed':
                 raise ValueError('Incomplete proxy installation; review journal before recovery')
+            reinstall = True
         if any(path.exists() for path in (INSTALLED, CERT, KEY, UNIT)):
             raise ValueError('Unowned proxy file exists')
         with socket.socket() as test:
@@ -132,7 +134,8 @@ def install():
         files = {str(path): i.digest(value) for path, value in
                  ((INSTALLED, source), (CERT, cert), (KEY, key), (UNIT, unit))}
         data = dict(version=1, phase='prepared', vm_uuid=i.fence.PROOF_UUID, files=files)
-        i.save(JOURNAL, json.dumps(data, indent=2) + '\n', mode=0o600)
+        # Only this installer's own `removed` journal is replaced; any other file refuses.
+        i.save(JOURNAL, json.dumps(data, indent=2) + '\n', mode=0o600, replace=reinstall)
         i.save(INSTALLED, source)
         i.save(CERT, cert)
         i.save(KEY, key, mode=0o600)
@@ -163,6 +166,18 @@ def remove():
     return dict(removed=True, fence_retained=True, vm_uuid=i.fence.PROOF_UUID)
 
 
+def reinstall():
+    """A reviewed proxy change or a certificate re-issue: remove, then install fresh.
+
+    A proxy already removed (for example by an interrupted earlier reinstall) is
+    installed without a second removal.
+    """
+    removed = None
+    if not JOURNAL.exists() or i.parse_json(JOURNAL.read_text(), str(JOURNAL)).get('phase') != 'removed':
+        removed = remove()
+    return dict(install(), previous_removed=removed)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'status', 'remove', 'reinstall'))
@@ -174,12 +189,8 @@ def main():
     i.secure(lock)
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if args.action == 'reinstall':
-            # A reviewed proxy change or a certificate re-issue: remove, then install fresh.
-            removed = remove()
-            print(json.dumps(dict(install(), previous_removed=removed), indent=2))
-        else:
-            print(json.dumps({'install': install, 'status': status, 'remove': remove}[args.action](), indent=2))
+        print(json.dumps({'install': install, 'status': status, 'remove': remove,
+                          'reinstall': reinstall}[args.action](), indent=2))
 
 
 if __name__ == '__main__':

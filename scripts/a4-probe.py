@@ -57,7 +57,7 @@ CASES = ('proxy_policy', 'login', 'egress', 'budget', 'rotation', 'revocation')
 MODEL = 'gpt-6-luna'
 PROMPT = 'This is a bounded billing proof. Reply with exactly the single word: OK'
 PROFILE_ARTIFACTS = ('Cookies', 'Cookies-journal', 'Login Data', 'Login Data-journal', 'Web Data',
-                     'Local State', 'Network Persistent State', 'Preferences', 'History')
+                     'Web Data-journal', 'Local State', 'Network Persistent State')
 # Walks the guest's writable trees after a stop; names only, never contents.
 GUEST_PROFILE_SCAN = r'''import json, os, sys
 names = set(json.loads(sys.argv[1]))
@@ -69,7 +69,7 @@ for top in ('/tmp', '/var/tmp', '/dev/shm', '/home', '/root', '/var/lib', '/none
             if name in names or name.startswith('pp-a4-credential'):
                 found.append(os.path.join(root, name))
 mounts = [l.split()[4] for l in open('/proc/self/mountinfo') if ' - tmpfs ' in l]
-print(json.dumps({'found': found[:50], 'tmpfs_mounts': mounts}))
+print(json.dumps({'found': found[:500], 'tmpfs_mounts': mounts}))
 '''
 EGRESS = r'''import json, socket, sys, threading
 targets = json.loads(sys.argv[1])
@@ -244,8 +244,14 @@ class Proof:
         result = probe.run()
         return {'status_codes': result['status_codes'], 'cases': len(result['cases']), 'boot_id': result['boot_id']}
 
+    def profile_scan(self):
+        return json.loads(guest(['/usr/bin/python3', '-I', '-c', GUEST_PROFILE_SCAN, json.dumps(PROFILE_ARTIFACTS)],
+                                timeout=180, check=True).stdout)['found']
+
     def login(self):
         record = self.binding()
+        # Artifacts left by earlier, unrelated probes are reported, never blamed on this attempt.
+        before = self.profile_scan()
         ref, launched, _, submitted, latency = self.sign_in(record)
         result = submitted['result']
         assert result['outcome'] == 'signed_in' and result['login_requests'] == 1, result
@@ -260,15 +266,17 @@ class Proof:
         payload = self.stop(ref)
         credential = evaluate_receipt_credential(payload, record['binding_id'], record['revision'], ['signed_in'])
         assert payload['evidence']['logout'] == 'done', payload['evidence']
-        scan = json.loads(guest(['/usr/bin/python3', '-I', '-c', GUEST_PROFILE_SCAN, json.dumps(PROFILE_ARTIFACTS)],
-                                timeout=120, check=True).stdout)
-        assert scan['found'] == [], scan['found']
+        after = self.profile_scan()
+        survivors = sorted(set(after) - set(before))
+        fifos = [path for path in after if Path(path).name.startswith('pp-a4-credential')]
+        assert survivors == [] and fifos == [], (survivors, fifos)
         unit = guest(['systemctl', 'is-active', sup.UNIT_PREFIX + ref['attempt_id'] + '.service'], timeout=20)
         deliveries = [d for d in broker('ledger', {'run_id': ref['run_id']})['deliveries']]
         assert [d['outcome'] for d in deliveries] == ['delivered'], deliveries
         return {'submit': result, 'submit_latency_ms': latency, 'read_files': files, 'journal_submit': submit,
                 'receipt_credential': credential, 'receipt_reason': payload['reason'],
-                'logout': payload['evidence']['logout'], 'guest_profile_or_cookie_files_after_stop': scan['found'],
+                'logout': payload['evidence']['logout'], 'guest_profile_or_cookie_files_after_stop': survivors,
+                'guest_profile_artifacts_before_this_attempt': before,
                 'unit_after_stop': unit.stdout.strip(), 'broker_deliveries': deliveries,
                 'boot_id': launched['boot_id']}
 

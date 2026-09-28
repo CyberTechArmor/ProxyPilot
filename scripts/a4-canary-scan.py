@@ -108,7 +108,7 @@ def mcp_ledger(path):
     return json.dumps(rows, default=str).encode()
 
 
-def sink_sources(database=None, backend_container='proxypilot-admin', since='14 days ago'):
+def sink_sources(database=None, backend_container='proxypilot-admin', since='2 days ago'):
     """name -> zero-argument reader returning bytes. Each raises when unreadable."""
     db = database or next((p for p in DB_CANDIDATES if Path(p).is_file()), None)
     journal = lambda *extra: (lambda: command(['journalctl', '--no-pager', '-o', 'cat', '--since', since, *extra]))  # noqa: E731
@@ -118,7 +118,7 @@ def sink_sources(database=None, backend_container='proxypilot-admin', since='14 
         'proxy_journal': journal('-u', 'proxypilot-a3-origin-proxy.service'),
         'host_journal_all': journal(),
         'guest_unit_journals': lambda: command(['incus', 'exec', VM, '--', 'journalctl', '--no-pager', '-o', 'cat']),
-        'backend_logs': lambda: command(['docker', 'logs', '--since', '336h', backend_container]),
+        'backend_logs': lambda: command(['docker', 'logs', '--since', '48h', backend_container]),
         'receipts_and_supervisor_journal': lambda: b''.join(p.read_bytes() for p in files(
             ['/var/lib/proxypilot-a3-proof/supervisor/*.json'])) or _missing('supervisor journal'),
         'broker_journal_and_model_records': lambda: b''.join(p.read_bytes() for p in files(

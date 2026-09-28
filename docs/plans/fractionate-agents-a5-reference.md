@@ -1,19 +1,26 @@
 # A5 reference: current state for any conversation
 
-Snapshot: 2026-09-28, after the A5 implementation and local verification. The
-host proof has not run yet.
+Snapshot: 2026-09-28, after the first A5 host run and its fixes. Host run 2
+is next.
 
 This file is the orientation page. The dated
 [A5 evidence](fractionate-agents-a5-evidence.md) is the record; if the two
 disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, proxy SPKI) before acting.
 
-**Status in one line:** A5 is **implemented and locally verified, not
-accepted**. The coordinator, the hybrid loop, the approval checkpoint,
-migration 1111, `model_step`, the runner outcome classes, the demo fixtures
-and the proof harness pass every local suite. Host steps 0–4 below are next.
-Nothing is activated, merged, deployed or promoted. PR #686 and PR #699 stay
-draft.
+**Status in one line:** A5 is **not accepted**. Host run 1 (2026-09-28)
+installed the A5 supervisor, runner, broker and demo server:
+- The A3 proof passed 19/19, including both `model_step` refusals.
+- 14 of the 18 A5 cases passed, with a real person's approval.
+- A runner misclassification failed every successful sign-in
+  (`unexpected_origin`). The failed cases were A4 `login`/`rotation` and A5
+  `supervised_run`, `rule_only` and `outcome_classes` (challenge).
+- `outside_set` depended on the model misbehaving.
+- The marker scan counted its own sudo command line.
+
+All three are fixed in `b9bd56e6` (see the evidence). **Host run 2** below is
+next. Nothing is activated, merged, deployed or promoted. PR #686 and PR #699
+stay draft.
 
 ## Read first
 
@@ -41,20 +48,24 @@ draft.
 |---|---|---|
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted |
 | PR #699 head (A4) | `efe0aa05fcdb989efb7e84fd2e8cef224989da79` | A5's base; draft |
-| A5 code | `6d420735b9e1b7a074a9c061ed5b6e133fb74d76` | Stage this; later commits are docs |
+| A5 code, host run 1 | `6d420735b9e1b7a074a9c061ed5b6e133fb74d76` | Staged and installed in host run 1 |
+| **A5 code, host run 2** | `b9bd56e6ae2a00eed08064ea06e4e01b0657ddb0` | **Stage this.** Changes the runner, the demo server, the harness and the canary scan; later commits are docs |
 | Live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged |
-| Candidate | `807219527870941c37c8c8719f7a95ae58cad755` (2026-09-28 readback) | Step 1 stages A5 onto it |
+| Candidate | `f2edffcf1f02fbc1a1d027020a1c0e0ab2598b9f` (host run 1 staging of `6d420735`) | Host run 2, step 1 stages `b9bd56e6` onto it |
 
 **File digests** (sha256 of the file; the installers copy it byte-exact):
 
-| File | A4 (installed) | A5 (`6d42073`) |
-|---|---|---|
-| `a3-worker-supervisor.py` | `0850c329…` | `151f1d24…` |
-| `a3-worker-guest.py` (runner) | `de4f44d6…` | `57770035…` |
-| `a4-credential-broker.py` | `97e0a207…` | `790a1957…` |
-| `admin/frontend/demo/server.mjs` | `8bb06506…` | `ce241fb1…` |
-| `a3-origin-proxy.py`, `a3-install-proxy.py` | `f5e63612…`, `59ae252e…` | unchanged |
-| `a3-network-fence.py`, `a3-install-fence.py` | `8d756bd2…`, `314b7766…` | unchanged |
+| File | A4 | A5 host run 1 (`6d42073`, installed) | A5 host run 2 (`b9bd56e6`) |
+|---|---|---|---|
+| `a3-worker-supervisor.py` | `0850c329…` | `151f1d24…` | `151f1d24…` (unchanged) |
+| `a3-worker-guest.py` (runner) | `de4f44d6…` | `57770035…` | **`a631ad9d…`** |
+| `a4-credential-broker.py` | `97e0a207…` | `790a1957…` | `790a1957…` (unchanged) |
+| `admin/frontend/demo/server.mjs` | `8bb06506…` | `ce241fb1…` | **`496846cd…`** (marker only) |
+| `a3-origin-proxy.py`, `a3-install-proxy.py` | `f5e63612…`, `59ae252e…` | unchanged | unchanged |
+| `a3-network-fence.py`, `a3-install-fence.py` | `8d756bd2…`, `314b7766…` | unchanged | unchanged |
+
+After host run 1: the supervisor receipt key is `b7fa10e4…` and the proof VM
+boot is `83df9a03-e43f-4d95-80b8-3f9303e9f6e5` (A3 `guest_crash`).
 
 ## Component map
 
@@ -71,7 +82,7 @@ draft.
 | `admin/frontend/demo/server.mjs` | A5 fixture modes and the injected file entry |
 | `scripts/a4-fixture-account.py` | `set-mode`, `clear-mode`, `server.mjs.previous`, `rollback-server --to` |
 | `scripts/a5-probe.mjs`, `scripts/a5-proof-db.mjs` | **Target proof harness** (18 cases) and its proof database |
-| `scripts/a4-canary-scan.py` | `--a5-dir`, `--marker` |
+| `scripts/a4-canary-scan.py` | `--a5-dir`, `--a5-marker` (the marker comes from the file, never the command line) |
 | Tests | `admin/backend/src/__tests__/operational-run-coordinator.test.js` (15); `scripts/tests/test_a5_{model_step,fixture_modes,probe_harness}.py` (12); A5 cases in `test_a4_credential_submit.py` |
 
 ## Interfaces
@@ -183,6 +194,59 @@ evidence.
 Every command runs as root on the proof host, as one paste. Review each
 output before the next. No step prints a secret.
 
+### Host run 2 (next): stage `b9bd56e6`, then the A3, A4 and A5 proofs again
+
+The supervisor and broker code are unchanged since host run 1. The runner
+changed, and it is installed with the supervisor, so the supervisor is
+reinstalled (with a new receipt key). The broker is not reinstalled.
+
+**Step R1 (stage, reinstall the supervisor, keep the A4 demo server aside, deploy the demo server, proxy proof).**
+`deploy-server` overwrites `server.mjs.previous` with the file it replaces
+(host run 1's `ce241fb1…`). The A4 server (`8bb06506…`, the current
+`.previous`) is therefore first copied to `server.mjs.a4`, once.
+
+```
+sudo sh -c 'set -e; C=b9bd56e6ae2a00eed08064ea06e4e01b0657ddb0; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/beautiful-maxwell-9bldxg; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py status; incus exec pp-fractionate-demo -- sh -c "test -e /opt/app/demo/server.mjs.a4 || cp -p /opt/app/demo/server.mjs.previous /opt/app/demo/server.mjs.a4; sha256sum /opt/app/demo/server.mjs.a4"; python3 a4-fixture-account.py deploy-server || { echo demo_deploy_failed; incus exec pp-fractionate-demo -- journalctl -u fractionate-demo.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a3-probe-proxy.py'
+```
+
+Expected output, in order:
+1. `staged <sha> (was f2edffcf…) from b9bd56e6…; 77 paths match exactly`,
+   then the new HEAD.
+2. The supervisor JSON:
+   - `"accepting_launch": true`, `"blockers": []`;
+   - a new `key_id` (`b7fa10e4…` archived);
+   - supervisor `151f1d24…` (unchanged) and runner **`a631ad9d…`**;
+   - every other file unchanged.
+3. The broker status: file `790a1957…`, `"approle_login": "ok"`.
+4. `8bb065061749f42c…  /opt/app/demo/server.mjs.a4` (the A4 server).
+5. The demo JSON:
+   - `previous_sha256` `ce241fb1…`;
+   - `server_sha256` **`496846cd…`**;
+   - `"service": "active"`.
+6. `"proxy_checks": "passed"` with 21 codes.
+
+If `server.mjs.a4` does not print `8bb06506…`, stop and paste it.
+
+**Step R2:** exactly step 2 below (a new A4 binding, then the full A3 proof,
+the A4 proof and the canary). All six A4 cases must now pass, including
+`login` and `rotation`.
+
+**Step R3 (the A5 proof, with the marker taken from the scanner, never typed).**
+
+```
+sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; node --no-warnings a5-probe.mjs; echo "a5_exit=$?"; D=$(ls -td /var/lib/proxypilot-a5-proof/*/ | head -1); B=$(cat "$D/last-binding"); python3 a4-canary-scan.py --binding "$B" --a5-dir "$D" --a5-marker; echo "canary_exit=$?"'
+```
+
+Expected output: step 3's list below.
+- `outside_set` now passes: the one-token reply is recorded by the
+  supervisor as `invalid`.
+- `host_journal_all` must show `marker_matches: 0`. The host run 1 sudo line
+  carried the old marker, which is no longer searched for.
+
+**Step R4:** step 4 below.
+
+### Host run 1 (2026-09-28, done; the record is in the evidence)
+
 **Step 0 (read-only, gate 3).**
 
 ```
@@ -276,7 +340,7 @@ digest and the **approval digest**. Check them, then type the digest's first
 12 characters. Anything else refuses and stops the run.
 
 ```
-sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; node --no-warnings a5-probe.mjs; echo "a5_exit=$?"; D=$(ls -td /var/lib/proxypilot-a5-proof/*/ | head -1); B=$(cat "$D/last-binding"); python3 a4-canary-scan.py --binding "$B" --a5-dir "$D" --marker A5-INJECTION-MARKER; echo "canary_exit=$?"'
+sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; node --no-warnings a5-probe.mjs; echo "a5_exit=$?"; D=$(ls -td /var/lib/proxypilot-a5-proof/*/ | head -1); B=$(cat "$D/last-binding"); python3 a4-canary-scan.py --binding "$B" --a5-dir "$D" --a5-marker; echo "canary_exit=$?"'
 ```
 
 Expected output:
@@ -303,13 +367,17 @@ If it fails:
   behaviour, not a boundary failure. Paste it; the case is then rerun with
   `--only outside_set`.
 
+(Host run 1 typed `--marker A5-INJECTION-MARKER` here. That option is gone:
+the typed marker was logged by sudo and counted itself.)
+
 **Step 4 (from the session, read-only):**
 - `run_self_checks` (`backend-tests`, `backend-syntax`, `skip_install: true`)
   on the new candidate head;
 - `get_host_services proxypilot-a`;
 - `inspect_a3_vm` (the boot changes in step 2).
 
-**Local checks** (repository root):
+**Local checks** (in a repository checkout, from its root; not on the host
+from `/`):
 
 ```
 python3 -m unittest discover -s scripts/tests -p 'test_a[345]*py'
@@ -321,9 +389,11 @@ python3 scripts/host-boundary-inventory.py
 ## Rollback order
 
 1. Keep A2/A3/Operations activation off; nothing activates A5.
-2. Put the demo back:
-   `python3 a4-fixture-account.py clear-mode; python3 a4-fixture-account.py rollback-server --to previous`
-   restores the A4 server (`8bb06506…`).
+2. Put the demo back to the A4 server (`8bb06506…`, kept as
+   `server.mjs.a4` since host run 2):
+   `python3 a4-fixture-account.py clear-mode; incus exec pp-fractionate-demo -- sh -c 'cp -p /opt/app/demo/server.mjs.a4 /opt/app/demo/server.mjs && systemctl restart fractionate-demo.service'`.
+   `rollback-server --to previous` restores only the file the last deploy
+   replaced.
 3. Return the supervisor, runner and broker to the A4 bytes. In the
    candidate, run `git revert --no-edit <the A5 staging commit>`, then
    `python3 a3-install-supervisor.py reinstall` and

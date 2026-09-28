@@ -14,8 +14,13 @@ value below (SHAs, services, VM boot) before acting.
 - The canary scan after it found 0 matches in 13 sinks.
 
 Exact-head Security CI passed on draft PR #699 (run `36449054256`, code
-`d052e416`). Nothing is activated, merged, deployed or promoted. A5 is eligible
-and not started; open items are in the evidence's acceptance section.
+`d052e416`). Nothing is activated, merged, deployed or promoted. Open items are
+in the evidence's acceptance section.
+
+**A5 (later):** implemented and locally verified on branch
+`claude/beautiful-maxwell-9bldxg` (code `6d420735`, built on this branch's
+head), not accepted; its host steps reinstall the supervisor, runner and broker
+and rerun this A4 proof. See the [A5 reference](fractionate-agents-a5-reference.md).
 
 ## Read first
 

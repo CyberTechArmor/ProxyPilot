@@ -123,6 +123,24 @@ refused at the broker in 0 ms and at the next submit in 4 ms). Replacing the
 AppRole secret ID in the dashboard is not one: tokens already issued stay valid
 for their TTL (1 h, max 4 h), and the running broker kept reading on its cached
 token until it was restarted.
+
+A5 widens the supervisor's backend socket by exactly one method, `model_step`
+(no mount, no other method, proxy path, fence rule or unit property changes).
+It is bound to the live attempt, its fence and its pinned run: the caller sends
+the run's policy document and the approved guide as exact bytes, and the
+supervisor refuses unless their sha256 match the pinned `policy_digest` and the
+policy's `guide_hash`, the profile consented to sending its guide to the
+provider, and the offered actions lie within the pinned rules. It then sends one
+fixed prompt to the broker's existing `model_call` under the run's pinned
+budget and returns one action name or a refusal, never model text. The
+broker's only change is a larger prompt cap (16000 bytes; the reservation
+arithmetic is unchanged). The A5 coordinator that calls it is a backend library
+that no route constructs; the proof runs it in a root host harness against a
+proof database, so the backend container still has no supervisor socket and
+this adds no reachable backend host call (the mount stays an A8 item). It does
+not close S6: a compromised root-equivalent backend could already drive the
+socket within the pinned project budgets, and now also spend the run's pinned
+model budget choosing among actions the pinned rules offer.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

@@ -9,6 +9,10 @@ Receipts are verified independently with the host public key. The guest
 crash case reboots the disposable proof VM's guest kernel (sync, then an
 immediate sysrq reboot); pass --skip-guest-crash to leave the boot as is.
 A host reboot is not performed here and stays an open proof.
+
+--human-session is not a case: it launches one browser attempt, serves the
+operator's human page on loopback for a real person, keeps the lease alive
+only until they take over, and records the verified receipt.
 """
 import argparse
 import base64
@@ -17,9 +21,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import secrets
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -540,9 +546,65 @@ print(json.dumps(out, sort_keys=True))'''
                 'receipt_evidence': payload['evidence'], 'relaunch_bound_boot': relaunched['boot_id'],
                 'post_reboot_fence': egress}
 
+    # ------------------------------------------------------ human session
+
+    def human_session(self, listen, minutes):
+        """A real person uses the human page on one live browser attempt. Not an automated case."""
+        ref, launched, _ = self.launch()
+        call('action', dict(ref, action='open_landing'))
+        token = secrets.token_urlsafe(24)
+        server = op.human_server(ref, listen, token)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(json.dumps({'human_session': ref, 'boot_id': launched['boot_id']}), flush=True)
+        print('From your workstation:  ssh -L %d:127.0.0.1:%d root@<this host>' % (listen[1], listen[1]))
+        print('Then open  http://127.0.0.1:%d/%s/  within %d minutes: Take over, click Sign in, type into the '
+              'dialog, press Esc, then Stop and tear down.' % (listen[1], token, minutes), flush=True)
+        seen, model_after, deadline = [], None, time.monotonic() + minutes * 60
+        record = None
+        try:
+            while time.monotonic() < deadline:
+                record = call('journal', {'attempt_id': ref['attempt_id']})['attempt']
+                if not seen or seen[-1] != record['state']:
+                    seen.append(record['state'])
+                if record['state'] in sup.TERMINAL:
+                    break
+                if record['state'] == 'running':
+                    # Stands in for the coordinator until the person takes over; from
+                    # then on only their page keeps the attempt alive.
+                    try:
+                        call('renew', ref)
+                    except op.CallFailed:
+                        pass
+                elif record['state'] == 'human' and model_after is None:
+                    model_after = refused('action', dict(ref, action='read_session'), backend=True)
+                time.sleep(5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.shutdown()
+            server.server_close()
+        record = call('journal', {'attempt_id': ref['attempt_id']})['attempt']
+        if record['state'] in sup.TERMINAL:
+            receipt = record['receipt']
+        else:
+            reason = 'taken_over' if record['state'] == 'human' else 'proof'
+            receipt = call('stop', dict(ref, reason=reason))['receipt']
+            record = call('journal', {'attempt_id': ref['attempt_id']})['attempt']
+        payload = receipt_ok(receipt)
+        log = [entry[1] for entry in record.get('log', [])]
+        result = {'human_session': 'taken_over' if 'takeover' in log else 'not_taken_over', 'ref': ref,
+                  'states_seen': seen, 'model_action_after_takeover': model_after, 'log': record.get('log'),
+                  'receipt_reason': payload['reason'], 'receipt_verified': True,
+                  'actions_performed': payload['actions_performed'], 'bound_boot_id': payload['bound_boot_id']}
+        path = OUT / ('human-session-%s.json' % self.stamp)
+        path.write_text(json.dumps(result, indent=2, default=str) + '\n')
+        os.chmod(path, 0o600)
+        result['report'] = str(path)
+        return result
+
     # --------------------------------------------------------------- run
 
-    def run(self, only):
+    def preflight(self):
         status = call('status')
         pub = subprocess.run(['openssl', 'pkey', '-pubin', '-in', str(op.PUBLIC_KEY), '-outform', 'DER'],
                              check=True, capture_output=True).stdout
@@ -550,7 +612,11 @@ print(json.dumps(out, sort_keys=True))'''
                      'boundary': status['boundary'], 'key_id_matches': status['supervisor']['key_id'] ==
                      hashlib.sha256(pub).hexdigest(), 'active': status['active']}
         print(json.dumps({'preflight': preflight}), flush=True)
-        if not status['accepting_launch'] or not preflight['key_id_matches']:
+        return preflight, status['accepting_launch'] and preflight['key_id_matches']
+
+    def run(self, only):
+        preflight, ready = self.preflight()
+        if not ready:
             return {'worker_proof': 'blocked', 'preflight': preflight}
         state = sup.Host().vm_state()
         self.measurements['qemu_tree_rss_kib_idle'] = sup.process_tree_rss_kib(state['pid'])[0]
@@ -594,9 +660,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--only', nargs='*', choices=CASES)
     parser.add_argument('--skip-guest-crash', action='store_true')
+    parser.add_argument('--human-session', action='store_true',
+                        help='launch one browser attempt and serve the human page for a real person')
+    parser.add_argument('--listen', type=op.parse_listen, default=('127.0.0.1', 18090))
+    parser.add_argument('--minutes', type=int, default=15)
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
+    if args.human_session:
+        proof = Proof(args.skip_guest_crash)
+        preflight, ready = proof.preflight()
+        if not ready:
+            print(json.dumps({'human_session': 'blocked', 'preflight': preflight}))
+            sys.exit(1)
+        result = proof.human_session(args.listen, max(1, min(args.minutes, 60)))
+        print(json.dumps(result, indent=2, default=str))
+        sys.exit(0 if result['human_session'] == 'taken_over' else 1)
     result = Proof(args.skip_guest_crash).run(args.only)
     print(json.dumps(result, indent=2, default=str))
     sys.exit(0 if result['worker_proof'] == 'passed' else 1)

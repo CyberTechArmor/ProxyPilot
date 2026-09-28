@@ -188,6 +188,51 @@ class ProofRunnerTests(unittest.TestCase):
                           '3e4f5a6b-7c8d-4e9f-8a1b-2c3d4e5f6a7b', 1, {'cpu': 1})
         self.assertEqual(probe.sup.validate_launch(spec)['limits'], {'cpu': 1})
 
+    def test_human_session_renews_only_until_takeover_and_keeps_the_page_receipt(self):
+        states = iter(['running', 'running', 'human', 'human', 'stopped', 'stopped'])
+        calls = []
+        receipt = {'attestation': 'a3r1.x.y'}
+
+        def fake_call(method, params=None, backend=False, timeout=180):
+            calls.append((method, backend))
+            if method == 'launch':
+                return {'boot_id': 'boot-1'}
+            if method == 'journal':
+                state = next(states)
+                log = [['t', 'takeover'], ['t', 'stopping:taken_over'], ['t', 'receipt']] if state == 'stopped' else []
+                return {'attempt': {'state': state, 'log': log, 'receipt': receipt}}
+            if method == 'action' and backend:
+                raise probe.op.CallFailed({'error': 'TAKEN_OVER'})
+            return {}
+
+        class Server:
+            def serve_forever(self):
+                pass
+
+            def shutdown(self):
+                calls.append(('page_closed', False))
+
+            def server_close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(probe, 'call', fake_call), patch.object(probe, 'OUT', Path(temp)), \
+                patch.object(probe.op, 'human_server', lambda ref, listen, token: Server()), \
+                patch.object(probe.time, 'sleep', lambda _: None), \
+                patch.object(probe, 'receipt_ok', lambda r: {'reason': 'taken_over', 'actions_performed': 1,
+                                                             'bound_boot_id': 'boot-1'}), \
+                patch('builtins.print'):
+            result = probe.Proof(True).human_session(('127.0.0.1', 18090), 1)
+            self.assertTrue(Path(result['report']).exists())
+        methods = [m for m, _ in calls]
+        self.assertEqual(result['human_session'], 'taken_over')
+        self.assertEqual(result['states_seen'], ['running', 'human', 'stopped'])
+        self.assertEqual(result['model_action_after_takeover'], 'TAKEN_OVER')
+        self.assertEqual(methods.count('renew'), 2)
+        self.assertNotIn('stop', methods)
+        self.assertLess(methods.index('page_closed'), len(methods) - 1)
+        self.assertEqual(result['receipt_reason'], 'taken_over')
+
 
 if __name__ == '__main__':
     unittest.main()

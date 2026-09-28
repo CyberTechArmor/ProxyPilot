@@ -40,7 +40,7 @@ installer = sup.installer
 VM = sup.VM
 OUT = installer.STATE / 'proof'
 POLICY = hashlib.sha256(b'a3-worker-proof-policy-v1').hexdigest()
-CASES = ('sessions', 'human_takeover', 'origin_refusals', 'escape', 'guest_root_egress', 'cpu', 'memory',
+CASES = ('sessions', 'minimums', 'human_takeover', 'origin_refusals', 'escape', 'guest_root_egress', 'cpu', 'memory',
          'tasks', 'disk', 'runtime', 'actions', 'descendant', 'lease_expiry', 'stale_fence', 'launch_failure',
          'backend_refusals', 'supervisor_crash', 'guest_crash')
 
@@ -108,6 +108,11 @@ def mib(value):
     return None if value in (None, '') else round(int(value) / 1048576, 1)
 
 
+def counters_of(text):
+    """cgroup key/value files such as memory.events and cpu.stat."""
+    return {k: int(v) for k, v in (line.split() for line in (text or '').splitlines() if len(line.split()) == 2)}
+
+
 def pressure(value):
     if not value:
         return None
@@ -164,47 +169,77 @@ class Proof:
         result = call('launch', body, backend=backend)
         return {'run_id': run, 'attempt_id': attempt, 'fence': fence}, result, (run, attempt, workspace)
 
+    def session(self, label, limits=None, sustain=0):
+        """One measured browser session; `sustain` adds model reads plus human screenshots."""
+        started = time.monotonic()
+        ref, launched, _ = self.launch(limits)
+        launch_seconds = round(time.monotonic() - started, 3)
+        latencies, results = {}, {}
+        for action in ('open_landing', 'open_login', 'read_session', 'read_workspace', 'open_landing'):
+            begin = time.monotonic()
+            results[action] = call('action', dict(ref, action=action))['result']
+            latencies.setdefault(action, []).append(int((time.monotonic() - begin) * 1000))
+        for _ in range(sustain):
+            begin = time.monotonic()
+            assert call('action', dict(ref, action='read_session'))['result'] == {
+                'untrusted_page_claim_authenticated': False}
+            latencies.setdefault('read_session', []).append(int((time.monotonic() - begin) * 1000))
+            call('view', ref)
+            time.sleep(1)
+        view = call('view', ref)
+        stats = call('unit_stats', {'attempt_id': ref['attempt_id']})
+        record = call('journal', {'attempt_id': ref['attempt_id']})['attempt']
+        payload = stop(ref)
+        assert results['open_login'] == {'at': 'login_dialog'}, results
+        assert results['read_session'] == {'untrusted_page_claim_authenticated': False}, results
+        assert results['read_workspace'] == {'at': 'workspace'}, results
+        events, cpu = counters_of(stats.get('memory.events')), counters_of(stats.get('cpu.stat'))
+        memory_stat = {k: mib(v) for k, v in (stats.get('memory.stat') or {}).items()}
+        return {'launch_seconds': launch_seconds, 'browser_start_seconds': record.get('browser_start_seconds'),
+                'seconds': round(time.monotonic() - started, 1), 'action_latency_ms': latencies,
+                'screenshot': self.save_png(label, view),
+                'unit_memory_peak_mib': mib(stats.get('memory.peak')),
+                'unit_memory_current_mib': mib(stats.get('memory.current')),
+                'unit_memory_stat_mib': memory_stat, 'unit_shmem_mib': memory_stat.get('shmem'),
+                'unit_memory_events': events, 'unit_oom_kills': events.get('oom_kill'),
+                'unit_pids_peak': stats.get('pids.peak'), 'unit_cpu_stat': cpu,
+                'unit_cpu_throttled_usec': cpu.get('throttled_usec'),
+                'unit_memory_pressure': pressure(stats.get('memory.pressure')),
+                'unit_cpu_pressure': pressure(stats.get('cpu.pressure')),
+                'guest_mem_available_mib': (stats.get('guest_mem_available_kib') or 0) // 1024,
+                'guest_mem_total_mib': (stats.get('guest_mem_total_kib') or 0) // 1024,
+                'guest_cpu_pressure': pressure(stats.get('guest_pressure_cpu')),
+                'guest_memory_pressure': pressure(stats.get('guest_pressure_memory')),
+                'root_free_mib': stats.get('root_free_mib'), 'root_total_mib': stats.get('root_total_mib'),
+                'var_log_mib': stats.get('var_log_mib'), 'apt_cache_mib': stats.get('apt_cache_mib'),
+                'host_qemu_tree_rss_kib': stats.get('host_qemu_tree_rss_kib'),
+                'limits_applied': launched['limits_applied'], 'boot_id': launched['boot_id'],
+                'receipt_reason': payload['reason']}
+
+    @staticmethod
+    def brief(samples):
+        keys = ('launch_seconds', 'browser_start_seconds', 'seconds', 'unit_memory_peak_mib', 'unit_shmem_mib',
+                'unit_oom_kills', 'unit_pids_peak', 'unit_cpu_throttled_usec', 'host_qemu_tree_rss_kib',
+                'guest_mem_available_mib')
+        return [{k: v for k, v in item.items() if k in keys} for item in samples]
+
     def sessions(self):
-        observed = []
-        for index in range(3):
-            started = time.monotonic()
-            ref, launched, _ = self.launch()
-            launch_seconds = round(time.monotonic() - started, 3)
-            latencies, results = {}, {}
-            for action in ('open_landing', 'open_login', 'read_session', 'read_workspace', 'open_landing'):
-                begin = time.monotonic()
-                results[action] = call('action', dict(ref, action=action))['result']
-                latencies.setdefault(action, []).append(int((time.monotonic() - begin) * 1000))
-            view = call('view', ref)
-            stats = call('unit_stats', {'attempt_id': ref['attempt_id']})
-            record = call('journal', {'attempt_id': ref['attempt_id']})['attempt']
-            payload = stop(ref)
-            assert results['open_login'] == {'at': 'login_dialog'}, results
-            assert results['read_session'] == {'untrusted_page_claim_authenticated': False}, results
-            assert results['read_workspace'] == {'at': 'workspace'}, results
-            sample = {'launch_seconds': launch_seconds, 'browser_start_seconds': record.get('browser_start_seconds'),
-                      'action_latency_ms': latencies, 'screenshot': self.save_png('session-%d' % index, view),
-                      'unit_memory_peak_mib': mib(stats.get('memory.peak')),
-                      'unit_memory_current_mib': mib(stats.get('memory.current')),
-                      'unit_memory_stat_mib': {k: mib(v) for k, v in (stats.get('memory.stat') or {}).items()},
-                      'unit_pids_peak': stats.get('pids.peak'), 'unit_cpu_stat': stats.get('cpu.stat'),
-                      'unit_memory_pressure': pressure(stats.get('memory.pressure')),
-                      'unit_cpu_pressure': pressure(stats.get('cpu.pressure')),
-                      'guest_mem_available_mib': (stats.get('guest_mem_available_kib') or 0) // 1024,
-                      'guest_mem_total_mib': (stats.get('guest_mem_total_kib') or 0) // 1024,
-                      'guest_cpu_pressure': pressure(stats.get('guest_pressure_cpu')),
-                      'guest_memory_pressure': pressure(stats.get('guest_pressure_memory')),
-                      'root_free_mib': stats.get('root_free_mib'), 'root_total_mib': stats.get('root_total_mib'),
-                      'var_log_mib': stats.get('var_log_mib'), 'apt_cache_mib': stats.get('apt_cache_mib'),
-                      'host_qemu_tree_rss_kib': stats.get('host_qemu_tree_rss_kib'),
-                      'limits_applied': launched['limits_applied'], 'boot_id': launched['boot_id'],
-                      'receipt_reason': payload['reason']}
-            observed.append(sample)
+        observed = [self.session('session-%d' % index) for index in range(3)]
         self.measurements['sessions'] = observed
-        return [{k: v for k, v in item.items() if k in ('launch_seconds', 'browser_start_seconds',
-                                                        'unit_memory_peak_mib', 'unit_pids_peak',
-                                                        'host_qemu_tree_rss_kib', 'guest_mem_available_mib')}
-                for item in observed]
+        return self.brief(observed)
+
+    def minimums(self):
+        """The browser and a human view must work AT the worker minimums, not only above them."""
+        limits = dict(sup.WORKER_MINIMUM)
+        observed = [self.session('minimums-%d' % index, limits, sustain=15) for index in range(2)]
+        for sample in observed:
+            applied = sample['limits_applied']
+            assert (applied['cpu_quota_percent'], applied['memory_mib'], applied['temporary_disk_mib']) == (
+                100, limits['memory_mib'], limits['temporary_disk_mib']), applied
+            assert sample['unit_oom_kills'] == 0, sample['unit_memory_events']
+            assert sample['unit_memory_peak_mib'] <= limits['memory_mib'], sample['unit_memory_peak_mib']
+        self.measurements['minimums'] = observed
+        return {'limits': limits, 'samples': self.brief(observed)}
 
     def human_takeover(self):
         ref, _, ids = self.launch()
@@ -227,7 +262,7 @@ class Proof:
         payload = stop(ref, 'taken_over')
         assert refused('launch', spec(*ids)) == 'ATTEMPT_EXISTS'
         assert refused('action', dict(ref, action='read_session')) == 'ATTEMPT_NOT_ACTIVE'
-        return {'click': point, 'dialog_opened_by_human_click': opened, 'escape_closed': closed,
+        return {'click': point, 'dialog_opened_by_human_click': opened, 'dialog_open_after_escape': closed,
                 'model_action_after_takeover': 'TAKEN_OVER', 'screenshots': [before, dialog],
                 'receipt_reason': payload['reason']}
 
@@ -533,9 +568,11 @@ print(json.dumps(out, sort_keys=True))'''
         os.chmod(path, 0o600)
         sessions = self.measurements.get('sessions') or []
 
-        def spread(key):
-            values = [s[key] for s in sessions if isinstance(s.get(key), (int, float))]
+        def spread(key, samples=None):
+            values = [s[key] for s in (sessions if samples is None else samples)
+                      if isinstance(s.get(key), (int, float))]
             return None if not values else {'min': min(values), 'median': statistics.median(values), 'max': max(values)}
+        minimum_runs = self.measurements.get('minimums') or []
         return {'worker_proof': report['worker_proof'], 'report': str(path),
                 'passed': [r['case'] for r in self.results if r['passed']],
                 'failed': [r['case'] for r in self.results if not r['passed']],
@@ -545,7 +582,11 @@ print(json.dumps(out, sort_keys=True))'''
                            'host_qemu_tree_rss_kib': spread('host_qemu_tree_rss_kib'),
                            'qemu_tree_rss_kib_idle': self.measurements.get('qemu_tree_rss_kib_idle'),
                            'guest_mem_available_mib': spread('guest_mem_available_mib'),
-                           'root_free_mib': spread('root_free_mib')},
+                           'root_free_mib': spread('root_free_mib'),
+                           'at_minimums_unit_memory_peak_mib': spread('unit_memory_peak_mib', minimum_runs),
+                           'at_minimums_unit_shmem_mib': spread('unit_shmem_mib', minimum_runs),
+                           'at_minimums_cpu_throttled_usec': spread('unit_cpu_throttled_usec', minimum_runs),
+                           'at_minimums_oom_kills': [s.get('unit_oom_kills') for s in minimum_runs]},
                 'open': report['open']}
 
 

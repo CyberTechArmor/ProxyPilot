@@ -160,6 +160,15 @@ class RenewTimerTests(unittest.TestCase):
         for line in ('OnCalendar=*-*-* 00/6:17:00', 'Persistent=true', 'OnBootSec=10min', 'WantedBy=timers.target'):
             self.assertIn(line, inst.RENEW_TIMER_TEXT)
 
+    def test_renewal_is_not_sandboxed_tighter_than_the_supervisor_it_mirrors(self):
+        # Host run 2026-09-28: with ProtectHome=yes the service failed while the same
+        # command succeeded from a root shell. It makes the supervisor's own Incus and
+        # nft calls (the supervisor unit has no ProtectHome; the incus client keeps its
+        # config under /root) and writes the certificate under /etc.
+        self.assertNotIn('ProtectHome', inst.UNIT_TEXT)
+        for directive in ('ProtectHome', 'ProtectSystem', 'ReadOnlyPaths', 'InaccessiblePaths', 'User='):
+            self.assertNotIn(directive, inst.RENEW_SERVICE_TEXT)
+
     @unittest.skipUnless(shutil.which('systemd-analyze'), 'systemd-analyze is required')
     def test_timer_and_service_verify(self):
         with tempfile.TemporaryDirectory() as temp:

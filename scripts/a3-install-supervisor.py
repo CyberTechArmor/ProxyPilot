@@ -53,8 +53,10 @@ TimeoutStartSec=180
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectHome=yes
 '''
+# No ProtectHome/ProtectSystem: renewal runs the same Incus and nft calls as the
+# supervisor (whose unit has no ProtectHome; the incus client keeps its config
+# under /root) and writes the certificate under /etc/proxypilot-a3-proof.
 RENEW_TIMER_TEXT = '''[Unit]
 Description=Check the A3 origin proxy certificate every six hours
 

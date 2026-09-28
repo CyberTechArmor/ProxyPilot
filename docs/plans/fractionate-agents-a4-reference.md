@@ -1,18 +1,21 @@
 # A4 reference: current state for any conversation
 
-Snapshot: 2026-09-28, after the second host run (step 1 and the A3 regression
-passed; step 2 stopped at a credential name).
+Snapshot: 2026-09-28, after the third host run (bound sign-in, rotation, egress
+and canary passed; the budget and revocation harness defects are fixed in
+`d052e416`).
 This file is the orientation page. The dated [A4 evidence](fractionate-agents-a4-evidence.md)
 is the record; if the two disagree, the evidence wins. Recheck every mutable
 value below (SHAs, services, VM boot) before acting.
 
 **Status in one line:** A4 is implemented, every local suite passes, and
-exact-head Security CI passed on draft PR #699. On the host, the broker is
-installed and configured, the proxy proof passed (21 cases) and the full A3
-proof passed again (19/19). A4 is **not accepted**: the provider key and
-binding are not set, because OpenBao has no credential under the name
-`openai-api-key`. The A4 probe and the canary scan are open. The next step is
-step 2b below.
+exact-head Security CI passed on draft PR #699. On the host:
+- The proxy proof (21 cases), the full A3 proof (19/19), and the A4 `login`,
+  `rotation` and `egress` cases passed.
+- The canary scan found 0 matches in 13 sinks.
+
+A4 is **not accepted**. `budget` and `revocation` failed on proof-harness
+defects, which are fixed in `d052e416`. The next step is **Resume here**
+below.
 
 ## Read first
 
@@ -30,9 +33,9 @@ step 2b below.
 | Where | Revision | Notes |
 |---|---|---|
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted (PR #698). Base of A4. |
-| Branch `claude/serene-franklin-eteidj` | code `9ef3af5656c58218cec9d214f18c6076a45cc2e1`; later commits are docs | Stage `9ef3af56` (fixes the proxy reinstall found on the first host run). Draft PR #699 carries Security CI. |
+| Branch `claude/serene-franklin-eteidj` | code `d052e416e6b63dfae756f5a6f7c226d4c7aa1145`; later commits are docs | Stage `d052e416` (probe `budget`/`revocation` fix, installer `configure`/`status` fix). The installed broker, supervisor, runner and proxy are byte-identical to `9ef3af56`, so nothing is reinstalled. Draft PR #699 carries Security CI. |
 | ProxyPilot live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged. Promotion is a separate user decision. |
-| ProxyPilot candidate (`pp-candidate`) | `795392979b7c68c1ce6bbe1f981548c77d2af027` (staged `9ef3af56` in the second host run), 23 ahead, clean | Installed: supervisor `0850c329…`, runner `de4f44d6…`, proxy `f5e63612…`, broker `97e0a207…`, supervisor key `062aa93b…`, proxy SPKI `NdkAJzLx…qwyM=`. Demo `server.mjs` `8bb06506…` (backup `server.mjs.pre-a4`). |
+| ProxyPilot candidate (`pp-candidate`) | `795392979b7c68c1ce6bbe1f981548c77d2af027` (staged `9ef3af56` in the second host run), 23 ahead, clean; stage `d052e416` next | Installed: supervisor `0850c329…`, runner `de4f44d6…`, proxy `f5e63612…`, broker `97e0a207…`, supervisor key `062aa93b…`, proxy SPKI `NdkAJzLx…qwyM=`. Demo `server.mjs` `8bb06506…` (backup `server.mjs.pre-a4`). |
 | PR #686 | draft, unmerged | Keep draft. |
 
 ## Proof target
@@ -285,6 +288,62 @@ run did). Its expected output is step 3 items 3–5.
 ```
 sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; test -s /var/lib/proxypilot-a4/proof-binding || { echo "no binding yet: finish step 2b"; exit 1; }; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B"; echo "canary_exit=$?"'
 ```
+
+**Resume here (after the third host run).** Binding `87698f27…` was revoked by
+the `revocation` case, so a new binding is needed. Run these in order:
+
+1. Stage `d052e416`. The code fix is only in the proof and host tools, so there
+   is no reinstall.
+   ```
+   sudo sh -c 'set -e; C=d052e416e6b63dfae756f5a6f7c226d4c7aa1145; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/serene-franklin-eteidj; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a4-install-broker.py status'
+   ```
+   Expected: `staged <sha> (was 79539297…) from d052e416…; 63 paths match
+   exactly`, then the new HEAD. The status shows files `97e0a207…` and
+   `23aeff46…`, `"vault_healthy": true`, **`"approle_login": "ok"`**, and
+   provider revision 2.
+   - `approle_login` shows `VAULT_UNAVAILABLE (approle login refused)`: the
+     secret ID was replaced in the dashboard. Reconfigure (below), then
+     continue.
+2. Step 2c (below): a new binding and a new verifier.
+3. Step 3b (below), then the ledger readback. The whole run takes about a
+   minute and makes one real `gpt-6-luna` call.
+   ```
+   sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; test -s /var/lib/proxypilot-a4/proof-binding || { echo "no binding yet: finish step 2c"; exit 1; }; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B"; echo "canary_exit=$?"; python3 a4-broker-operator.py ledger'
+   ```
+   Expected: `"a4_proof": "passed"` with all six cases, `a4_exit=0`,
+   `"canary_scan": "passed"`, `canary_exit=0`, then the ledger JSON. The ledger
+   holds calls, runs and deliveries: IDs, usage, costs and outcomes, never a
+   value.
+
+**Reconnect the broker after a new secret ID.** *Issue a new secret ID* in the
+dashboard replaces the broker's saved one. The running broker keeps working on
+its cached token for up to an hour, but every new sign-in is refused. Since
+`d052e416`, `configure` restarts the broker and waits for it. It prompts for
+the role ID and the new secret ID (hidden):
+
+```
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate/scripts; python3 a4-install-broker.py configure --approle-mount pp-g6-23bfea7a17f8-machine --kv-mount pp-g6-23bfea7a17f8-kv --agent a4-broker; python3 a4-install-broker.py status'
+```
+
+Expected: `"approle_login": "ok"`, `"broker_restarted": true`, then a status
+with `"approle_login": "ok"`.
+
+**Step 2c (a new binding after a proof run revoked the last one).** This
+revokes the old binding if it is still active and keeps its ID file as
+`proof-binding.<old id>`. It then binds a new one and provisions the verifier.
+
+```
+sudo sh -c 'set -e; OK=openai-api-key; FK=a4-fixture-password; cd /var/lib/proxypilot/self/candidate/scripts; OLD=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-broker-operator.py revoke --binding "$OLD" || true; mv /var/lib/proxypilot-a4/proof-binding /var/lib/proxypilot-a4/proof-binding.$OLD; python3 a4-broker-operator.py provider --vault-key "$OK"; B=$(cat /proc/sys/kernel/random/uuid); P=$(cat /proc/sys/kernel/random/uuid); Q=$(cat /proc/sys/kernel/random/uuid); python3 a4-broker-operator.py bind --binding $B --project $P --profile $Q --username a4-fixture@demo.fractionate.ai --vault-key "$FK"; umask 077; echo "$B" > /var/lib/proxypilot-a4/proof-binding; echo "binding=$B project=$P profile=$Q"; python3 a4-fixture-account.py provision --binding $B; python3 a4-install-broker.py status'
+```
+
+Expected output, in order:
+- `A4 broker refused: BINDING_REVOKED` (already revoked; fine), or the revoke
+  JSON;
+- the provider at the next revision;
+- a new binding at `"revision": 1`, `"state": "active"`;
+- the `binding=…` line;
+- `"provisioned": true`;
+- a status with `"approle_login": "ok"`.
 
 **Step 3 (A3 regression, A4 proof, canary).** This takes about 6–9 minutes and
 reboots the proof VM's guest once, in the A3 `guest_crash` case. The

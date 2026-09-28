@@ -1,15 +1,19 @@
 # A4 credentials and provider route — evidence
 
 **A4 is implemented and locally verified, and not accepted.** On the proof
-host (second host run, last section), the supervisor and proxy were reinstalled
-and the broker installed, the proxy proof passed (21 cases), and the full A3
-proof passed again (19 cases). The A4 probe and the canary scan have not run:
-no binding exists yet, because the provider step stopped at a credential name
-that is not in OpenBao. The [A4 reference](fractionate-agents-a4-reference.md)
-is the orientation page, and this file is the record. A2, A3 and Operations
-activation stay off. PR #686 stays draft. The only live change is the demo's
-reviewed `server.mjs`, deployed by the operator with a kept backup; its
-synthetic account stays inactive until a binding is provisioned.
+host:
+- The proxy proof (21 cases) and the full A3 proof (19/19) passed again.
+- The bound sign-in (`login`), rotation and egress cases passed.
+- The canary scan found 0 matches in all 13 sinks.
+
+Two proof cases, `budget` and `revocation`, failed on defects in the proof
+harness itself, fixed in `d052e416` (third host run, last section). They must
+pass on the host, followed by a final canary scan. The
+[A4 reference](fractionate-agents-a4-reference.md) is the orientation page,
+and this file is the record. A2, A3 and Operations activation stay off. PR #686
+stays draft. The only live change is the demo's reviewed `server.mjs`, which
+the operator deployed with a kept backup; it now also accepts the synthetic
+test account.
 
 ## 2026-09-28 gate check, implementation and local verification
 
@@ -557,3 +561,186 @@ output into the session. No value appears in it.
    passed at these supervisor and runner bytes.
 
 A4 remains **not accepted**. Gates 4 (A4 probe) and 5 (canary scan) are open.
+
+## 2026-09-28 third host run: bound sign-in, rotation, egress and canary pass; two harness defects fixed
+
+The user pasted the output of each step. No value appears in any of it.
+
+### Credential names
+
+- The name-only diagnostic listed `keys ["AgentKeys"]`: the agent had one
+  credential, under a different name. The user then assigned
+  `openai-api-key` and `a4-fixture-password` in the dashboard.
+- Step 2b:
+  - provider revision 1 (vault version 1, 15:53:00Z);
+  - binding `29532439-72a5-4654-9141-37c87909c3e3`, revision 1, active, vault
+    `agents/a4-broker/a4-fixture-password` version 1.
+  - `provision` was then refused with `VAULT_UNAVAILABLE`.
+
+### The dashboard's "Issue a new secret ID" and a stale broker sign-in
+
+- **Cause.** Between steps, the user confirmed *Issue a new secret ID* for
+  `a4-broker`. The broker config on the host still held the old secret ID.
+- **Why some calls still worked.** The running broker kept working on the token
+  it had signed in with at 15:22, which lasts up to one hour. So `provider` and
+  `bind` succeeded, and later the `login` case's delivery did too. Every fresh
+  sign-in was refused: the fixture tool, the canary scan, and the probe's
+  in-process re-provisioning.
+- **Confirmation.** A sign-in-only check with the saved config returned
+  `approle_login_http 400`. After the user reconfigured with the new secret ID
+  and restarted the broker, it returned to `ok`.
+- **Finding (recorded, not a code defect).** Issuing a new AppRole secret ID
+  does not end tokens already issued with the old one. The broker could read
+  assigned values for up to the token TTL (1 h, max 4 h) after the secret ID
+  was replaced, until it was restarted. Binding revocation is the immediate
+  stop (below); a secret-ID rotation is not.
+- **Tooling fixes (`d052e416`).**
+  - `a4-install-broker.py status` now also reports `approle_login` from a fresh
+    sign-in. `vault_healthy` only says OpenBao answers, and it read `true`
+    throughout.
+  - `configure` now restarts an installed broker and waits for it. The host's
+    `systemctl restart` returned before the broker's socket existed, so the
+    status call that followed failed with ENOENT (`[Errno 2]`).
+  - The fixture tool, the canary scan and the probe now print the broker's
+    fixed refusal detail next to its code.
+
+### Proof run 1 (`a4-proof-20260928T155331Z.json`, binding `29532439…`): failed
+
+| Case | Result |
+|---|---|
+| `proxy_policy` | Passed. |
+| `egress` | Passed. |
+| `login` | `outcome: rejected`, `login_requests: 1`, page claim `false`. The delivery and the one armed POST worked, but the demo had no synthetic account (provisioning had failed), so it refused the sign-in. A wrong or missing account yields `rejected`, never a false success. |
+| `budget` | `CallFailed: ACTIVE_ATTEMPT` (harness defect, below). |
+| `rotation` | `VAULT_UNAVAILABLE`: its re-provisioning needed a fresh sign-in. |
+| `revocation` | `KeyError: 'revoked_at'` (harness defect, below). The binding was revoked. |
+
+The canary scan stopped with `VAULT_UNAVAILABLE`.
+
+### Step 2c after reconfiguring
+
+- Revoking the old binding was refused with `BINDING_REVOKED` (the proof had
+  already revoked it); its ID file was kept as `proof-binding.29532439…`.
+- Provider revision 2 (vault version 1, 16:00:30Z).
+- New binding `87698f27-d3a6-4484-86f9-40068d56e777` (project `2f32bad0-…`,
+  profile `1089ce8a-…`), revision 1, active.
+- `"provisioned": true`: verifier 197 bytes, binding revision 1, vault
+  version 1.
+- Status: two bindings (`29532439…` revision 2 revoked; `87698f27…`
+  revision 1 active), provider revision 2, prices revision 1.
+
+### Proof run 2 (`a4-proof-20260928T160109Z.json`, binding `87698f27…`): four of six passed
+
+- **`proxy_policy`: passed.** The same 21 codes, boot `728c93ce…`.
+- **`login`: passed.**
+  - The submit returned `outcome: signed_in`, `login_requests: 1`, and the page
+    claims the bound account. The binding is `87698f27…` at revision 1; the
+    submit took 430 ms (journal `latency_ms` 404).
+  - `read_files` (a page read after sign-in) returned
+    `untrusted_page_claim_sample_present: true`.
+  - The journal's submit record has only `ordinal` 3, `action`, `binding_id`,
+    `binding_revision`, `state: done`, `at`, `latency_ms` and
+    `outcome: signed_in`.
+  - The receipt's credential block has only `binding_id`,
+    `binding_revision: 1`, `logout: done` and
+    `submits: [{ordinal: 3, outcome: signed_in}]`; the receipt reason is `proof`.
+  - Logout was `done`.
+  - Guest profile or cookie files after the stop: `[]` (before: `[]`); the
+    worker unit is `inactive`.
+  - The broker ledger has exactly one delivery, `outcome: delivered`, for run
+    `27a1a635…` / attempt `b5573ba1…`.
+- **`egress`: passed.**
+  - Guest root is refused to every `api.openai.com` address
+    (`162.159.140.245`, `172.66.0.243`: timeout; `2606:4700:7::f3`,
+    `2a06:98c1:58::f3`: 113).
+  - Also refused: the DNS gateway and public DNS, the vault on the bridge
+    (`10.185.17.1:18200`), and the vault route (`:443`).
+  - Fence counters: `allowed_proxy` +4, `denied_ipv4` +18, `denied_ipv6` +3.
+- **`rotation`: passed.**
+  - Revision 1 → 2 at vault version 1. The value was unchanged; this proves the
+    revision semantics.
+  - At the old revision, each of these was refused with
+    `BINDING_REVISION_MISMATCH`: the next submit (5 ms), a relaunch of the same
+    run, and a new run.
+  - The verifier was re-provisioned at revision 2, and the new revision signed
+    in (`signed_in`, `binding_revision: 2`, 484 ms).
+- **`budget`: failed**, `CallFailed: ACTIVE_ATTEMPT` (below).
+- **`revocation`: failed**, `KeyError: 'revoked_at'` (below). Binding
+  `87698f27…` is now revoked.
+
+`a4_exit=1`.
+
+### Canary scan after run 2: passed
+
+`"canary_scan": "passed"`, `canary_exit=0`, binding `87698f27…` revision 2,
+vault version 1. Every sink is `scanned: true` with 0 matches:
+
+| Sink | Bytes | Matches |
+|---|---|---|
+| supervisor unit journal | 4,415 | 0 |
+| broker unit journal | 776 | 0 |
+| proxy unit journal | 486 | 0 |
+| whole host journal (2 days) | 12,658,287 | 0 |
+| guest journal | 589,816 | 0 |
+| backend container logs (48 h) | 26,408 | 0 |
+| receipts and supervisor state journal | 400,019 | 0 |
+| broker journal and model records | 22,712 | 0 |
+| page reads and proof reports | 88,627 | 0 |
+| Incus logs | 138,717 | 0 |
+| database files | 12,959,248 | 0 |
+| database dump | 7,014,079 | 0 |
+| MCP ledger | 262,486 | 0 |
+
+`encodings_searched: 4`: the raw value plus its base64 at three alignments.
+For a letters-and-digits value the JSON-escaped and URL-encoded forms equal
+the raw one, and base64 equals base64url, so duplicates collapse.
+
+The scan covers the value delivered in all three sign-ins of both runs: the
+rejected one in run 1 and the two successful ones in run 2. It also covers the
+dashboard entry of the value through the backend.
+
+### Harness defects and fix (`d052e416`)
+
+- **`budget`.**
+  - The case launched run B while run A's attempt was still live. The
+    installed supervisor allows one live attempt and refused it
+    (`ACTIVE_ATTEMPT`); that refusal is correct.
+  - Each run is now stopped before the next launches, so its calls happen while
+    its own attempt is live.
+  - Before the refusal, run A had already made its real allowed call in both
+    runs. A refused or failed call would have raised a different code first. So
+    two real `gpt-6-luna` calls settled; the ledger readback after the rerun
+    records them.
+- **`revocation`.**
+  - Every assertion passed: broker `check`, the running attempt's next submit
+    and a new launch were each refused with `BINDING_REVOKED`, and no submit
+    was journalled. The case then read `revoked_at`, which the broker's
+    `revoke` reply does not carry (it returns `revoked_at_epoch`), so its
+    timings were lost.
+  - It now reports `revoked_at_epoch` and reads the binding state back.
+- **Why local tests missed both.** The earlier tests covered only the pure
+  helpers. The new `ProofFlowTests` run both cases end to end against the real
+  `Broker` class, with a supervisor fake that enforces one live attempt. On
+  the old code they fail with the host's exact errors
+  (`a4_probe_operator.CallFailed: ACTIVE_ATTEMPT` at the run-B launch, and
+  `KeyError: 'revoked_at'`).
+- **Local after the fix.** All script tests: 154 passed. The host-boundary
+  inventory exits 0.
+- **Staging.**
+  - Staging `d052e416` over the `9ef3af56` staging, simulated on a stand-in
+    candidate, gives `63 paths match exactly`.
+  - The installed broker, supervisor, runner and proxy are byte-identical at
+    `d052e416` (`97e0a207…`, `0850c329…`, `de4f44d6…`, `f5e63612…`), so
+    nothing is reinstalled.
+
+### Next (operator)
+
+1. Stage `d052e416`; the status should report `"approle_login": "ok"`.
+2. Run step 2c: binding `87698f27…` is revoked, so the proof needs a new
+   binding.
+3. Run step 3b, then read back the ledger.
+
+A4 remains **not accepted**. The `login` and `rotation` cases have passed on
+the host (gate 4 in part), and a canary scan has passed (gate 5), but
+`budget` and `revocation` must pass, and the canary must pass again after the
+final run.

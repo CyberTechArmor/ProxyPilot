@@ -1,8 +1,10 @@
 # Next section prompt — A4 credential and provider broker, gated by A3
 
 Do not execute merely by reading this file. **A4 is gated on A3 acceptance.**
-As of 2026-09-28 the host-owned A3 supervisor, guest runner and typed backend
-client are implemented, but the target proof has not run. The
+As of 2026-09-28 the host-owned A3 supervisor is installed on the proof VM and
+every automated target case has passed (18/18 plus the confirmed worker
+minimums), but A3 is not accepted: a real person on the human page and the
+candidate frontend build are still open. The
 [A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md) must first
 record A3 as accepted from observed evidence on the proof VM; start from the
 [A3 reference](fractionate-agents-a3-reference.md). A configuration assertion

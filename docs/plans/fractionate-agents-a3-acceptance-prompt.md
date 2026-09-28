@@ -54,13 +54,17 @@ and A4 stays blocked.
      command. It fetches the branch, runs the pinned stager
      `scripts/a3-stage-candidate.sh` against the latest reviewed code commit
      (never a plain cherry-pick: the mirrored scripts' file modes differ),
-     reinstalls the supervisor and runs the proof. As of the first target run,
-     that commit is `0572dcff`, and 16 of 18 cases have passed on the VM (see the
+     and runs what is still open. As of the third target run, the supervisor and
+     runner are installed from `0572dcff`, all 18 cases and `minimums` have
+     passed, and the latest code commit is `44c630fb` (`--human-session`; see the
      dated evidence).
    - Then run `run_self_checks` with `backend-tests` and `frontend-build` on the
      exact candidate head. Record the totals, failures and skips. Never skip a
      database test; if the install drops the native binding, the candidate's
      `prepare-self-check-native.mjs` step must restore it.
+   - The container's `frontend-build` check cannot build: the image sets
+     `NODE_ENV=production`, so `npm ci` omits `vite`. Build the exact candidate
+     on the host with `npm ci --include=dev` (the reference command does this).
    - Do not upload repository content from a cloud session to the host; the
      exfiltration guard refuses it.
 3. **Review the install output.**

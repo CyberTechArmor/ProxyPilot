@@ -1322,3 +1322,139 @@ The cause: the running live backend installs with its own policy
 repair line is not on live. The handoff records the same condition. The repair is
 `scripts/prepare-self-check-native.mjs`, run inside `proxypilot-admin`, followed
 by `run_self_checks` with `skip_install: true`. No test is skipped or weakened.
+
+## 2026-09-28 third target run: minimums confirmed, candidate checks, human-session tool
+
+User-run in the Host Terminal and reviewed in the session. Report:
+`/var/lib/proxypilot-a3-proof/proof/worker-proof-20260928T124209Z.json`.
+
+**Command.** Stage `1c5f486b` with the pinned stager, then
+`a3-probe-worker.py --only sessions minimums human_takeover`, then the
+candidate's `prepare-self-check-native.mjs` inside `proxypilot-admin`. No
+reinstall: only the probe changed, so the installed supervisor and runner stay
+the reviewed `0572dcff` bytes.
+
+- **Staging.** `staged 228fdd12… (was e5cf67b6…) from 1c5f486b…; 43 paths match
+  exactly`. `get_self_status`: candidate `228fdd12`, clean, 20 ahead of live
+  `33528751`.
+- **Preflight.** `accepting_launch: true`, no blockers, `key_id_matches: true`,
+  boundary VM `49592202-…`, boot `524515b5-…`, SPKI `u8bIwg5K…`.
+- **`sessions` (default limits), three cold starts.**
+  - Launch 0.469–0.576 s; Chromium ready 0.156–0.171 s.
+  - Unit memory peak 222.2–227.6 MiB; shmem 14.5–23.9 MiB.
+  - pids peak 103–111; OOM kills 0; no CPU throttling.
+  - Guest MemAvailable 3,244–3,261 MiB; root free 9,905 MiB.
+  - Host QEMU tree RSS 2,248,664 KiB, idle and during the sessions.
+- **`minimums` (CPU 1, 1024 MiB, 64 MiB), two sessions of 15 extra rounds each.**
+  Each round is a model read plus a human screenshot.
+  - Applied limits read back as `cpu_quota_percent: 100`, 1024 MiB and 64 MiB.
+  - Unit memory peak 221.0–225.1 MiB; shmem 13.2 MiB.
+  - pids peak 106–112; OOM kills `[0, 0]`.
+  - Throttled 339,925 and 365,183 µs over about 20 s sessions (under 2%).
+  - Launch 0.552–0.646 s; Chromium ready 0.24 s.
+- **`human_takeover`.**
+  - The human click at (1193, 43) opened the dialog, and Escape closed it
+    (`dialog_open_after_escape: false`).
+  - The model's action after takeover was refused `TAKEN_OVER`; receipt reason
+    `taken_over`.
+  - Screenshots `20260928T124209Z-human-{before,dialog}.png` (sha256 `c86f7b0c…`,
+    `6c5a9d65…`).
+- **Exits.** `worker_proof: passed`, `probe_exit=0`.
+- **MCP corroboration after the run.**
+  - All three A3 units active (fence active/exited; proxy and supervisor
+    running).
+  - `inspect_a3_vm`: same UUID, boot `524515b5-…` (no guest-crash case in this
+    run), QEMU PID 272179, 2 vCPU, 4096 MiB (guest MemTotal 3,845 MiB), 12 GiB,
+    no swap, QEMU RSS 2,302,631,936 bytes.
+
+**Sizing decision.** The minimums are confirmed as measured, and their values
+do not change.
+
+| Limit | Minimum | Measured need | Headroom |
+|---|---|---|---|
+| Memory | 1024 MiB | 225 MiB browser peak at the minimum | About 4.5×; room for a full browser restart (another ~225 MiB) with more than 500 MiB to spare |
+| Tasks | 512 | Peak 112 | Fixed limit; ample |
+| Temporary disk | 64 MiB | Unit shmem, including `/dev/shm`, peaked at 13.2 MiB | About 4.8× |
+| CPU | 1 | Throttled under 2% of wall time | 1 CPU is enough for this flow; slower pages would throttle more, not fail |
+
+VM shape (2 vCPU / 4096 MiB / 12 GiB, install formula `max(2, cpu)` and
+`max(4096, memory_mib + 1024)`) is confirmed for one worker:
+- guest MemAvailable stays above 3.2 GiB during a session;
+- root has 9.9 GiB free;
+- host QEMU RSS settles at about 2.2–2.3 GB. QEMU keeps pages the guest
+  touched, bounded by the VM size.
+
+The code comments that call the minimums "provisional until the lifecycle proof
+confirms them" are now satisfied by this record. They are left unchanged so the
+installed bytes stay the reviewed ones.
+
+**Native binding and candidate checks at `228fdd12`.**
+- `prepare-self-check-native.mjs` in `proxypilot-admin` printed
+  `Candidate better-sqlite3 12.11.1 native probe passed` (`native_exit=0`).
+- `run_self_checks` with `backend-tests` and `backend-syntax`
+  (`skip_install: true`, so the live policy's install could not remove the addon
+  again), run twice with the same result:
+  - `backend-tests`: **3333 tests, 3322 pass, 0 fail, 11 skipped**, 24.3 s.
+  - `backend-syntax`: passed. `promote_ready: true`.
+  - That tool's `backend-tests` runs every test file except the six named in
+    `docs/known-issues.md` (`cve-research`, `cves`, `incus`, `webauthn`,
+    `vpn-mtu`, `ldap`). The exclusion is hard-coded in `routes/mcp-tools/self-edit.js`
+    and predates A3; none of those files touches Operations or A3 code.
+  - The 11 skips are the suite's own environment guards (Playwright, live
+    OpenBao/Keycloak/Infisical binaries, root-only runner functions, loop
+    devices, `openssl`, `python3`). The tail does not name them individually.
+    The one A3 test behind such a guard is the cross-language receipt test in
+    `operational-worker-supervisor.test.js` (skips without `python3`). It
+    passed locally on the same bytes (73/73 Operations tests, 0 skipped).
+- `frontend-build` **failed in the container with `sh: vite: not found`
+  (exit 127)**, with and without install.
+  - Cause: the dashboard image sets `NODE_ENV=production` (`admin/Dockerfile`),
+    so the policy's `npm ci` omits devDependencies, which include `vite`.
+  - This is a pre-existing defect in that check's environment, not an A3
+    result. A3's only frontend change is the limits text in `AccessPolicy.jsx`.
+  - The branch's frontend, byte-identical to `1c5f486b`, builds locally
+    (`vite build`, 12.7 s).
+  - The exact-candidate build is in the next host command
+    (`npm ci --include=dev`, then `npm run build`, in the candidate).
+  - The recorded check state was restored afterwards by re-running
+    `backend-tests` and `backend-syntax`.
+
+**Local suites at `44c630fb`.**
+- `python3 -m unittest discover -s scripts/tests -p 'test_a3*py'`: 74 tests OK.
+- `node --test src/__tests__/operational-*.test.js`: 73/73.
+- `python3 scripts/host-boundary-inventory.py`: exit 0, "96 candidate backend
+  files inventoried; S6 remains open", no suppression.
+
+**Human page for a real person (`44c630fb`).** The operator CLI's `human`
+subcommand needs a live attempt, and nothing could launch one for a person. The
+new `a3-probe-worker.py --human-session` mode is not a proof case, and the
+supervisor and runner are unchanged. It does the following:
+- launches one browser attempt through the installed supervisor and opens the
+  landing page;
+- serves the existing loopback page (token path, loopback Host check) and
+  renews the lease only while the attempt is still the model's;
+- after takeover, only the person's page keeps it alive (every screenshot
+  refresh renews a `human` attempt). If they close it, the lease expires in
+  30 s and the attempt is torn down with a receipt;
+- checks that a backend (model) action is refused `TAKEN_OVER`;
+- writes `human-session-<stamp>.json` with the attempt log and the verified
+  receipt.
+
+It has a unit test.
+
+**Acceptance state.** A3 is **not yet accepted**.
+
+- **Observed on the VM with the installed supervisor:**
+  - every automated criterion (18 cases in the second run, plus the minimums
+    and three more measured sessions here);
+  - candidate `backend-tests`;
+  - the local suites and the inventory.
+- **Required and still open:**
+  1. A real person using the human page (`--human-session`).
+  2. The candidate frontend build on the host.
+- **Security CI:** recorded open unless the user asks for a draft PR, which the
+  criteria allow.
+- **May stay open if named:** the host reboot proof, the backend socket mount and
+  coordinator (A5), and S6/SEC-01/SEC-04.
+- **Deadline:** the proxy certificate expires around 2026-10-03, and launches
+  refuse after that until it is re-issued.

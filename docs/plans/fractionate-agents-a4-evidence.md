@@ -271,6 +271,18 @@ inside the browser.
 | `(cd admin/frontend && npm run demo:build && npm run demo:test)` | build passed; **2/2** smoke tests (public account, and the synthetic account with rotation, a bounds-refused file and a malformed file) |
 | `systemd-analyze verify proxypilot-a4-broker.service` | no findings |
 
+### Exact-head Security CI (draft PR #699)
+
+The user authorized one draft PR. [CyberTechArmor/ProxyPilot#699](https://github.com/CyberTechArmor/ProxyPilot/pull/699)
+ran *Security regression* run `36436717665` on head
+`ae8c8db1f8b1189ce8aae01e72be612352492413` (code `d0d4c2de` plus docs). All
+seven jobs passed: `backend`, `agent`, `frontend`, and the four dependency
+`audit` jobs (`admin/backend`, `admin/backend/src/mock2/framework-seed/base-app`,
+`admin/frontend`, `cli`). GitHub reported the PR `mergeable_state: clean`.
+The `backend` job runs every `scripts/tests/test_*.py`, so this includes the
+A3 and A4 Python suites and the unsuppressed host-boundary inventory. The PR
+stays draft.
+
 ### Target proof: not run (host root required)
 
 A cloud session cannot upload repository content to the host, and root on the
@@ -299,7 +311,8 @@ Open gates, each needing observed, reviewed evidence on the proof host:
      mismatch; provider error);
    - `rotation` and `revocation` (with timings).
 5. `a4-canary-scan.py`: every sink `scanned: true` with **0** matches.
-6. Exact-head Security CI on the draft PR.
+6. ~~Exact-head Security CI on the draft PR~~: **passed** at `ae8c8db1` (run
+   `36436717665`). It must pass again on any later code head.
 
 Still open by name after A4 (not A4 gates): S6 / SEC-01 / SEC-04, host reboot
 persistence (now also of the broker unit), and the backend socket mount and

@@ -5,9 +5,10 @@ This file is the orientation page. The dated [A4 evidence](fractionate-agents-a4
 is the record; if the two disagree, the evidence wins. Recheck every mutable
 value below (SHAs, services, VM boot) before acting.
 
-**Status in one line:** A4 is implemented and every local suite passes. A4 is
-**not accepted**: nothing is installed on the proof host yet, and the target
-proofs, the canary scan and exact-head Security CI are open.
+**Status in one line:** A4 is implemented, every local suite passes, and
+exact-head Security CI passed on draft PR #699 (run `36436717665`, head
+`ae8c8db1`). A4 is **not accepted**: nothing is installed on the proof host
+yet, and the target proofs and the canary scan are open.
 
 ## Read first
 

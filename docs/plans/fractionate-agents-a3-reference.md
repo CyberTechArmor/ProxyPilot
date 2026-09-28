@@ -77,7 +77,7 @@ A3 was **not accepted** yet.
 | Network | `incusbr0`, TAP `ppa3proof0`, guest `10.185.17.179` on NIC `enp5s0`, MAC `10:66:6a:55:f6:3f`, gateway `10.185.17.1` |
 | Host units | `proxypilot-a3-fence.service` (active/exited), `proxypilot-a3-origin-proxy.service` (active/running on `10.185.17.1:18083`), `proxypilot-a3-supervisor.service` (active/running; key ID `d6817618265ac253ea341b9f3f69dfe102ba9f1077e597f9accda4e113d0d517`, the old `c31fecee…` archived) |
 | Rollback snapshot | `pp-mcp-pre-network-20260927-222658`. Keep it; the fence installer also requires it. |
-| Proxy certificate | Self-signed (CN `demo.fractionate.ai`), pinned by SPKI in the guest browser; not Caddy or Let's Encrypt. It lives 7 days, and proxy `status` refuses it with under 24 h left. Since `d932ecd2`, `proxypilot-a3-proxy-renew.timer` (installed with the supervisor) re-issues it every ~4 days via `a3-install-proxy.py renew`; see the [A4 evidence](fractionate-agents-a4-evidence.md) section "proxy certificate: automatic renewal". Before that, only a proxy reinstall re-issued it. |
+| Proxy certificate | Self-signed (CN `demo.fractionate.ai`), pinned by SPKI in the guest browser; not Caddy or Let's Encrypt. It lives 7 days, and proxy `status` refuses it with under 24 h left. Since `d932ecd2`, `proxypilot-a3-proxy-renew.timer` (installed with the supervisor) re-issues it every ~4 days via `a3-install-proxy.py renew`; see the [A4 evidence](fractionate-agents-a4-evidence.md) section "proxy certificate: automatic renewal". Before that, only a proxy reinstall re-issued it. Proven on the host on 2026-09-28 (the timer's service ran, then 21 proxy cases and three sessions passed on the renewed pin `ASpAFpze…`). |
 
 ## Component map
 

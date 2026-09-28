@@ -1061,3 +1061,40 @@ session launches on the new pin.
   pins the new SPKI at the next launch. The timer is enabled, but its service
   fails until `63e00295` is installed. No renewal is due before about
   2026-10-02.
+
+### Host run 2 of the renewal step: the timer's service renews; proven
+
+- **The failed run's journal** (printed first) confirms the cause:
+  - the first renewal run, fired by the timer at install while the installer
+    held the lock, printed `"reason": "installer_busy"` and exited 0, as
+    designed;
+  - the `systemctl start` run printed `A3 proxy operation refused: Error:
+    mkdir /root/.config: read-only file system` — the incus client under
+    `ProtectHome=yes`.
+- **Staging.** `staged 807219527870941c37c8c8719f7a95ae58cad755 (was 39e3a8a9…)
+  from 63e00295…; 63 paths match exactly`.
+- **Supervisor reinstall.** `"accepting_launch": true`, `"blockers": []`,
+  `"certificate_renewal"` active/enabled.
+  - Receipt key `962dc0cf07218cfdd1de71b116b636ae345c87852bc8cfdce5f5fd08f8284732`;
+    the previous `e52ffcf3…` was archived.
+  - The renewal service is `cfd074a8…`; the timer (`058e2af8…`) and every
+    other file are unchanged.
+  - The boundary pins `ASpAFpzeM18Iynjr8SzmdGLAnozqpdqf1BZ3S18WDnI=`.
+- **The timer's own service, started by systemd:** success.
+  `"renewed": false, "reason": "not_due"`, `not_after` Oct 5 16:54:37 2026
+  GMT, `renew_within_seconds` 259200, the same SPKI. Next run in 5 h 19 min.
+- **Proxy proof.** `"proxy_checks": "passed"`, the same 21 codes, and a new
+  certificate hash `5a8e71ca…351f` (was `d54fdbc7…`).
+- **Sessions.** `a3-probe-worker.py --only sessions`: `"worker_proof":
+  "passed"`, report `worker-proof-20260928T170109Z.json`.
+  - The preflight pins the new SPKI with `key_id_matches: true`.
+  - Three launches: median 0.538 s, browser start 0.158 s, unit peak about
+    221 MiB, 0 OOM kills.
+- **CI.** Run `36454795456` on `d3a1b2b3` (code `63e00295`): 7/7 success.
+
+**Result.** The proxy certificate now renews unattended.
+- The first automatic renewal is expected at the first six-hourly check after
+  2026-10-02 16:54 UTC, when under 3 days remain.
+- A failed run shows as a failed `proxypilot-a3-proxy-renew.service`, with the
+  cause in its journal, while the current certificate stays valid for up to
+  3 more days.

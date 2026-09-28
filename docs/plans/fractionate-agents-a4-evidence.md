@@ -1,11 +1,15 @@
 # A4 credentials and provider route — evidence
 
-**A4 is implemented and locally verified, and not accepted.** No target proof
-has run yet: the broker is not installed on the proof host, no binding exists,
-and the canary scan has not run. The [A4 reference](fractionate-agents-a4-reference.md)
+**A4 is implemented and locally verified, and not accepted.** On the proof
+host (second host run, last section), the supervisor and proxy were reinstalled
+and the broker installed, the proxy proof passed (21 cases), and the full A3
+proof passed again (19 cases). The A4 probe and the canary scan have not run:
+no binding exists yet, because the provider step stopped at a credential name
+that is not in OpenBao. The [A4 reference](fractionate-agents-a4-reference.md)
 is the orientation page, and this file is the record. A2, A3 and Operations
-activation stay off. PR #686 stays draft. Nothing was deployed and no live
-host, route or guest was changed by this work.
+activation stay off. PR #686 stays draft. The only live change is the demo's
+reviewed `server.mjs`, deployed by the operator with a kept backup; its
+synthetic account stays inactive until a binding is provisioned.
 
 ## 2026-09-28 gate check, implementation and local verification
 
@@ -296,12 +300,13 @@ deliberately.
 ### Acceptance decision (2026-09-28): A4 is NOT accepted
 
 Open gates, each needing observed, reviewed evidence on the proof host:
-1. Staging on the candidate, the proxy reinstall, the supervisor reinstall and
-   the broker install, with readback.
-2. The full A3 proof again (18 cases plus `minimums`), because the supervisor
-   and runner changed.
-3. `a3-probe-proxy.py`: 21 cases (A3's 7, 12 refused POST/path variants, and
-   the two positives: the bounded sign-in POST and the empty logout).
+1. ~~Staging on the candidate, the proxy reinstall, the supervisor reinstall
+   and the broker install, with readback~~: **passed** on the second host run.
+2. ~~The full A3 proof again (18 cases plus `minimums`), because the supervisor
+   and runner changed~~: **passed**, 19/19, on the second host run.
+3. ~~`a3-probe-proxy.py`: 21 cases (A3's 7, 12 refused POST/path variants, and
+   the two positives: the bounded sign-in POST and the empty logout)~~:
+   **passed** on the second host run.
 4. `a4-probe.py`, where every case must pass:
    - `login` (signed in, `read_files`, logout `done`, receipt credential block,
      no profile or cookie file in the guest after stop);
@@ -407,3 +412,148 @@ The user ran step 1 in the ProxyPilot Host Terminal with the stager pinned at
   placeholder is left.
 
 A4 remains **not accepted**; every target gate listed above is still open.
+
+## 2026-09-28 second host run: step 1 and the A3 regression pass; step 2 stops at a credential name
+
+The user ran steps 1–3 in the ProxyPilot Host Terminal and pasted the full
+output into the session. No value appears in it.
+
+### Step 1: passed
+
+- **Staging.** `staged 795392979b7c68c1ce6bbe1f981548c77d2af027 (was
+  10290c81…) from 9ef3af56…; 63 paths match exactly`.
+- **Proxy reinstall.** `"installed": true`, `"previous_removed": null`. This is
+  the reinstall-skip path of the `9ef3af56` fix, run on the host where the first
+  run had already removed the proxy. The new certificate SPKI is
+  `NdkAJzLxqviLAlokZghRbU+B+uE8lO7dmjnEg7NqwyM=`, and the service is
+  active/enabled.
+- **Supervisor reinstall.** `"installed": true`, `"accepting_launch": true`,
+  `"blockers": []`, new `key_id` `062aa93bb65d…ecee8b`. The previous key was
+  archived as `supervisor-keys/d6817618…d517.pem`; the state journal, fence
+  and proxy were retained. The installed files read back as:
+
+  | File | SHA-256 |
+  |---|---|
+  | `a3-worker-supervisor.py` | `0850c329d85d64a00e5941f92317a74bf5a6ee13df3223c77be75b19f5572eeb` |
+  | `a3-worker-guest.py` | `de4f44d6bddccf045ba17621c323b5eb376dff987b5ca60deb526a26705d3c3b` |
+  | `a3-origin-proxy.py` | `f5e63612043ce1fce052c1de0c04722754b290d2fdd35c61e79b2d8af33a1104` |
+  | `a3-install-proxy.py` | `f0233e1619a7aeff4fd64eb5f847ad03b56043737fc7730120d9642002948e44` |
+  | `a3-install-fence.py` | `314b77669482b3f55bf5526fe745cf0fe68a28eb9fa979c2a8ad9ae9d8fa46d6` |
+  | `a3-network-fence.py` | `8d756bd27c4c308945215ae80ad7439a6d58f2678183208180534b0986a35eb7` |
+  | `proxypilot-a3-supervisor.service` | `254ec0d57fe46b7b618941f62369ca63aa2ab128392a6a2dce48e7f72f2fcdfe` |
+  | `supervisor-pub.pem` | `7e1d2c48564b87b18da35c2429c7fcf1028440b2777a7dfd4259386ddcc842d0` |
+
+- **Proxy proof.** `"proxy_checks": "passed"`, 21 codes
+  `403,403,200,200,403,403,403,400,403×12,200`, all on the demo certificate
+  `d54fdbc7…107a`.
+  - `login_json_reaches_origin`: 400 from the origin (`origin_answered: true`).
+    The bounded JSON sign-in POST passes the proxy; the demo refuses the
+    probe's deliberately invalid body.
+  - The 12 refused variants all return 403 with `origin_answered: false`:
+    text/plain, no content type, empty body, over 1024 bytes, chunked, query,
+    other host, PUT, POST to session, files and root, and logout with a body.
+  - `logout_empty_reaches_origin`: 200 (`origin_answered: true`).
+  - The old A3 `request_/api/login` GET is still 403.
+- **Broker install.** `"installed": true`, service active/enabled. Broker
+  `97e0a2074414ba377b16102819ab4355556101b5cfacb16d1fc175c9fd8d4bd5`, unit
+  `23aeff46dadf4a7d3591fe779459182783e3fb4530b4379fa0a697dc0c8f11e4`.
+  `vault_healthy: false` and `bindings: []`, as expected before configuration.
+
+### Step 2: stopped at `VAULT_KEY_MISSING`
+
+- **First attempt.** Interrupted at the hidden secret-ID prompt
+  (`KeyboardInterrupt` in `getpass`). Nothing was written.
+- **Second attempt.**
+  - `configure`: `"approle_login": "ok"`; config `/etc/proxypilot-a4/broker-config.json`,
+    mode 0600, address `http://127.0.0.1:18200`, mounts
+    `pp-g6-23bfea7a17f8-machine` and `pp-g6-23bfea7a17f8-kv`, agent `a4-broker`.
+  - `price set`: price table revision 1 at `2026-09-28T15:22:20Z`, `gpt-6-luna`
+    input 0.10, cached input 0.01, cache write 0.125, output 0.50.
+  - `provider --vault-key openai-api-key`: `A4 broker refused:
+    VAULT_KEY_MISSING`.
+- **What the refusal means.** The broker got HTTP 404 on
+  `pp-g6-23bfea7a17f8-kv/metadata/agents/a4-broker/openai-api-key` with its own
+  AppRole token. Its policy grants that path, so a 404 rather than a 403 means
+  the mount and policy are right. No credential exists under that exact name,
+  and names are case-sensitive.
+  - The dashboard's credential name field shows `OPENAI_API_KEY` as its
+    placeholder, so the key was probably entered under a different name, or not
+    yet entered.
+  - `set -e` stopped the step before `bind`. No binding exists, and
+    `/var/lib/proxypilot-a4/proof-binding` was not written.
+- **Partial rerun** (the "rerun only what failed" command). It read the
+  missing binding file, then:
+  - `deploy-server`: `"deployed": true`, previous `f83d8189…df6a`, now
+    `8bb065061749…e390`, backup `/opt/app/demo/server.mjs.pre-a4`, service
+    `active`.
+  - `provision`: `BINDING_UNKNOWN`, since there is no binding. The demo's
+    synthetic account stays inactive; the public demo account is unchanged.
+  - Status: `config_present: true`, `vault_healthy: true`, `bindings: []`,
+    `provider: null`, prices revision 1.
+
+### Step 3: A3 regression passed; A4 probe and canary blocked
+
+- **A3 regression.** `"worker_proof": "passed"`, 19/19, `a3_exit=0`, report
+  `worker-proof-20260928T152421Z.json`. It ran against the A4 supervisor and
+  runner above, with key `062aa93b…`.
+  - `backend_refusals` has 12 codes, including `credential_action:
+    CREDENTIAL_NOT_BOUND` and `credential_action_without_binding:
+    INVALID_REQUEST`.
+  - `origin_refusals` still refuses the page's own `login_submission`. The
+    runner's single armed POST exists only inside `submit_bound_fixture`.
+  - `guest_crash` rebooted the guest from `524515b5…` to
+    `728c93ce-2436-44a7-818b-017ee50645c9`. The fence refused everything after
+    the reboot.
+  - Sizing:
+
+    | Measure | Range |
+    |---|---|
+    | Unit memory peak | 221.6–224.3 MiB |
+    | Unit memory peak at minimums | 220.6–228.5 MiB, 0 OOM kills |
+    | Launch | median 0.571 s |
+    | Browser start | median 0.162 s |
+    | Idle QEMU tree RSS | 2,541,992 KiB |
+
+  - The A3 open items are unchanged: host reboot persistence, and the backend
+    socket mount.
+- **A4 probe.** `"a4_proof": "blocked"`, `a4_exit=1`. The preflight had
+  everything but a binding:
+
+  | Preflight field | Value |
+  |---|---|
+  | `credential_broker` | `available` |
+  | `broker_sha256` | matches `97e0a207…` |
+  | `key_id_matches` | `true` |
+  | `vault_healthy` | `true` |
+  | `provider` | `null` |
+  | Prices | revision 1 |
+  | Boundary boot | `728c93ce…` |
+  | SPKI | as installed |
+  | `binding` | `null` |
+
+- **Canary.** `A4 canary scan stopped: BINDING_UNKNOWN`, `canary_exit=1`.
+- Both blocks follow from step 2. Neither is a proof failure.
+
+### Read back from the session (MCP, after the run)
+
+- `get_host_services`: `proxypilot-a3-fence` active/exited,
+  `proxypilot-a3-origin-proxy`, `proxypilot-a3-supervisor` and
+  `proxypilot-a4-broker` active/running.
+- `inspect_a3_vm agents-a3-debian13-proof-20260927`: Running, VM UUID
+  `49592202-…73e4`, boot `728c93ce-2436-44a7-818b-017ee50645c9`, QEMU PID
+  272179 (RSS 2,384,216,064 bytes), 2 CPUs, 4096 MiB, 12 GiB root on
+  `Storage`, swap off, Debian 13.7.
+- `test_route demo.fractionate.ai`: edge 200, upstream `10.185.17.210:4179`
+  200. The demo serves on the A4 `server.mjs`.
+- `get_self_status`: candidate `79539297`, 23 ahead, clean.
+
+### Next (operator)
+
+1. Read the exact credential names under agent `a4-broker`. Use the dashboard's
+   *Assigned credentials* list, or the reference's name-only diagnostic.
+2. Run step 2b from the reference, with those names. It skips configure, price
+   and deploy, which are done.
+3. Run step 3b: the A4 probe and the canary only. The A3 regression already
+   passed at these supervisor and runner bytes.
+
+A4 remains **not accepted**. Gates 4 (A4 probe) and 5 (canary scan) are open.

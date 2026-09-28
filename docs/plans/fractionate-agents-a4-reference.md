@@ -1,14 +1,18 @@
 # A4 reference: current state for any conversation
 
-Snapshot: 2026-09-28, after the A4 implementation and local verification.
+Snapshot: 2026-09-28, after the second host run (step 1 and the A3 regression
+passed; step 2 stopped at a credential name).
 This file is the orientation page. The dated [A4 evidence](fractionate-agents-a4-evidence.md)
 is the record; if the two disagree, the evidence wins. Recheck every mutable
 value below (SHAs, services, VM boot) before acting.
 
 **Status in one line:** A4 is implemented, every local suite passes, and
-exact-head Security CI passed on draft PR #699 (run `36436717665`, head
-`ae8c8db1`). A4 is **not accepted**: nothing is installed on the proof host
-yet, and the target proofs and the canary scan are open.
+exact-head Security CI passed on draft PR #699. On the host, the broker is
+installed and configured, the proxy proof passed (21 cases) and the full A3
+proof passed again (19/19). A4 is **not accepted**: the provider key and
+binding are not set, because OpenBao has no credential under the name
+`openai-api-key`. The A4 probe and the canary scan are open. The next step is
+step 2b below.
 
 ## Read first
 
@@ -28,7 +32,7 @@ yet, and the target proofs and the canary scan are open.
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted (PR #698). Base of A4. |
 | Branch `claude/serene-franklin-eteidj` | code `9ef3af5656c58218cec9d214f18c6076a45cc2e1`; later commits are docs | Stage `9ef3af56` (fixes the proxy reinstall found on the first host run). Draft PR #699 carries Security CI. |
 | ProxyPilot live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged. Promotion is a separate user decision. |
-| ProxyPilot candidate (`pp-candidate`) | `10290c81…` (staged `d0d4c2de` in the first host run), 22 ahead, clean | Staging `9ef3af56` over it was simulated on a stand-in: "63 paths match exactly". The proxy is **removed** (unit not found) since that run; step 1 reinstalls it. |
+| ProxyPilot candidate (`pp-candidate`) | `795392979b7c68c1ce6bbe1f981548c77d2af027` (staged `9ef3af56` in the second host run), 23 ahead, clean | Installed: supervisor `0850c329…`, runner `de4f44d6…`, proxy `f5e63612…`, broker `97e0a207…`, supervisor key `062aa93b…`, proxy SPKI `NdkAJzLx…qwyM=`. Demo `server.mjs` `8bb06506…` (backup `server.mjs.pre-a4`). |
 | PR #686 | draft, unmerged | Keep draft. |
 
 ## Proof target
@@ -38,7 +42,7 @@ Same as A3; recheck with `inspect_a3_vm`.
 | Field | Value |
 |---|---|
 | VM | `pp-agents-a3-debian13-proof-20260927`, UUID `49592202-a8b0-45af-9ac6-5439761d73e4` |
-| Boot | `524515b5-6576-4479-8b0f-07fa4d9205c6`, QEMU PID 272179 (2026-09-28 readback). The A3 `guest_crash` case changes the boot. |
+| Boot | `728c93ce-2436-44a7-818b-017ee50645c9`, QEMU PID 272179 (2026-09-28 readback after the second host run). The A3 `guest_crash` case changes the boot. |
 | Fixture origin | `https://demo.fractionate.ai`, LXC `pp-fractionate-demo`, `fractionate-demo.service` (`www-data`), `/opt/app/demo/server.mjs` |
 | Vault | OpenBao (Docker, `127.0.0.1:18200`), agent `a4-broker` from *Platform Setup → Agents and machines (OpenBao)* |
 | Model route | OpenAI `gpt-6-luna`, Chat Completions, `https://api.openai.com/v1/chat/completions`, called from the host |
@@ -239,12 +243,48 @@ Expected output:
 If a step fails:
 - "AppRole login refused": wrong mount, role or secret, or OpenBao sealed.
   Nothing was written; rerun the whole step.
-- `VAULT_KEY_MISSING`: the credential key name differs from the dashboard.
+- `VAULT_KEY_MISSING`: no credential exists under that exact name under agent
+  `a4-broker`. Names are case-sensitive, and the dashboard's placeholder is
+  `OPENAI_API_KEY`. Find the real names, then continue with step 2b (below).
+  Do not rerun step 2: it would prompt for the AppRole again and redeploy the
+  demo.
 - After the binding line printed, do not rerun the whole step (it would create
   a second binding). Rerun only what failed:
   `sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-fixture-account.py deploy-server; python3 a4-fixture-account.py provision --binding "$B"; python3 a4-install-broker.py status'`
 - A `deploy-server` failure that left the demo broken:
   `sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; python3 a4-fixture-account.py rollback-server'`
+
+**Key names (read-only, prints names only).** The dashboard's *Assigned
+credentials* list under `a4-broker` shows the same names, as
+`<kv>/agents/a4-broker/<name>`.
+
+```
+sudo python3 -I -c 'import importlib.util,json;s=importlib.util.spec_from_file_location("b","/etc/proxypilot-a4/broker/a4-credential-broker.py");b=importlib.util.module_from_spec(s);s.loader.exec_module(b);v=b.Vault(b.load_config());st,body=v._call("GET","/v1/%s/metadata/agents/%s/?list=true"%(v.config["kv_mount"],v.config["agent"]),token=v._token());print("http",st,"kv",v.config["kv_mount"],"agent",v.config["agent"],"keys",json.dumps((body.get("data") or {}).get("keys")))'
+```
+
+Expected: `http 200 … keys ["<name>", "<name>"]`. A result of `http 404 …
+keys null` means the agent has no credentials yet: assign both in the
+dashboard (step 0, items 4 and 5).
+
+**Step 2b (resume after `VAULT_KEY_MISSING`).** This skips configure, price
+and deploy. Set `OK` (OpenAI key) and `FK` (fixture password) to the exact
+names first. It refuses to run once a binding file exists.
+
+```
+sudo sh -c 'set -e; OK=openai-api-key; FK=a4-fixture-password; cd /var/lib/proxypilot/self/candidate/scripts; test ! -s /var/lib/proxypilot-a4/proof-binding || { echo "a binding already exists: $(cat /var/lib/proxypilot-a4/proof-binding); do not rerun step 2b"; exit 1; }; python3 a4-broker-operator.py provider --vault-key "$OK"; B=$(cat /proc/sys/kernel/random/uuid); P=$(cat /proc/sys/kernel/random/uuid); Q=$(cat /proc/sys/kernel/random/uuid); python3 a4-broker-operator.py bind --binding $B --project $P --profile $Q --username a4-fixture@demo.fractionate.ai --vault-key "$FK"; umask 077; echo "$B" > /var/lib/proxypilot-a4/proof-binding; echo "binding=$B project=$P profile=$Q"; python3 a4-fixture-account.py provision --binding $B; python3 a4-install-broker.py status'
+```
+
+Expected: step 2 items 3, 4, 5, 7 and 8. Do not change either value in the
+dashboard between step 2b and step 3. Delivery reads the pinned version, and
+a newer version is refused.
+
+**Step 3b (A4 probe and canary only).** Use this when the A3 regression has
+already passed at the installed supervisor and runner bytes (the second host
+run did). Its expected output is step 3 items 3–5.
+
+```
+sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; test -s /var/lib/proxypilot-a4/proof-binding || { echo "no binding yet: finish step 2b"; exit 1; }; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B"; echo "canary_exit=$?"'
+```
 
 **Step 3 (A3 regression, A4 proof, canary).** This takes about 6–9 minutes and
 reboots the proof VM's guest once, in the A3 `guest_crash` case. The

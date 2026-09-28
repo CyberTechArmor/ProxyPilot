@@ -1253,3 +1253,72 @@ need the `sessions` case.
 The VM boot generation is now `92a161fd…`. The earlier fence, proxy and cgroup
 probes named the old boot, but the post-reboot fence deltas above re-observed
 the fence on the new boot.
+
+## 2026-09-28 second target run: all 18 cases passed
+
+User-run in the Host Terminal and reviewed in the session. Report:
+`/var/lib/proxypilot-a3-proof/proof/worker-proof-20260928T121140Z.json`.
+
+- **Staging and install.**
+  - The stager (pinned at `0572dcff`) moved the candidate `9a9c453a` → `e5cf67b6`,
+    "43 paths match exactly".
+  - `reinstall` archived the old key
+    (`supervisor-keys/c31fecee….pem`), kept the state journal and installed the new
+    key `d6817618265ac253ea341b9f3f69dfe102ba9f1077e597f9accda4e113d0d517`.
+  - The installed runner `0cee977c…` and supervisor `cdd49b83…` equal
+    `git show 0572dcff:…`. Preflight key ID matched.
+  - MCP corroboration: all three A3 units active; `inspect_a3_vm` shows the same
+    UUID and QEMU PID 272179 with the new boot `524515b5-6576-4479-8b0f-07fa4d9205c6`;
+    candidate `e5cf67b6` clean.
+- **Browser and human path (were failing, now pass).**
+  - `sessions`: three cold starts. Launch 0.45–0.54 s, Chromium ready 0.15 s, unit
+    memory peak **217–224 MiB**, pids peak 111–114, guest MemAvailable 3,237–3,255
+    MiB, root free 9,913 MiB.
+  - `human_takeover`: the human click at (1193, 43) opened the dialog, and Escape
+    closed it (the report field `escape_closed: false` meant "dialog open: false";
+    renamed in `1c5f486b`). The model's action after takeover was refused
+    `TAKEN_OVER`, and the receipt reason was `taken_over`.
+- **Origin refusals.** 8/8 page attempts refused. Top-level navigations to
+  `example.com`, `1.1.1.1` and `:8443` were refused by the runner's own policy.
+  `http://demo…` was upgraded by Chromium to the approved `https` origin. The
+  runner-layer refusal list also shows the page's Google Fonts request
+  (`fonts.googleapis.com`), which is denied, so local font fallback is used.
+- **Escape.** `raw_ipv4_socket: refused:1` (EPERM; no CAP_NET_RAW), now a real
+  privilege test. Everything else as in the first run.
+- **Every other case passed again** with the same outcomes:
+  - guest-root egress with fence deltas;
+  - CPU usage/wall 1.024 with 30 throttles;
+  - OOM at 1024 MiB after 960 MiB;
+  - tasks denied at 510/512;
+  - ENOSPC at 64 MiB;
+  - runtime `timeout` at 15.054 s, then relaunch `DEADLINE`;
+  - the action limit across attempts;
+  - the detached descendant killed;
+  - lease expiry at about 31.7 s;
+  - stale fence;
+  - launch failure;
+  - 11 backend refusals;
+  - supervisor crash (NRestarts 0 → 1, action 2 `uncertain`, not replayed);
+  - guest crash (`92a161fd…` → `524515b5…`, relaunch bound to the new boot, fence
+    re-observed).
+- **Host memory.** QEMU tree RSS was 2,210,660 KiB idle and during the sessions.
+  `inspect_a3_vm` read 2,303,156,224 bytes afterwards: QEMU keeps pages the guest
+  touched, bounded by the 4 GiB VM plus overhead.
+
+**Gap found in review.** These sessions ran at default limits (memory 3,077
+MiB, temporary disk 512 MiB, no CPU quota). They measure the browser's need, but
+they do not show that a project set exactly at the provisional minimums (CPU 1,
+1024 MiB, 64 MiB) can run the flow. `1c5f486b` adds a `minimums` case: two
+sessions at those limits, each with 15 extra rounds of a model read plus a human
+screenshot, which must finish with no OOM kill. It was validated locally through
+the real supervisor, runner and Chromium. Only the probe script changed, so the
+installed supervisor and runner stay the reviewed `0572dcff` bytes.
+
+**Candidate checks at `e5cf67b6`:** `backend-syntax` passed. `backend-tests`
+failed before any assertion about this change, with "Could not locate the bindings
+file" for `better-sqlite3` (for example in `security-mcp-recovery-migration.test.js`).
+The cause: the running live backend installs with its own policy
+(`npm ci --ignore-scripts`), which removes the native addon, and the candidate's
+repair line is not on live. The handoff records the same condition. The repair is
+`scripts/prepare-self-check-native.mjs`, run inside `proxypilot-admin`, followed
+by `run_self_checks` with `skip_install: true`. No test is skipped or weakened.

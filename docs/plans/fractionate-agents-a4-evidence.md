@@ -356,3 +356,54 @@ is off. No backend route writes 1110 tables.
 The other new files are the A4 scripts and tests, `operational-credential-*.js`
 and the new backend test. The full list is in `git diff --stat
 0b743b22..HEAD`.
+
+## 2026-09-28 first host run of step 1: proxy reinstall stopped; fixed
+
+The user ran step 1 in the ProxyPilot Host Terminal with the stager pinned at
+`d0d4c2de`. A screenshot of the output was reviewed in the session.
+
+- **Staging.** `staged 10290c81c78b56d9c79aa3787056a9cba64ccc4a (was
+  ba5c6363…) from d0d4c2de…; 60 paths match exactly`. MCP `get_self_status`
+  then read candidate `10290c81`, 22 ahead, clean.
+- **Proxy reinstall.** It stopped with `A3 proxy operation refused: Refusing to
+  replace unrelated file: /var/lib/proxypilot-a3-proof/proxy-install.json`. The
+  `set -e` command did not reach the supervisor reinstall, the proxy probe or
+  the broker install.
+- **State afterwards (MCP `get_host_services`).**
+  - `proxypilot-a3-origin-proxy.service` is `not-found`: removal completed.
+  - The fence is active/exited and the supervisor active/running.
+  - With no proxy, the supervisor's boundary check refuses every launch. That
+    is the fail-closed direction. No guest, route or other service changed.
+- **Root cause (my defect).** `remove()` leaves the journal in phase
+  `removed`. `install()` then accepted that phase but wrote its new
+  `prepared` journal with the installer's non-replacing `save`, which refuses
+  to overwrite a file with different content. The earlier unit test stopped
+  the install before that write (at certificate generation), so it did not
+  catch the defect.
+- **Fix (`9ef3af56`).**
+  - `install()` replaces only its own `removed` journal.
+  - `reinstall` skips the removal when the proxy is already removed, so the
+    same step-1 command recovers this host.
+  - The new test runs `install()` end to end on temp paths, with a real
+    certificate and real journal writes. On the old code it fails with the
+    host's exact error; on the fix it passes. It also shows that a `prepared`
+    journal is still refused and left untouched.
+- **Hardening in the same commit, found while re-reading steps 2 and 3.**
+  - `a4-fixture-account.py` pushes from a 0600 temporary file instead of
+    relying on `incus file push -` reading stdin.
+  - The login case counts only profile or cookie files that are new since the
+    attempt started. It reports earlier leftovers separately, and dropped the
+    generic names `Preferences`/`History`.
+  - The canary scan reads a two-day journal window instead of fourteen days.
+- **Local after the fix:** `python3 -m unittest discover -s scripts/tests -p
+  'test_*.py'`: 149 passed.
+- **Staging `9ef3af56` over the `d0d4c2de` staging,** simulated on a stand-in
+  candidate: `63 paths match exactly`, and scripts, backend and demo are
+  byte-identical to `9ef3af56`.
+- **Mount names.** MCP `get_platform_service openbao` gave the OpenBao
+  container prefix `pp-g6-23bfea7a17f8`. With `namesFor`, the broker config
+  uses the KV mount `pp-g6-23bfea7a17f8-kv` and the AppRole mount
+  `pp-g6-23bfea7a17f8-machine`. The step 2 command now carries both, so no
+  placeholder is left.
+
+A4 remains **not accepted**; every target gate listed above is still open.

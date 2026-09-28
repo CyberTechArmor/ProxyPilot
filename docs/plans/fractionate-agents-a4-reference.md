@@ -26,9 +26,9 @@ yet, and the target proofs and the canary scan are open.
 | Where | Revision | Notes |
 |---|---|---|
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted (PR #698). Base of A4. |
-| Branch `claude/serene-franklin-eteidj` | code `d0d4c2de21e827748275ab8283297708851483fc`; later commits are docs | Stage `d0d4c2de`. A draft PR carries Security CI. |
+| Branch `claude/serene-franklin-eteidj` | code `9ef3af5656c58218cec9d214f18c6076a45cc2e1`; later commits are docs | Stage `9ef3af56` (fixes the proxy reinstall found on the first host run). Draft PR #699 carries Security CI. |
 | ProxyPilot live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged. Promotion is a separate user decision. |
-| ProxyPilot candidate (`pp-candidate`) | `ba5c6363…` (staged A3 `44c630fb`), 21 ahead, clean | Staging `d0d4c2de` over it was simulated on a stand-in: "60 paths match exactly". |
+| ProxyPilot candidate (`pp-candidate`) | `10290c81…` (staged `d0d4c2de` in the first host run), 22 ahead, clean | Staging `9ef3af56` over it was simulated on a stand-in: "63 paths match exactly". The proxy is **removed** (unit not found) since that run; step 1 reinstalls it. |
 | PR #686 | draft, unmerged | Keep draft. |
 
 ## Proof target
@@ -184,14 +184,16 @@ output of each step before the next; no step prints a secret.
 **Step 1 (stage, reinstall the proxy and supervisor, install the broker, proxy proof).**
 
 ```
-sudo sh -c 'set -e; C=d0d4c2de21e827748275ab8283297708851483fc; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/serene-franklin-eteidj; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-proxy.py reinstall; python3 a3-install-supervisor.py reinstall; python3 a3-probe-proxy.py; python3 a4-install-broker.py install'
+sudo sh -c 'set -e; C=9ef3af5656c58218cec9d214f18c6076a45cc2e1; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/serene-franklin-eteidj; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-proxy.py reinstall; python3 a3-install-supervisor.py reinstall; python3 a3-probe-proxy.py; python3 a4-install-broker.py install'
 ```
 
 Expected output, in order:
-1. `staged <sha> (was ba5c6363…) from d0d4c2de…; 60 paths match exactly`, then
+1. `staged <sha> (was 10290c81…) from 9ef3af56…; 63 paths match exactly`, then
    the new HEAD.
-2. The proxy JSON: `"installed": true`, a new `certificate_spki_sha256` (7-day
-   certificate from now) and `previous_removed.removed: true`.
+2. The proxy JSON: `"installed": true` and a new `certificate_spki_sha256`
+   (7-day certificate from now). `previous_removed` is `null`, because the
+   first host run already removed the proxy; on a host where it is still
+   installed it reads `removed: true`.
 3. The supervisor JSON: `"installed": true`, `"accepting_launch": true`,
    `"blockers": []` and a new `key_id`, with the old key archived under
    `supervisor-keys/`.
@@ -210,12 +212,16 @@ If a step fails:
 - "Unowned broker file exists": report `ls -la /etc/proxypilot-a4`.
 
 **Step 2 (AppRole, price, provider key, binding, fixture origin).** This step
-is interactive: two hidden prompts. It **replaces the live demo's
-`server.mjs`**, keeping `server.mjs.pre-a4`. Replace `<APPROLE>` and `<KV>`
-with the page's mount names.
+is interactive: two hidden prompts, for the role ID and then the secret ID. It
+**replaces the live demo's `server.mjs`**, keeping `server.mjs.pre-a4`.
+
+The mount names are this host's OpenBao names: prefix `pp-g6-23bfea7a17f8`,
+so the KV mount is `pp-g6-23bfea7a17f8-kv` and the AppRole mount is
+`pp-g6-23bfea7a17f8-machine`. The agents page shows the same. The binding ID
+is saved (not secret) to `/var/lib/proxypilot-a4/proof-binding` for step 3.
 
 ```
-sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate/scripts; python3 a4-install-broker.py configure --approle-mount <APPROLE> --kv-mount <KV> --agent a4-broker; python3 a4-broker-operator.py price set --model gpt-6-luna --input 0.10 --cached-input 0.01 --cache-write 0.125 --output 0.50; python3 a4-broker-operator.py provider --vault-key openai-api-key; B=$(cat /proc/sys/kernel/random/uuid); P=$(cat /proc/sys/kernel/random/uuid); Q=$(cat /proc/sys/kernel/random/uuid); python3 a4-broker-operator.py bind --binding $B --project $P --profile $Q --username a4-fixture@demo.fractionate.ai --vault-key a4-fixture-password; python3 a4-fixture-account.py deploy-server; python3 a4-fixture-account.py provision --binding $B; python3 a4-install-broker.py status; echo "binding=$B project=$P profile=$Q"'
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate/scripts; python3 a4-install-broker.py configure --approle-mount pp-g6-23bfea7a17f8-machine --kv-mount pp-g6-23bfea7a17f8-kv --agent a4-broker; python3 a4-broker-operator.py price set --model gpt-6-luna --input 0.10 --cached-input 0.01 --cache-write 0.125 --output 0.50; python3 a4-broker-operator.py provider --vault-key openai-api-key; B=$(cat /proc/sys/kernel/random/uuid); P=$(cat /proc/sys/kernel/random/uuid); Q=$(cat /proc/sys/kernel/random/uuid); python3 a4-broker-operator.py bind --binding $B --project $P --profile $Q --username a4-fixture@demo.fractionate.ai --vault-key a4-fixture-password; umask 077; echo "$B" > /var/lib/proxypilot-a4/proof-binding; echo "binding=$B project=$P profile=$Q"; python3 a4-fixture-account.py deploy-server; python3 a4-fixture-account.py provision --binding $B; python3 a4-install-broker.py status'
 ```
 
 Expected output:
@@ -224,24 +230,28 @@ Expected output:
 3. The provider with `"revision": 1` and a `vault_version`.
 4. The binding with `"revision": 1`, `"state": "active"` and a vault
    `path`/`version`.
-5. `"deployed": true` with `previous_sha256` and `server_sha256 8bb06506…`,
+5. The `binding=… project=… profile=…` line. The ID is also saved for step 3.
+6. `"deployed": true` with `previous_sha256` and `server_sha256 8bb06506…`,
    `"service": "active"`.
-6. `"provisioned": true`, `"binding_revision": 1`.
-7. Status with `"vault_healthy": true`.
-8. The `binding=… project=… profile=…` line. Keep it.
+7. `"provisioned": true`, `"binding_revision": 1`.
+8. Status with `"vault_healthy": true`.
 
 If a step fails:
 - "AppRole login refused": wrong mount, role or secret, or OpenBao sealed.
-  Nothing was written.
-- `VAULT_KEY_MISSING`: the credential key name differs.
-- A `deploy-server` failure: `python3 a4-fixture-account.py rollback-server`.
+  Nothing was written; rerun the whole step.
+- `VAULT_KEY_MISSING`: the credential key name differs from the dashboard.
+- After the binding line printed, do not rerun the whole step (it would create
+  a second binding). Rerun only what failed:
+  `sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-fixture-account.py deploy-server; python3 a4-fixture-account.py provision --binding "$B"; python3 a4-install-broker.py status'`
+- A `deploy-server` failure that left the demo broken:
+  `sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; python3 a4-fixture-account.py rollback-server'`
 
 **Step 3 (A3 regression, A4 proof, canary).** This takes about 6–9 minutes and
 reboots the proof VM's guest once, in the A3 `guest_crash` case. The
 `revocation` case ends the binding.
 
 ```
-sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; python3 a3-probe-worker.py; echo "a3_exit=$?"; python3 a4-probe.py --binding <B>; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding <B>; echo "canary_exit=$?"'
+sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; python3 a3-probe-worker.py; echo "a3_exit=$?"; B=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B"; echo "canary_exit=$?"'
 ```
 
 Expected output:

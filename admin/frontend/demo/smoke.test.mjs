@@ -128,3 +128,84 @@ test('synthetic account signs in from its verifier file, rotates without restart
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A5: outcome fixtures apply to the synthetic account only, after a correct
+// password, and never count toward the shared sign-in rate limit.
+test('A5 fixture modes and the injected file entry stay on the synthetic account', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'demo-a5-'));
+  const file = path.join(dir, 'synthetic-account.json');
+  const modes = path.join(dir, 'a5-fixture.json');
+  const account = 'a4-fixture@demo.fractionate.ai';
+  const value = 'A5-fixture-value-123';
+  writeFileSync(file, verifier(account, value));
+  const a5Port = port + 2;
+  const a5Origin = `http://127.0.0.1:${a5Port}`;
+  const child = spawn(process.execPath, [serverPath], {
+    env: { ...process.env, DEMO_PORT: String(a5Port), DEMO_PUBLIC_ORIGIN: a5Origin,
+      DEMO_SYNTHETIC_ACCOUNT_FILE: file, DEMO_A5_FIXTURE_FILE: modes },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let errors = '';
+  child.stderr.on('data', (data) => { errors += data; });
+  const login = (emailValue, passwordValue) => fetch(`${a5Origin}/api/login`, {
+    method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/json', Origin: a5Origin },
+    body: JSON.stringify({ email: emailValue, password: passwordValue }),
+  });
+  const setMode = async (mode, injection = false) => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(modes, JSON.stringify({ v: 1, mode, injection }));
+  };
+  try {
+    await Promise.race([
+      once(child.stdout, 'data'),
+      once(child, 'exit').then(() => { throw new Error(`Demo server exited: ${errors}`); }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`Demo server did not start: ${errors}`)), 5000)),
+    ]);
+    await setMode('expired');
+    // Nine fixture refusals: the shared bucket (8 failures lock everyone) is untouched.
+    for (let i = 0; i < 9; i += 1) {
+      const expired = await login(account, value);
+      assert.equal(expired.status, 401);
+      assert.equal((await expired.json()).code, 'credential_expired');
+    }
+    assert.equal((await login('demo@fractionate.ai', 'welcome-demo')).status, 200);
+    await setMode('locked');
+    assert.equal((await login(account, value)).status, 429);
+    assert.equal((await login('demo@fractionate.ai', 'welcome-demo')).status, 200);
+    // A wrong password is still a real failure whatever the mode.
+    assert.equal((await login(account, 'wrong-value')).status, 401);
+    await setMode('redirect');
+    const redirected = await login(account, value);
+    assert.equal(redirected.status, 302);
+    assert.equal(redirected.headers.get('location'), '/external-login');
+    await setMode('challenge');
+    const challenged = await login(account, value);
+    assert.equal(challenged.status, 200);
+    assert.deepEqual(await challenged.json(), { authenticated: false, challenge: 'mfa' });
+    const pending = challenged.headers.get('set-cookie')?.split(';')[0];
+    assert.deepEqual(await (await fetch(`${a5Origin}/api/session`, { headers: { Cookie: pending } })).json(),
+      { authenticated: false, email: null, challenge: 'mfa' });
+    // The public account never sees a mode or the injected entry.
+    const demo = await login('demo@fractionate.ai', 'welcome-demo');
+    const demoCookie = demo.headers.get('set-cookie')?.split(';')[0];
+    await setMode('normal', true);
+    const demoFiles = await (await fetch(`${a5Origin}/api/files`, { headers: { Cookie: demoCookie } })).json();
+    assert.deepEqual(demoFiles.files.map((f) => f.id), ['sample-metrics']);
+    const ok = await login(account, value);
+    assert.equal(ok.status, 200);
+    const cookie = ok.headers.get('set-cookie')?.split(';')[0];
+    const files = await (await fetch(`${a5Origin}/api/files`, { headers: { Cookie: cookie } })).json();
+    assert.deepEqual(files.files.map((f) => f.id), ['a5-notice', 'sample-metrics']);
+    assert.match(files.files[0].description, /A5-INJECTION-MARKER/);
+    // A malformed fixture file is ignored (normal mode).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(modes, '{"v":1,"mode":"shell","injection":true}');
+    assert.equal((await login(account, value)).status, 200);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill();
+      await once(child, 'exit').catch(() => {});
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -12,8 +12,15 @@ printed, written to disk on the host, or placed in the guest.
 
   provision --binding <uuid>   write/refresh the verifier (after bind or rotate)
   deploy-server                push this checkout's reviewed demo server.mjs
-                               (keeps the previous file as server.mjs.pre-a4)
-  rollback-server              restore server.mjs.pre-a4 and restart
+                               (keeps the first original as server.mjs.pre-a4
+                               and the file it replaces as server.mjs.previous)
+  rollback-server [--to pre-a4|previous]
+                               restore that file and restart
+  set-mode --mode M [--injection on|off]
+                               A5: write the synthetic account's outcome fixture
+                               (normal, expired, locked, challenge, redirect) and
+                               the injected file entry; not secret, no restart
+  clear-mode                   A5: remove the fixture file (normal, no injection)
 """
 import argparse
 import base64
@@ -31,6 +38,9 @@ DEMO_DIR = '/opt/app/demo'
 VERIFIER = DEMO_DIR + '/synthetic-account.json'
 SERVER = DEMO_DIR + '/server.mjs'
 BACKUP = DEMO_DIR + '/server.mjs.pre-a4'
+PREVIOUS = DEMO_DIR + '/server.mjs.previous'
+FIXTURE = DEMO_DIR + '/a5-fixture.json'
+MODES = ('normal', 'expired', 'locked', 'challenge', 'redirect')
 SERVICE = 'fractionate-demo.service'
 INSTALLED_BROKER = Path('/etc/proxypilot-a4/broker/a4-credential-broker.py')
 REVIEWED_SERVER = Path(__file__).resolve().parents[1] / 'admin' / 'frontend' / 'demo' / 'server.mjs'
@@ -99,21 +109,44 @@ def deploy_server(instance=INSTANCE, source=REVIEWED_SERVER):
         raise ValueError('demo server not found in ' + instance)
     if guest_sha256(BACKUP, instance) is None:
         run(['incus', 'exec', instance, '--', 'cp', '-p', SERVER, BACKUP])
+    if before != hashlib.sha256(data).hexdigest():
+        run(['incus', 'exec', instance, '--', 'cp', '-p', SERVER, PREVIOUS])
     push(data, SERVER, instance)
     run(['incus', 'exec', instance, '--', 'systemctl', 'restart', SERVICE])
     run(['incus', 'exec', instance, '--', 'systemctl', 'is-active', '--quiet', SERVICE])
     return {'deployed': True, 'instance': instance, 'previous_sha256': before,
-            'server_sha256': hashlib.sha256(data).hexdigest(), 'backup': BACKUP, 'service': 'active'}
+            'server_sha256': hashlib.sha256(data).hexdigest(), 'backup': BACKUP,
+            'previous': PREVIOUS, 'previous_sha256': guest_sha256(PREVIOUS, instance), 'service': 'active'}
 
 
-def rollback_server(instance=INSTANCE):
-    if guest_sha256(BACKUP, instance) is None:
-        raise ValueError('no pre-A4 backup in ' + instance)
-    run(['incus', 'exec', instance, '--', 'cp', '-p', BACKUP, SERVER])
+def rollback_server(instance=INSTANCE, to='pre-a4'):
+    source = {'pre-a4': BACKUP, 'previous': PREVIOUS}[to]
+    if guest_sha256(source, instance) is None:
+        raise ValueError('no %s backup in %s' % (to, instance))
+    run(['incus', 'exec', instance, '--', 'cp', '-p', source, SERVER])
     run(['incus', 'exec', instance, '--', 'systemctl', 'restart', SERVICE])
     run(['incus', 'exec', instance, '--', 'systemctl', 'is-active', '--quiet', SERVICE])
-    return {'rolled_back': True, 'server_sha256': guest_sha256(SERVER, instance),
+    return {'rolled_back': True, 'to': to, 'server_sha256': guest_sha256(SERVER, instance),
             'notice': 'The synthetic-account file is left in place and ignored by the pre-A4 server.'}
+
+
+def fixture_document(mode, injection):
+    if mode not in MODES or not isinstance(injection, bool):
+        raise ValueError('mode must be one of %s' % ', '.join(MODES))
+    return (json.dumps({'v': 1, 'mode': mode, 'injection': injection}) + '\n').encode()
+
+
+def set_mode(mode, injection, instance=INSTANCE):
+    document = fixture_document(mode, injection)
+    push(document, FIXTURE, instance)
+    return {'fixture': FIXTURE, 'mode': mode, 'injection': injection,
+            'sha256': hashlib.sha256(document).hexdigest(),
+            'notice': 'Applies to the synthetic account only, after a correct password; no restart.'}
+
+
+def clear_mode(instance=INSTANCE):
+    run(['incus', 'exec', instance, '--', 'rm', '-f', FIXTURE])
+    return {'fixture': FIXTURE, 'removed': guest_sha256(FIXTURE, instance) is None}
 
 
 def main():
@@ -122,7 +155,12 @@ def main():
     prov = sub.add_parser('provision')
     prov.add_argument('--binding', required=True)
     sub.add_parser('deploy-server')
-    sub.add_parser('rollback-server')
+    back = sub.add_parser('rollback-server')
+    back.add_argument('--to', choices=('pre-a4', 'previous'), default='pre-a4')
+    mode = sub.add_parser('set-mode')
+    mode.add_argument('--mode', required=True, choices=MODES)
+    mode.add_argument('--injection', choices=('on', 'off'), default='off')
+    sub.add_parser('clear-mode')
     for command in sub.choices.values():
         command.add_argument('--instance', default=INSTANCE)
     args = parser.parse_args()
@@ -132,8 +170,12 @@ def main():
         result = provision(args.binding, args.instance)
     elif args.command == 'deploy-server':
         result = deploy_server(args.instance)
+    elif args.command == 'set-mode':
+        result = set_mode(args.mode, args.injection == 'on', args.instance)
+    elif args.command == 'clear-mode':
+        result = clear_mode(args.instance)
     else:
-        result = rollback_server(args.instance)
+        result = rollback_server(args.instance, args.to)
     print(json.dumps(result, indent=2))
 
 

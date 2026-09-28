@@ -18,10 +18,16 @@ export const BROWSER_ACTIONS = Object.freeze([
   'open_landing', 'open_login', 'submit_bound_fixture', 'read_workspace',
   'read_session', 'read_files', 'sign_out',
 ]);
+// A5: the runner classifies each bound submit; the class is untrusted page data.
+export const SUBMIT_OUTCOMES = Object.freeze(['signed_in','rejected','rate_limited','challenge_required',
+  'unexpected_origin','timeout','unknown']);
+// Stop reasons the backend may give the supervisor. `completed` (A5) is a label
+// on a normal teardown; it grants nothing a cancel does not.
+export const STOP_REASONS = Object.freeze(['cancelled','blocked','failed','completed']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/i;
 const ACTIVE = new Set(['prepared', 'starting', 'running']);
-const REQUIRED_ACTION = Object.freeze({open_landing:'navigate',open_login:'click',
+export const REQUIRED_ACTION = Object.freeze({open_landing:'navigate',open_login:'click',
   submit_bound_fixture:'type',read_workspace:'navigate',read_session:'read',read_files:'read',sign_out:'logout'});
 // A4 launch pin: operator-authorized UUIDs and revisions only, never a value.
 const CREDENTIAL_FIELDS = Object.freeze(['project_id','profile_id','profile_revision','binding_id','binding_revision']);
@@ -77,6 +83,27 @@ export function validateBrowserAction(value) {
   return value;
 }
 
+// Observations are the typed step claims only (booleans, an outcome class, a
+// small count); the supervisor re-validates them. No page text crosses.
+const OBSERVATION_CLAIMS = Object.freeze({authenticated:'boolean',as_bound_account:'boolean',sample_present:'boolean',
+  signed_out:'boolean',outcome:'outcome',login_requests:'count'});
+function validObservation(o) {
+  return fields(o,['action','status','claims']) && BROWSER_ACTIONS.includes(o.action) && ['done','failed'].includes(o.status) &&
+    o.claims && typeof o.claims==='object' && !Array.isArray(o.claims) && Object.entries(o.claims).every(([k,v]) =>
+      OBSERVATION_CLAIMS[k]==='boolean' ? typeof v==='boolean' : OBSERVATION_CLAIMS[k]==='outcome' ?
+        SUBMIT_OUTCOMES.includes(v) : OBSERVATION_CLAIMS[k]==='count' && Number.isSafeInteger(v) && v>=0 && v<=10);
+}
+export function validateModelStep(value) {
+  if (!fields(value,['run_id','attempt_id','fence','call_id','policy','guide','observations','allowed']) ||
+      !validUuid(value.run_id) || !validUuid(value.attempt_id) || !validUuid(value.call_id) ||
+      !Number.isSafeInteger(value.fence) || value.fence<1 || typeof value.policy!=='string' ||
+      typeof value.guide!=='string' || !Array.isArray(value.observations) || value.observations.length>20 ||
+      !value.observations.every(validObservation) || !Array.isArray(value.allowed) || value.allowed.length<2 ||
+      new Set(value.allowed).size!==value.allowed.length || !value.allowed.every(a=>BROWSER_ACTIONS.includes(a)))
+    fail('INVALID_MODEL_STEP');
+  return value;
+}
+
 const validRef = ref => fields(ref, ['run_id','attempt_id','fence']) &&
   validUuid(ref.run_id) && validUuid(ref.attempt_id) && Number.isSafeInteger(ref.fence) && ref.fence >= 1;
 
@@ -114,11 +141,23 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       // A submit result names the binding, revision and outcome; nothing else is expected back.
       if (submit && (result.result?.binding_id!==request.binding_id ||
           !Number.isSafeInteger(result.result?.binding_revision) ||
-          !['signed_in','rejected','unknown'].includes(result.result?.outcome))) fail('SUPERVISOR_PROTOCOL');
+          !SUBMIT_OUTCOMES.includes(result.result?.outcome))) fail('SUPERVISOR_PROTOCOL');
+      return result;
+    },
+    // A5: one model choice for the live attempt. The supervisor checks the
+    // policy bytes against the run's pinned digest and the guide bytes against
+    // the policy's guide hash, calls the broker's model route under the run's
+    // pinned budget, and returns one action name from `allowed` or a refusal.
+    async modelStep(request) {
+      const valid=validateModelStep(request);
+      const result=await connected().request('model_step', valid);
+      if (!result || result.call_id!==valid.call_id) fail('SUPERVISOR_PROTOCOL');
+      // The call is settled at the broker; a choice outside the set is refused, never used.
+      if (!valid.allowed.includes(result.choice)) fail('MODEL_CHOICE_INVALID');
       return result;
     },
     async stop(ref, reason='cancelled') {
-      if (!validRef(ref) || !['cancelled','blocked','failed'].includes(reason)) fail('INVALID_STOP');
+      if (!validRef(ref) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');
       const result=await connected().request('stop', {run_id:ref.run_id,attempt_id:ref.attempt_id,
         fence:ref.fence,reason});
       const receipt=result?.receipt;
@@ -195,7 +234,9 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
   }
   return {
     // Only an internal test/coordinator may call this; no route or starter exists.
-    prepare(input) {
+    // `within(runId)` runs inside the same transaction (A5: the policy pin row),
+    // so the run and everything pinned with it commit together or not at all.
+    prepare(input, within=null) {
       const names=['project_id','profile_id','profile_revision','site_origin','site_revision',
         'guide_version_id','guide_hash','policy_digest'];
       if (!(fields(input, names) || (fields(input, [...names,'credential_binding_id']) &&
@@ -239,6 +280,7 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
           project.agent_limits_revision,limits.max_seconds??null,limits.max_actions??null,
           now.toISOString(),deadline,now.toISOString(),binding?.id??null,binding?.revision??null);
         event(id,null,'prepared');
+        if (within) within(id);
         return {run_id:id,deadline_at:deadline,credential_binding_revision:binding?.revision??null};
       });
     },
@@ -297,7 +339,9 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
         ...(binding ? {credential:{project_id:r.project_id,profile_id:r.profile_id,profile_revision:r.profile_revision,
           binding_id:binding.id,binding_revision:r.credential_binding_revision}} : {})});
     },
-    authorizeAction(request) {
+    // `within(ordinal, run)` runs inside the reservation transaction (A5: the
+    // durable step row and the approval consumption commit with the count).
+    authorizeAction(request, within=null) {
       validateBrowserAction(request);
       return tx(() => {
         const {r,profile}=current(request.run_id,request.attempt_id,request.fence);
@@ -310,22 +354,25 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
         if (r.max_actions != null && r.action_count >= r.max_actions) fail('ACTION_LIMIT');
         run('UPDATE ops_agent_runs SET action_count=action_count+1,revision=revision+1,updated_at=? WHERE id=?',stamp(),r.id);
         event(r.id,request.attempt_id,`action:${request.action}`);
+        if (within) within(r.action_count+1, r);
         return {ordinal:r.action_count+1};
       });
     },
-    fence(runId, reason='cancelled') {
-      if (!validUuid(runId) || !['cancelled','blocked','failed'].includes(reason)) fail('INVALID_STOP');
+    fence(runId, reason='cancelled', within=null) {
+      if (!validUuid(runId) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');
       return tx(() => {
         const r=one('SELECT * FROM ops_agent_runs WHERE id=?',runId);
         if (!r || !ACTIVE.has(r.state)) fail('RUN_NOT_ACTIVE');
         const attempt=one("SELECT id,fence FROM ops_agent_worker_attempts WHERE run_id=? AND state IN ('starting','running')",runId);
         run("UPDATE ops_agent_runs SET state='cancelling',fence=fence+1,revision=revision+1,updated_at=? WHERE id=?",stamp(),runId);
         event(runId,null,`fenced:${reason}`);
+        if (within) within(r);
         return {run_id:runId,attempt_id:attempt?.id??null,previous_fence:r.fence,reason};
       });
     },
-    finishStop(runId, reason, receipt) {
-      if (!validUuid(runId) || !['cancelled','blocked','failed'].includes(reason)) fail('INVALID_STOP');
+    // `within(run)` runs inside the same transaction (A5: the durable result row).
+    finishStop(runId, reason, receipt, within=null) {
+      if (!validUuid(runId) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');
       return tx(() => {
         const r=one('SELECT * FROM ops_agent_runs WHERE id=?',runId);
         if (!r || r.state!=='cancelling') fail('RUN_NOT_CANCELLING');
@@ -339,11 +386,25 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
               vm_uuid:attempt?.vm_uuid??null,boot_id:attempt?.boot_id??null})!==true)
           fail('TEARDOWN_UNVERIFIED');
         run("UPDATE ops_agent_worker_attempts SET state='stopped',stopped_at=? WHERE run_id=? AND state IN ('starting','running')",stamp(),runId);
+        if (within) within(r);
         run('UPDATE ops_agent_runs SET state=?,revision=revision+1,updated_at=? WHERE id=?',reason,stamp(),runId);
         event(runId,null,reason);
       });
     },
-    recover() {
+    // A run that never reserved an attempt was never sent to the supervisor, so
+    // there is nothing to tear down and no receipt to wait for.
+    abandonUnlaunched(runId, reason, within=null) {
+      if (!validUuid(runId) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');
+      return tx(() => {
+        const r=one('SELECT * FROM ops_agent_runs WHERE id=?',runId);
+        if (!r || r.state!=='cancelling') fail('RUN_NOT_CANCELLING');
+        if (one('SELECT 1 FROM ops_agent_worker_attempts WHERE run_id=?',runId)) fail('RUN_HAS_ATTEMPT');
+        if (within) within(r);
+        run('UPDATE ops_agent_runs SET state=?,revision=revision+1,updated_at=? WHERE id=?',reason,stamp(),runId);
+        event(runId,null,`${reason}:unlaunched`);
+      });
+    },
+    recover(within=null) {
       return tx(() => {
         const rows=db.prepare("SELECT id FROM ops_agent_runs WHERE state IN ('prepared','starting','running')").all();
         for (const {id} of rows) {
@@ -352,6 +413,7 @@ export function createOperationalWorkerStore(db, clock = () => new Date(), uuid 
           run("UPDATE ops_agent_runs SET state='cancelling',fence=fence+1,revision=revision+1,updated_at=? WHERE id=?",stamp(),id);
           run("UPDATE ops_agent_worker_attempts SET state='lost',stopped_at=? WHERE run_id=? AND state IN ('starting','running')",stamp(),id);
           event(id,null,'recovery_fenced');
+          if (within) within(id);
         }
         return rows.map(row=>row.id);
       });

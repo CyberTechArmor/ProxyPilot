@@ -79,7 +79,8 @@ MAX_SAFE = 2 ** 53 - 1
 MODEL_ROUTES = {'gpt-6-luna': {'provider': 'openai', 'url': 'https://api.openai.com/v1/chat/completions',
                                'service_tier': 'default'}}
 MAX_OUTPUT_TOKENS = 4096
-MAX_PROMPT_BYTES = 4000
+# A5: room for an approved guide in one model step (the supervisor checks it first).
+MAX_PROMPT_BYTES = 16000
 PROVIDER_SECONDS = 60
 # A byte-level BPE token covers at least one byte, so UTF-8 bytes bound the
 # prompt tokens; the chat framing overhead is bounded generously on top.

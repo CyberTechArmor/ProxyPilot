@@ -54,6 +54,9 @@ CREDENTIAL_FIFO = 'pp-a4-credential'
 DELIVERY_SECONDS = 20
 FRAME_MAGIC = b'PPA4'
 MAX_FIELD = 256
+# A5: a pending second factor or consent the origin's session reports after a
+# sign-in (typed names only). Any of them needs a human takeover.
+CHALLENGES = frozenset(('mfa', 'passkey', 'captcha', 'consent'))
 
 
 class Refused(Exception):
@@ -82,6 +85,24 @@ def permits(url, method):
     if method == 'POST':
         return parts.path == '/api/logout'
     return False
+
+
+def classify_login(status, as_bound, challenge, off_origin):
+    """The typed A5 outcome of one bound submit. Only the runner's own session read
+    naming the bound account is `signed_in`; a status or a vanished form is not."""
+    if off_origin or (isinstance(status, int) and 300 <= status < 400):
+        return 'unexpected_origin'
+    if status == 200 and as_bound:
+        return 'signed_in'
+    if status == 429:
+        return 'rate_limited'
+    if challenge in CHALLENGES:
+        return 'challenge_required'
+    if status in (400, 401, 403):
+        return 'rejected'
+    if status is None or status in (502, 504):
+        return 'timeout'
+    return 'unknown'
 
 
 def printable_field(value):
@@ -465,6 +486,7 @@ class Browser:
         self.channel = channel
         self.statuses = {}
         self.blocked = []
+        self.refused_requests = 0
         self.allowed = 0
         self.main_target = None
         # One-shot sign-in gate: only submit_bound_fixture arms it, for one POST.
@@ -472,6 +494,9 @@ class Browser:
         self.login_posts = 0
         self.login_status = None
         self.submitted = False
+        # The bound account's user name (not secret; the broker's binding names it),
+        # kept after a submit so a later session read can name it too.
+        self.bound_email = None
         home = os.path.join(WORKSPACE, 'home')
         profile = os.path.join(WORKSPACE, 'profile')
         for path in (home, profile):
@@ -565,6 +590,7 @@ class Browser:
             self.allowed += 1
             self.cdp.notify('Fetch.continueRequest', {'requestId': params.get('requestId')}, session)
             return
+        self.refused_requests += 1
         if len(self.blocked) < 50:
             try:
                 parts = urlsplit(url or '')
@@ -667,9 +693,12 @@ class Browser:
                 raise Refused('CREDENTIAL_ENTRY_FAILED')
             self.login_status, self.login_posts, self.login_armed = None, 0, 1
             self.submitted = True
+            self.bound_email = username.decode('ascii').lower()
+            refused_before = self.refused_requests
             self.login_form('submit')
             deadline = time.monotonic() + STEP_SECONDS
-            while self.login_status is None and time.monotonic() < deadline:
+            while (self.login_status is None and self.refused_requests == refused_before
+                   and time.monotonic() < deadline):
                 time.sleep(0.1)
             self.login_armed = 0
             status = self.login_status
@@ -679,6 +708,9 @@ class Browser:
                 session = None
             as_bound = (isinstance(session, dict) and session.get('authenticated') is True and
                         session.get('email') == username.decode('ascii').lower())
+            challenge = session.get('challenge') if isinstance(session, dict) else None
+            # A redirect or request the sign-in caused outside the fixed origin policy.
+            off_origin = self.refused_requests > refused_before
         finally:
             self.login_armed = 0
             wipe(username)
@@ -688,12 +720,7 @@ class Browser:
                 self.login_form('clear')
             except Refused:
                 pass
-        if status == 200 and as_bound:
-            outcome = 'signed_in'
-        elif status in (400, 401, 403, 429):
-            outcome = 'rejected'
-        else:
-            outcome = 'unknown'
+        outcome = classify_login(status, as_bound, challenge, off_origin)
         return {'binding_id': binding_id, 'outcome': outcome, 'login_requests': self.login_posts,
                 'untrusted_page_claim_authenticated_as_bound_account': as_bound}
 
@@ -726,8 +753,14 @@ class Browser:
             return {'at': 'workspace'}
         if name == 'read_session':
             data = self.fixed_json('/api/session')
-            return {'untrusted_page_claim_authenticated': isinstance(data, dict) and
-                    data.get('authenticated') is True and data.get('email') == 'demo@fractionate.ai'}
+            out = {'untrusted_page_claim_authenticated': isinstance(data, dict) and
+                   data.get('authenticated') is True and data.get('email') == 'demo@fractionate.ai'}
+            if self.bound_email is not None:
+                # A5: after a submit, whether the session names the bound account.
+                out['untrusted_page_claim_authenticated_as_bound_account'] = (
+                    isinstance(data, dict) and data.get('authenticated') is True and
+                    data.get('email') == self.bound_email)
+            return out
         if name == 'read_files':
             data = self.fixed_json('/api/files')
             files = data.get('files') if isinstance(data, dict) else None

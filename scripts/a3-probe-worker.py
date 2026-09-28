@@ -474,7 +474,14 @@ print(json.dumps(out, sort_keys=True))'''
             'credential_action_without_binding': refused('action', dict(ref, action='submit_bound_fixture'), True),
             'unknown_action': refused('action', dict(ref, action='download'), True),
             'url_field': refused('action', dict(ref, action='open_landing', url='https://example.com'), True),
-            'operator_stop_reason': refused('stop', dict(ref, reason='taken_over'), True)})
+            'operator_stop_reason': refused('stop', dict(ref, reason='taken_over'), True),
+            # A5: model_step is bound to the pinned policy bytes; the proof flag is operator-only.
+            'model_step_foreign_policy': refused('model_step', dict(ref, call_id=str(uuid.uuid4()), policy='{}',
+                                                                    guide='{}', observations=[],
+                                                                    allowed=['read_files', 'read_workspace']), True),
+            'model_step_proof_flag': refused('model_step', dict(ref, call_id=str(uuid.uuid4()), policy='{}', guide='{}',
+                                                                observations=[], allowed=['read_files', 'read_workspace'],
+                                                                proof='provider_error'), True)})
         receipt = call('stop', dict(ref, reason='cancelled'), backend=True)['receipt']
         receipt_ok(receipt)
         expected = {'journal': 'METHOD_NOT_ALLOWED', 'takeover': 'METHOD_NOT_ALLOWED', 'input': 'METHOD_NOT_ALLOWED',
@@ -482,7 +489,8 @@ print(json.dumps(out, sort_keys=True))'''
                     'below_minimum': 'PROJECT_LIMIT_BELOW_WORKER_MINIMUM',
                     'credential_action': 'CREDENTIAL_NOT_BOUND', 'credential_action_without_binding': 'INVALID_REQUEST',
                     'unknown_action': 'INVALID_BROWSER_ACTION',
-                    'url_field': 'INVALID_REQUEST', 'operator_stop_reason': 'INVALID_REQUEST'}
+                    'url_field': 'INVALID_REQUEST', 'operator_stop_reason': 'INVALID_REQUEST',
+                    'model_step_foreign_policy': 'RUN_POLICY_MISMATCH', 'model_step_proof_flag': 'INVALID_REQUEST'}
         assert found == expected, found
         return found
 

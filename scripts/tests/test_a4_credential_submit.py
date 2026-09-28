@@ -117,6 +117,8 @@ class LoginOrigin(BaseHTTPRequestHandler):
     password = None
     sessions = set()
     logins = []
+    # A5 outcome fixtures, applied after a correct password (the demo's A5 modes).
+    mode = 'normal'
 
     def log_message(self, *args):
         pass
@@ -138,6 +140,8 @@ class LoginOrigin(BaseHTTPRequestHandler):
         if self.path == '/api/session':
             signed_in = self._session() in LoginOrigin.sessions
             body = {'authenticated': signed_in, 'email': USERNAME if signed_in else None}
+            if 'chal=mfa' in (self.headers.get('Cookie') or ''):
+                body['challenge'] = 'mfa'
             return self._send(200, json.dumps(body).encode())
         return self._send(200, PAGE, 'text/html')
 
@@ -157,6 +161,18 @@ class LoginOrigin(BaseHTTPRequestHandler):
             LoginOrigin.logins.append('accepted' if ok else 'rejected')
             if not ok:
                 return self._send(401, b'{"error":"no"}')
+            mode = LoginOrigin.mode
+            if mode == 'expired':
+                return self._send(401, b'{"error":"expired","code":"credential_expired"}')
+            if mode == 'locked':
+                return self._send(429, b'{"error":"locked"}')
+            if mode == 'challenge':
+                return self._send(200, b'{"authenticated":false,"challenge":"mfa"}',
+                                  extra=[('Set-Cookie', 'chal=mfa; Path=/')])
+            if mode == 'redirect':
+                return self._send(302, b'{}', extra=[('Location', '/external-login')])
+            if mode == 'slow':
+                time.sleep(g.STEP_SECONDS + 3)
             sid = secrets.token_hex(8)
             LoginOrigin.sessions.add(sid)
             return self._send(200, b'{"authenticated":true}', extra=[('Set-Cookie', 'sid=%s; Path=/' % sid)])
@@ -202,6 +218,7 @@ class CredentialBrowserTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def setUp(self):
+        LoginOrigin.mode = 'normal'
         LoginOrigin.password = 'A4-canary-' + secrets.token_urlsafe(18)
         LoginOrigin.sessions.clear()
         LoginOrigin.logins.clear()
@@ -264,8 +281,10 @@ class CredentialBrowserTests(unittest.TestCase):
                                                'untrusted_page_claim_authenticated_as_bound_account': True})
             self.assertEqual(LoginOrigin.logins, ['accepted'])
             self.assertFalse(os.path.exists(self.fifo))
+            # A5: after a submit the session read also says whether it names the bound account.
             self.assertEqual(send('action', action='read_session')['result'],
-                             {'untrusted_page_claim_authenticated': False})
+                             {'untrusted_page_claim_authenticated': False,
+                              'untrusted_page_claim_authenticated_as_bound_account': True})
             stopped = send('stop')
             self.assertEqual(stopped['result'], {'stopping': True, 'logout': 'done'})
             self.assertEqual(LoginOrigin.logins, ['accepted', 'logout'])
@@ -395,6 +414,40 @@ class RealProxyBrowserTests(unittest.TestCase):
             item.stop()
         cls.temp.cleanup()
 
+    def test_a5_outcome_classes_are_distinct_against_real_chromium(self):
+        """Each A1 sign-in class from one correct bound value, through the real proxy
+        policy: only the session read naming the bound account is signed_in. `slow`
+        outlasts the proxy's upstream timeout (8 s), which answers 502."""
+        expected = {'normal': 'signed_in', 'expired': 'rejected', 'locked': 'rate_limited',
+                    'challenge': 'challenge_required', 'redirect': 'unexpected_origin', 'slow': 'timeout'}
+        seen, fifo = {}, str(self.workspace / g.CREDENTIAL_FIFO)
+        LoginOrigin.password = 'A5-canary-' + secrets.token_urlsafe(18)
+        self.addCleanup(setattr, LoginOrigin, 'mode', 'normal')
+        for mode, outcome in expected.items():
+            LoginOrigin.mode = mode
+            LoginOrigin.sessions.clear()
+            channel = g.Channel(open(os.devnull, 'w'))
+            browser = g.Browser(self.spki, channel)
+            try:
+                browser.action('open_landing')
+                browser.action('open_login')
+                writer = threading.Thread(target=deliver, args=(fifo, frame(USERNAME, LoginOrigin.password)))
+                writer.start()
+                result = browser.action('submit_bound_fixture', BINDING)
+                writer.join(5)
+                seen[mode] = result['outcome']
+                self.assertEqual(result['login_requests'], 1, mode)
+                self.assertEqual(result['untrusted_page_claim_authenticated_as_bound_account'], mode == 'normal', mode)
+                session = browser.action('read_session')
+                self.assertEqual(session['untrusted_page_claim_authenticated_as_bound_account'], mode == 'normal', mode)
+                if mode not in ('normal', 'challenge'):
+                    # The dialog stays open on a refusal: the typed clear leaves no value in it.
+                    # (After a 200 this fixture page only hides its dialog; the demo unmounts it.)
+                    self.assertEqual(browser.isolated("document.getElementById('pw').value"), '', mode)
+            finally:
+                browser.close()
+        self.assertEqual(seen, expected)
+
     def test_sign_in_and_logout_pass_the_exact_proxy_policy(self):
         LoginOrigin.password = 'A4-canary-' + secrets.token_urlsafe(18)
         LoginOrigin.sessions.clear()
@@ -419,3 +472,19 @@ class RealProxyBrowserTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OutcomeClassTests(unittest.TestCase):
+    def test_classification_is_typed_and_never_trusts_a_status_alone(self):
+        c = g.classify_login
+        self.assertEqual(c(200, True, None, False), 'signed_in')
+        self.assertEqual(c(200, False, None, False), 'unknown')       # a 200 without the bound account
+        self.assertEqual(c(200, True, None, True), 'unexpected_origin')
+        self.assertEqual(c(302, False, None, False), 'unexpected_origin')
+        self.assertEqual(c(429, False, None, False), 'rate_limited')
+        self.assertEqual(c(200, False, 'mfa', False), 'challenge_required')
+        self.assertEqual(c(200, False, 'something-else', False), 'unknown')
+        self.assertEqual(c(401, False, None, False), 'rejected')
+        self.assertEqual(c(None, False, None, False), 'timeout')
+        self.assertEqual(c(502, False, None, False), 'timeout')
+        self.assertEqual(c(500, False, None, False), 'unknown')

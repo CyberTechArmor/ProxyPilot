@@ -317,6 +317,41 @@ Run these in order:
    holds calls, runs and deliveries: IDs, usage, costs and outcomes, never a
    value.
 
+**Proxy certificate renewal (host step, after `d932ecd2`).** The proxy's
+self-signed certificate (not Caddy or Let's Encrypt; the guest pins its SPKI)
+lives 7 days. This step installs the renewal timer with the supervisor and
+proves one renewal on the host:
+
+```
+sudo sh -c 'set -e; C=d932ecd23d85cb0fb3c599838826f9d0e58474f4; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/serene-franklin-eteidj; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py reinstall; python3 -I /etc/proxypilot-a3-proof/supervisor/a3-install-proxy.py renew --force; systemctl start proxypilot-a3-proxy-renew.service; journalctl -u proxypilot-a3-proxy-renew.service -n 12 -o cat --no-pager; systemctl list-timers proxypilot-a3-proxy-renew.timer --no-pager; python3 a3-probe-proxy.py; python3 a3-probe-worker.py --only sessions'
+```
+
+Expected output, in order:
+1. `staged <sha> (was b6cae65e…) from d932ecd2…; 63 paths match exactly`, then
+   the new HEAD.
+2. The supervisor JSON:
+   - `"installed": true`, `"accepting_launch": true`, `"blockers": []`;
+   - a new `key_id`;
+   - files including `proxypilot-a3-proxy-renew.service` and `.timer`;
+   - `"certificate_renewal": {"timer": "proxypilot-a3-proxy-renew.timer",
+     "state": "active/enabled"}`;
+   - the old key archived.
+3. `"renewed": true`, `previous_spki_sha256` `NdkAJzLx…qwyM=`, a new
+   `certificate_spki_sha256`, and `not_after` 7 days out.
+4. The service's own run (journal): `"renewed": false, "reason": "not_due"`.
+5. The timer's next run (within six hours).
+6. `"proxy_checks": "passed"` with 21 codes; the `cert_sha256` is new (not
+   `d54fdbc7…`).
+7. `"worker_proof": "passed"` for `sessions` (three launches pinned to the new
+   key).
+
+If a step fails:
+- "A worker attempt is live": run `python3 a3-worker-operator.py status`, then
+  `stop` it.
+- `"reason": "attempt_live"` or `"installer_busy"`: rerun the `renew --force`
+  command alone.
+- Anything else: paste the output.
+
 **Reconnect the broker after a new secret ID.** *Issue a new secret ID* in the
 dashboard replaces the broker's saved one. The running broker keeps working on
 its cached token for up to an hour, but every new sign-in is refused. Since

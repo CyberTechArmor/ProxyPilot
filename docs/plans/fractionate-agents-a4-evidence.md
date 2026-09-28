@@ -921,8 +921,9 @@ receipts, journals, the ledger and the database.
 
 **Operational items:**
 - **Proxy certificate.** The certificate from the second host run lasts 7
-  days, to about 2026-10-05. Launches fail closed after that until
-  `a3-install-proxy.py reinstall` and `a3-probe-proxy.py`.
+  days, to about 2026-10-05; launches would fail closed after that. It is now
+  renewed automatically (`d932ecd2`; see the next section), once the host
+  step there has run.
 - **`AgentKeys`.** The agent `a4-broker` also holds a credential named
   `AgentKeys`, which A4 does not use. The AppRole can read it; remove it
   unless it is meant for this agent.
@@ -937,3 +938,90 @@ Accepting A4 does not authorize A5, activation, deployment, or promotion of the
 candidate to live; each is a separate user decision. The
 [A5 prompt](fractionate-agents-a5-prompt.md) is now eligible, and work stops
 here for review before any A5 work.
+
+## 2026-09-28 proxy certificate: automatic renewal (after acceptance)
+
+The user asked whether the proxy certificate is managed by Caddy / Let's
+Encrypt. It is not.
+
+### What the certificate is
+
+- The fixed-origin proxy (`a3-origin-proxy.py`, `10.185.17.1:18083`) is how
+  the proof VM's browser reaches `demo.fractionate.ai`.
+  - It terminates the browser's TLS with its **own self-signed certificate**
+    (CN `demo.fractionate.ai`).
+  - It checks every decrypted request against the path policy, which is how
+    it admits exactly one bounded `POST /api/login`.
+  - It then opens its own verified TLS connection to the real origin, which
+    serves Caddy's Let's Encrypt certificate.
+- The guest browser trusts the proxy certificate only through the SPKI pin
+  that the supervisor passes at each launch
+  (`--ignore-certificate-errors-spki-list`). Nobody else trusts it.
+- **Why not a Let's Encrypt or Caddy certificate.** Doing that would put a
+  publicly trusted key for the real hostname, or the edge's own key, inside
+  the proof boundary. Caddy is also controlled by the root-equivalent backend
+  (S6 is open), so a Caddy-issued key would let a compromised backend mint
+  certificates the guest accepts.
+- **Why 7 days.** A3 kept the key short-lived.
+- **The gap.** Until now nothing renewed the certificate. Proxy `status`
+  refuses a certificate with under 24 hours left, so launches would have
+  failed closed from about 2026-10-04 until someone reinstalled the proxy.
+
+### The fix (`d932ecd2`)
+
+**`a3-install-proxy.py renew`** re-issues the key and certificate in place.
+It runs only when all of these hold:
+- fewer than 3 days remain (or `--force` is given);
+- the proof VM is running;
+- no worker attempt is live (the supervisor operator socket reports
+  `active: null`).
+
+A live attempt's browser pinned the current key, so renewal waits for it. The
+renewal then:
+1. records the pending pair in the journal first, so an interrupted renewal
+   is finished rather than refused;
+2. writes the key (0600) and the certificate;
+3. updates the recorded digests;
+4. restarts the proxy and reads its status back.
+
+The proxy source and unit are verified unchanged. The supervisor reads the SPKI
+from proxy `status` at every launch, so the next launch pins the new key with
+no supervisor restart.
+
+**`proxypilot-a3-proxy-renew.timer` and `.service`** are installed, recorded
+and digest-checked by `a3-install-supervisor.py`.
+- The timer runs every six hours (`00/6:17`, randomized by 10 min,
+  `Persistent=true`) and 10 minutes after boot.
+- It runs the supervisor's installed copy of `a3-install-proxy.py`, never a
+  checkout.
+- The supervisor's `status` reports the timer; `remove` disables it; an
+  installation from before the timer still reads back and removes.
+
+With 3 days of lead and four checks a day, a renewal has about twelve chances
+before launches would refuse the certificate. A failed run leaves the service
+`failed` (visible in `get_host_services failed=true`), and the current
+certificate stays in use.
+
+**Boundary.** No socket method, peer rule, fence rule, unit property or limit
+changes. The installed supervisor, runner, proxy and broker code are
+byte-identical to the accepted A4 run.
+
+**Local verification.**
+- All script tests: 162 passed. The new tests use real openssl and journal
+  writes:
+  - not due → nothing changes;
+  - due → re-issued in place, digests recorded, proxy restarted, SPKI
+    changed;
+  - an attempt live or the VM stopped → nothing changes;
+  - an interrupted renewal is finished; a foreign certificate is refused;
+  - the socket read;
+  - `systemd-analyze verify` passes for the timer and service.
+- Host-boundary inventory: exit 0.
+- Staging `d932ecd2` over the `d052e416` staging on a stand-in candidate gives
+  `63 paths match exactly`.
+
+**Open until the host step in the [A4 reference](fractionate-agents-a4-reference.md)
+("Proxy certificate renewal") runs.** That step stages `d932ecd2`, reinstalls
+the supervisor (installing the timer; new receipt key), forces one renewal,
+runs the timer's service once, and re-runs the proxy probe and three A3
+session launches on the new pin.

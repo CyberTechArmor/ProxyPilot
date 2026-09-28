@@ -1025,3 +1025,39 @@ byte-identical to the accepted A4 run.
 the supervisor (installing the timer; new receipt key), forces one renewal,
 runs the timer's service once, and re-runs the proxy probe and three A3
 session launches on the new pin.
+
+### Host run 1 of the renewal step: the forced renewal worked, the timer's service did not
+
+- **Staging.** `staged 39e3a8a91364db7fbb4d37e0267aee04dac0b3e9 (was b6cae65e…)
+  from d932ecd2…; 63 paths match exactly`.
+- **Supervisor reinstall.** `"installed": true`, `"accepting_launch": true`,
+  `"blockers": []`.
+  - New receipt key `e52ffcf3b101…66f6`; the previous `062aa93b…` was
+    archived.
+  - `a3-install-proxy.py` is now `59ae252e…`. The renewal service is
+    `99f8c3e7…` and the timer `058e2af8…`; `"certificate_renewal"` reads
+    active/enabled.
+  - The supervisor, runner, origin proxy and fence digests are unchanged
+    (`0850c329…`, `de4f44d6…`, `f5e63612…`, `314b7766…`, `8d756bd2…`).
+- **`renew --force`** (the installed copy, run from a root shell):
+  `"renewed": true`. `previous_spki_sha256` was `NdkAJzLx…qwyM=`; the new
+  `certificate_spki_sha256` is `ASpAFpzeM18Iynjr8SzmdGLAnozqpdqf1BZ3S18WDnI=`,
+  `not_after` Oct 5 16:54:37 2026 GMT.
+- **`systemctl start proxypilot-a3-proxy-renew.service`** failed ("control
+  process exited with error code"). `set -e` stopped the command, so the
+  journal, the timer listing, the proxy probe and the sessions probe did not
+  run.
+- **Cause (my defect).** The service carried `ProtectHome=yes`. It makes the
+  same Incus and nft calls as the supervisor, whose unit has no
+  `ProtectHome`, and the incus client keeps its config under `/root`. That is
+  the service's only restriction beyond the supervisor unit's, and the same
+  command succeeded from a root shell. The next run's first lines (the
+  failed run's journal) confirm or correct this.
+- **Fix (`63e00295`).** Removed `ProtectHome` from the renewal service. A test
+  pins that its sandbox is never tighter than the supervisor's (no
+  `ProtectHome`, `ProtectSystem`, `ReadOnlyPaths`, `InaccessiblePaths` or
+  `User=`); `systemd-analyze verify` passes; all script tests pass.
+- **State now.** The proxy serves the renewed certificate, and the supervisor
+  pins the new SPKI at the next launch. The timer is enabled, but its service
+  fails until `63e00295` is installed. No renewal is due before about
+  2026-10-02.

@@ -83,12 +83,21 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn('--disable-dev-shm-usage', text)
 
 
-PAGE = b'''<!doctype html><html><body>
-<button onclick="document.getElementById('dlg').setAttribute('open','');document.getElementById('dlg').style.display='block'">Sign in</button>
-<div id="dlg" role="dialog" aria-labelledby="t" style="display:none"><h2 id="t">Sign in to your workspace</h2></div>
-<script>document.addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('dlg').style.display = 'none'; });</script>
-<img src="https://outside.invalid/tracker.png">
-</body></html>'''
+# Like the deployed demo SPA: a loading screen until its own reads return,
+# then the Sign in button. The first target run failed on exactly this delay.
+PAGE = b'''<!doctype html><html><body><div id="app">Preparing your workspace</div>
+<script>
+setTimeout(() => {
+  document.getElementById('app').innerHTML = '<button id="s">Sign in</button>' +
+    '<div id="dlg" role="dialog" aria-labelledby="t" style="display:none"><h2 id="t">Sign in to your workspace</h2></div>' +
+    '<img src="https://outside.invalid/tracker.png">';
+  document.getElementById('s').onclick = () => { document.getElementById('dlg').style.display = 'block'; };
+}, 700);
+document.addEventListener('keydown', e => {
+  const dialog = document.getElementById('dlg');
+  if (e.key === 'Escape' && dialog) dialog.style.display = 'none';
+});
+</script></body></html>'''
 
 
 class Origin(BaseHTTPRequestHandler):
@@ -291,8 +300,12 @@ class LocalBrowserTests(unittest.TestCase):
             self.assertEqual(send('action', action='open_landing', url='https://x')['error'], 'INVALID_COMMAND')
             probe = send('egress_probe')['result']
             self.assertEqual(set(probe['page_attempts'].values()), {'refused'}, probe)
+            self.assertNotIn('reached', probe['navigation_attempts'].values(), probe)
+            self.assertEqual({k: v for k, v in probe['navigation_attempts'].items() if k != 'plain_http'},
+                             {'cross_origin': 'refused', 'raw_ip': 'refused', 'alternate_port': 'refused'})
             refused_hosts = {row.get('host') for row in probe['browser_layer_refusals']}
             self.assertTrue({'example.com', '1.1.1.1', 'outside.invalid'} <= refused_hosts, refused_hosts)
+            self.assertEqual(send('observe')['result']['untrusted_page_url'], 'https://demo.fractionate.ai/')
             self.assertEqual(send('action', action='read_workspace')['result'], {'at': 'workspace'})
             self.origin.redirect = True
             self.assertEqual(send('action', action='read_workspace')['error'], 'BROWSER_NAVIGATION_FAILED')

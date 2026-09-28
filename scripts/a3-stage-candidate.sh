@@ -8,8 +8,8 @@
 # on add/add conflicts. This copies exactly the reviewed commit's version of
 # every path that commit changed since GitHub main, except the MCP policy file
 # (the candidate's copy carries live-only lines and the same self-check line).
-# It refuses when any such candidate file differs from both the base and the
-# reviewed commit, so no candidate-only change is overwritten. It aborts only
+# It refuses when any such candidate file matches neither the base nor any
+# commit of the reviewed branch, so no candidate-only change is overwritten. It aborts only
 # an interrupted cherry-pick, and it never touches the live checkout.
 set -eu
 dir=${1:?candidate directory}
@@ -32,7 +32,16 @@ for p in $paths; do
   old=$(git rev-parse -q --verify "$base:$p" || echo none)
   new=$(git rev-parse -q --verify "$code:$p" || echo none)
   [ "$new" != none ] || { echo "reviewed commit deletes $p; refusing" >&2; exit 1; }
-  [ "$have" = "$old" ] || [ "$have" = "$new" ] || {
+  known=no
+  if [ "$have" = "$old" ] || [ "$have" = "$new" ]; then
+    known=yes
+  else
+    # An earlier reviewed commit on the same branch (a previous staging).
+    for c in $(git rev-list "$base..$code" -- "$p"); do
+      if [ "$(git rev-parse -q --verify "$c:$p" || echo none)" = "$have" ]; then known=yes; break; fi
+    done
+  fi
+  [ "$known" = yes ] || {
     echo "candidate differs from both base and reviewed commit: $p" >&2; exit 1; }
 done
 grep -q 'prepare-self-check-native.mjs' "$policy" || {

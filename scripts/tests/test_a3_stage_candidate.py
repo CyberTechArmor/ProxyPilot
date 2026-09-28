@@ -72,6 +72,17 @@ class StageCandidateTests(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertIn('already matches', again.stdout)
 
+    def test_restages_a_newer_reviewed_commit_over_an_earlier_one(self):
+        self.assertEqual(self.stage().returncode, 0)
+        self.git('checkout', '-q', 'code')
+        self.write('scripts/new.py', '#!/usr/bin/env python3\nprint(3)\n')
+        self.code = self.commit('reviewed fix')
+        self.git('checkout', '-q', 'candidate')
+        result = self.stage()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.repo / 'scripts/new.py').read_text(), '#!/usr/bin/env python3\nprint(3)\n')
+        self.assertEqual((self.repo / 'other.js').read_text(), 'live only\n')
+
     def test_refuses_to_overwrite_a_candidate_only_change(self):
         self.write('admin/x.js', 'candidate only\n')
         head = self.commit('candidate-only edit of a reviewed path')

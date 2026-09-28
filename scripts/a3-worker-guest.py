@@ -268,14 +268,21 @@ class Cdp:
                 done.set()
 
 
-FIND_BUTTON = '''(() => {
-  const want = %s;
+# Waits in the page, like Playwright's locator auto-wait: the synthetic app
+# renders a loading screen until its own session/config reads return.
+FIND_BUTTON = '''(async () => {
+  const want = %s, click = %s, until = Date.now() + %d;
   const name = e => ((e.getAttribute('aria-label') || e.textContent || '').trim());
-  const b = [...document.querySelectorAll('button')].find(e => name(e) === want && e.getClientRects().length);
-  if (!b) return null;
-  const r = b.getBoundingClientRect();
-  if (%s) b.click();
-  return {x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2)};
+  for (;;) {
+    const b = [...document.querySelectorAll('button')].find(e => name(e) === want && e.getClientRects().length);
+    if (b) {
+      const r = b.getBoundingClientRect();
+      if (click) b.click();
+      return {x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2)};
+    }
+    if (Date.now() >= until) return null;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
 })()'''
 DIALOG_OPEN = '''(() => {
   const want = 'Sign in to your workspace';
@@ -485,7 +492,9 @@ class Browser:
         return value.get('data')
 
     def button(self, name, click):
-        return self.isolated(FIND_BUTTON % (json.dumps(name), 'true' if click else 'false'))
+        wait_ms = STEP_SECONDS * 1000
+        return self.isolated(FIND_BUTTON % (json.dumps(name), 'true' if click else 'false', wait_ms),
+                             await_promise=True, timeout=STEP_SECONDS + 5)
 
     def dialog_open(self):
         return self.isolated(DIALOG_OPEN) is True
@@ -580,7 +589,27 @@ class Browser:
     def egress_probe(self):
         before = len(self.blocked)
         result = self.main_world(EGRESS_PROBE, timeout=60)
-        return {'page_attempts': result, 'browser_layer_refusals': self.blocked[before:]}
+        # Top-level navigations are not governed by the page's own CSP, so they
+        # exercise this runner's request policy on the real origin as well.
+        navigations = {}
+        for key, url in (('cross_origin', 'https://example.com/'), ('raw_ip', 'https://1.1.1.1/'),
+                         ('alternate_port', 'https://demo.fractionate.ai:8443/'),
+                         ('plain_http', 'http://demo.fractionate.ai/')):
+            try:
+                reply = self.cdp.call('Page.navigate', {'url': url}, self.session)
+                if reply.get('errorText'):
+                    navigations[key] = 'refused'
+                else:
+                    # Chromium's HTTPS-Upgrades may rewrite http:// before any request;
+                    # only the committed URL says where the browser actually went.
+                    landed = self.isolated('location.href')
+                    navigations[key] = ('upgraded_to_approved_origin' if permits(landed, 'GET')
+                                        else 'reached')
+            except Refused:
+                navigations[key] = 'refused'
+        self.navigate('/')
+        return {'page_attempts': result, 'navigation_attempts': navigations,
+                'browser_layer_refusals': self.blocked[before:]}
 
     def diagnostics(self):
         try:

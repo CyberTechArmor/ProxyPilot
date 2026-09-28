@@ -236,10 +236,16 @@ class Proof:
         call('action', dict(ref, action='open_landing'))
         probe = call('egress_probe', ref)
         stop(ref)
-        attempts = probe['page_attempts']
+        attempts, navigations = probe['page_attempts'], probe['navigation_attempts']
         assert attempts and set(attempts.values()) == {'refused'}, attempts
+        # The page's own CSP may refuse cross-origin requests first; top-level
+        # navigations are outside that CSP and must be refused by the runner.
+        assert 'reached' not in navigations.values(), navigations
+        assert all(navigations[k] == 'refused' for k in ('cross_origin', 'raw_ip', 'alternate_port')), navigations
         hosts = sorted({row.get('host') for row in probe['browser_layer_refusals']})
-        return {'page_attempts': attempts, 'browser_layer_refused_hosts': hosts,
+        assert {'example.com', '1.1.1.1'} <= set(hosts), hosts
+        return {'page_attempts': attempts, 'navigation_attempts': navigations,
+                'browser_layer_refused_hosts': hosts,
                 'browser_layer_refusals': len(probe['browser_layer_refusals'])}
 
     def proof_workload(self, workload, limits=None, send=True):

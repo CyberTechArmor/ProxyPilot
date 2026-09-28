@@ -1222,10 +1222,14 @@ class Supervisor:
                 raise Refused('CHANNEL_CLOSED')
             result = reply.get('result') if reply.get('ok') else None
             record['latency_ms'] = int((time.monotonic() - started) * 1000)
-            if isinstance(result, dict) and result.get('binding_id') == ref['binding_id'] and delivery_error is None:
+            if isinstance(result, dict) and result.get('binding_id') == ref['binding_id']:
+                # The runner received a frame, so the effect happened even if the
+                # broker's own reply was lost; record both, never hide the effect.
                 record['state'] = 'done'
                 record['outcome'] = result.get('outcome') if result.get('outcome') in (
                     'signed_in', 'rejected', 'unknown') else 'unknown'
+                if delivery_error is not None:
+                    record['broker_reply_error'] = delivery_error
             else:
                 record['state'] = 'failed'
                 record['error'] = delivery_error or str(reply.get('error'))[:64]

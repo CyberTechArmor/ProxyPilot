@@ -469,7 +469,9 @@ print(json.dumps(out, sort_keys=True))'''
         ref, _, _ = self.launch(ids=(run, attempt, workspace), backend=True)
         call('action', dict(ref, action='open_landing'), backend=True)
         found.update({
-            'credential_action': refused('action', dict(ref, action='submit_bound_fixture'), True),
+            # A4: submit needs the binding ID field, and this run pinned no binding.
+            'credential_action': refused('action', dict(ref, action='submit_bound_fixture', binding_id=workspace), True),
+            'credential_action_without_binding': refused('action', dict(ref, action='submit_bound_fixture'), True),
             'unknown_action': refused('action', dict(ref, action='download'), True),
             'url_field': refused('action', dict(ref, action='open_landing', url='https://example.com'), True),
             'operator_stop_reason': refused('stop', dict(ref, reason='taken_over'), True)})
@@ -478,7 +480,8 @@ print(json.dumps(out, sort_keys=True))'''
         expected = {'journal': 'METHOD_NOT_ALLOWED', 'takeover': 'METHOD_NOT_ALLOWED', 'input': 'METHOD_NOT_ALLOWED',
                     'proof_workload': 'INVALID_LAUNCH', 'argv_field': 'INVALID_LAUNCH', 'other_origin': 'INVALID_LAUNCH',
                     'below_minimum': 'PROJECT_LIMIT_BELOW_WORKER_MINIMUM',
-                    'credential_action': 'CREDENTIAL_BROKER_UNAVAILABLE', 'unknown_action': 'INVALID_BROWSER_ACTION',
+                    'credential_action': 'CREDENTIAL_NOT_BOUND', 'credential_action_without_binding': 'INVALID_REQUEST',
+                    'unknown_action': 'INVALID_BROWSER_ACTION',
                     'url_field': 'INVALID_REQUEST', 'operator_stop_reason': 'INVALID_REQUEST'}
         assert found == expected, found
         return found

@@ -32,6 +32,29 @@ class OriginPolicyTests(unittest.TestCase):
                 self.assertTrue(p.permitted('GET', path, self.headers()))
         self.assertTrue(p.permitted('POST', '/api/logout', self.headers() | {'content-length': '0'}))
 
+    def test_a4_sign_in_is_the_only_post_with_a_body(self):
+        json_headers = self.headers() | {'content-type': 'application/json', 'content-length': '64'}
+        self.assertTrue(p.permitted('POST', '/api/login', json_headers))
+        self.assertTrue(p.permitted('POST', '/api/login', json_headers | {'content-type': 'Application/JSON; charset=UTF-8'}))
+        self.assertTrue(p.permitted('POST', '/api/login', json_headers | {'content-length': '1024'}))
+        self.assertEqual(p.login_length(json_headers), 64)
+        for change in ({'content-length': '0'}, {'content-length': '1025'}, {'content-length': '01'},
+                       {'content-length': '-1'}, {'content-length': '1e3'}, {'content-type': 'text/plain'},
+                       {'content-type': 'application/json; charset=latin-1'}, {'content-type': ''},
+                       {'transfer-encoding': 'chunked'}, {'expect': '100-continue'}, {'host': 'outside.invalid'},
+                       {'upgrade': 'websocket'}):
+            with self.subTest(change=change):
+                self.assertFalse(p.permitted('POST', '/api/login', json_headers | change))
+        self.assertFalse(p.permitted('POST', '/api/login', {k: v for k, v in json_headers.items() if k != 'content-length'}))
+        for method, target in (('POST', '/api/login?next=/'), ('POST', '/api/login?'), ('POST', '/api/login#x'),
+                               ('POST', '/api/login/'), ('POST', '/API/login'), ('POST', '/api/session'),
+                               ('POST', '/api/files'), ('POST', '/'), ('POST', '/workspace'), ('PUT', '/api/login'),
+                               ('PATCH', '/api/login'), ('GET', '/api/login'), ('GET', '/workspace?'),
+                               ('POST', '/api/logout?')):
+            with self.subTest(method=method, target=target):
+                self.assertFalse(p.permitted(method, target, json_headers))
+        self.assertFalse(p.permitted('POST', '/api/logout', json_headers))
+
     def test_origin_methods_paths_and_bypasses_denied(self):
         cases = [('GET', '/', {'host': 'outside.invalid'}),
                  ('GET', '/', {'host': 'demo.fractionate.ai:443'}),
@@ -120,19 +143,32 @@ class OriginPolicyTests(unittest.TestCase):
                 self.assertTrue(all(not path.exists() for path in paths))
                 self.assertEqual(json.loads(save.call_args.args[1])['phase'], 'removed')
 
-    def test_live_probe_requires_two_positive_and_five_negative_results(self):
-        report = {'boot_id': 'boot', 'cases': [{'status': 'HTTP/1.1 ' + code + ' test'}
-                  for code in ('403', '403', '200', '200', '403', '403', '403')]}
-        self.assertEqual(probe.evaluate(report), ['403', '403', '200', '200', '403', '403', '403'])
+    def test_live_probe_requires_every_expected_positive_and_negative(self):
+        report = {'boot_id': 'boot', 'cases': [
+            {'case': name, 'status': 'HTTP/1.1 ' + code + ' test', 'origin_answered': bool(answered)}
+            for name, code, answered in probe.EXPECTED]}
+        codes = probe.evaluate(report)
+        self.assertEqual(codes[:7], ['403', '403', '200', '200', '403', '403', '403'])
+        # Exactly three answers reach the origin in A4: two A3 GETs and one bounded
+        # sign-in POST, plus the empty logout; everything else is the proxy's 403.
+        self.assertEqual([name for name, code, answered in probe.EXPECTED if answered],
+                         ['request_/_demo.fractionate.ai', 'request_/api/session_demo.fractionate.ai',
+                          'login_json_reaches_origin', 'logout_empty_reaches_origin'])
         with self.assertRaises(ValueError):
             probe.evaluate(report | {'cases': report['cases'][:-1]})
+        for index in (5, 7, 8):
+            changed = json.loads(json.dumps(report))
+            changed['cases'][index]['status'] = 'HTTP/1.1 200 unexpected'
+            with self.assertRaises(ValueError):
+                probe.evaluate(changed)
+        # A 403 that the ORIGIN produced is not a proxy refusal.
         changed = json.loads(json.dumps(report))
-        changed['cases'][5]['status'] = 'HTTP/1.1 200 unexpected'
-        with self.assertRaises(ValueError):
+        changed['cases'][9]['origin_answered'] = True
+        with self.assertRaisesRegex(ValueError, 'mismatch at login_no_content_type'):
             probe.evaluate(changed)
+        changed = json.loads(json.dumps(report))
         changed['cases'][5]['status'] = ''
-        changed['cases'][5]['case'] = 'request_/api/login_demo.fractionate.ai'
-        with self.assertRaisesRegex(ValueError, 'Malformed proxy response for request_/api/login'):
+        with self.assertRaisesRegex(ValueError, 'Malformed proxy response for request_/_outside.invalid'):
             probe.evaluate(changed)
         compile(probe.GUEST, 'fixed-guest-proxy-probe', 'exec')
 

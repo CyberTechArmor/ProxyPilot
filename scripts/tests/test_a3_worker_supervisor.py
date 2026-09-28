@@ -153,6 +153,19 @@ class FakeHost:
     def worker_units(self):
         return [u for u in self.units if self.alive(u)]
 
+    def broker_available(self):
+        return getattr(self, 'broker_object', None) is not None
+
+    def broker(self, method, params, timeout=30):
+        if not self.broker_available():
+            raise s.Refused('CREDENTIAL_BROKER_UNAVAILABLE')
+        # Through JSON, as over the socket: nothing but the typed fields and a code cross.
+        try:
+            result = self.broker_object.dispatch(method, json.loads(json.dumps(params)))
+        except Exception as error:  # noqa: BLE001 - the broker's own Refused class
+            raise s.Refused(getattr(error, 'code', 'INTERNAL')) from None
+        return json.loads(json.dumps(result))
+
     def sign(self, payload):
         message = self.root / 'message'
         message.write_bytes(payload)
@@ -265,7 +278,10 @@ class SupervisorTests(unittest.TestCase):
                          (s.VM_UUID, BOOT, s.UNIT_PREFIX + ATTEMPT))
         self.assertEqual(result['workspace']['kind'], 'unit-private-tmpfs')
         self.assertEqual(self.sup.action(self.ref(action='open_landing'))['ordinal'], 1)
-        self.assertRefused('CREDENTIAL_BROKER_UNAVAILABLE', self.sup.action, self.ref(action='submit_bound_fixture'))
+        # A4: the binding ID is required, and a run launched without a binding has none.
+        self.assertRefused('INVALID_REQUEST', self.sup.action, self.ref(action='submit_bound_fixture'))
+        self.assertRefused('CREDENTIAL_NOT_BOUND', self.sup.action,
+                           self.ref(action='submit_bound_fixture', binding_id=WORKSPACE))
         self.assertRefused('INVALID_BROWSER_ACTION', self.sup.action, self.ref(action='run_shell'))
         self.assertRefused('INVALID_REQUEST', self.sup.action, self.ref(action='open_landing', url='https://x'))
         self.assertRefused('STALE_FENCE', self.sup.action, self.ref(fence=2, action='open_landing'))
@@ -542,8 +558,8 @@ class SupervisorBrowserTests(unittest.TestCase):
         self.assertEqual(self.sup.action(dict(ref, action='read_session'))['result'],
                          {'untrusted_page_claim_authenticated': False})
         with self.assertRaises(s.Refused) as caught:
-            self.sup.action(dict(ref, action='submit_bound_fixture'))
-        self.assertEqual(caught.exception.code, 'CREDENTIAL_BROKER_UNAVAILABLE')
+            self.sup.action(dict(ref, action='submit_bound_fixture', binding_id=WORKSPACE))
+        self.assertEqual(caught.exception.code, 'CREDENTIAL_NOT_BOUND')
         probe = self.sup.dispatch('egress_probe', ref, operator=True)
         self.assertEqual(set(probe['page_attempts'].values()), {'refused'})
         self.assertTrue(base64.b64decode(self.sup.dispatch('view', ref, operator=True)['png_base64']).startswith(b'\x89PNG'))

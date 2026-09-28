@@ -19,6 +19,17 @@ the unit, its descendants and its workspace are gone, and a receipt signed by
 a host-held Ed25519 key that the backend never sees. An uncertain browser
 effect is recorded and never replayed. Human view and control exist only on
 the root operator socket, after takeover fences the model's attempt.
+
+A4: a launch may pin one credential binding (project, profile and binding
+UUIDs with the profile and binding revisions). The pin is registered with the
+host credential broker (a separate root daemon, a4-credential-broker.py) and
+the run's token/spending limits are pinned there too. `submit_bound_fixture`
+carries only the binding ID: this supervisor asks the broker to check the
+binding, sends the runner the action with the binding ID, and asks the broker
+to deliver; the broker writes the value to the runner's one-shot FIFO itself.
+This process never holds the value. Results, the journal and receipts carry the
+binding ID, revision and outcome only. A browser attempt that submitted a
+credential signs out (POST /api/logout) before teardown.
 """
 import argparse
 import base64
@@ -70,6 +81,10 @@ UNIT = Path('/etc/systemd/system/proxypilot-a3-supervisor.service')
 RUN_DIR = Path('/run/proxypilot-a3')
 BACKEND_SOCKET = RUN_DIR / 'supervisor.sock'
 OPERATOR_SOCKET = RUN_DIR / 'operator.sock'
+BROKER_SOCKET = Path('/run/proxypilot-a4/broker.sock')
+CREDENTIAL_FIELDS = ('project_id', 'profile_id', 'profile_revision', 'binding_id', 'binding_revision')
+DELIVERY_SECONDS = 40
+STOP_SECONDS = 12
 UNIT_PREFIX = 'pp-a3-worker-'
 LEASE_SECONDS = 30
 READY_SECONDS = 60
@@ -153,10 +168,19 @@ def install_shape(limits):
             'root_disk_gib': INSTALL_BASELINE['root_disk_gib']}
 
 
+def validate_credential(value):
+    """A4 launch pin: operator-authorized UUIDs and revisions, never a value."""
+    if (not exact(value, CREDENTIAL_FIELDS) or not all(isinstance(value[k], str) and UUID.fullmatch(value[k])
+                                                        for k in ('project_id', 'profile_id', 'binding_id'))
+            or not safe_int(value['profile_revision'], 1) or not safe_int(value['binding_revision'], 1)):
+        raise Refused('INVALID_LAUNCH', 'credential')
+    return dict(value)
+
+
 def validate_launch(value):
     names = ('run_id', 'attempt_id', 'workspace_id', 'fence', 'policy_digest', 'project_limits_revision',
              'origin', 'target', 'limits', 'install')
-    if not exact(value, names):
+    if not exact(value, names) and not exact(value, names + ('credential',)):
         raise Refused('INVALID_LAUNCH', 'fields')
     if (not all(isinstance(value[k], str) and UUID.fullmatch(value[k]) for k in ('run_id', 'attempt_id', 'workspace_id'))
             or not safe_int(value['fence'], 1) or not isinstance(value['policy_digest'], str)
@@ -169,7 +193,8 @@ def validate_launch(value):
             raise Refused('PROJECT_LIMIT_BELOW_WORKER_MINIMUM', key)
     if value['install'] != install_shape(limits):
         raise Refused('INVALID_LAUNCH', 'install')
-    return dict(value, limits=limits)
+    credential = None if 'credential' not in value else validate_credential(value['credential'])
+    return dict(value, limits=limits, credential=credential)
 
 
 def validate_ref(value, extra=()):
@@ -522,6 +547,26 @@ class Host:
         der = self.run(['openssl', 'pkey', '-pubin', '-in', str(PUBLIC_KEY), '-outform', 'DER'], timeout=20).stdout
         return hashlib.sha256(der).hexdigest()
 
+    def broker_available(self):
+        return BROKER_SOCKET.is_socket()
+
+    def broker(self, method, params, timeout=30):
+        """One request to the root-only A4 credential broker; never carries a value."""
+        try:
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(timeout)
+                client.connect(str(BROKER_SOCKET))
+                client.sendall((json.dumps({'method': method, 'params': params}) + '\n').encode())
+                line = client.makefile().readline(65536)
+            reply = json.loads(line)
+        except (OSError, ValueError) as error:
+            raise Refused('CREDENTIAL_BROKER_UNAVAILABLE') from error
+        if not isinstance(reply, dict) or reply.get('ok') is not True:
+            code = reply.get('error') if isinstance(reply, dict) else None
+            raise Refused(code if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code)
+                          else 'CREDENTIAL_BROKER_UNAVAILABLE')
+        return reply.get('result')
+
     def verify_install(self, own_files):
         """The daemon runs only from its reviewed, root-owned installed copies."""
         try:
@@ -554,6 +599,7 @@ class Worker:
         self.first = None
         self.ready = threading.Event()
         self.ended = threading.Event()
+        self.credential_channel = threading.Event()
         self.stderr_tail = b''
         threading.Thread(target=self._stdout, daemon=True).start()
         threading.Thread(target=self._stderr, daemon=True).start()
@@ -577,6 +623,8 @@ class Worker:
                 with self.state_lock:
                     if len(self.events) < 500:
                         self.events.append(message)
+                if message.get('event') == 'credential_channel':
+                    self.credential_channel.set()
                 if message.get('event') in ('ready', 'failed') and self.first is None:
                     self.first = message
                     self.ready.set()
@@ -610,7 +658,8 @@ class Worker:
             except (OSError, ValueError) as error:
                 raise Refused('CHANNEL_CLOSED') from error
 
-    def request(self, op, timeout, **fields):
+    def send(self, op, **fields):
+        """Write one request; the reply is collected later with `wait`."""
         with self.state_lock:
             self.counter += 1
             ident = self.counter
@@ -624,11 +673,18 @@ class Worker:
             with self.state_lock:
                 self.pending.pop(ident, None)
             raise
+        return ident, done, box
+
+    def wait(self, sent, timeout):
+        ident, done, box = sent
         if not done.wait(timeout):
             with self.state_lock:
                 self.pending.pop(ident, None)
             raise Refused('WORKER_TIMEOUT')
         return box['reply']
+
+    def request(self, op, timeout, **fields):
+        return self.wait(self.send(op, **fields), timeout)
 
     def ping(self):
         with self.state_lock:
@@ -728,6 +784,14 @@ class Supervisor:
             'uncertain_actions': [a['ordinal'] for a in attempt.get('actions', []) if a['state'] == 'uncertain'],
             'actions_performed': len(attempt.get('actions', [])), 'key_id': self._key_id(),
             'supervisor_sha256': self.state.get('supervisor_sha256')}
+        credential = (self.state['runs'].get(attempt['run_id']) or {}).get('credential')
+        if credential is not None:
+            # Binding ID, revision and outcomes only: never a value or a hash of one.
+            payload['credential'] = {
+                'binding_id': credential['binding_id'], 'binding_revision': credential['binding_revision'],
+                'submits': [{'ordinal': a['ordinal'], 'outcome': a.get('outcome', a['state'])}
+                            for a in attempt.get('actions', []) if a['action'] == 'submit_bound_fixture'],
+                'logout': attempt.get('logout')}
         body = canonical(payload)
         signature = self.host.sign(body)
         return {'run_id': attempt['run_id'], 'attempt_id': attempt['attempt_id'], 'fence': attempt['fence'],
@@ -789,9 +853,17 @@ class Supervisor:
             worker = self.workers.get(attempt_id)
         if worker is not None:
             try:
-                worker.request('stop', 3)
+                # An attempt that submitted a credential signs out first (POST /api/logout).
+                reply = worker.request('stop', STOP_SECONDS if attempt.get('credential_submitted') else 3)
+                if attempt.get('credential_submitted'):
+                    logout = (reply.get('result') or {}).get('logout') if reply.get('ok') else None
+                    with self.lock:
+                        attempt['logout'] = logout if logout in ('done', 'failed') else 'not_run'
             except Refused:
-                pass
+                if attempt.get('credential_submitted'):
+                    with self.lock:
+                        attempt['logout'] = 'not_run'
+
         try:
             if attempt.get('unit') and attempt.get('spawned'):
                 state = self.host.vm_state()
@@ -821,6 +893,8 @@ class Supervisor:
                 self._save()
             raise Refused('TEARDOWN_UNVERIFIED')
         evidence['exit'] = attempt.get('exit')
+        if attempt.get('credential_submitted'):
+            evidence['logout'] = attempt.get('logout', 'not_run')
         receipt = self._receipt(attempt, reason, evidence, True, True)
         with self.lock:
             attempt['receipt'] = receipt
@@ -863,8 +937,9 @@ class Supervisor:
                     raise Refused('ACTIVE_ATTEMPT')
                 run = self.state['runs'].get(spec['run_id'])
                 pins = {'policy_digest': spec['policy_digest'], 'origin': spec['origin'],
-                        'project_limits_revision': spec['project_limits_revision'], 'limits': spec['limits']}
-                if run and any(run[k] != v for k, v in pins.items()):
+                        'project_limits_revision': spec['project_limits_revision'], 'limits': spec['limits'],
+                        'credential': spec['credential']}
+                if run and any(run.get(k) != v for k, v in pins.items()):
                     refusal = 'RUN_POLICY_MISMATCH'
                 elif run and spec['fence'] <= run['max_fence']:
                     refusal = 'STALE_FENCE'
@@ -883,6 +958,7 @@ class Supervisor:
                         or spec['install']['root_disk_gib'] > boundary['root_disk_gib']):
                     raise Refused('VM_CAPACITY_INSUFFICIENT', 'install shape')
                 plan = worker_plan(spec['limits'], boundary['mem_total_kib'], boundary['guest_cpus'])
+                broker_pinned = self._pin_at_broker(spec)
             except Refused as error:
                 self._refuse_before_effect(spec, error.code, error.detail)
             with self.lock:
@@ -892,7 +968,7 @@ class Supervisor:
                     run = self.state['runs'][spec['run_id']] = dict(
                         pins, first_launch_at=stamp(started), max_fence=0, action_count=0, attempts=[],
                         deadline=started + limits['max_seconds'] if 'max_seconds' in limits else None,
-                        max_actions=limits.get('max_actions'))
+                        max_actions=limits.get('max_actions'), broker_pinned=broker_pinned)
                 runtime = None
                 if run['deadline'] is not None:
                     runtime = math.ceil(run['deadline'] - started)
@@ -959,6 +1035,23 @@ class Supervisor:
                     'workspace': {'kind': 'unit-private-tmpfs', **(first.get('workspace') or {})},
                     'workload': workload}
 
+    def _pin_at_broker(self, spec):
+        """Pin the binding revision and the token/spend policy with the A4 broker.
+
+        A credential launch needs the broker and fails closed without it. A launch
+        without one is pinned when the broker is installed (model calls for the run
+        then have a policy) and proceeds unpinned otherwise (no model calls).
+        """
+        credential = spec['credential']
+        if not self.host.broker_available():
+            if credential is not None:
+                raise Refused('CREDENTIAL_BROKER_UNAVAILABLE')
+            return False
+        spend = {k: spec['limits'][k] for k in ('max_tokens', 'max_usd') if k in spec['limits']}
+        self.host.broker('pin_run', {'run_id': spec['run_id'], 'project_limits_revision': spec['project_limits_revision'],
+                                     'limits': spend, 'credential': credential})
+        return True
+
     def _check_readback(self, unit, plan, runtime):
         values = self.host.readback(unit)
         expected = {'User': 'nobody', 'NoNewPrivileges': 'yes', 'ProtectSystem': 'strict',
@@ -1004,16 +1097,17 @@ class Supervisor:
             return {'lease_expires_at': stamp(attempt['lease'])}
 
     def action(self, params):
-        ref = validate_ref(params, ('action',))
+        submit = isinstance(params, dict) and params.get('action') == 'submit_bound_fixture'
+        ref = validate_ref(params, ('action', 'binding_id') if submit else ('action',))
         if ref['action'] not in runner.ACTIONS:
             raise Refused('INVALID_BROWSER_ACTION')
+        if submit:
+            return self._submit(ref)
         with self.lock:
             attempt = self._attempt(ref, ('running',))
             if attempt['workload'] != 'browser':
                 raise Refused('INVALID_BROWSER_ACTION')
             run = self._usable(attempt)
-            if ref['action'] == 'submit_bound_fixture':
-                raise Refused('CREDENTIAL_BROKER_UNAVAILABLE')
             if run['max_actions'] is not None and run['action_count'] >= run['max_actions']:
                 raise Refused('ACTION_LIMIT')
             run['action_count'] += 1
@@ -1048,6 +1142,103 @@ class Supervisor:
         if not reply.get('ok'):
             raise Refused(str(reply.get('error'))[:64])
         return {'ordinal': record['ordinal'], 'result': reply.get('result'), 'untrusted': True}
+
+    def _submit_target(self, ref):
+        attempt = self._attempt(ref, ('running',))
+        if attempt['workload'] != 'browser':
+            raise Refused('INVALID_BROWSER_ACTION')
+        run = self._usable(attempt)
+        credential = run.get('credential')
+        if credential is None:
+            raise Refused('CREDENTIAL_NOT_BOUND')
+        if credential['binding_id'] != ref['binding_id']:
+            raise Refused('BINDING_MISMATCH')
+        return attempt, run, credential
+
+    def _submit(self, ref):
+        """submit_bound_fixture: broker check, runner action, broker delivery.
+
+        Only the binding ID crosses the runner channel; the broker writes the
+        value to the runner's FIFO itself, so no value is ever in this process.
+        """
+        if not isinstance(ref['binding_id'], str) or not UUID.fullmatch(ref['binding_id']):
+            raise Refused('INVALID_REQUEST')
+        with self.lock:
+            attempt, run, credential = self._submit_target(ref)
+        try:
+            # Rotation and revocation are refused here, before any browser effect.
+            self.host.broker('check', {'run_id': ref['run_id'], 'binding_id': ref['binding_id']}, 15)
+        except Refused as error:
+            with self.lock:
+                self._note(attempt, 'submit_refused:' + error.code)
+                self._save()
+            raise
+        with self.lock:
+            attempt, run, credential = self._submit_target(ref)
+            if run['max_actions'] is not None and run['action_count'] >= run['max_actions']:
+                raise Refused('ACTION_LIMIT')
+            run['action_count'] += 1
+            record = {'ordinal': run['action_count'], 'action': 'submit_bound_fixture',
+                      'binding_id': credential['binding_id'], 'binding_revision': credential['binding_revision'],
+                      'state': 'started', 'at': stamp(self.clock())}
+            attempt['actions'].append(record)
+            attempt['credential_submitted'] = True
+            self._save()
+            worker = self.workers.get(ref['attempt_id'])
+        if worker is None:
+            self._fail_channel(ref['attempt_id'])
+            raise Refused('CHANNEL_CLOSED')
+        started = time.monotonic()
+        worker.credential_channel.clear()
+        try:
+            sent = worker.send('action', action='submit_bound_fixture', binding_id=ref['binding_id'])
+        except Refused as error:
+            self._fail_channel(ref['attempt_id'])
+            raise Refused(error.code) from error
+        # Deliver only once the runner reports its FIFO reader is open: a runner
+        # that refused first (no login form) never causes a vault read.
+        deadline = time.monotonic() + runner.DELIVERY_SECONDS
+        while (not worker.credential_channel.is_set() and not sent[1].is_set()
+               and time.monotonic() < deadline):
+            worker.credential_channel.wait(0.05)
+        delivery_error = None
+        if worker.credential_channel.is_set():
+            try:
+                self.host.broker('deliver', {'run_id': ref['run_id'], 'attempt_id': ref['attempt_id'],
+                                             'binding_id': ref['binding_id']}, DELIVERY_SECONDS)
+            except Refused as error:
+                delivery_error = error.code
+        try:
+            reply = worker.wait(sent, ACTION_SECONDS + runner.DELIVERY_SECONDS)
+        except Refused as error:
+            self._fail_channel(ref['attempt_id'])
+            raise Refused(error.code) from error
+        with self.lock:
+            if reply.get('error') == 'CHANNEL_CLOSED':
+                record['state'] = 'uncertain'
+                self._save()
+                self._fail_channel(ref['attempt_id'])
+                raise Refused('CHANNEL_CLOSED')
+            result = reply.get('result') if reply.get('ok') else None
+            record['latency_ms'] = int((time.monotonic() - started) * 1000)
+            if isinstance(result, dict) and result.get('binding_id') == ref['binding_id'] and delivery_error is None:
+                record['state'] = 'done'
+                record['outcome'] = result.get('outcome') if result.get('outcome') in (
+                    'signed_in', 'rejected', 'unknown') else 'unknown'
+            else:
+                record['state'] = 'failed'
+                record['error'] = delivery_error or str(reply.get('error'))[:64]
+                record['outcome'] = 'refused:' + record['error']
+            if attempt['state'] == 'running':
+                attempt['lease'] = self._next_lease(run)
+            self._save()
+        if record['state'] != 'done':
+            raise Refused(record['error'])
+        return {'ordinal': record['ordinal'], 'untrusted': True,
+                'result': {'binding_id': ref['binding_id'], 'binding_revision': record['binding_revision'],
+                           'outcome': record['outcome'], 'login_requests': result.get('login_requests'),
+                           'untrusted_page_claim_authenticated_as_bound_account':
+                               result.get('untrusted_page_claim_authenticated_as_bound_account') is True}}
 
     def _fail_channel(self, attempt_id):
         threading.Thread(target=self._safe_teardown, args=(attempt_id, 'channel_lost'), daemon=True).start()
@@ -1204,6 +1395,7 @@ class Supervisor:
                                'supervisor_sha256': self.state.get('supervisor_sha256'),
                                'runner_sha256': hashlib.sha256(self.source.encode()).hexdigest()},
                 'target': TARGET, 'vm_uuid': VM_UUID, 'boundary': public, 'blockers': blockers,
+                'credential_broker': 'available' if self.host.broker_available() else 'absent',
                 'active': active, 'accepting_launch': active is None and not blockers and not self.stopping}
 
     # ----------------------------------------------------- recovery/watch

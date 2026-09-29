@@ -25,6 +25,8 @@ import { executorPolicy } from './lib/setup-engine/logic.js';
 import { setupInputsDir, sweepSetupInputs } from './lib/setup-engine/setup-inputs.js';
 import { setupRouter } from './routes/setup.js';
 import { authRouter } from './routes/auth.js';
+import { agentControlRouter } from './routes/agent-control-auth.js';
+import { hasControlGrant } from './lib/operational-control-grants.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
@@ -59,6 +61,10 @@ import { applyStreamingTimeouts } from './lib/http-server-timeouts.js';
 import { seedTlsCertFromInstall } from './lib/tls-cert-seed.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { attachTerminalServer, setMock2TerminalAuthorizer } from './routes/terminal-ws.js';
+import { attachAgentLiveServer } from './routes/agent-live-ws.js';
+import { randomUUID } from 'node:crypto';
+import { createDemoFixtureWriter } from './lib/operational-demo-fixtures.js';
+import { runHostCapture } from './lib/lxc-zip.js';
 import { decryptSecret } from './lib/secrets.js';
 import { postNotification } from './lib/notifications.js';
 import { backupRoot, ensureRoot } from './lib/backup-local-store.js';
@@ -599,6 +605,8 @@ app.get('/api/health', (req, res) => {
 // see nothing else until an admin assigns them a role.
 app.use(recoveryBoundary(getDb()));
 app.use('/api/auth/sso', ssoRouter);
+// A7: the once-per-session agent-control verification (never sudo).
+app.use('/api/auth/agent-control', authLimiter, agentControlRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/services', authenticateToken, blockPendingRole, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
@@ -608,8 +616,12 @@ const evidenceRuntime = createEvidenceRuntime(evidenceConfig);
 // toggles (lib/operations-toggles.js, off until turned on), read per request.
 const operationsStore = createOperationsStore(getDb(), { evidenceFactory: evidenceRuntime?.factory });
 // A6: without a configured supervisor every execution control answers EXECUTION_UNAVAILABLE.
-const agentRuns = createAgentRunRuntime(agentRunsConfiguration(), { db: getDb(),
-  log: entry => console.log('[agent-runs]', JSON.stringify(entry)) });
+// A7: practice runs set the demo's fixture mode only where execution is configured.
+const agentRunsConfig = agentRunsConfiguration();
+const agentRuns = createAgentRunRuntime(agentRunsConfig, { db: getDb(),
+  fixtures: agentRunsConfig.execution ? createDemoFixtureWriter({ runHostCapture }) : null,
+  log: entry => console.log('[agent-runs]', JSON.stringify(entry)),
+  audit: (actor, action, details) => logAudit(actor?.id ?? null, action, 'operational_agent_run', details?.run_id ?? null, details, null) });
 const operationsToggle = name => () => effectiveToggles(getDb())[name];
 app.use('/api/operations-settings', authenticateToken, blockPendingRole, createOperationsSettingsRouter({
   Router: express.Router, db: getDb, requireAdmin, requireSudo }));
@@ -621,6 +633,7 @@ app.use('/api/operational-projects', authenticateToken, blockPendingRole, create
   store: operationsStore,
   agentRuns,
   requireSudo,
+  controlVerified: req => hasControlGrant(getDb(), { sessionId: req.user?.jti, userId: req.user?.id }),
   evidenceEnabled: evidenceConfig.enabled,
   evidenceRouter: createEvidenceRouter({ Router: express.Router, enabled: evidenceConfig.enabled,
     store: operationsStore?.evidence, service: evidenceRuntime?.service(operationsStore.evidence), csrf: csrfProtection }),
@@ -943,6 +956,10 @@ const server = http.createServer(app);
 // them at five minutes (lib/http-server-timeouts.js has the story).
 applyStreamingTimeouts(server);
 attachTerminalServer(server);
+// A7: the live view of an agent run (Neko signalling only; routes/agent-live-ws.js).
+attachAgentLiveServer(server, { agentRuns,
+  enabled: () => { const t = effectiveToggles(getDb()); return t.operations && t.agents_metadata && t.agent_runs; },
+  actorOf: user => { const actor = { ...user, requestId: randomUUID() }; operationsStore.assertActor(actor); return actor; } });
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);

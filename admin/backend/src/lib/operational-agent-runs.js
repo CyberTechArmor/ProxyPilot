@@ -1,7 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { OperationsError, assertEligible, assertOperation, resolveOperationsRole, validId } from './operational-projects-logic.js';
 import { SUBMIT, guideRules } from './operational-run-policy.js';
 import { workerInstallResources } from './operational-worker-boundary.js';
+import { DECISIONS, EXPECTED_RESULT, FIXTURE_MODES, critique, profileGate, runSubjects, summaryFacts } from './operational-recovery.js';
+import { fromViewer, toViewer } from './operational-live-relay.js';
 
 // A6 supervision service: what the Operations routes expose of A5 runs. It reads
 // durable state through typed projections only (never a raw row, a receipt body,
@@ -11,6 +14,18 @@ import { workerInstallResources } from './operational-worker-boundary.js';
 // EXECUTION_UNAVAILABLE and the reads still show what is durable. The only live
 // data is the browser frame (A6 decision: pixels only), kept in memory for a
 // moment and never written to the database or a log.
+//
+// A7 adds practice runs (the demo's fixture mode set through an injected,
+// audited fixture writer; one practice run at a time, alone on the demo), resume
+// (a new run linked to one that needs a person, pinned to the same policy),
+// reconciliation (a person's typed decision about each uncertain step or model
+// call; an undecided uncertain write gates the profile), the rule-based critique
+// and the run's model summary, read from durable state. It also relays the live
+// view (Neko signalling only, filtered here and in the VM; the video and the
+// input go over WebRTC through the TURN relay, never through the backend or its
+// database) and hands a running attempt to one person (takeover), after the
+// session's own agent-control verification. With the owner's consent, a
+// finished run gets one model summary written from typed facts.
 export class AgentRunError extends OperationsError {
   constructor(status, code, message, extra = {}) { super(status, message); this.code = code; this.extra = extra; }
 }
@@ -18,7 +33,8 @@ const refuse = (status, code, message, extra) => { throw new AgentRunError(statu
 export const AGENT_PILOT_ORIGIN = 'https://demo.fractionate.ai';
 const ACTIVE = ['prepared', 'starting', 'running', 'cancelling'];
 const RUN_ROLES = ['operator', 'editor', 'reviewer'];
-const HELP_CLASSES = new Set(['challenge_required', 'interrupted', 'uncertain_step', 'model_uncertain', 'taken_over']);
+const HELP_CLASSES = new Set(['challenge_required', 'interrupted', 'uncertain_step', 'model_uncertain', 'taken_over',
+  'timeout']);
 const UNAVAILABLE = Object.freeze({
   flag_off: 'Agent runs are turned off on this installation.',
   not_configured: 'Execution is unavailable: no worker supervisor is configured on this installation.',
@@ -52,6 +68,27 @@ const CODES = Object.freeze({
   SUPERVISOR_TIMEOUT: [503, 'The worker supervisor did not answer in time. A fenced run stays stopped; Stop again retries collecting its verified receipt.'],
   SUPERVISOR_PROTOCOL: [503, 'The worker supervisor gave an answer that was refused. A fenced run stays stopped; Stop again retries.'],
   TEARDOWN_UNVERIFIED: [502, 'The teardown receipt did not verify, so the run stays fenced until a verified receipt arrives.'],
+  RECONCILIATION_REQUIRED: [409, 'A sign-in or sign-out of an earlier run of this profile may or may not have happened. A person decides it on that run before the profile runs again.'],
+  RESUME_UNKNOWN: [404, 'The run to resume was not found for this profile.'],
+  RESUME_NOT_ALLOWED: [409, 'Only a run that ended needing a person can be resumed.'],
+  RESUME_ALREADY_STARTED: [409, 'This run was already resumed. Open the resumed run instead.'],
+  RESUME_STALE: [409, 'The profile, its guide, the binding or the policy changed since this run, so it cannot be resumed with the same pins. Start a new run instead.'],
+  PRACTICE_BUSY: [409, 'Another agent run is active. A practice run changes how the demo signs in the synthetic account, so it runs alone.'],
+  PRACTICE_ACTIVE: [409, 'A practice run is active. It has put the demo into a fixture mode, so no other run starts until it ends.'],
+  FIXTURE_UNAVAILABLE: [503, 'Practice runs are unavailable: no demo fixture writer is configured on this installation.'],
+  FIXTURE_FAILED: [502, 'The demo fixture mode could not be set, so the practice run was not started.'],
+  FIXTURE_NOT_RESET: [409, 'The demo is still in a practice fixture mode and could not be reset. No run starts until it is.'],
+  TAKEOVER_NOT_RUNNING: [409, 'Only a running agent run can be taken over.'],
+  TAKEOVER_HELD: [409, 'Someone already holds this run. There is one controller at a time.'],
+  TAKEOVER_NOT_YOURS: [403, 'Only the person who took over can end the takeover; Stop ends the run for anyone with run access.'],
+  TAKEOVER_NONE: [409, 'Nobody holds this run.'],
+  TAKEOVER_STARTING: [409, 'Control is still being handed over. Try again in a moment.'],
+  TAKEOVER_VIEWER_UNKNOWN: [409, 'Open the live view of this run first: control is handed to the view you are watching.'],
+  TAKEOVER_FAILED: [502, 'The browser could not be handed to you. The agent\'s run was stopped and can be resumed.'],
+  LIVE_UNAVAILABLE: [409, 'The live view is not available for this run; the still frames are shown instead.'],
+  LIVE_BUSY: [409, 'Too many people are watching this run live. Try again when someone closes their view.'],
+  RECONCILE_SUBJECT_UNKNOWN: [404, 'That step or model call has no decision to make.'],
+  RECONCILE_DECISION_INVALID: [400, 'Choose one of the decisions offered for this item.'],
 });
 const toRunError = (error) => {
   if (error instanceof OperationsError) return error;
@@ -61,8 +98,12 @@ const toRunError = (error) => {
 };
 const uuid = z.string().uuid();
 const schemas = {
-  start: z.object({ profile_id: uuid, credential_binding_id: uuid.nullable().optional() }).strict(),
+  start: z.object({ profile_id: uuid, credential_binding_id: uuid.nullable().optional(),
+    practice: z.object({ fixture_mode: z.enum(FIXTURE_MODES) }).strict().optional() }).strict(),
+  reconcile: z.object({ subject: z.string().regex(/^(step:[1-9][0-9]{0,2}|call:[0-9a-f-]{36}|run)$/),
+    decision: z.enum([...DECISIONS, 'acknowledged']) }).strict(),
   approve: z.object({ digest: z.string().regex(/^[0-9a-f]{64}$/), confirmation: z.string().max(200) }).strict(),
+  takeover: z.object({ viewer: z.string().regex(/^[0-9a-f]{16}$/) }).strict(),
   list: z.object({ before: z.string().datetime().optional() }).strict(),
 };
 const parse = (schema, input, code, message) => {
@@ -83,14 +124,26 @@ function receiptKeyId(attestation) {
   } catch { return null; }
 }
 
+// `fixtures` (A7) sets the demo's fixture mode for practice runs:
+// { apply(mode) -> Promise }. Without it, practice runs are unavailable.
+// `audit(actor, action, details)` records the human decisions A7 adds.
+// Supervisor codes that leave it unknown whether a model summary call reached
+// the provider: the reserved summary becomes `uncertain`, never retried.
+const SUMMARY_UNCERTAIN = new Set(['SUPERVISOR_TIMEOUT', 'SUPERVISOR_UNREACHABLE', 'SUPERVISOR_PROTOCOL', 'INTERNAL',
+  'CREDENTIAL_BROKER_UNAVAILABLE', 'CHANNEL_CLOSED']);
 export function createAgentRunService({ db, coordinator = null, launcher = null, unavailableReason = 'not_configured',
-  clock = () => new Date(), log = () => {}, frameMs = 1500, stopWaitMs = 1500 } = {}) {
+  clock = () => new Date(), log = () => {}, frameMs = 1500, stopWaitMs = 1500, fixtures = null,
+  audit = () => {}, renewMs = 10_000 } = {}) {
   const one = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const available = !!(coordinator && launcher);
   const reason = available ? null : (UNAVAILABLE[unavailableReason] ? unavailableReason : 'not_configured');
   const execution = Object.freeze({ available, reason, message: available ? null : UNAVAILABLE[reason] });
   const executing = new Map(), frames = new Map(), viewing = new Map();
+  // A7: open live viewers (viewer id -> who, which run, the relay handle) and
+  // the lease renewal of a held takeover (run id -> timer). Memory only.
+  const lives = new Map(), renewals = new Map();
+  let practicePending = false;
   const note = (entry) => { try { log({ at: clock().toISOString(), ...entry }); } catch { /* never changes a run */ } };
   const unavailable = () => refuse(503, 'EXECUTION_UNAVAILABLE', execution.message, { reason: execution.reason });
   const username = id => (id && one('SELECT username FROM users WHERE id=?', id)?.username) || null;
@@ -158,8 +211,17 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
     const active = one(`SELECT id FROM ops_agent_runs WHERE profile_id=? AND state IN (${ACTIVE.map(() => '?').join(',')})`,
       row.id, ...ACTIVE);
     if (active) reasons.push('A run is already active for this profile.');
+    const gate = profileGate(db, row.id);
+    if (gate) reasons.push(`A sign-in or sign-out in run ${gate.run_id.slice(0, 8)} may or may not have happened. Decide it on that run first.`);
+    const practice = activePractice();
+    if (practice && !active) reasons.push('A practice run is active; no other run starts until it ends.');
+    const practiceReasons = [...reasons];
+    if (!fixtures) practiceReasons.push(CODES.FIXTURE_UNAVAILABLE[1]);
+    if (!practice && !active && anyActive()) practiceReasons.push('A practice run runs alone, and another agent run is active.');
     return { profile_id: row.id, display_name: row.display_name, ready: reasons.length === 0, reasons,
+      practice_ready: practiceReasons.length === 0, practice_reasons: practiceReasons, reconcile_run_id: gate?.run_id ?? null,
       active_run_id: active?.id ?? null, model_guide_consent: row.model_guide_consent === 1,
+      model_summary_consent: row.model_summary_consent === 1,
       binding: binding ? { binding_id: binding.id, revision: binding.revision, username: binding.username } : null };
   }
 
@@ -167,9 +229,31 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
   // person must decide, otherwise the uncertain step that made it one.
   function help(result) {
     if (!result || result.needs_human !== 1) return null;
+    const state = runSubjects(db, result.run_id);
+    const resumed = one('SELECT run_id FROM ops_agent_run_origins WHERE resumed_from_run_id=?', result.run_id);
     return { result_class: HELP_CLASSES.has(result.result_class) ? result.result_class : 'uncertain_step',
-      uncertain_steps: result.uncertain_steps };
+      uncertain_steps: result.uncertain_steps, open: state.open && !resumed, gating: state.gating.length > 0,
+      resumed_as: resumed?.run_id ?? null };
   }
+  const originOf = (runId) => {
+    const o = one('SELECT practice,fixture_mode,resumed_from_run_id FROM ops_agent_run_origins WHERE run_id=?', runId);
+    const next = one('SELECT run_id FROM ops_agent_run_origins WHERE resumed_from_run_id=?', runId);
+    return { practice: o?.practice === 1, fixture_mode: o?.fixture_mode ?? null, resumed_from_run_id: o?.resumed_from_run_id ?? null,
+      resumed_as_run_id: next?.run_id ?? null,
+      expected_result: o?.practice === 1 ? EXPECTED_RESULT[o.fixture_mode] ?? null : null };
+  };
+  const activePractice = () => one(`SELECT r.id FROM ops_agent_runs r JOIN ops_agent_run_origins o ON o.run_id=r.id
+    WHERE o.practice=1 AND r.state IN (${ACTIVE.map(() => '?').join(',')})`, ...ACTIVE) ?? (practicePending ? { id: null } : null);
+  const anyActive = () => !!one(`SELECT 1 FROM ops_agent_runs WHERE state IN (${ACTIVE.map(() => '?').join(',')})`, ...ACTIVE);
+  const takeoversOf = runId => all(`SELECT t.*, u.username FROM ops_agent_takeovers t LEFT JOIN users u ON u.id=t.user_id
+    WHERE t.run_id=? ORDER BY t.started_at`, runId).map(t => ({ id: t.id, state: t.state, user: t.username ?? t.user_id,
+    user_id: t.user_id, started_at: t.started_at, control_at: t.control_at, ended_at: t.ended_at, end_reason: t.end_reason,
+    inputs: JSON.parse(t.inputs_json) }));
+  const summaryOf = runId => {
+    const row = one('SELECT * FROM ops_agent_run_summaries WHERE run_id=?', runId);
+    return row ? { state: row.state, text: row.summary_text, refusal_code: row.refusal_code, prompt_tokens: row.prompt_tokens,
+      completion_tokens: row.completion_tokens, settled_usd: row.settled_usd, created_at: row.created_at } : null;
+  };
   const resultView = (row) => !row ? null : ({ final_state: row.final_state, result_class: row.result_class,
     verified_account: row.verified_account === 1, needs_human: row.needs_human === 1, steps: row.steps,
     rule_steps: row.rule_steps, model_steps: row.model_steps, model_calls: row.model_calls,
@@ -193,17 +277,14 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       started_by: { id: pin?.started_by ?? null, username: username(pin?.started_by) },
       result_class: result?.result_class ?? null, final_state: result?.final_state ?? null,
       needs_human: result?.needs_human === 1, awaiting_approval: !!open && r.state === 'running',
-      help: help(result) };
+      help: help(result), origin: originOf(r.id) };
   }
   function detail(r) {
     const v = one('SELECT version_number FROM ops_guide_versions WHERE project_id=? AND id=?', r.project_id, r.guide_version_id);
     const result = one('SELECT * FROM ops_agent_run_results WHERE run_id=?', r.id);
     const running = r.state === 'running';
-    return {
-      run: { ...summary(r), fence: r.fence, deadline_at: r.deadline_at, policy_digest: r.policy_digest,
-        guide_hash: r.guide_hash, guide_version_id: r.guide_version_id, guide_version_number: v?.version_number ?? null,
-        max_actions: r.max_actions, credential_binding_id: r.credential_binding_id,
-        credential_binding_revision: r.credential_binding_revision },
+    const base = summary(r);
+    const view = { run: base,
       steps: all(`SELECT ordinal,action,decided_by,rule,model_call_id,approval_id,state,claims_json,error_code,created_at,
         finished_at FROM ops_agent_run_steps WHERE run_id=? ORDER BY ordinal`, r.id)
         .map(({ claims_json, ...s }) => ({ ...s, claims: JSON.parse(claims_json) })),
@@ -211,9 +292,25 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         completion_tokens,replayed,created_at,finished_at FROM ops_agent_model_calls WHERE run_id=? ORDER BY created_at,call_id`, r.id)
         .map(({ allowed_json, replayed, ...c }) => ({ ...c, allowed: JSON.parse(allowed_json), replayed: replayed === 1 })),
       approvals: all('SELECT * FROM ops_agent_run_approvals WHERE run_id=? ORDER BY requested_at,id', r.id)
-        .map(a => approvalView(a, r.state)),
+        .map(a => approvalView(a, r.state)), result: resultView(result) };
+    const reconciliation = result ? runSubjects(db, r.id) : null;
+    const takeovers = takeoversOf(r.id);
+    const origin = base.origin;
+    const resumeReason = !execution.available ? execution.message : !result ? 'The run has not ended.'
+      : result.needs_human !== 1 ? 'Only a run that ended needing a person can be resumed.'
+        : origin.resumed_as_run_id ? 'This run was already resumed.'
+          : reconciliation?.gating.length ? 'Decide the uncertain sign-in or sign-out first.' : null;
+    return {
+      run: { ...base, fence: r.fence, deadline_at: r.deadline_at, policy_digest: r.policy_digest,
+        guide_hash: r.guide_hash, guide_version_id: r.guide_version_id, guide_version_number: v?.version_number ?? null,
+        max_actions: r.max_actions, credential_binding_id: r.credential_binding_id,
+        credential_binding_revision: r.credential_binding_revision },
+      steps: view.steps, model_calls: view.model_calls, approvals: view.approvals,
       events: all('SELECT id,kind,created_at FROM ops_agent_worker_events WHERE run_id=? ORDER BY id', r.id),
-      result: resultView(result),
+      result: view.result,
+      origin, takeovers, reconciliation: reconciliation ? { open: reconciliation.open, items: reconciliation.items } : null,
+      critique: critique({ ...view, origin, takeovers, reconciliation }),
+      summary: summaryOf(r.id),
       controls: {
         // A fenced run whose receipt has not arrived (the supervisor was
         // unreachable) may be stopped again: the coordinator retries the
@@ -223,19 +320,185 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         view: execution.available && running ? { enabled: true, reason: null }
           : { enabled: false, reason: !execution.available ? execution.message
             : r.state === 'prepared' || r.state === 'starting' ? 'The browser is starting.' : 'The browser is gone: the run is not running.' },
+        resume: resumeReason ? { enabled: false, reason: resumeReason } : { enabled: true, reason: null },
+        reconcile: reconciliation?.items.length ? { enabled: true, reason: null }
+          : { enabled: false, reason: result ? 'Nothing in this run needs a decision.' : 'The run has not ended.' },
+        live: execution.available && running ? { enabled: true, reason: null }
+          : { enabled: false, reason: !execution.available ? execution.message : 'The browser is not running.' },
+        takeover: takeoverControl(r, takeovers),
       },
       execution,
     };
   }
+  function takeoverControl(r, takeovers) {
+    if (!execution.available) return { enabled: false, reason: execution.message, holder: null };
+    const held = takeovers.find(t => t.state === 'taking' || t.state === 'holding');
+    if (held) return { enabled: false, reason: `${held.user} has control.`, holder: { user_id: held.user_id, user: held.user,
+      state: held.state, since: held.control_at ?? held.started_at } };
+    return r.state === 'running' ? { enabled: true, reason: null, holder: null }
+      : { enabled: false, reason: 'Only a running agent run can be taken over.', holder: null };
+  }
   // The execute loop runs in the background; its failures are already durable
   // results, so here they are only logged (codes, never messages from a page).
+  // The demo leaves a practice fixture mode only when told to. A failure is
+  // recorded (applied 0) and the next start tries the reset again first.
+  async function setFixture(mode, runId, actorId) {
+    let applied = 0;
+    try { await fixtures.apply(mode); applied = 1; }
+    catch (error) { note({ event: 'fixture_failed', mode, code: toRunError(error).code }); }
+    db.prepare(`INSERT INTO ops_agent_fixture_state(id,mode,run_id,set_by,set_at,applied) VALUES(1,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,run_id=excluded.run_id,set_by=excluded.set_by,set_at=excluded.set_at,
+      applied=excluded.applied`).run(mode, runId, actorId, clock().toISOString(), applied);
+    audit(actorId ? { id: actorId } : null, 'AGENT_PRACTICE_FIXTURE', { mode, run_id: runId, applied: applied === 1 });
+    return applied === 1;
+  }
+  async function fixtureReset() {
+    const state = one('SELECT mode,applied FROM ops_agent_fixture_state WHERE id=1');
+    if (!state || (state.mode === 'normal' && state.applied === 1)) return true;
+    if (!fixtures) return false;
+    return setFixture('normal', null, null);
+  }
   function background(runId) {
+    const practice = one('SELECT practice FROM ops_agent_run_origins WHERE run_id=?', runId)?.practice === 1;
     const work = coordinator.execute(runId)
       .then(result => note({ event: 'agent_run_finished', run_id: runId, result_class: result?.result_class ?? null }))
       .catch(error => note({ event: 'agent_run_error', run_id: runId, code: toRunError(error).code }))
-      .finally(() => { executing.delete(runId); frames.delete(runId); });
+      .then(() => (practice ? fixtureReset() : null))
+      .then(() => summarize(runId))
+      .catch(error => note({ event: 'agent_run_summary_error', run_id: runId, code: toRunError(error).code }))
+      .finally(() => { executing.delete(runId); frames.delete(runId); stopRenewal(runId); });
     executing.set(runId, work);
     return work;
+  }
+  // A7 decision 5: with the profile owner's consent, one model summary of the
+  // finished run from typed facts only. Reserved first (one per run, immutable
+  // once decided); a transport failure leaves it `uncertain` and it is never
+  // sent again.
+  async function summarize(runId) {
+    if (!execution.available || typeof launcher.summarize !== 'function') return null;
+    const r = one('SELECT * FROM ops_agent_runs WHERE id=?', runId);
+    const consent = r && one('SELECT model_summary_consent FROM ops_agent_profiles WHERE id=?', r.profile_id);
+    if (consent?.model_summary_consent !== 1) return null;
+    if (one('SELECT 1 FROM ops_agent_run_summaries WHERE run_id=?', runId)) return null;
+    const view = detail(runIn(r.project_id, runId));
+    if (!view.result) return null;
+    const facts = summaryFacts(view);
+    const callId = randomUUID();
+    try {
+      db.prepare(`INSERT INTO ops_agent_run_summaries(run_id,call_id,state,created_at) VALUES(?,?,'reserved',?)`)
+        .run(runId, callId, clock().toISOString());
+    } catch { return null; }
+    try {
+      const out = await launcher.summarize({ run_id: runId, call_id: callId, facts });
+      db.prepare(`UPDATE ops_agent_run_summaries SET state='written',summary_text=?,prompt_tokens=?,completion_tokens=?,
+        settled_usd=?,price_table_revision=?,finished_at=? WHERE run_id=? AND state='reserved'`)
+        .run(out.text, out.prompt_tokens, out.completion_tokens, out.settled_usd, out.price_table_revision,
+          clock().toISOString(), runId);
+      note({ event: 'agent_run_summary', run_id: runId, state: 'written' });
+      return 'written';
+    } catch (error) {
+      const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'INTERNAL';
+      const state = SUMMARY_UNCERTAIN.has(code) ? 'uncertain' : 'refused';
+      db.prepare(`UPDATE ops_agent_run_summaries SET state=?,refusal_code=?,finished_at=? WHERE run_id=? AND state='reserved'`)
+        .run(state, code, clock().toISOString(), runId);
+      note({ event: 'agent_run_summary', run_id: runId, state, code });
+      return state;
+    }
+  }
+
+  // A7 takeover lease: while a person holds the attempt, the backend renews its
+  // lease (the agent's heartbeat stopped when it saw the takeover). It stops as
+  // soon as the takeover is no longer held or the supervisor refuses.
+  function startRenewal(runId, ref) {
+    stopRenewal(runId);
+    const timer = setInterval(() => {
+      const held = one("SELECT 1 FROM ops_agent_takeovers WHERE run_id=? AND fence=? AND state='holding'", runId, ref.fence);
+      if (!held) return stopRenewal(runId);
+      launcher.renew(ref).catch((error) => {
+        note({ event: 'takeover_renew_failed', run_id: runId, code: toRunError(error).code });
+        stopRenewal(runId);
+      });
+      return undefined;
+    }, renewMs);
+    timer.unref?.();
+    renewals.set(runId, timer);
+  }
+  function stopRenewal(runId) {
+    const timer = renewals.get(runId);
+    if (timer) clearInterval(timer);
+    renewals.delete(runId);
+  }
+  // A viewer went away (closed tab, lost network, revoked access, the attempt
+  // ended). Whoever held control through that view gives it up: the takeover
+  // ends and the run ends taken_over, needing a person (it can be resumed).
+  function viewerGone(entry, reason) {
+    if (!entry || entry.gone) return;
+    entry.gone = true;
+    lives.delete(entry.viewer);
+    note({ event: 'live_closed', run_id: entry.runId, reason: String(reason).slice(0, 32) });
+    if (!entry.holding) return;
+    finishTakeover({ id: entry.actorId }, entry.runId, 'viewer_left', { system: true })
+      .catch(error => note({ event: 'takeover_end_error', run_id: entry.runId, code: toRunError(error).code }));
+  }
+  async function finishTakeover(actor, runId, reason, { system = false } = {}) {
+    const t = one("SELECT * FROM ops_agent_takeovers WHERE run_id=? AND state IN ('taking','holding')", runId);
+    if (!t) return null;
+    if (!system && t.user_id !== actor.id) refuse(403, 'TAKEOVER_NOT_YOURS', CODES.TAKEOVER_NOT_YOURS[1]);
+    if (!system && t.state === 'taking') refuse(409, 'TAKEOVER_STARTING', CODES.TAKEOVER_STARTING[1]);
+    stopRenewal(runId);
+    for (const entry of lives.values()) if (entry.runId === runId) entry.holding = false;
+    let inputs = null;
+    if (t.state === 'holding') {
+      try { inputs = (await launcher.release({ run_id: runId, attempt_id: t.attempt_id, fence: t.fence })).inputs; }
+      catch (error) { note({ event: 'takeover_release_failed', run_id: runId, code: toRunError(error).code }); }
+    }
+    const ending = system ? coordinator.dropTakeover(t.id, { reason, inputs }) : coordinator.endTakeover(actor, runId, { reason, inputs });
+    const outcome = ending.then(() => ({ done: true }), error => ({ error }));
+    outcome.then(({ error }) => { if (error) note({ event: 'takeover_end_error', run_id: runId, code: toRunError(error).code }); });
+    audit(actor, 'AGENT_RUN_TAKEOVER_ENDED', { run_id: runId, reason, inputs });
+    const first = await Promise.race([outcome, new Promise(done => { setTimeout(done, stopWaitMs, null).unref?.(); })]);
+    if (first?.error) throw toRunError(first.error);
+    return !first;
+  }
+  function runningRef(r) {
+    if (r.state !== 'running') return null;
+    const attempt = one("SELECT id,fence FROM ops_agent_worker_attempts WHERE run_id=? AND state='running'", r.id);
+    return attempt && attempt.fence === r.fence ? { run_id: r.id, attempt_id: attempt.id, fence: r.fence } : null;
+  }
+
+  // Start, practice start and resume share one path. A practice mode is set on
+  // the demo before the run is pinned (and the run is refused if it cannot be);
+  // any other start first makes sure no practice mode is left behind.
+  async function launch(actor, projectId, input, origin, mode) {
+    if (mode) {
+      practicePending = true;
+      try {
+        if (!(await setFixture(mode, null, actor.id))) {
+          await fixtureReset();
+          refuse(502, 'FIXTURE_FAILED', CODES.FIXTURE_FAILED[1]);
+        }
+      } catch (error) { practicePending = false; throw error; }
+    } else if (!(await fixtureReset())) refuse(409, 'FIXTURE_NOT_RESET', CODES.FIXTURE_NOT_RESET[1]);
+    let started;
+    try {
+      started = coordinator.start({ id: actor.id }, input, origin);
+    } catch (error) {
+      if (mode) { practicePending = false; await fixtureReset(); }
+      const mapped = toRunError(error);
+      if (mapped.code === 'RUN_ALREADY_ACTIVE') {
+        const active = one(`SELECT id FROM ops_agent_runs WHERE profile_id=? AND project_id=? AND state IN (${ACTIVE.map(() => '?').join(',')})`,
+          input.profile_id, projectId, ...ACTIVE);
+        mapped.extra = { active_run_id: active?.id ?? null };
+      }
+      if (mapped.code === 'RECONCILIATION_REQUIRED') mapped.extra = { run_id: typeof error.detail === 'string' ? error.detail : null };
+      if (mapped.code === 'RESUME_STALE') mapped.extra = { stale_reason: typeof error.detail === 'string' ? error.detail : null };
+      throw mapped;
+    }
+    practicePending = false;
+    if (mode) db.prepare('UPDATE ops_agent_fixture_state SET run_id=? WHERE id=1').run(started.run_id);
+    note({ event: 'agent_run_started', run_id: started.run_id, by: actor.id, practice: !!mode });
+    background(started.run_id);
+    return detail(runIn(projectId, started.run_id));
   }
 
   return {
@@ -260,22 +523,59 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       const v = parse(schemas.start, input, 'INVALID_RUN', CODES.INVALID_RUN[1]);
       access(actor, projectId, 'run');
       if (!execution.available) unavailable();
-      let started;
-      try {
-        started = coordinator.start({ id: actor.id }, { project_id: projectId, profile_id: v.profile_id,
-          ...(v.credential_binding_id ? { credential_binding_id: v.credential_binding_id } : {}) });
-      } catch (error) {
-        const mapped = toRunError(error);
-        if (mapped.code === 'RUN_ALREADY_ACTIVE') {
-          const active = one(`SELECT id FROM ops_agent_runs WHERE profile_id=? AND project_id=? AND state IN (${ACTIVE.map(() => '?').join(',')})`,
-            v.profile_id, projectId, ...ACTIVE);
-          mapped.extra = { active_run_id: active?.id ?? null };
-        }
-        throw mapped;
-      }
-      note({ event: 'agent_run_started', run_id: started.run_id, by: actor.id });
-      background(started.run_id);
-      return detail(runIn(projectId, started.run_id));
+      const practice = v.practice ?? null;
+      if (practice) {
+        if (!fixtures) refuse(503, 'FIXTURE_UNAVAILABLE', CODES.FIXTURE_UNAVAILABLE[1]);
+        if (activePractice() || anyActive()) refuse(409, 'PRACTICE_BUSY', CODES.PRACTICE_BUSY[1]);
+      } else if (activePractice()) refuse(409, 'PRACTICE_ACTIVE', CODES.PRACTICE_ACTIVE[1]);
+      const started = await launch(actor, projectId, { project_id: projectId, profile_id: v.profile_id,
+        ...(v.credential_binding_id ? { credential_binding_id: v.credential_binding_id } : {}) },
+      practice ? { practice: true, fixture_mode: practice.fixture_mode } : null, practice?.fixture_mode ?? null);
+      if (practice) audit(actor, 'AGENT_PRACTICE_RUN_STARTED', { project_id: projectId, run_id: started.run.id,
+        fixture_mode: practice.fixture_mode });
+      return started;
+    },
+    // A7 decision 2: a new run linked to one that needed a person, pinned to its
+    // exact policy, profile, guide and binding revisions, from step 1 in a fresh
+    // browser. It is never the old attempt, and it asks for its own approval.
+    async resume(actor, projectId, runId) {
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      const origin = one('SELECT practice,fixture_mode FROM ops_agent_run_origins WHERE run_id=?', runId);
+      const mode = origin?.practice === 1 ? origin.fixture_mode : null;
+      if (mode && !fixtures) refuse(503, 'FIXTURE_UNAVAILABLE', CODES.FIXTURE_UNAVAILABLE[1]);
+      if (mode ? (activePractice() || anyActive()) : activePractice())
+        refuse(409, mode ? 'PRACTICE_BUSY' : 'PRACTICE_ACTIVE', CODES[mode ? 'PRACTICE_BUSY' : 'PRACTICE_ACTIVE'][1]);
+      const started = await launch(actor, projectId, { project_id: projectId, profile_id: r.profile_id,
+        ...(r.credential_binding_id ? { credential_binding_id: r.credential_binding_id } : {}) }, { resumed_from: runId }, mode);
+      audit(actor, 'AGENT_RUN_RESUMED', { project_id: projectId, run_id: runId, resumed_as: started.run.id });
+      return started;
+    },
+    // A7 decision 3: a person's typed decision about one uncertain step, model
+    // call or help request. Nothing is re-sent; the decision is recorded,
+    // audited, and (for a write) lifts the profile's Start gate unless "unknown".
+    reconcile(actor, projectId, runId, input, { verified = false } = {}) {
+      const v = parse(schemas.reconcile, input, 'RECONCILE_DECISION_INVALID', CODES.RECONCILE_DECISION_INVALID[1]);
+      access(actor, projectId, 'run');
+      runIn(projectId, runId);
+      if (!verified) refuse(401, 'CONTROL_VERIFICATION_REQUIRED',
+        'Confirm it is you (password and authenticator code, or a passkey) once in this session to decide agent runs.',
+        { control_verification_required: true });
+      const state = runSubjects(db, runId);
+      const item = state.items.find(i => i.subject === v.subject);
+      if (!item) refuse(404, 'RECONCILE_SUBJECT_UNKNOWN', CODES.RECONCILE_SUBJECT_UNKNOWN[1]);
+      if ((item.kind === 'run') !== (v.decision === 'acknowledged'))
+        refuse(400, 'RECONCILE_DECISION_INVALID', CODES.RECONCILE_DECISION_INVALID[1]);
+      const at = clock().toISOString();
+      db.prepare(`INSERT INTO ops_agent_reconciliations(id,run_id,subject,kind,decision,decided_by,decided_at)
+        VALUES(?,?,?,?,?,?,?)`).run(randomUUID(), runId, v.subject, item.kind, v.decision, actor.id, at);
+      db.prepare('INSERT INTO ops_agent_worker_events(run_id,attempt_id,kind,created_at) VALUES(?,?,?,?)')
+        .run(runId, null, `a7:reconciled:${item.kind}:${v.decision}`, at);
+      audit(actor, 'AGENT_RUN_RECONCILED', { project_id: projectId, run_id: runId, subject: v.subject, kind: item.kind,
+        decision: v.decision });
+      note({ event: 'reconciled', run_id: runId, subject: v.subject, decision: v.decision });
+      return detail(runIn(projectId, runId));
     },
     async stop(actor, projectId, runId) {
       access(actor, projectId, 'run');
@@ -321,12 +621,18 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         WHERE a.state='requested' AND r.state='running' AND ${scope} ORDER BY a.requested_at LIMIT 50`).all({ actor: actor.id })
         .map(a => ({ ...approvalView(a, a.run_state), project_id: a.project_id, project_name: a.project_name,
           profile_name: one('SELECT display_name FROM ops_agent_profiles WHERE id=?', a.profile_id)?.display_name ?? null }));
-      const help = db.prepare(`SELECT r.*, p.name AS project_name FROM ops_agent_runs r JOIN ops_agent_run_results res ON res.run_id=r.id
+      // A help request stays listed until a person has decided it (or resumed
+      // the run). A newer run of the profile closes one with nothing that gates
+      // the profile, as before A7; an undecided write stays listed regardless.
+      const help = db.prepare(`SELECT r.*, p.name AS project_name,
+        EXISTS(SELECT 1 FROM ops_agent_runs n JOIN ops_agent_run_pins np ON np.run_id=n.id
+          WHERE n.profile_id=r.profile_id AND n.started_at > r.started_at) AS superseded
+        FROM ops_agent_runs r JOIN ops_agent_run_results res ON res.run_id=r.id
         JOIN ops_projects p ON p.id=r.project_id WHERE res.needs_human=1 AND ${scope}
-        AND NOT EXISTS(SELECT 1 FROM ops_agent_runs n JOIN ops_agent_run_pins np ON np.run_id=n.id
-          WHERE n.profile_id=r.profile_id AND n.started_at > r.started_at)
-        ORDER BY res.created_at DESC LIMIT 50`).all({ actor: actor.id })
-        .map(r => ({ ...summary(r), project_name: r.project_name }));
+        ORDER BY res.created_at DESC LIMIT 200`).all({ actor: actor.id })
+        .map(r => ({ ...summary(r), project_name: r.project_name, superseded: r.superseded === 1 }))
+        .filter(r => r.help?.open && (r.help.gating || !r.superseded)).slice(0, 50)
+        .map(({ superseded, ...r }) => r);
       return { approvals, help_requests: help, execution };
     },
     rules(actor, projectId, profileId) {
@@ -375,6 +681,120 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         refuse(503, 'VIEW_FAILED', 'The browser frame could not be read from the supervisor.', { cause: toRunError(error).code });
       }
     },
+    // A7 live view. Checked before the WebSocket upgrade and again every few
+    // seconds while it is open, so a removed grant stops the view.
+    assertLive(actor, projectId, runId) {
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      if (!runningRef(r)) refuse(409, 'LIVE_UNAVAILABLE', 'The browser is not running.', { run_state: r.state });
+      return true;
+    },
+    // One viewer's relay: the service filters every message both ways; the
+    // WebSocket route owns the browser side. Resolves with the viewer id and
+    // that viewer's own TURN credentials.
+    async openLive(actor, projectId, runId, { sessionId, onMessage = () => {}, onClose = () => {} } = {}) {
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      const ref = runningRef(r);
+      if (!ref || typeof launcher.live !== 'function') refuse(409, 'LIVE_UNAVAILABLE', CODES.LIVE_UNAVAILABLE[1]);
+      let entry = null, early = null;
+      const closed = (reason) => {
+        if (!entry) { early = reason; return; }
+        viewerGone(entry, reason);
+        try { onClose(reason); } catch { /* the route's socket may be gone */ }
+      };
+      let handle;
+      try {
+        handle = await launcher.live(ref, {
+          onMessage: (message) => {
+            if (message === null) return onMessage(null);
+            const allowed = toViewer(message);
+            return allowed ? onMessage(allowed) : undefined;
+          },
+          onClose: closed,
+        });
+      } catch (error) {
+        const code = error?.code;
+        if (code === 'LIVE_UNAVAILABLE' || code === 'LIVE_BUSY')
+          refuse(409, code, CODES[code][1]);
+        if (['ATTEMPT_NOT_ACTIVE', 'STALE_FENCE', 'UNKNOWN_ATTEMPT', 'LEASE_EXPIRED', 'DEADLINE', 'CHANNEL_CLOSED',
+          'WORKER_EXITED'].includes(code))
+          refuse(409, 'LIVE_UNAVAILABLE', 'The browser is not running.');
+        throw toRunError(error);
+      }
+      entry = { viewer: handle.viewer, actorId: actor.id, sessionId, runId, projectId, handle, holding: false, gone: false };
+      lives.set(handle.viewer, entry);
+      note({ event: 'live_opened', run_id: runId, by: actor.id });
+      if (early) closed(early);
+      return { viewer: handle.viewer, ice_servers: handle.ice_servers, ttl_seconds: handle.ttl_seconds };
+    },
+    // From the viewer's browser: signalling only, the rest is dropped here.
+    sendLive(viewer, actorId, message) {
+      const entry = lives.get(viewer);
+      if (!entry || entry.actorId !== actorId || entry.gone) return false;
+      const allowed = fromViewer(message);
+      return allowed ? entry.handle.send(allowed) !== false : false;
+    },
+    closeLive(viewer, reason = 'viewer_closed') {
+      const entry = lives.get(viewer);
+      if (!entry) return;
+      try { entry.handle.close(); } catch { /* already closed */ }
+      viewerGone(entry, reason);
+    },
+    // A7 takeover: anyone with run access (the starter too), after this
+    // session's agent-control verification; never sudo, never a host privilege.
+    // The claim (one controller) is durable first; then the supervisor fences
+    // the model and Neko gives control to the caller's own live view.
+    async takeover(actor, projectId, runId, input, { verified = false, sessionId = null } = {}) {
+      const v = parse(schemas.takeover, input, 'TAKEOVER_VIEWER_UNKNOWN', CODES.TAKEOVER_VIEWER_UNKNOWN[1]);
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!verified) refuse(401, 'CONTROL_VERIFICATION_REQUIRED',
+        'Confirm it is you (password and authenticator code, or a passkey) once in this session to take over agent runs.',
+        { control_verification_required: true });
+      if (!execution.available) unavailable();
+      const entry = lives.get(v.viewer);
+      if (!entry || entry.gone || entry.actorId !== actor.id || entry.sessionId !== sessionId || entry.runId !== r.id)
+        refuse(409, 'TAKEOVER_VIEWER_UNKNOWN', CODES.TAKEOVER_VIEWER_UNKNOWN[1]);
+      let begun;
+      try { begun = coordinator.beginTakeover({ id: actor.id }, runId); }
+      catch (error) { throw toRunError(error); }
+      let handed;
+      try {
+        handed = await launcher.takeover(begun.ref, v.viewer);
+      } catch (error) {
+        const cause = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'INTERNAL';
+        note({ event: 'takeover_failed', run_id: runId, code: cause });
+        coordinator.abandonTakeover(begun.takeover_id, cause)
+          .catch(err => note({ event: 'takeover_abandon_error', run_id: runId, code: toRunError(err).code }));
+        audit(actor, 'AGENT_RUN_TAKEOVER_FAILED', { project_id: projectId, run_id: runId, code: cause });
+        refuse(502, 'TAKEOVER_FAILED', CODES.TAKEOVER_FAILED[1], { cause });
+      }
+      coordinator.holdTakeover(begun.takeover_id);
+      entry.holding = true;
+      startRenewal(runId, begun.ref);
+      // X input while nobody had control should be none; recorded either way.
+      audit(actor, 'AGENT_RUN_TAKEN_OVER', { project_id: projectId, run_id: runId,
+        uncontrolled_inputs: handed.uncontrolled_inputs, password_fields_empty: handed.password_fields_empty });
+      note({ event: 'takeover_holding', run_id: runId, by: actor.id, uncontrolled_inputs: handed.uncontrolled_inputs });
+      // The view may have closed while control was being handed over.
+      if (entry.gone) { entry.gone = false; viewerGone(entry, 'viewer_left'); }
+      return detail(runIn(projectId, runId));
+    },
+    // The person who took over gives the browser back. The attempt is torn down
+    // (stop reason taken_over, verified receipt); the run ends taken_over and
+    // needs a person: they decide what happened and may resume it.
+    async endTakeover(actor, projectId, runId) {
+      access(actor, projectId, 'run');
+      runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      if (!one("SELECT 1 FROM ops_agent_takeovers WHERE run_id=? AND state IN ('taking','holding')", runId))
+        refuse(409, 'TAKEOVER_NONE', CODES.TAKEOVER_NONE[1]);
+      const stopping = await finishTakeover({ id: actor.id }, runId, 'ended_by_person');
+      return { ...detail(runIn(projectId, runId)), stopping: stopping === true };
+    },
     // At boot, with a coordinator: fence every run a previous process left
     // active and collect its verified receipt. Nothing is resumed.
     async recover() {
@@ -384,5 +804,6 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       return results;
     },
     settled: runId => executing.get(runId) ?? Promise.resolve(),
+    summarize,
   };
 }

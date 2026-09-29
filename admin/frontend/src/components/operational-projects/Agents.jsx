@@ -33,7 +33,7 @@ export function AgentConfiguration({base,project,onChanged,runsEnabled=false}) {
       <p className="text-sm break-all">Guide: {p.guide_version_id?`v${p.guide_version_number??'?'} · ${p.guide_version_id} · SHA-256 ${p.guide_hash}`:'Unassigned'}</p>
       <p className="text-sm break-words">Scope: {p.proposed_actions.join(', ')||'No actions'} · {p.proposed_origins.join(', ')||'No origins'}</p>
       {!runsEnabled&&<p className="text-sm break-words">{p.disabled_reasons.join('; ')}</p>}
-      {runsEnabled&&<><ModelConsent base={base} project={project} profile={p} busy={busy} submit={submit}/><EnforcedRules base={base} profile={p}/></>}
+      {runsEnabled&&<><ModelConsent base={base} project={project} profile={p} busy={busy} submit={submit}/><SummaryConsent base={base} project={project} profile={p} busy={busy} submit={submit}/><EnforcedRules base={base} profile={p}/></>}
       {editable&&<><div className="flex flex-wrap gap-2"><Action variant="outline" disabled={busy} onClick={()=>choose(p)}>Edit profile</Action>
         <Action variant="outline" aria-describedby={`${p.id}-assign`} disabled={busy||!project.current_version||p.guide_version_id===project.current_version.id&&p.assigned_site_revision===project.site_revision} onClick={()=>submit(()=>api.write(`${base}/agent-profiles/${p.id}/guide`,{guide_version_id:project.current_version.id},p.revision,'PUT'),'Current guide assigned.')}>Assign current approved guide</Action>
         <Action variant="outline" disabled={busy||!p.guide_version_id} onClick={()=>submit(()=>api.write(`${base}/agent-profiles/${p.id}/guide`,{guide_version_id:null},p.revision,'PUT'),'Guide unassigned.')}>Unassign</Action>
@@ -72,6 +72,26 @@ function ModelConsent({base,project,profile,busy,submit}) {
       :<><label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={reviewed} onChange={e=>setReviewed(e.target.checked)}/><span>I reviewed: {CONSENT_STATEMENT}.</span></label>
         <Action disabled={busy||!reviewed} aria-describedby={hint} onClick={()=>submit(()=>api.write(`${base}/agent-profiles/${profile.id}/model-guide-consent`,{model_guide_consent:true,reviewed_statement:CONSENT_STATEMENT},profile.revision,'PUT'),'Consent given.')}>Give consent</Action>
         {!reviewed&&<p className="text-sm">Tick the reviewed statement to enable consent.</p>}</>)}
+  </div>;
+}
+
+const SUMMARY_STATEMENT = "Send this profile's finished runs, as typed facts, to the model provider for a summary";
+
+// A7 decision 5, owner only: whether a finished run of this profile gets one
+// model summary, written from typed facts (codes, counts, states): never page
+// text, the guide or a credential. It changes nothing a run is pinned to.
+function SummaryConsent({base,project,profile,busy,submit}) {
+  const [reviewed,setReviewed]=useState(false),hint=useId();
+  const owner=project.own_role==='owner'&&!project.archived_at;
+  useEffect(()=>setReviewed(false),[profile.revision,profile.model_summary_consent]);
+  return <div className="space-y-2 border-t pt-2">
+    <p className="text-sm font-medium">Model summaries of finished runs: {profile.model_summary_consent?'allowed':'not allowed'}</p>
+    <p id={hint} className="text-sm text-muted-foreground">{owner?'When a run ends, the model (gpt-6-luna) writes a short summary from the run\'s typed facts only, charged to the run\'s budget. It is shown as the model\'s words, to check against the record.':'Only the owner can allow or stop summaries.'}</p>
+    {owner&&(profile.model_summary_consent
+      ?<Action variant="outline" disabled={busy} aria-describedby={hint} onClick={()=>submit(()=>api.write(`${base}/agent-profiles/${profile.id}/model-summary-consent`,{model_summary_consent:false},profile.revision,'PUT'),'Summaries turned off.')}>Stop summaries</Action>
+      :<><label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={reviewed} onChange={e=>setReviewed(e.target.checked)}/><span>I reviewed: {SUMMARY_STATEMENT}.</span></label>
+        <Action disabled={busy||!reviewed} aria-describedby={hint} onClick={()=>submit(()=>api.write(`${base}/agent-profiles/${profile.id}/model-summary-consent`,{model_summary_consent:true,reviewed_statement:SUMMARY_STATEMENT},profile.revision,'PUT'),'Summaries allowed.')}>Allow summaries</Action>
+        {!reviewed&&<p className="text-sm">Tick the reviewed statement to allow summaries.</p>}</>)}
   </div>;
 }
 

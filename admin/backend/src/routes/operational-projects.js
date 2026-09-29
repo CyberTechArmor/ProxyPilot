@@ -10,8 +10,11 @@ const noSudo = (_req, res) => res.status(401).json({ error: 'sudo_required', sud
 // The switches are booleans or getters read on every request (the server passes
 // the administrators' toggles, lib/operations-toggles.js), so turning one off
 // takes effect at the next request. `agentRuns` (A6) is the supervision service.
+// `controlVerified(req)` (A7) says whether this session has made its
+// once-per-session agent-control verification (lib/operational-control-grants.js);
+// without it nothing is verified, so takeover and reconciliation are refused.
 export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false,
-  agentRuns = null, agentRunsEnabled = true, requireSudo = noSudo }) {
+  agentRuns = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
   const router = Router();
   const on = value => (typeof value === 'function' ? value() : value) === true;
   const opsOn = () => on(enabled), agentsOn = () => opsOn() && on(agentsEnabled);
@@ -75,6 +78,8 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.get('/directory', agentsOnly, handle((r,a)=>store.directory(a,r.query),200,'directory_read'));
   // Human-only: approving needs the session's sudo elevation plus the typed digest.
   router.get('/agent-approvals', agentRunsOnly, agentHandle((_r,a)=>agentRuns.inbox(a),200,'agent_inbox_read'));
+  // A7: whether this session already made its agent-control verification.
+  router.get('/agent-control', agentRunsOnly, (req, res) => res.json({ verified: controlVerified(req) === true }));
   router.post('/agent-approvals/:approvalId', agentRunsOnly, requireSudo,
     agentHandle((r,a)=>agentRuns.approve(a,r.params.approvalId,r.body,{elevated:true}),200,'agent_approval'));
   router.get('/', handle((r, a) => store.list(a, r.query)));
@@ -97,6 +102,8 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
     handle((r,a)=>store.assignProfile(a,r.params.id,r.params.profileId,expected(r),r.body),200,'profile_guide_assignment'));
   router.put('/:id/agent-profiles/:profileId/model-guide-consent', agentRunsOnly,
     handle((r,a)=>store.modelGuideConsent(a,r.params.id,r.params.profileId,expected(r),r.body),200,'profile_model_guide_consent'));
+  router.put('/:id/agent-profiles/:profileId/model-summary-consent', agentRunsOnly,
+    handle((r,a)=>store.modelSummaryConsent(a,r.params.id,r.params.profileId,expected(r),r.body),200,'profile_model_summary_consent'));
   router.get('/:id/agent-profiles/:profileId/rules', agentRunsOnly,
     agentHandle((r,a)=>agentRuns.rules(a,r.params.id,r.params.profileId),200,'profile_rules_read'));
   router.get('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.list(a,r.params.id,r.query),200,'agent_runs_read'));
@@ -105,6 +112,19 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.post('/:id/agent-runs/:runId/stop', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.stop(a,r.params.id,r.params.runId);},
     data=>data.stopping?202:200,'agent_run_stop'));
   router.get('/:id/agent-runs/:runId/view', agentRunsOnly, agentHandle((r,a)=>agentRuns.view(a,r.params.id,r.params.runId),200,'agent_run_view'));
+  // A7: resume (a new linked run with the same pins) and reconciliation (a
+  // person's typed decision; needs the session's agent-control verification).
+  router.post('/:id/agent-runs/:runId/resume', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.resume(a,r.params.id,r.params.runId);},
+    201,'agent_run_resume'));
+  router.post('/:id/agent-runs/:runId/reconcile', agentRunsOnly, agentHandle((r,a)=>agentRuns.reconcile(a,r.params.id,r.params.runId,r.body,
+    { verified: controlVerified(r) === true }),200,'agent_run_reconcile'));
+  // A7 takeover: control goes to the caller's own open live view (the live
+  // WebSocket, routes/agent-live-ws.js); needs the session's agent-control
+  // verification. Ending it gives the browser back and ends the run.
+  router.post('/:id/agent-runs/:runId/takeover', agentRunsOnly, agentHandle((r,a)=>agentRuns.takeover(a,r.params.id,r.params.runId,r.body,
+    { verified: controlVerified(r) === true, sessionId: r.user?.jti ?? null }),200,'agent_run_takeover'));
+  router.post('/:id/agent-runs/:runId/takeover/end', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.endTakeover(a,r.params.id,r.params.runId);},
+    data=>data.stopping?202:200,'agent_run_takeover_end'));
   router.delete('/:id/agent-profiles/:profileId', agentsOnly,
     handle((r,a)=>{empty(r);return store.deleteProfile(a,r.params.id,r.params.profileId,expected(r));},200,'profile_delete'));
   router.get('/:id/draft', handle((r, a) => ({ draft: store.draft(a, r.params.id) })));

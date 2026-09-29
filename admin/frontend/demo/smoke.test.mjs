@@ -142,7 +142,7 @@ test('A5 fixture modes and the injected file entry stay on the synthetic account
   const a5Origin = `http://127.0.0.1:${a5Port}`;
   const child = spawn(process.execPath, [serverPath], {
     env: { ...process.env, DEMO_PORT: String(a5Port), DEMO_PUBLIC_ORIGIN: a5Origin,
-      DEMO_SYNTHETIC_ACCOUNT_FILE: file, DEMO_A5_FIXTURE_FILE: modes },
+      DEMO_SYNTHETIC_ACCOUNT_FILE: file, DEMO_A5_FIXTURE_FILE: modes, DEMO_A7_SLOW_MS: '600' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let errors = '';
@@ -185,6 +185,16 @@ test('A5 fixture modes and the injected file entry stay on the synthetic account
     const pending = challenged.headers.get('set-cookie')?.split(';')[0];
     assert.deepEqual(await (await fetch(`${a5Origin}/api/session`, { headers: { Cookie: pending } })).json(),
       { authenticated: false, email: null, challenge: 'mfa' });
+    // A7 slow: the synthetic sign-in is held, then completes (the site signs in).
+    await setMode('slow');
+    let started = Date.now();
+    const slow = await login(account, value);
+    assert.ok(Date.now() - started >= 550, 'the synthetic sign-in is held');
+    assert.equal(slow.status, 200);
+    assert.deepEqual(await slow.json(), { authenticated: true, email: account });
+    started = Date.now();
+    assert.equal((await login('demo@fractionate.ai', 'welcome-demo')).status, 200);
+    assert.ok(Date.now() - started < 500, 'the public account is never held');
     // The public account never sees a mode or the injected entry.
     const demo = await login('demo@fractionate.ai', 'welcome-demo');
     const demoCookie = demo.headers.get('set-cookie')?.split(';')[0];

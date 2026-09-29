@@ -23,7 +23,12 @@ export function agentRunsConfiguration(env = process.env) {
   return { enabled: true, execution: { socket, publicKeyPath, vmUuid }, reason: null };
 }
 
-export function createAgentRunRuntime(config, { db, readFile = readFileSync, log = () => {} } = {}) {
+// `audit(actor, action, details)` records A7's human decisions (resume,
+// reconciliation, practice fixture modes); `fixtures` sets the demo fixture
+// mode for practice runs (lib/operational-demo-fixtures.js); absent, practice
+// runs are unavailable.
+export function createAgentRunRuntime(config, { db, readFile = readFileSync, log = () => {}, audit = () => {},
+  fixtures = null } = {}) {
   let coordinator = null, launcher = null, reason = config.reason;
   if (config.execution) {
     try {
@@ -37,5 +42,5 @@ export function createAgentRunRuntime(config, { db, readFile = readFileSync, log
       reason = 'invalid_configuration';
     }
   }
-  return createAgentRunService({ db, coordinator, launcher, unavailableReason: reason, log });
+  return createAgentRunService({ db, coordinator, launcher, unavailableReason: reason, log, audit, fixtures });
 }

@@ -19,6 +19,11 @@ TAP = 'ppa3proof0'
 TABLE = 'pp_a3_proof'
 PROXY_PORT = 18083
 PROOF_UUID = '49592202-a8b0-45af-9ac6-5439761d73e4'
+# A7 live view (user decision 1b, 2026-09-29): Neko's one WebRTC port in the
+# worker unit may send UDP to the host's TURN relay ports on the gateway, and to
+# nothing else. The relay itself (coturn) listens for viewers on the host.
+LIVE_UDP_PORT = 18091
+LIVE_RELAY_PORTS = (49160, 49200)
 
 
 def validate(manifest):
@@ -43,8 +48,14 @@ def validate(manifest):
     return dict(manifest)
 
 
-def render(manifest):
+def render(manifest, live=False):
     m = validate(manifest)
+    if live not in (True, False):
+        raise ValueError('live must be true or false')
+    relay_counter = '  counter allowed_live_relay { }\n' if live else ''
+    relay_rule = (f"    ether type ip ip saddr {m['guest_ipv4']} ip daddr {m['gateway_ipv4']} udp sport {LIVE_UDP_PORT} "
+                  f"udp dport {LIVE_RELAY_PORTS[0]}-{LIVE_RELAY_PORTS[1]} counter name allowed_live_relay accept\n"
+                  if live else '')
     # The bridge prerouting hook covers both routed and same-bridge traffic,
     # including host input, without depending on br_netfilter or IP identity.
     # Static guest addressing is a precondition: DHCP and DNS are not admitted.
@@ -54,13 +65,13 @@ add table bridge {TABLE}
 flush table bridge {TABLE}
 table bridge {TABLE} {{
   counter allowed_proxy {{ }}
-  counter denied_ipv4 {{ }}
+{relay_counter}  counter denied_ipv4 {{ }}
   counter denied_ipv6 {{ }}
   counter denied_other {{ }}
   chain from_worker {{
     ether type arp arp saddr ip {m['guest_ipv4']} arp daddr ip {m['gateway_ipv4']} accept
     ether type ip ip saddr {m['guest_ipv4']} ip daddr {m['gateway_ipv4']} tcp dport {PROXY_PORT} counter name allowed_proxy accept
-    ether type ip counter name denied_ipv4 drop
+{relay_rule}    ether type ip counter name denied_ipv4 drop
     ether type ip6 counter name denied_ipv6 drop
     counter name denied_other drop
   }}

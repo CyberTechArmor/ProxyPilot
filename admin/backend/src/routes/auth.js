@@ -50,7 +50,7 @@ const LOGIN_LOCKOUT_MIN = parseInt(process.env.LOGIN_LOCKOUT_MIN || '30', 10);
 // Returns { locked: true, retryAfterSec } if user.locked_until is in
 // the future, else { locked: false }. Pass `null` for users that
 // don't exist (typo'd usernames) — safe no-op.
-function checkLockout(user) {
+export function checkLockout(user) {
   if (!user || !user.locked_until) return { locked: false };
   const untilMs = Date.parse(user.locked_until);
   if (!Number.isFinite(untilMs) || untilMs <= Date.now()) return { locked: false };
@@ -62,7 +62,7 @@ function checkLockout(user) {
 // the previous failure was inside the window — sets locked_until.
 // If the previous failure was OUTSIDE the window, resets the counter
 // to 1 (fresh streak) before re-checking.
-function recordLoginFailure(db, user, req) {
+export function recordLoginFailure(db, user, req) {
   if (!user) return;
   const now = Date.now();
   const prevFailedAt = user.last_failed_at ? Date.parse(user.last_failed_at) : 0;
@@ -98,7 +98,7 @@ function recordLoginFailure(db, user, req) {
 }
 
 // Reset failed_attempts on a clean win.
-function resetLoginFailures(db, userId) {
+export function resetLoginFailures(db, userId) {
   db.prepare(
     `UPDATE users
         SET failed_attempts = 0, last_failed_at = NULL, locked_until = NULL

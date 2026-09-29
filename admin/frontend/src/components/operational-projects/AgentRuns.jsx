@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { operationsApi as api } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Action, Panel } from './shared';
-import { ACTION_TEXT, ACTIVE_STATES, DECK_TEXT, STALE_TEXT, STATE_TEXT, resultLabel, shortId, when } from './agent-run-text';
+import { ACTION_TEXT, ACTIVE_STATES, DECK_TEXT, FIXTURE_TEXT, LIVE_TEXT, ORIGIN_TEXT, STALE_TEXT, STATE_TEXT, resultLabel,
+  shortId, when } from './agent-run-text';
 import { ApprovalFields, Badge, FrameDialog, HelpBanner, RunDeck, StateBadge } from './RunDeck';
 import { EMPTY_VIEW, acceptFrame, feedOf, firstStepFinishedAt, panelFor } from './run-deck-logic';
 
 // A6 supervision UI. Everything shown comes from durable server state except the
 // live browser frames (pixels only, held in this page's memory and gone on
 // refresh). Every control either acts or says why it cannot. The run detail is
-// laid out by RunDeck.jsx.
+// laid out by RunDeck.jsx. A7: the live video and takeover (LiveBrowser.jsx),
+// the decisions a person records, resume and practice runs. Taking over and
+// deciding need this session's own confirmation once (the api client opens the
+// agent-control prompt on the server's 401); it is never sudo.
 
 const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
 // Runs `load` now, then every `interval` ms while enabled and the page is
@@ -96,12 +101,31 @@ function announcementFor(prev, next) {
   return '';
 }
 
-export function AgentRunDetail({ base, runId, onBack }) {
+// A confirmation for the two takeover gestures; full screen on a phone.
+function ConfirmDialog({ title, body, confirm, destructive = false, busy, onConfirm, onClose }) {
+  return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+    <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg flex flex-col">
+      <DialogHeader><DialogTitle>{title}</DialogTitle>
+        <DialogDescription>{Array.isArray(body) ? body[0] : body}</DialogDescription></DialogHeader>
+      {Array.isArray(body) && <ul className="list-disc pl-5 space-y-1 text-sm">{body.slice(1).map(line => <li key={line} className="break-words">{line}</li>)}</ul>}
+      <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 mt-auto sm:mt-2">
+        <Action type="button" variant="outline" onClick={onClose}>{LIVE_TEXT.cancel}</Action>
+        <Action type="button" variant={destructive ? 'destructive' : 'default'} disabled={busy} onClick={onConfirm}>{busy ? 'Working…' : confirm}</Action>
+      </div>
+    </DialogContent>
+  </Dialog>;
+}
+
+const LIVE_OFF = Object.freeze({ mode: 'live', state: 'connecting', viewer: null, control: { hasHost: false, mine: false }, note: '' });
+
+export function AgentRunDetail({ base, runId, onBack, onOpenRun }) {
   const [data, setData] = useState(null), [refusal, setRefusal] = useState(''), [announce, setAnnounce] = useState('');
   const [view, setView] = useState(EMPTY_VIEW), [viewNote, setViewNote] = useState(''), [tab, setTab] = useState('result');
   const [watch, setWatch] = useState(true), [approving, setApproving] = useState(null), [enlarged, setEnlarged] = useState(null);
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState('');
   const [params, setParams] = useSearchParams();
+  const me = useAuth().user?.id ?? null;
+  const [live, setLive] = useState(LIVE_OFF), [confirming, setConfirming] = useState(null);
   const previous = useRef(null), alive = useRef(true), viewing = useRef(false), steps = useRef([]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const load = useCallback(async () => {
@@ -121,12 +145,39 @@ export function AgentRunDetail({ base, runId, onBack }) {
       else setError(e.message);
     }
   }, [base, runId]);
-  useEffect(() => { previous.current = null; steps.current = []; setData(null); setView(EMPTY_VIEW); setTab('result'); load(); }, [load]);
+  useEffect(() => { previous.current = null; steps.current = []; setData(null); setView(EMPTY_VIEW); setTab('result');
+    setLive(LIVE_OFF); load(); }, [load]);
   const active = !!data && ACTIVE_STATES.includes(data.run.state);
   usePolling(load, active ? 1500 : 0, !!data);
+  // A7: live video while the run's browser runs; still frames when it cannot
+  // connect (or has not yet). Holding control asks before the page is left.
+  const liveOn = !!data?.controls.live?.enabled && live.mode === 'live';
+  const holding = live.control.mine;
+  useEffect(() => {
+    if (!holding) return undefined;
+    const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [holding]);
+  const onLiveState = useCallback((state, detail = {}) => {
+    if (!alive.current) return;
+    // Not set up on this host: a quiet note. A connection that failed or
+    // ended: the reason, and a retry.
+    const notSetUp = state === 'unavailable' && ['LIVE_UNAVAILABLE', 'EXECUTION_UNAVAILABLE'].includes(detail.code);
+    setLive(old => ['unavailable', 'failed', 'closed'].includes(state)
+      ? { ...old, mode: 'frames', state, viewer: null, retry: !notSetUp,
+        note: notSetUp ? LIVE_TEXT.notSetUp : LIVE_TEXT.fallback(LIVE_TEXT.reason[detail.reason] ?? detail.message ?? detail.code ?? '') }
+      : { ...old, state });
+    if (['unavailable', 'failed', 'closed'].includes(state)) load();
+  }, [load]);
+  const onControl = useCallback(control => { if (alive.current) setLive(old => ({ ...old, control })); }, []);
+  const onViewer = useCallback(viewer => { if (alive.current) setLive(old => ({ ...old, viewer })); }, []);
+  const liveView = { ...live, base, onState: onLiveState, onControl, onViewer,
+    onRetry: () => setLive(LIVE_OFF) };
   // No frame is asked for before step 1 has finished: the browser before its
-  // first page is a blank frame.
-  const viewEnabled = !!data?.controls.view.enabled && watch && firstStepFinishedAt(data.steps) !== null;
+  // first page is a blank frame. Still frames pause while live video plays.
+  const viewEnabled = !!data?.controls.view.enabled && watch && firstStepFinishedAt(data.steps) !== null
+    && !(liveOn && live.state === 'live');
   const loadFrame = useCallback(async () => {
     if (viewing.current) return;
     viewing.current = true;
@@ -155,6 +206,33 @@ export function AgentRunDetail({ base, runId, onBack }) {
     } catch (e) { setError(e.message); if ([403, 404].includes(e.status)) load(); }
     finally { setBusy(false); }
   }
+  // A7 gestures. Each asks the server, which answers with the run detail; the
+  // agent-control prompt opens by itself when this session has not confirmed.
+  async function act(fn, success) {
+    if (busy) return null;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const result = await fn();
+      if (success) setMessage(success);
+      if (result?.run) setData(result);
+      await load();
+      return result;
+    } catch (e) {
+      setError(e.message);
+      if ([403, 404].includes(e.status)) load();
+      return null;
+    } finally { setBusy(false); }
+  }
+  // The confirmation closes first, so the agent-control prompt (if this
+  // session has not confirmed yet) never stacks on another dialog.
+  const takeover = () => { setConfirming(null); return act(() => api.write(`${base}/agent-runs/${runId}/takeover`, { viewer: live.viewer }), LIVE_TEXT.taken); };
+  const endTakeover = () => { setConfirming(null); return act(() => api.write(`${base}/agent-runs/${runId}/takeover/end`, {}), LIVE_TEXT.ended); };
+  const decide = (subject, decision) => act(() => api.write(`${base}/agent-runs/${runId}/reconcile`, { subject, decision }),
+    'Recorded.');
+  const resume = async () => {
+    const result = await act(() => api.write(`${base}/agent-runs/${runId}/resume`, {}));
+    if (result?.run?.id) onOpenRun?.(result.run.id);
+  };
   // A phone shows one panel at a time; the choice rides in the URL (&panel=).
   const panel = panelFor(params.get('panel'), active);
   const choosePanel = key => setParams(old => { const next = new URLSearchParams(old); next.set('panel', key); return next; }, { replace: true });
@@ -166,7 +244,13 @@ export function AgentRunDetail({ base, runId, onBack }) {
   return <>
     <RunDeck data={data} feed={feed} view={view} active={active} panel={panel} onPanel={choosePanel} tab={tab} onTab={setTab}
       watch={watch} onWatch={setWatch} viewNote={viewNote} busy={busy} message={message} error={error} announce={announce}
-      onBack={onBack} onStop={stop} onRefresh={() => load()} onReview={setApproving} onFrame={setEnlarged}/>
+      onBack={onBack} onStop={stop} onRefresh={() => load()} onReview={setApproving} onFrame={setEnlarged}
+      liveView={data.controls.live?.enabled ? liveView : null} me={me} onTakeover={() => setConfirming('take')}
+      onEndTakeover={() => setConfirming('end')} onResume={resume} onOpenRun={onOpenRun} onDecide={decide}/>
+    {confirming === 'take' && <ConfirmDialog title={LIVE_TEXT.confirmTitle} body={LIVE_TEXT.confirmBody} confirm={LIVE_TEXT.confirm}
+      busy={busy} onConfirm={takeover} onClose={() => setConfirming(null)}/>}
+    {confirming === 'end' && <ConfirmDialog title={LIVE_TEXT.endTitle} body={LIVE_TEXT.endBody} confirm={LIVE_TEXT.end} destructive
+      busy={busy} onConfirm={endTakeover} onClose={() => setConfirming(null)}/>}
     {approving && <ApprovalDialog approval={dialogApproval} onClose={() => setApproving(null)}
       onApproved={() => { setApproving(null); setMessage('Approved. The agent may now submit the bound credential.'); load(); }}/>}
     {enlarged && <FrameDialog frame={enlarged} onClose={() => setEnlarged(null)}/>}
@@ -191,17 +275,18 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
   useEffect(() => { if (!runId) load(); }, [load, runId, project.revision]);
   const anyActive = !!list?.runs.some(r => ACTIVE_STATES.includes(r.state));
   usePolling(load, anyActive ? 4000 : 20000, !runId);
-  if (runId) return <AgentRunDetail base={base} runId={runId} onBack={() => { onCloseRun(); load(); }}/>;
-  async function start(profile) {
+  if (runId) return <AgentRunDetail base={base} runId={runId} onBack={() => { onCloseRun(); load(); }} onOpenRun={onOpenRun}/>;
+  async function start(profile, practice = null) {
     if (busy) return;
     setBusy(true); setError(''); setMessage(''); setActiveLink(null);
     try {
       const result = await api.write(`${base}/agent-runs`, { profile_id: profile.profile_id,
-        credential_binding_id: profile.binding?.binding_id ?? null });
+        credential_binding_id: profile.binding?.binding_id ?? null, ...(practice ? { practice: { fixture_mode: practice } } : {}) });
       onOpenRun(result.run.id);
     } catch (e) {
       setError(e.message);
       if (e.code === 'RUN_ALREADY_ACTIVE' && e.active_run_id) setActiveLink(e.active_run_id);
+      if (e.code === 'RECONCILIATION_REQUIRED' && e.run_id) setActiveLink(e.run_id);
       await load();
     } finally { if (alive.current) setBusy(false); }
   }
@@ -213,7 +298,7 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
   return <Panel title="Agent runs">
     <p className="text-sm">One supervised run of the synthetic sign-in workflow at a time per profile. Starting, stopping and approving are human actions; the agent submits the bound credential only after a person approves.</p>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
-    {activeLink && <Action variant="outline" onClick={() => onOpenRun(activeLink)}>Open the active run</Action>}
+    {activeLink && <Action variant="outline" onClick={() => onOpenRun(activeLink)}>Open that run</Action>}
     <p role="status" aria-live="polite" className="text-sm">{busy ? 'Working…' : message}</p>
     {refusal ? <p role="alert" className="break-words">Agent runs are not available to you: {refusal}</p> : !list ? <p role="status">Loading agent runs…</p> : <>
       {!list.execution.available && <p className="rounded-md border border-amber-500/70 p-3 text-sm break-words" role="note">{list.execution.message} Runs already recorded stay readable.</p>}
@@ -221,7 +306,7 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
         <h3 id="agent-profiles-heading" className="font-semibold">Start a run</h3>
         {!list.profiles.length && <p className="text-sm">No agent profiles. Create one in Agents.</p>}
         <ul className="space-y-3">{list.profiles.map(profile => <ProfileStart key={profile.profile_id} profile={profile} busy={busy}
-          onStart={() => start(profile)} onOpenRun={onOpenRun}/>)}</ul>
+          onStart={practice => start(profile, practice)} onOpenRun={onOpenRun}/>)}</ul>
       </section>
       <section className="space-y-3" aria-labelledby="agent-runs-heading">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -236,20 +321,59 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
   </Panel>;
 }
 
+// A7 decision 4: a practice run with the demo in one fixture mode, chosen here.
+function PracticeDialog({ profile, busy, onStart, onClose }) {
+  const [mode, setMode] = useState('challenge');
+  const legend = useId();
+  return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+    <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:max-h-[90vh] sm:rounded-lg flex flex-col overflow-y-auto">
+      <DialogHeader><DialogTitle>{ORIGIN_TEXT.practiceTitle}</DialogTitle>
+        <DialogDescription>{ORIGIN_TEXT.practiceBody}</DialogDescription></DialogHeader>
+      <form className="space-y-4" onSubmit={event => { event.preventDefault(); onStart(mode); }}>
+        <fieldset aria-labelledby={legend} className="space-y-2">
+          <legend id={legend} className="text-sm font-medium">{ORIGIN_TEXT.practiceMode} · {profile.display_name}</legend>
+          {Object.entries(FIXTURE_TEXT).map(([key, [label, what, expected]]) => <label key={key}
+            className="flex min-h-11 items-start gap-3 rounded-md border p-2 has-[:checked]:border-primary">
+            <input type="radio" name="fixture-mode" value={key} checked={mode === key} onChange={() => setMode(key)} className="mt-1 h-4 w-4"/>
+            <span className="min-w-0"><span className="block text-sm font-medium">{label}</span>
+              <span className="block text-sm text-muted-foreground break-words">{what} Expected: {expected}.</span></span>
+          </label>)}
+        </fieldset>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+          <Action type="button" variant="outline" onClick={onClose}>Cancel</Action>
+          <Action type="submit" disabled={busy}>{ORIGIN_TEXT.practiceGo}</Action>
+        </div>
+      </form>
+    </DialogContent>
+  </Dialog>;
+}
+
 function ProfileStart({ profile, busy, onStart, onOpenRun }) {
-  const reasons = useId();
+  const reasons = useId(), practiceReasons = useId();
+  const [practicing, setPracticing] = useState(false);
   return <li className="rounded-md border p-3 space-y-2 min-w-0">
     <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
       <div className="min-w-0 space-y-1">
         <h4 className="font-medium break-words">{profile.display_name}</h4>
         <p className="text-sm break-all">Credential: {profile.binding ? `${profile.binding.username} · binding ${shortId(profile.binding.binding_id)} · revision ${profile.binding.revision}` : 'no active binding'}</p>
-        <p className="text-sm">Model provider consent: {profile.model_guide_consent ? 'given' : 'not given'}</p>
+        <p className="text-sm">Model provider consent: {profile.model_guide_consent ? 'given' : 'not given'} · model summaries: {profile.model_summary_consent ? 'allowed' : 'not allowed'}</p>
       </div>
-      <Action disabled={!profile.ready || busy} aria-describedby={reasons} onClick={onStart}>Start run</Action>
+      <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+        <Action disabled={!profile.ready || busy} aria-describedby={reasons} onClick={() => onStart(null)}>Start run</Action>
+        <Action variant="outline" disabled={!profile.practice_ready || busy} aria-describedby={practiceReasons}
+          onClick={() => setPracticing(true)}>{ORIGIN_TEXT.practiceStart}</Action>
+      </div>
     </div>
     {profile.ready ? <p id={reasons} className="text-sm text-muted-foreground">Ready. Start pins this profile, its guide, the site and the binding revision for the run.</p>
       : <div id={reasons} className="text-sm space-y-1"><p className="font-medium">Start is not available:</p><ul className="list-disc pl-5 space-y-1">{profile.reasons.map(r => <li key={r} className="break-words">{r}</li>)}</ul></div>}
+    {profile.practice_ready ? <p id={practiceReasons} className="sr-only">{ORIGIN_TEXT.practiceBody}</p>
+      : <details id={practiceReasons} className="text-sm"><summary className="cursor-pointer min-h-11 py-2">{ORIGIN_TEXT.practiceUnavailable}</summary>
+        <ul className="list-disc pl-5 space-y-1">{!profile.ready && <li className="break-words">{ORIGIN_TEXT.practiceSameReasons}</li>}
+          {(profile.practice_reasons ?? []).filter(r => !profile.reasons.includes(r)).map(r => <li key={r} className="break-words">{r}</li>)}</ul></details>}
     {profile.active_run_id && <Action variant="outline" onClick={() => onOpenRun(profile.active_run_id)}>Open the active run</Action>}
+    {profile.reconcile_run_id && <Action variant="outline" onClick={() => onOpenRun(profile.reconcile_run_id)}>Open the run to decide</Action>}
+    {practicing && <PracticeDialog profile={profile} busy={busy} onClose={() => setPracticing(false)}
+      onStart={mode => { setPracticing(false); onStart(mode); }}/>}
   </li>;
 }
 
@@ -257,7 +381,9 @@ function RunRow({ run, onOpen }) {
   return <li className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0">
     <div className="min-w-0 space-y-1">
       <p className="font-medium break-words flex flex-wrap items-center gap-2"><span>{run.profile_name ?? 'Profile'} · run {shortId(run.id)}</span><StateBadge run={run}/>
-        {run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}{run.needs_human && <Badge tone="warn">Needs a person</Badge>}</p>
+        {run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}{run.needs_human && <Badge tone="warn">Needs a person</Badge>}
+        {run.origin?.practice && <Badge tone="warn">{ORIGIN_TEXT.practice(run.origin.fixture_mode)}</Badge>}
+        {run.origin?.resumed_from_run_id && <Badge>{ORIGIN_TEXT.resumedFrom(run.origin.resumed_from_run_id)}</Badge>}</p>
       <p className="text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1"><span>Started by {run.started_by.username ?? run.started_by.id}</span><span>{when(run.started_at)}</span>
         {run.result_class && <span>Result: {resultLabel(run.result_class)}</span>}</p>
     </div>

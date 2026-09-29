@@ -252,7 +252,44 @@ def status():
     return dict(installed=True, vm_uuid=fence.PROOF_UUID, vm_status=instance['status'],
                 tap=fence.TAP, service='active/enabled', counters=[r['counter'] for r in
                 table()['nftables'] if 'counter' in r], worker_ready=False,
+                live_relay=data.get('live_relay') is True,
                 notice='Network prerequisite only; proxy, supervisor and live proofs remain open')
+
+
+def live_relay(enable=True):
+    """A7: add (or remove) the one live-relay accept in the installed fence.
+
+    Only on an installed, unchanged fence; the table is replaced in one nft
+    transaction (the rendered file flushes and re-adds its own table). The
+    journal records the change as pending first, so an interrupted change
+    leaves `status` (and the supervisor) refusing until it is rerun.
+    """
+    inspect(stopped=False)
+    data = read_journal()
+    if data.get('phase') == 'relay_pending':
+        if data.get('pending_live') is not enable:
+            raise ValueError('A different live-relay change is pending; rerun that one first')
+    else:
+        verify_files(data)
+        if data.get('phase') != 'installed':
+            raise ValueError('The fence is not installed')
+        if fingerprint(table()) != data.get('table_fingerprint'):
+            raise ValueError('A3 table changed; refusing')
+    rules = fence.render(MANIFEST, live=enable)
+    if data.get('phase') == 'installed' and digest(rules) == data['files'][str(RULES)]:
+        return status()
+    execute(['nft', '--check', '--file', '-'], input=rules)
+    data.update(phase='relay_pending', pending_live=enable)
+    write_journal(data)
+    save(RULES, rules, replace=True)
+    execute(['nft', '--file', str(RULES)])
+    data['files'][str(RULES)] = digest(rules)
+    data['table_fingerprint'] = fingerprint(table())
+    data['live_relay'] = enable
+    data.pop('pending_live', None)
+    data['phase'] = 'installed'
+    write_journal(data)
+    return status()
 
 
 def remove():
@@ -285,7 +322,7 @@ def remove():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('install', 'status', 'remove'))
+    parser.add_argument('action', choices=('install', 'status', 'remove', 'live-relay', 'live-relay-remove'))
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
@@ -294,7 +331,9 @@ def main():
     secure(lock)
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print(json.dumps({'install': install, 'status': status, 'remove': remove}[args.action](), indent=2))
+        print(json.dumps({'install': install, 'status': status, 'remove': remove,
+                          'live-relay': lambda: live_relay(True),
+                          'live-relay-remove': lambda: live_relay(False)}[args.action](), indent=2))
 
 
 if __name__ == '__main__':

@@ -50,16 +50,36 @@ flight per attempt and at most one per second, and only the pixels cross (a
 bounded PNG and its size; no page URL, text or DOM). Frames are not journaled.
 The runner types a bound value only into a password input, so a frame shows
 it masked. Input, takeover and every other operator control stay operator-only.
+
+A7 (user decisions, 2026-09-29): the real-time view and dashboard takeover are
+Neko inside the worker unit (see a3-worker-guest.py). When the A7 live install
+is present (live.json), a browser launch runs live. The backend socket gains:
+- `live`: one streaming relay per viewer, for the coordinator's own attempt
+  while it runs or is taken over. Only signalling crosses it (the runner and the
+  backend each filter it); the viewer's Neko member and token stay in the unit.
+- `takeover`: hands the coordinator's own running attempt to one viewer's relay.
+  The attempt is fenced from the model first (state human), and the hand-over
+  is queued behind any in-flight browser action in the runner, so a person never
+  reaches a page while a bound value is in it.
+- `release`: takes control back and returns the count and kind of the person's
+  inputs (never what they typed); the backend then stops the attempt with the
+  stop reason taken_over, which the backend may use only after its own takeover.
+- `summarize`: one model summary of a finished run from typed facts only (A7
+  decision 5), on the run's pinned budget; the bounded text is untrusted.
+Operator takeover, input and the proofs stay operator-only.
 """
 import argparse
 import base64
 import hashlib
+import hmac
 import importlib.util
 import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
+import secrets
 import signal
 import socket
 import socketserver
@@ -127,11 +147,13 @@ LIMIT_KEYS = frozenset(('cpu', 'memory_mib', 'temporary_disk_mib', 'max_seconds'
 MAX_SAFE = 2 ** 53 - 1
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
-BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop'))
+BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop',
+                             'live', 'takeover', 'release', 'summarize'))
 OPERATOR_METHODS = BACKEND_METHODS | frozenset(('takeover', 'input', 'observe', 'locate',
                                                 'egress_probe', 'proof', 'unit_stats', 'journal',
                                                 'proof_crash_mid_action'))
-BACKEND_STOP_REASONS = frozenset(('cancelled', 'blocked', 'failed', 'completed'))
+# `taken_over` on the backend socket only for an attempt its own takeover holds.
+BACKEND_STOP_REASONS = frozenset(('cancelled', 'blocked', 'failed', 'completed', 'taken_over'))
 OPERATOR_STOP_REASONS = BACKEND_STOP_REASONS | frozenset(('taken_over', 'proof'))
 TERMINAL = frozenset(('stopped', 'lost', 'refused'))
 # A5 model step. The route and its prices live in the broker; this is the only
@@ -165,6 +187,34 @@ GUIDE:
 OBSERVATIONS: %s
 """
 LIVE = frozenset(('launching', 'running', 'human', 'stopping'))
+# A7 live view. The installer writes live.json once the proof VM holds the
+# reviewed Neko build and managed policy and the TURN relay and fence rule are in
+# place; without it every launch stays headless (A6 behaviour).
+LIVE_MARKER = installer.CONFIG / 'live.json'
+# The TURN relay's shared secret (root 0600). Each viewer gets a credential that
+# expires (TURN REST scheme: "<expiry>:<viewer>", HMAC-SHA1); the secret itself
+# never leaves the host, like the receipt key.
+TURN_SECRET = Path('/etc/proxypilot-a7/turn-secret')
+TURN_TTL_SECONDS = 3600
+TURN_URL = re.compile(r'(turn:[a-z0-9.-]{1,253}:3478\?transport=(udp|tcp)|turns:[a-z0-9.-]{1,253}:5349\?transport=tcp)\Z')
+LIVE_MAX_VIEWERS = 6
+LIVE_IDLE_SECONDS = 60
+LIVE_MAX_LINE = 256 * 1024
+LIVE_RATE = 60              # client messages per second per viewer
+MODEL_PROOFS = frozenset(('provider_error', 'reply_outside_set', 'usage_missing'))
+# A7 decision 5: the model summary. Its input is typed facts only (checked here
+# field by field), never page text, a prompt, a guide or a value.
+SUMMARY_MAX_OUTPUT_TOKENS = 160
+SUMMARY_TEXT_CHARS = 800
+CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z')
+WORD = re.compile(r'[a-z][a-z0-9_]{0,63}\Z')
+SUMMARY_PROMPT = """You write a short plain-language summary of one finished run of a supervised browser
+workflow that signs a synthetic test account in to %s. FACTS are typed records of what happened
+(codes, counts and states); they are the only source. Write at most four short sentences: what the
+run did, how it ended, what went wrong if anything, and what a person should check. Do not invent
+details and do not give instructions to any system.
+FACTS: %s
+"""
 
 
 class Refused(Exception):
@@ -272,6 +322,58 @@ def frame_only(result):
     if not raw.startswith(PNG_MAGIC):
         raise Refused('VIEW_INVALID')
     return {'png_base64': shot, 'width': width, 'height': height}
+
+
+SUMMARY_FACTS = ('result_class', 'final_state', 'verified_account', 'practice', 'fixture_mode', 'expected_result',
+                 'steps', 'model_calls', 'approvals', 'takeovers', 'critique', 'logout', 'receipt_verified')
+FIXTURE_MODES = ('normal', 'expired', 'locked', 'challenge', 'redirect', 'slow')
+
+
+def validate_facts(value):
+    """A7 summary facts: typed fields only (codes, enums, counts), nothing free-form."""
+    def word(v, empty=False):
+        return (empty and v is None) or (isinstance(v, str) and WORD.fullmatch(v))
+
+    def code(v):
+        return v is None or (isinstance(v, str) and CODE.fullmatch(v))
+
+    def number(v, top):
+        return v is None or (type(v) in (int, float) and math.isfinite(v) and 0 <= v <= top)
+
+    def items(v, names, top, check):
+        return isinstance(v, list) and len(v) <= top and all(exact(x, names) and check(x) for x in v)
+    ok = (exact(value, SUMMARY_FACTS) and word(value['result_class'])
+          and value['final_state'] in ('completed', 'cancelled', 'blocked', 'failed')
+          and all(value[k] is True or value[k] is False for k in ('verified_account', 'practice', 'receipt_verified'))
+          and (value['fixture_mode'] is None or value['fixture_mode'] in FIXTURE_MODES)
+          and word(value['expected_result'], True) and value['logout'] in (None, 'done', 'failed', 'not_run')
+          and items(value['steps'], ('ordinal', 'action', 'decided_by', 'state', 'error_code', 'seconds', 'outcome'), 20,
+                    lambda s: safe_int(s['ordinal'], 1) and s['ordinal'] <= 99 and s['action'] in runner.ACTIONS
+                    and s['decided_by'] in ('rule', 'model') and s['state'] in ('reserved', 'done', 'failed', 'uncertain')
+                    and code(s['error_code']) and number(s['seconds'], 3600)
+                    and (s['outcome'] is None or s['outcome'] in SUBMIT_OUTCOMES))
+          and items(value['model_calls'], ('state', 'choice', 'refusal_code'), 10,
+                    lambda c: c['state'] in ('reserved', 'chosen', 'refused', 'uncertain')
+                    and (c['choice'] is None or c['choice'] in runner.ACTIONS) and code(c['refusal_code']))
+          and items(value['approvals'], ('state', 'stale_reason'), 5,
+                    lambda a: a['state'] in ('requested', 'approved', 'consumed', 'stale', 'expired')
+                    and word(a['stale_reason'], True))
+          and items(value['takeovers'], ('seconds', 'inputs'), 3,
+                    lambda t: number(t['seconds'], 86400) and exact(t['inputs'], ('key', 'click', 'scroll'))
+                    and all(safe_int(n) and n <= 100000 for n in t['inputs'].values()))
+          and exact(value['critique'], ('good', 'bad', 'check'))
+          and all(isinstance(v, list) and len(v) <= 20 and all(word(x) for x in v) for v in value['critique'].values()))
+    if not ok:
+        raise Refused('INVALID_REQUEST', 'facts')
+    return value
+
+
+def clean_text(text, limit):
+    """Untrusted model text for a person to read: printable, single-spaced, bounded."""
+    if not isinstance(text, str):
+        return ''
+    text = ''.join(c if c.isprintable() else ' ' for c in text)
+    return ' '.join(text.split())[:limit]
 
 
 def valid_observation(value):
@@ -733,6 +835,7 @@ class Worker:
         self.ready = threading.Event()
         self.ended = threading.Event()
         self.credential_channel = threading.Event()
+        self.live_sinks = {}
         self.stderr_tail = b''
         threading.Thread(target=self._stdout, daemon=True).start()
         threading.Thread(target=self._stderr, daemon=True).start()
@@ -753,6 +856,15 @@ class Worker:
                         slot[1]['reply'] = message
                         slot[0].set()
                     continue
+                if message.get('event') in ('live', 'live_closed', 'live_dropped'):
+                    # A7 relay traffic goes to its viewer only; it is never kept.
+                    sink = self.live_sinks.get(message.get('conn'))
+                    if sink is not None:
+                        try:
+                            sink.put_nowait(message)
+                        except queue.Full:
+                            pass
+                    continue
                 with self.state_lock:
                     if len(self.events) < 500:
                         self.events.append(message)
@@ -771,6 +883,11 @@ class Worker:
             for done, box in slots:
                 box['reply'] = {'ok': False, 'error': 'CHANNEL_CLOSED'}
                 done.set()
+            for sink in list(self.live_sinks.values()):
+                try:
+                    sink.put_nowait({'event': 'live_closed', 'reason': 'attempt_ended'})
+                except queue.Full:
+                    pass
 
     def _stderr(self):
         try:
@@ -818,6 +935,13 @@ class Worker:
 
     def request(self, op, timeout, **fields):
         return self.wait(self.send(op, **fields), timeout)
+
+    def fire(self, op, **fields):
+        """Write one command whose reply nobody waits for (A7 relay traffic)."""
+        with self.state_lock:
+            self.counter += 1
+            ident = self.counter
+        self._write({'id': ident, 'op': op, **fields})
 
     def ping(self):
         with self.state_lock:
@@ -918,6 +1042,12 @@ class Supervisor:
             'uncertain_actions': [a['ordinal'] for a in attempt.get('actions', []) if a['state'] == 'uncertain'],
             'actions_performed': len(attempt.get('actions', [])), 'key_id': self._key_id(),
             'supervisor_sha256': self.state.get('supervisor_sha256')}
+        taken = attempt.get('dashboard_takeover')
+        if taken is not None:
+            # A7: who took over is the backend's record; the receipt says only that a
+            # dashboard takeover held the attempt and the count and kind of inputs.
+            payload['dashboard_takeover'] = {'state': taken.get('state'), 'inputs': taken.get('inputs'),
+                                             'uncontrolled_inputs': taken.get('uncontrolled_inputs')}
         credential = (self.state['runs'].get(attempt['run_id']) or {}).get('credential')
         if credential is not None:
             # Binding ID, revision and outcomes only: never a value or a hash of one.
@@ -1123,6 +1253,8 @@ class Supervisor:
                 # Durable before any guest effect: recovery tears down whatever this starts.
                 self._save()
             config = {'attempt_id': spec['attempt_id'], 'workload': workload, 'spki': boundary['spki']}
+            if workload == 'browser' and self.live_available():
+                config['live'] = True
             try:
                 worker = Worker(self.host.spawn(unit, unit_properties(plan, runtime), self.source, config))
             except (OSError, subprocess.SubprocessError) as error:
@@ -1158,6 +1290,7 @@ class Supervisor:
                 attempt['workspace'] = first.get('workspace')
                 attempt['browser_pid'] = first.get('browser_pid')
                 attempt['browser_start_seconds'] = first.get('browser_start_seconds')
+                attempt['live'] = first.get('live') if config.get('live') else None
                 attempt['lease'] = self._next_lease(run)
                 self._note(attempt, 'running')
                 self._save()
@@ -1251,9 +1384,7 @@ class Supervisor:
             # The reservation is durable before the browser can act on it.
             self._save()
             worker = self.workers.get(ref['attempt_id'])
-        if worker is None:
-            self._fail_channel(ref['attempt_id'])
-            raise Refused('CHANNEL_CLOSED')
+        self._refuse_if_exited(ref['attempt_id'], worker, record)
         started = time.monotonic()
         try:
             reply = worker.request('action', ACTION_SECONDS, action=ref['action'])
@@ -1276,6 +1407,19 @@ class Supervisor:
         if not reply.get('ok'):
             raise Refused(str(reply.get('error'))[:64])
         return {'ordinal': record['ordinal'], 'result': reply.get('result'), 'untrusted': True}
+
+    def _refuse_if_exited(self, attempt_id, worker, record):
+        """A runner that had already gone before a command was written never got
+        it: the action certainly did not happen (A7, found by the kill proof).
+        Only a runner that goes while a command is in flight leaves it uncertain."""
+        if worker is not None and not worker.ended.is_set():
+            return
+        with self.lock:
+            record['state'] = 'failed'
+            record['error'] = 'WORKER_EXITED'
+            self._save()
+        self._fail_channel(attempt_id)
+        raise Refused('WORKER_EXITED')
 
     def _submit_target(self, ref):
         attempt = self._attempt(ref, ('running',))
@@ -1319,9 +1463,7 @@ class Supervisor:
             attempt['credential_submitted'] = True
             self._save()
             worker = self.workers.get(ref['attempt_id'])
-        if worker is None:
-            self._fail_channel(ref['attempt_id'])
-            raise Refused('CHANNEL_CLOSED')
+        self._refuse_if_exited(ref['attempt_id'], worker, record)
         started = time.monotonic()
         worker.credential_channel.clear()
         try:
@@ -1445,6 +1587,9 @@ class Supervisor:
             raise Refused('INVALID_REQUEST', 'reason')
         with self.lock:
             attempt = self.state['attempts'].get(ref['attempt_id'])
+            if (not operator and ref['reason'] == 'taken_over'
+                    and (attempt is None or attempt.get('dashboard_takeover') is None)):
+                raise Refused('INVALID_REQUEST', 'reason')
             if attempt is None:
                 # This supervisor never started it; record that so it can never start.
                 self.state['attempts'][ref['attempt_id']] = {
@@ -1579,6 +1724,159 @@ class Supervisor:
             self._save()
         os.kill(os.getpid(), signal.SIGKILL)
 
+    # -------------------------------------------------- A7 live and takeover
+
+    def live_available(self):
+        """The A7 live install record, when present and root-owned."""
+        try:
+            installer.secure(LIVE_MARKER)
+            data = json.loads(LIVE_MARKER.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and data.get('version') == 1 else None
+
+    def turn_credentials(self, viewer):
+        """Short-lived TURN credentials for one viewer, from live.json and the secret."""
+        marker = self.live_available() or {}
+        urls = (marker.get('turn') or {}).get('urls')
+        if not isinstance(urls, list) or not urls or not all(isinstance(u, str) and TURN_URL.fullmatch(u) for u in urls):
+            raise Refused('LIVE_UNAVAILABLE', 'turn')
+        try:
+            installer.secure(TURN_SECRET)
+            secret = TURN_SECRET.read_bytes().strip()
+        except (OSError, ValueError) as error:
+            raise Refused('LIVE_UNAVAILABLE', 'turn secret') from error
+        if len(secret) < 32:
+            raise Refused('LIVE_UNAVAILABLE', 'turn secret')
+        username = '%d:%s' % (int(self.clock()) + TURN_TTL_SECONDS, viewer)
+        credential = base64.b64encode(hmac.new(secret, username.encode(), hashlib.sha1).digest()).decode()
+        return [{'urls': list(urls), 'username': username, 'credential': credential}]
+
+    def live_open(self, params):
+        ref = validate_ref(params)
+        with self.lock:
+            attempt = self._attempt(ref, ('running', 'human'))
+            if attempt.get('workload') != 'browser' or not attempt.get('live'):
+                raise Refused('LIVE_UNAVAILABLE')
+            self._usable(attempt)
+            worker = self.workers.get(ref['attempt_id'])
+            if worker is None:
+                raise Refused('CHANNEL_CLOSED')
+            if len(worker.live_sinks) >= LIVE_MAX_VIEWERS:
+                raise Refused('LIVE_BUSY')
+            conn = secrets.token_hex(8)
+            sink = queue.Queue(maxsize=2000)
+            worker.live_sinks[conn] = sink
+        try:
+            ice = self.turn_credentials(conn)
+        except Refused:
+            worker.live_sinks.pop(conn, None)
+            raise
+        try:
+            reply = worker.request('live_open', 20, conn=conn)
+        except Refused as error:
+            reply = {'ok': False, 'error': error.code}
+        if not reply.get('ok'):
+            worker.live_sinks.pop(conn, None)
+            raise Refused(str(reply.get('error'))[:64])
+        return LiveStream(self, worker, ref, conn, sink, ice)
+
+    def dashboard_takeover(self, params):
+        """Hand the coordinator's own running attempt to one viewer (A7)."""
+        ref = validate_ref(params, ('conn',))
+        if not isinstance(ref['conn'], str) or not re.fullmatch(r'[0-9a-f]{16}', ref['conn']):
+            raise Refused('INVALID_REQUEST', 'conn')
+        with self.lock:
+            attempt = self._attempt(ref, ('running',))
+            if attempt.get('workload') != 'browser' or not attempt.get('live'):
+                raise Refused('LIVE_UNAVAILABLE')
+            run = self._usable(attempt)
+            worker = self.workers.get(ref['attempt_id'])
+            if worker is None or ref['conn'] not in worker.live_sinks:
+                raise Refused('LIVE_CONN_UNKNOWN')
+            # Fence the model first: from here the model's actions are refused.
+            attempt['state'] = 'human'
+            attempt['dashboard_takeover'] = {'state': 'giving', 'at': stamp(self.clock())}
+            self._note(attempt, 'dashboard_takeover')
+            self._save()
+        # Queued in the runner behind any in-flight action (a submit clears both
+        # fields in its finally before this runs).
+        try:
+            reply = worker.request('live_give', ACTION_SECONDS + runner.DELIVERY_SECONDS + 15, conn=ref['conn'])
+        except Refused as error:
+            reply = {'ok': False, 'error': error.code}
+        # The runner reports two facts from its own command queue: no password
+        # field held a value, and the X input counted while nobody had control.
+        given = reply.get('result') if reply.get('ok') else None
+        uncontrolled = given.get('uncontrolled_inputs') if isinstance(given, dict) else None
+        if reply.get('ok') and not (given.get('password_fields_empty') is True and exact(uncontrolled, ('key', 'click', 'scroll'))
+                                    and all(safe_int(n) for n in uncontrolled.values())):
+            reply = {'ok': False, 'error': 'LIVE_PROTOCOL'}
+        with self.lock:
+            if not reply.get('ok'):
+                attempt['dashboard_takeover']['state'] = 'failed'
+                self._note(attempt, 'dashboard_takeover_failed')
+                self._save()
+                raise Refused(str(reply.get('error'))[:64])
+            attempt['dashboard_takeover'].update(state='holding', uncontrolled_inputs=dict(uncontrolled))
+            attempt['lease'] = self._next_lease(run)
+            self._save()
+        return {'state': 'human', 'controlling': True, 'uncontrolled_inputs': dict(uncontrolled),
+                'password_fields_empty': True}
+
+    def release(self, params):
+        ref = validate_ref(params)
+        with self.lock:
+            attempt = self._attempt(ref, ('human',))
+            if (attempt.get('dashboard_takeover') or {}).get('state') != 'holding':
+                raise Refused('NOT_TAKEN_OVER')
+            worker = self.workers.get(ref['attempt_id'])
+        if worker is None:
+            raise Refused('CHANNEL_CLOSED')
+        reply = worker.request('live_release', 15)
+        inputs = (reply.get('result') or {}).get('inputs') if reply.get('ok') else None
+        if not exact(inputs, ('key', 'click', 'scroll')) or not all(safe_int(n) for n in inputs.values()):
+            raise Refused(str(reply.get('error') or 'LIVE_PROTOCOL')[:64])
+        with self.lock:
+            attempt['dashboard_takeover'].update(state='released', inputs=dict(inputs), released=stamp(self.clock()))
+            self._note(attempt, 'dashboard_takeover_released')
+            self._save()
+        return {'inputs': dict(inputs)}
+
+    def summarize(self, params):
+        """One model summary of a finished run from typed facts (A7 decision 5)."""
+        if (not exact(params, ('run_id', 'call_id', 'facts')) or not isinstance(params['run_id'], str)
+                or not UUID.fullmatch(params['run_id']) or not isinstance(params['call_id'], str)
+                or not UUID.fullmatch(params['call_id'])):
+            raise Refused('INVALID_REQUEST')
+        facts = validate_facts(params['facts'])
+        with self.lock:
+            run = self.state['runs'].get(params['run_id'])
+            if run is None:
+                raise Refused('UNKNOWN_RUN')
+            if any(self.state['attempts'].get(a, {}).get('state') in LIVE for a in run.get('attempts', [])):
+                raise Refused('RUN_ACTIVE')
+            if run.get('summary_call') not in (None, params['call_id']):
+                raise Refused('SUMMARY_EXISTS')
+            run['summary_call'] = params['call_id']
+            self._save()
+        prompt = SUMMARY_PROMPT % (ORIGIN, json.dumps(facts, sort_keys=True, separators=(',', ':')))
+        if len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
+            raise Refused('PROMPT_TOO_LARGE')
+        result = self.host.broker('summary_call', {
+            'run_id': params['run_id'], 'call_id': params['call_id'],
+            'project_limits_revision': run['project_limits_revision'], 'model': MODEL_ROUTE,
+            'max_output_tokens': SUMMARY_MAX_OUTPUT_TOKENS, 'prompt': prompt}, MODEL_STEP_SECONDS)
+        if not isinstance(result, dict):
+            raise Refused('CREDENTIAL_BROKER_UNAVAILABLE')
+        text = clean_text(result.get('untrusted_response_excerpt'), SUMMARY_TEXT_CHARS)
+        if not text:
+            raise Refused('SUMMARY_EMPTY')
+        usage = result.get('usage') if isinstance(result.get('usage'), dict) else {}
+        return {'call_id': params['call_id'], 'text': text, 'replayed': result.get('replayed') is True,
+                'usage': {k: usage.get(k) for k in ('prompt_tokens', 'completion_tokens')},
+                'settled_usd': result.get('settled_usd'), 'price_table_revision': result.get('price_table_revision')}
+
     # ------------------------------------------------------------- status
 
     def status(self, _params=None):
@@ -1610,6 +1908,7 @@ class Supervisor:
                                'runner_sha256': hashlib.sha256(self.source.encode()).hexdigest()},
                 'target': TARGET, 'vm_uuid': VM_UUID, 'boundary': public, 'blockers': blockers,
                 'credential_broker': 'available' if self.host.broker_available() else 'absent',
+                'live': self.live_available() is not None,
                 'active': active, 'accepting_launch': active is None and not blockers and not self.stopping}
 
     # ----------------------------------------------------- recovery/watch
@@ -1687,17 +1986,120 @@ class Supervisor:
             if operator and 'proof' in params:
                 params = dict(params)
                 proof = params.pop('proof')
-                if proof != 'provider_error':
+                if proof not in MODEL_PROOFS:
                     raise Refused('INVALID_REQUEST', 'proof')
                 return self.model_step(params, proof)
             return self.model_step(params)
         if method == 'view':
             return self.view(params) if operator else self.backend_view(params)
+        if method == 'takeover':
+            return self.takeover(params) if operator else self.dashboard_takeover(params)
+        if method == 'live':
+            return self.live_open(params)
         return {'status': self.status, 'renew': self.renew, 'action': self.action,
                 'takeover': self.takeover, 'input': self.human_input,
                 'observe': self.observe, 'locate': self.locate, 'egress_probe': self.egress_probe,
                 'proof': self.proof, 'unit_stats': self.unit_stats, 'journal': self.journal,
-                'proof_crash_mid_action': self.crash_mid_action}[method](params)
+                'proof_crash_mid_action': self.crash_mid_action, 'release': self.release,
+                'summarize': self.summarize}[method](params)
+
+
+class LiveStream:
+    """One viewer's relay on one socket connection (A7): newline JSON both ways.
+    From the backend {"send": msg} or {"close": true}; to it {"recv": msg},
+    {"dropped": true} and finally {"closed": reason}. Nothing here is journaled."""
+
+    def __init__(self, supervisor, worker, ref, conn, sink, ice_servers):
+        self.supervisor, self.worker, self.ref, self.conn, self.sink = supervisor, worker, ref, conn, sink
+        self.ice_servers = ice_servers
+        self.write_lock = threading.Lock()
+        self.done = threading.Event()
+        self.closed_sent = False
+
+    def _live(self):
+        attempt = self.supervisor.state['attempts'].get(self.ref['attempt_id']) or {}
+        return attempt.get('state') in ('running', 'human') and not self.worker.ended.is_set()
+
+    def _write(self, wfile, value):
+        with self.write_lock:
+            if self.closed_sent:
+                return
+            if 'closed' in value:
+                self.closed_sent = True
+            wfile.write((json.dumps(value, separators=(',', ':')) + '\n').encode())
+            wfile.flush()
+
+    def _pump(self, wfile):
+        try:
+            while not self.done.is_set():
+                try:
+                    message = self.sink.get(timeout=1)
+                except queue.Empty:
+                    if not self._live():
+                        self._write(wfile, {'closed': 'attempt_ended'})
+                        break
+                    continue
+                if message.get('event') == 'live':
+                    self._write(wfile, {'recv': message.get('data')})
+                elif message.get('event') == 'live_dropped':
+                    self._write(wfile, {'dropped': True})
+                else:
+                    self._write(wfile, {'closed': str(message.get('reason'))[:32]})
+                    break
+        except (OSError, ValueError):
+            pass
+        self.done.set()
+
+    def run(self, rfile, wfile, sock):
+        self._write(wfile, {'ok': True, 'result': {'conn': self.conn, 'ice_servers': self.ice_servers,
+                                                    'ttl_seconds': TURN_TTL_SECONDS}})
+        sock.settimeout(LIVE_IDLE_SECONDS)
+        threading.Thread(target=self._pump, args=(wfile,), daemon=True).start()
+        window, count, reason = time.monotonic(), 0, 'viewer_closed'
+        try:
+            while not self.done.is_set():
+                line = rfile.readline(LIVE_MAX_LINE + 1)
+                if not line:
+                    break
+                if len(line) > LIVE_MAX_LINE:
+                    reason = 'too_large'
+                    break
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    reason = 'invalid'
+                    break
+                if not isinstance(message, dict) or set(message) - {'send', 'close'}:
+                    reason = 'invalid'
+                    break
+                if message.get('close'):
+                    break
+                now = time.monotonic()
+                if now - window >= 1:
+                    window, count = now, 0
+                count += 1
+                if count > LIVE_RATE:
+                    reason = 'rate_limited'
+                    break
+                if not self._live():
+                    reason = 'attempt_ended'
+                    break
+                self.worker.fire('live_send', conn=self.conn, data=message.get('send'))
+        except socket.timeout:
+            reason = 'idle'
+        except (OSError, ValueError, Refused):
+            reason = 'closed'
+        finally:
+            self.done.set()
+            self.worker.live_sinks.pop(self.conn, None)
+            try:
+                self.worker.request('live_close', 10, conn=self.conn)
+            except Refused:
+                pass
+            try:
+                self._write(wfile, {'closed': reason})
+            except (OSError, ValueError):
+                pass
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -1719,6 +2121,9 @@ class Handler(socketserver.StreamRequestHandler):
                 raise Refused('INVALID_REQUEST')
             result = self.server.supervisor.dispatch(request['method'], request.get('params', {}),
                                                      operator=self.server.operator)
+            if isinstance(result, LiveStream):
+                result.run(self.rfile, self.wfile, self.request)
+                return
             reply = {'ok': True, 'result': result}
         except Refused as error:
             reply = {'ok': False, 'error': error.code}

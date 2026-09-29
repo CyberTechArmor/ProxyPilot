@@ -301,7 +301,8 @@ test('every sign-in outcome class is a distinct durable result', async () => {
       const result = await holder.c.execute(holder.c.start(s.operator, startInput(s)).run_id);
       assert.deepEqual([result.final_state, result.result_class, result.submit_outcome, result.verified_account],
         [state, cls, outcome, 0], outcome);
-      assert.equal(result.needs_human, outcome === 'challenge_required' ? 1 : 0);
+      // A7 decision 6: a timed-out submit may have signed in, so a person decides.
+      assert.equal(result.needs_human, ['challenge_required', 'timeout'].includes(outcome) ? 1 : 0);
     } finally { s.f.close(); }
   }
 });
@@ -430,6 +431,20 @@ test('an uncertain browser step becomes a human decision; a takeover hands the r
     const result = await c.execute(c.start(t.operator, startInput(t)).run_id);
     assert.deepEqual([result.final_state, result.result_class, result.needs_human], ['blocked', 'taken_over', 1]);
   } finally { t.f.close(); }
+});
+
+test('a step the supervisor never sent (the runner had already exited) fails; it is not uncertain', async () => {
+  const s = setup({ rules: { ...baseRules, model_actions: ['read_workspace'], stop_when: ['verified_account'] },
+    bind: false });
+  try {
+    const sup = fakeSupervisor({ actionErrors: { read_workspace: 'WORKER_EXITED' } });
+    const { c } = coordinator(s, sup);
+    const result = await c.execute(c.start(s.operator, startInput(s)).run_id);
+    assert.deepEqual([result.final_state, result.result_class, result.needs_human, result.uncertain_steps],
+      ['failed', 'attempt_lost', 0, 0]);
+    const step = s.f.db.prepare("SELECT state,error_code FROM ops_agent_run_steps WHERE action='read_workspace'").get();
+    assert.deepEqual({ ...step }, { state: 'failed', error_code: 'WORKER_EXITED' });
+  } finally { s.f.close(); }
 });
 
 test('without a binding the submit is never offered, and a run with nothing left ends blocked', async () => {

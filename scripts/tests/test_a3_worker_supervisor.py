@@ -301,6 +301,21 @@ class SupervisorTests(unittest.TestCase):
         self.assertRefused('ATTEMPT_NOT_ACTIVE', self.sup.renew, self.ref())
         self.assertEqual(self.host.seen.read_text().split(), ['open_landing'])
 
+    def test_a_command_to_a_runner_that_had_already_exited_certainly_did_not_happen(self):
+        # A7 kill proof: the runner is gone before the command is written, so
+        # it is a failed action (WORKER_EXITED), never an uncertain one.
+        self.sup.launch(launch_spec())
+        self.host.units[s.UNIT_PREFIX + ATTEMPT].kill()
+        worker = self.sup.workers[ATTEMPT]
+        self.assertTrue(worker.ended.wait(10))
+        self.assertRefused('WORKER_EXITED', self.sup.action, self.ref(action='open_landing'))
+        record = self.sup.state['attempts'][ATTEMPT]['actions'][-1]
+        self.assertEqual((record['action'], record['state'], record['error']), ('open_landing', 'failed', 'WORKER_EXITED'))
+        deadline = time.monotonic() + 10
+        while self.sup.state['attempts'][ATTEMPT]['state'] != 'stopped' and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.sup.state['attempts'][ATTEMPT].get('stop_reason'), 'channel_lost')
+
     def test_budgets_are_pinned_across_attempts_and_stale_fences_refused(self):
         self.sup.launch(launch_spec(limits={'max_actions': 2, 'max_seconds': 100}))
         props = dict(p.split('=', 1) for p in self.host.props[s.UNIT_PREFIX + ATTEMPT])
@@ -342,7 +357,11 @@ class SupervisorTests(unittest.TestCase):
 
     def test_takeover_fences_model_and_operator_only_controls(self):
         self.sup.launch(launch_spec())
-        self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'takeover', self.ref())
+        # A7 (user decision): the backend's takeover is the dashboard one. It needs
+        # a viewer's live relay on a live attempt; input and observe stay operator-only.
+        self.assertRefused('INVALID_REQUEST', self.sup.dispatch, 'takeover', self.ref())
+        self.assertRefused('LIVE_UNAVAILABLE', self.sup.dispatch, 'takeover', self.ref(conn='0123456789abcdef'))
+        self.assertRefused('LIVE_UNAVAILABLE', self.sup.dispatch, 'live', self.ref())
         self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'input',
                            self.ref(input={'kind': 'key', 'key': 'Tab'}))
         self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'observe', self.ref())
@@ -510,6 +529,12 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue(launched['ok'], launched)
             self.assertEqual(call(backend, 'status')['result']['active']['attempt_id'], ATTEMPT)
             self.assertTrue(call(operator, 'journal', {'attempt_id': ATTEMPT})['ok'])
+            # What the A3 host proof's backend_refusals expects since A7: the
+            # backend's takeover needs an open live viewer; input stays operator-only.
+            self.assertEqual(call(backend, 'takeover', self.ref())['error'], 'INVALID_REQUEST')
+            self.assertEqual(call(backend, 'takeover', self.ref(conn='0' * 16))['error'], 'LIVE_UNAVAILABLE')
+            self.assertEqual(call(backend, 'input', self.ref(input={'kind': 'key', 'key': 'Tab'}))['error'],
+                             'METHOD_NOT_ALLOWED')
             self.assertTrue(call(backend, 'stop', self.ref(reason='cancelled'))['ok'])
         finally:
             for server in servers:

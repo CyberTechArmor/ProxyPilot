@@ -45,6 +45,9 @@ export const schemas = {
   modelGuideConsent: z.object({ model_guide_consent: z.boolean(),
     reviewed_statement: z.literal('Send this profile\'s approved guide to the model provider').optional() }).strict()
     .refine(v => !v.model_guide_consent || !!v.reviewed_statement),
+  modelSummaryConsent: z.object({ model_summary_consent: z.boolean(),
+    reviewed_statement: z.literal('Send this profile\'s finished runs, as typed facts, to the model provider for a summary').optional() }).strict()
+    .refine(v => !v.model_summary_consent || !!v.reviewed_statement),
   accessDecision: z.object({ decision: z.enum(['approve','decline']), role: z.enum(roles).optional() }).strict()
     .refine(v => v.decision !== 'approve' || !!v.role),
   draft: z.object({ title: text(200).optional(), instructions: z.string().refine(v => Buffer.byteLength(v, 'utf8') <= 100000).optional() }).strict().refine(v => Object.keys(v).length > 0),

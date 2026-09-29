@@ -66,9 +66,13 @@ test('supervisor client speaks one typed line per call and maps refusals to code
     await assert.rejects(client.request('launch', spec()), {code:'ACTIVE_ATTEMPT'});
     await assert.rejects(client.request('renew', {}), {code:'SUPERVISOR_PROTOCOL'});
     await assert.rejects(client.request('stop', {}), {code:'SUPERVISOR_PROTOCOL'});
-    await assert.rejects(client.request('takeover', {}), {code:'METHOD_NOT_ALLOWED'});
+    // A7: the dashboard takeover is a backend method; operator input and the
+    // live relay (a stream, never a one-line request) are not.
+    await assert.rejects(client.request('takeover', {}), {code:'ACTIVE_ATTEMPT'});
     await assert.rejects(client.request('input', {}), {code:'METHOD_NOT_ALLOWED'});
-    assert.deepEqual(fake.seen.map(r => r.method), ['status','launch','renew','stop']);
+    await assert.rejects(client.request('live', {}), {code:'METHOD_NOT_ALLOWED'});
+    await assert.rejects(client.stream('launch', {}), {code:'METHOD_NOT_ALLOWED'});
+    assert.deepEqual(fake.seen.map(r => r.method), ['status','launch','renew','stop','takeover']);
   } finally { await fake.close(); }
   await assert.rejects(createSupervisorClient('/nonexistent/a3.sock').request('status', {}),
     {code:'SUPERVISOR_UNREACHABLE'});
@@ -99,7 +103,8 @@ test('launcher fails closed without the supervisor and checks its readback when 
   assert.equal((await launcher.action({...ref,action:'open_landing'})).untrusted, true);
   await assert.rejects(launcher.action({...ref,action:'open_landing',url:'https://x'}), {code:'INVALID_BROWSER_ACTION'});
   await assert.rejects(launcher.action({...ref,action:'run_shell'}), {code:'INVALID_BROWSER_ACTION'});
-  await assert.rejects(launcher.stop(ref, 'taken_over'), {code:'INVALID_STOP'});
+  // `taken_over` is a backend stop reason since A7 (dashboard takeover); `proof` stays operator-only.
+  await assert.rejects(launcher.stop(ref, 'proof'), {code:'INVALID_STOP'});
   assert.equal((await launcher.stop(ref)).attestation, 'a3r1.x.y');
   assert.deepEqual(calls.at(-1), ['stop', {...ref,reason:'cancelled'}]);
   await assert.rejects(createWorkerLauncher({client:{request:async()=>({...good,vm_uuid:randomUUID()})},vmUuid:VM})

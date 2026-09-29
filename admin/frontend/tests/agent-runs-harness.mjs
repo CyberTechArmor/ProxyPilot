@@ -5,7 +5,11 @@
 // the sudo check are fixtures: a `pp_harness_user` cookie names the account, and
 // POST /api/auth/sudo accepts the fixture password and TOTP below. The real CSRF
 // middleware guards every write. The production backend (index.js) never imports
-// this file or the world helper.
+// this file or the world helper. A7: the real live WebSocket route over the
+// scripted supervisor's relay (the live view is unavailable unless a journey
+// turns it on, as on a host without the live install), and a fixture
+// agent-control check (the same password and code) that records a grant for
+// the fixture session.
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import express from '../../backend/node_modules/express/index.js';
@@ -14,6 +18,7 @@ import { createOperationsRouter } from '../../backend/src/routes/operational-pro
 import { createOperationsSettingsRouter } from '../../backend/src/routes/operations-settings.js';
 import { effectiveToggles } from '../../backend/src/lib/operations-toggles.js';
 import { agentRunsWorld } from '../../backend/src/__tests__/helpers/agent-runs-world.js';
+import { attachAgentLiveServer } from '../../backend/src/routes/agent-live-ws.js';
 
 export const SUDO_PASSWORD = 'harness-password';
 export const SUDO_TOTP = '246810';
@@ -47,7 +52,7 @@ export async function startHarness({ execution = true, delayMs = 350, toggles = 
     res.setHeader('Set-Cookie', `pp_csrf=${csrf}; Path=/; SameSite=Strict`);
     const role = req.cookies.pp_harness_user;
     const u = role && byName[role];
-    if (u) req.user = { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user' };
+    if (u) req.user = { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user', jti: `harness-${role}` };
     requests.push({ method: req.method, path: req.path, role: role || null });
     next();
   });
@@ -66,6 +71,15 @@ export async function startHarness({ execution = true, delayMs = 350, toggles = 
     sudoUntil.set(req.user.id, Date.now() + 4 * 3600_000);
     return res.json({ ok: true });
   });
+  // A7: the agent-control verification, per fixture session; never sudo.
+  const controlGrants = new Set();
+  app.post('/api/auth/agent-control', (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+    if (req.body?.password !== SUDO_PASSWORD || req.body?.totpCode !== SUDO_TOTP)
+      return res.status(401).json({ error: 'Invalid credentials', agent_control_failed: true });
+    controlGrants.add(req.user.jti);
+    return res.json({ verified: true, factor: 'totp' });
+  });
   // Same envelope and sliding window as middleware/auth.js requireSudo.
   const requireSudo = (req, res, next) => {
     if ((sudoUntil.get(req.user?.id) ?? 0) <= Date.now())
@@ -80,14 +94,22 @@ export async function startHarness({ execution = true, delayMs = 350, toggles = 
     requireAdmin, requireSudo }));
   app.use('/api/operational-projects', authed,
     createOperationsRouter({ Router: express.Router, store: world.f.store, lookupLimiter: (_req, _res, next) => next(),
-      agentRuns: world.service, requireSudo, ...(toggles
+      agentRuns: world.service, requireSudo, controlVerified: req => controlGrants.has(req.user?.jti), ...(toggles
         ? { enabled: toggle('operations'), agentsEnabled: toggle('agents_metadata'), agentRunsEnabled: toggle('agent_runs') }
         : { enabled: true, agentsEnabled: true }) }));
   app.use('/api/', (_req, res) => res.status(404).json({ error: 'Not found in the A6 harness' }));
   const server = await createServer({ root, configFile: `${root}/vite.config.js`, logLevel: 'error',
     server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{ name: 'a6-harness',
       configureServer(vite) { vite.middlewares.use((req, res, next) => req.url.startsWith('/api/') ? app(req, res, next) : next()); } }] });
+  world.supervisor.scenario.liveError = 'LIVE_UNAVAILABLE';
+  attachAgentLiveServer(server.httpServer, { agentRuns: world.service,
+    enabled: () => !toggles || Object.values(effectiveToggles(world.f.db)).every(Boolean),
+    verify: (req) => {
+      const role = cookies(req).pp_harness_user, u = role && byName[role];
+      if (!u) { const e = new Error('Authentication required'); e.statusCode = 401; throw e; }
+      return { user: { id: u.id, username: u.username, role: 'user', jti: `harness-${role}` } };
+    } });
   await server.listen();
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
-  return { origin, world, requests, sudoUntil, close: async () => { await server.close(); world.f.close(); } };
+  return { origin, world, requests, sudoUntil, controlGrants, close: async () => { await server.close(); world.f.close(); } };
 }

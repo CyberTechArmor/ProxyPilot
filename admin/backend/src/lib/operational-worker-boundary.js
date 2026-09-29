@@ -24,6 +24,10 @@ export const SUBMIT_OUTCOMES = Object.freeze(['signed_in','rejected','rate_limit
 // Stop reasons the backend may give the supervisor. `completed` (A5) is a label
 // on a normal teardown; it grants nothing a cancel does not.
 export const STOP_REASONS = Object.freeze(['cancelled','blocked','failed','completed']);
+// A7: the supervisor also takes `taken_over` from the backend, only for an
+// attempt a dashboard takeover handed to a person. It is a receipt label, never
+// a run state.
+export const SUPERVISOR_STOP_REASONS = Object.freeze([...STOP_REASONS, 'taken_over']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/i;
 const ACTIVE = new Set(['prepared', 'starting', 'running']);
@@ -113,6 +117,20 @@ const validRef = ref => fields(ref, ['run_id','attempt_id','fence']) &&
 // the independently installed host supervisor, and the proof VM identity it
 // must report, every call fails closed. Silent fallback to spawn/host-exec is
 // forbidden. Nothing in the routes constructs a client: A3 activation is off.
+// A7 live relay: the supervisor's viewer id and each viewer's TURN REST
+// credential (username "<expiry>:<viewer>", HMAC-SHA1 base64), for the three
+// reviewed TURN URL forms only.
+const LIVE_CONN = /^[0-9a-f]{16}$/;
+const TURN_URL = /^(turn:[a-z0-9.-]{1,253}:3478\?transport=(udp|tcp)|turns:[a-z0-9.-]{1,253}:5349\?transport=tcp)$/;
+const SUMMARY_TEXT_CHARS = 800;
+function validIceServers(list, viewer) {
+  return Array.isArray(list) && list.length === 1 && list.every(server => fields(server, ['urls','username','credential']) &&
+    Array.isArray(server.urls) && server.urls.length >= 1 && server.urls.length <= 3 &&
+    server.urls.every(url => typeof url === 'string' && TURN_URL.test(url)) &&
+    typeof server.username === 'string' && new RegExp(`^[0-9]{10}:${viewer}$`).test(server.username) &&
+    typeof server.credential === 'string' && /^[A-Za-z0-9+/]{27}=$/.test(server.credential));
+}
+
 export function createWorkerLauncher({client=null, vmUuid=null}={}) {
   const connected = () => {
     if (!client || typeof client.request !== 'function' || !validUuid(vmUuid)) fail('BOUNDARY_UNVERIFIED');
@@ -172,7 +190,7 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       return Object.freeze({png_base64:result.png_base64,width:result.width,height:result.height});
     },
     async stop(ref, reason='cancelled') {
-      if (!validRef(ref) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');
+      if (!validRef(ref) || !SUPERVISOR_STOP_REASONS.includes(reason)) fail('INVALID_STOP');
       const result=await connected().request('stop', {run_id:ref.run_id,attempt_id:ref.attempt_id,
         fence:ref.fence,reason});
       const receipt=result?.receipt;
@@ -182,6 +200,64 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       return receipt;
     },
     async status() { return connected().request('status', {}); },
+    // A7: one viewer's live relay (Neko signalling only; the video and the input
+    // travel over WebRTC through the TURN relay, never through here). The
+    // viewer id is the supervisor's; the TURN credentials are that viewer's own.
+    async live(ref, { onMessage, onClose } = {}) {
+      if (!validRef(ref)) fail('INVALID_LIVE');
+      const client = connected();
+      if (typeof client.stream !== 'function') fail('LIVE_UNAVAILABLE');
+      const opened = await client.stream('live', {run_id:ref.run_id,attempt_id:ref.attempt_id,fence:ref.fence},
+        { onMessage, onClose });
+      if (!LIVE_CONN.test(opened?.conn ?? '') || !validIceServers(opened.ice_servers, opened.conn) ||
+          !Number.isSafeInteger(opened.ttl_seconds) || opened.ttl_seconds < 60 || opened.ttl_seconds > 86400) {
+        opened?.close?.();
+        fail('SUPERVISOR_PROTOCOL');
+      }
+      return Object.freeze({ viewer: opened.conn, ice_servers: opened.ice_servers.map(server => Object.freeze({
+        urls: [...server.urls], username: server.username, credential: server.credential })),
+      ttl_seconds: opened.ttl_seconds, send: opened.send, close: opened.close });
+    },
+    // A7: hand the running attempt to one viewer. The supervisor fences the
+    // model first (the attempt becomes human), then Neko gives that viewer
+    // control. The runner reports, from its own command queue, that no password
+    // field held a value and how much X input arrived while nobody had control.
+    async takeover(ref, viewer) {
+      if (!validRef(ref) || !LIVE_CONN.test(viewer ?? '')) fail('INVALID_TAKEOVER');
+      const result=await connected().request('takeover', {run_id:ref.run_id,attempt_id:ref.attempt_id,
+        fence:ref.fence,conn:viewer});
+      const before=result?.uncontrolled_inputs;
+      if (!fields(result,['state','controlling','uncontrolled_inputs','password_fields_empty']) || result.state!=='human' ||
+          result.controlling!==true || result.password_fields_empty!==true || !fields(before,['key','click','scroll']) ||
+          !Object.values(before).every(n=>Number.isSafeInteger(n) && n>=0 && n<=1_000_000)) fail('SUPERVISOR_PROTOCOL');
+      return Object.freeze({state:'human',password_fields_empty:true,
+        uncontrolled_inputs:Object.freeze({key:before.key,click:before.click,scroll:before.scroll})});
+    },
+    // A7: take control back from the person. Only the count and kind of inputs
+    // come back, never what was typed.
+    async release(ref) {
+      if (!validRef(ref)) fail('INVALID_TAKEOVER');
+      const result=await connected().request('release', {run_id:ref.run_id,attempt_id:ref.attempt_id,fence:ref.fence});
+      const inputs=result?.inputs;
+      if (!fields(result,['inputs']) || !fields(inputs,['key','click','scroll']) ||
+          !Object.values(inputs).every(n=>Number.isSafeInteger(n) && n>=0 && n<=1_000_000)) fail('SUPERVISOR_PROTOCOL');
+      return Object.freeze({inputs:Object.freeze({key:inputs.key,click:inputs.click,scroll:inputs.scroll})});
+    },
+    // A7 decision 5: one model summary of a finished run from typed facts,
+    // charged to the run's pinned budget. The text is untrusted model output
+    // for a person to read; it is bounded and never an instruction.
+    async summarize({run_id, call_id, facts}) {
+      if (!validUuid(run_id) || !validUuid(call_id) || !facts || typeof facts!=='object') fail('INVALID_SUMMARY');
+      const result=await connected().request('summarize', {run_id,call_id,facts});
+      if (!result || result.call_id!==call_id || typeof result.text!=='string' || !result.text ||
+          result.text.length>SUMMARY_TEXT_CHARS || /[\u0000-\u001f\u007f]/.test(result.text)) fail('SUPERVISOR_PROTOCOL');
+      const count=n=>(Number.isSafeInteger(n) && n>=0 ? n : null);
+      return Object.freeze({call_id, text:result.text, replayed:result.replayed===true,
+        prompt_tokens:count(result.usage?.prompt_tokens), completion_tokens:count(result.usage?.completion_tokens),
+        settled_usd:typeof result.settled_usd==='string' && /^[0-9]{1,12}(\.[0-9]{1,12})?$/.test(result.settled_usd)
+          ? result.settled_usd : null,
+        price_table_revision:Number.isSafeInteger(result.price_table_revision) ? result.price_table_revision : null});
+    },
   };
 }
 

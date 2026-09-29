@@ -1,10 +1,14 @@
 # A7 practice and recovery — evidence
 
-**A7 is in progress (2026-09-29).** The gate holds and every decision is
-made (below). Nothing is merged, deployed or promoted; no host step has run.
+**A7 is implemented and proven locally (2026-09-29); the host run has not
+run.** The gate held and every decision is made (below). The code for the host
+steps is `91a25b62` on `claude/intelligent-heisenberg-bwnuiv`. Nothing is
+merged, deployed or promoted; no host step has run. The host pastes (H0–H7)
+are in the reference and need two values from the user: the TURN host name
+and the host's LAN address.
 
-This file is the record: later dated sections win. The orientation page will
-be `fractionate-agents-a7-reference.md`.
+This file is the record: later dated sections win. The orientation page is
+[`fractionate-agents-a7-reference.md`](fractionate-agents-a7-reference.md).
 
 ## 2026-09-29 gate check and decisions
 
@@ -121,3 +125,221 @@ when the user chooses; host root steps are one reviewed paste each.
 5. Proofs: local suites and journeys; the host proof paste list.
 6. Record: this file, the reference, the plan row, `CLAUDE.md`,
    `docs/core/security-host-boundary.md`, `.env.example`, the A8 prompt.
+
+## 2026-09-29 implementation and local verification
+
+### As built, where it differs from the plan above
+
+- **Xvfb, not Xorg with the dummy driver.** The runner draws the kiosk
+  Chromium on a private Xvfb display (no TCP, no abstract socket, its cookie
+  on the unit's tmpfs). Neko captures that display. Xvfb needs no driver
+  package and no config file, and Neko's capture works the same.
+- **The worker's memory is within the A3 minimum.** Measured locally with
+  one viewer streaming at 25 fps: the peak was 420 MiB PSS (Chromium 296,
+  Neko 81, Xvfb 42) and 109 tasks. The A3 minimum is 1024 MiB and 512 tasks.
+  The A3 proof runs in live mode on the host (H4), which proves it on the VM.
+- **The hand-over checks two facts from the runner's own command queue.**
+  No password field holds text (`LIVE_FIELDS_NOT_CLEAR` otherwise). The X
+  input counted while nobody had control is zero. The supervisor refuses a
+  reply without both (`LIVE_PROTOCOL`), the backend refuses it again, and
+  both facts go into the audit entry and the receipt.
+- **The kill cases are host proof cases** in `a7-probe.mjs` (the prompt's
+  target list): the worker killed mid-read, mid-approval and mid-write, and
+  the coordinator killed mid-read, mid-approval and mid-write. Account loss
+  and key loss while a person holds control are cases too (18 in all).
+- **The TCP and TLS fallback on the host** is proven by allocation, not
+  media. The Go probe (pion) gives a relay candidate gathered over TCP or TLS
+  the TCP network type, so it cannot reach Neko's UDP port that way.
+  Browsers can, and the dashboard's client in Chromium streams over UDP, TCP
+  and TLS TURN locally. On the host, `live_refusals` checks the 3478/TCP and
+  5349/TLS listeners: the viewer's credential allocates, the certificate
+  verifies for the TURN name, and the peer scope is the same.
+- **No new environment variable.** The TURN settings are host state
+  (`live.json`, written by `a7-install-live.py enable`). The backend gets the
+  ICE servers from the supervisor for each viewer. `.env.example` is
+  unchanged.
+
+### What changed (code `91a25b62`)
+
+Commits:
+- `c12b26bb`: backend core.
+- `b9271b94`: host scripts.
+- `3ed44fa6`: fence, TURN and installer.
+- `9776478e`: backend plumbing.
+- `d5fe6d0e`: UI.
+- `f6491871`: proofs.
+- `91a25b62`: kill cases and `WORKER_EXITED`.
+
+The reference's component map lists the files.
+
+- **Practice (decision 4).**
+  - Start takes `practice: {fixture_mode}` (`normal`, `expired`, `locked`,
+    `challenge`, `redirect`, `slow`).
+  - The demo's fixture mode is written through one audited, fixed write into
+    `pp-fractionate-demo` and read back byte-exact, set before the pin and
+    reset after.
+  - A practice run runs alone. It is labelled Practice everywhere, and the
+    Review tab says whether the result matched the mode's expected result.
+- **Reconciliation (decision 3).**
+  - Every uncertain step or model call becomes an item. Another start of the
+    profile is refused (`RECONCILIATION_REQUIRED`) while an uncertain write
+    (a submit or a sign-out, a `timeout` included) is undecided or "Not known
+    yet".
+  - Reads and model calls only close the help request.
+  - Decisions are append-only and audited. They need run access and the
+    session's verification. Nothing is re-sent.
+- **Resume (decision 2).**
+  - A resume is a new run, linked to the old one and pinned to its profile,
+    guide, binding revision and policy (`RESUME_STALE` with the reason
+    otherwise).
+  - It gets a new attempt and fence, a fresh browser and its own approval.
+  - A run can be resumed once.
+- **Takeover (the user's direction, decisions 1–1c).**
+  - A person watches the run in the Browser pane as live video over WebRTC,
+    relayed through TURN; relay candidates only.
+  - "Take over" hands control to that person's own open view, after one
+    "Confirm it is you" per session (password + TOTP or a passkey; not sudo).
+  - There is one controller at a time. Keys, pointer and wheel go over Neko's
+    data channel; only counts by kind are recorded.
+  - "Give back and end run" ends the run `taken_over` with a verified receipt.
+  - If the holder's view closes, their access ends or the coordinator
+    restarts, the takeover ends the same way.
+- **Critique (decision 5).**
+  - The Review tab shows the rule-based critique (typed codes from durable
+    state) for every finished run.
+  - For a profile whose owner allowed summaries, one model summary is
+    written automatically from typed facts under the run's budget. It is
+    bounded and labelled as model text, and changes nothing.
+- **The locally proven classes (decision 6).**
+  - A reply outside the allowed set stays `blocked/model_choice_invalid`, and
+    unknown usage stays `failed/usage_unknown`. The host proof uses the
+    broker's operator-only proof switches.
+  - A submit `timeout` is a help request that gates the profile. The host
+    proof uses the demo's `slow` mode: the proxy answers 502 after 8 s, and
+    the demo completes the sign-in afterwards.
+- **Migration 1112:**
+  - run origins;
+  - reconciliations;
+  - control grants;
+  - takeovers;
+  - the fixture state;
+  - summaries;
+  - summary consent.
+
+  Migrations 1100–1111 are untouched.
+- **UI** (to `MOBILE_FIRST.md`):
+  - the Browser pane's live view with Take over / Give back;
+  - the reconcile panel ("It happened", "It did not happen", "Not known yet",
+    "Acknowledge");
+  - the practice dialog;
+  - resume;
+  - the Review tab;
+  - summary consent;
+  - the "Confirm it is you" prompt.
+
+### Local verification (this session, code `91a25b62`)
+
+- **Backend, full suite:** 3,391 tests, 3,359 pass, **20 fail**, 12 skipped.
+  - The 20 failures are exactly the set that fails on untouched `main` in this
+    sandbox (3,361 tests, 20 failures; compared by test name). None is new.
+  - Operations and agent suites (`agent-*`, `operational-*`,
+    `operations-toggles`): **159/159**.
+- **Scripts:** `python3 -m unittest discover -s scripts/tests -p
+  'test_a[34567]*py'` ran **210 tests, OK**, with a real Neko build
+  (`A7_TEST_NEKO`) and the probe (`A7_TEST_PROBE`). Included:
+  - `test_a7_live_e2e`, with real Xvfb, Neko, coturn (rendered by the
+    installer), the Go probe and Chromium:
+    - the probe streamed over the UDP relay at **25.0 fps** (149 frames in
+      6 s);
+    - the dashboard's own client in Chromium streamed over **UDP 24.8 fps,
+      TCP 25 fps and TLS 25 fps**, relay candidates only, to Neko's port;
+    - input before control reached X zero times, and after control 4 keys,
+      1 click and 2 scrolls;
+    - the relay permitted only the Neko address; every other peer got `403
+      Forbidden IP` over UDP, TCP and TLS;
+    - the TLS check verified the name, and was refused as `TLS_UNVERIFIED`
+      without the CA.
+  - `test_a7_probe_harness`: the host harness itself, **18/18** against the
+    real supervisor and broker socket servers.
+- **Browser journeys:**
+  - A6: **19/19**, 96 layout checks.
+  - A7 (`agent-runs-a7.browser.mjs`): **5/5**, 36 layout checks (six
+    screens at 360, 375, 390, 768, 1280 and 1920 px: no horizontal scroll,
+    touch targets ≥ 44 px under 640 px).
+- **Frontend build:** passed.
+- **Host-boundary inventory:** 97 candidate backend files (the demo fixture
+  writer is new); S6 remains open.
+
+### MOBILE_FIRST pre-merge checklist (recorded)
+
+- Default breakpoints only.
+- The run bar's resume row wraps to its own line under `sm`.
+- The confirmation dialog and "Confirm it is you" are full-screen under `sm`
+  and completable at 360 px.
+- On a phone:
+  - the live view keeps its 16:10 box;
+  - "Keyboard" opens the phone keyboard for the held browser;
+  - the takeover bar's buttons are ≥ 44 px.
+- Rendered and checked at 360/375/390/768/1280/1920 by the journeys.
+- No dead control: the journeys' dead-control audit is empty.
+
+### Findings while building (fixed before commit)
+
+- **Neko sends its host candidate before its offer.** Adding it before the
+  remote description throws. Both the dashboard's client and the probe now
+  buffer early candidates. A unit test models it: the fake peer throws
+  without a remote description.
+- **React's development double mount closed the live client it kept.** A
+  disposed guard stops a client closed by its own cleanup from reporting.
+- **A duplicate object key (`DECK_TEXT.review`) silently replaced the
+  approval button's label.** The key was renamed `reviewTab`, and a
+  duplicate-key ratchet was added (`agent-run-text.test.js`).
+- **coturn's `bps-capacity` reserves the rate per allocation.** A browser
+  holds one allocation per TURN URL, so it answered 486 "Allocation
+  Bandwidth Quota Reached". It was removed; `max-bps` (bytes per second per
+  session) stays.
+- **A runner that had already exited was reported as `CHANNEL_CLOSED`.** A
+  submit that was never sent then became an uncertain write that gated the
+  profile. The supervisor now answers `WORKER_EXITED`, a certain failure,
+  and the coordinator maps it to `failed/attempt_lost`. Found by the
+  `worker_killed_mid_approval` case.
+- **The A3 host proof still expected `takeover` to be refused on the backend
+  socket.** A7 made it a backend method. `backend_refusals` now expects
+  `INVALID_REQUEST` without a viewer and `LIVE_CONN_UNKNOWN` or
+  `LIVE_UNAVAILABLE` for an unknown one, and the socket test asserts the
+  same. The host regression would otherwise have failed.
+- **In the harness, a killed worker made the in-flight call reject** before
+  the harness had attached a handler. Node treats that as fatal. It now
+  attaches one at once.
+- **Layout:**
+  - the resume button overflowed at 360 px, so it moved to its own row;
+  - a practice reason was shown twice;
+  - the A6 journeys needed the new Review tab in their keyboard walk.
+- **Local harness:**
+  - Chromium sends TCP TURN through the proxy settings, so the local
+    end-to-end test runs it with `--no-proxy-server`;
+  - Chromium does not use `--host-resolver-rules` for TURN names, so the test
+    uses an address.
+
+### Open items (for the user's acceptance decision)
+
+- **The host run (H0–H7) has not run.** It needs the TURN host name, the
+  host's LAN address, the DNS record and the three router forwards.
+- **The dashboard's live view from the internet** cannot be shown before A8:
+  execution on the live dashboard stays unavailable until the supervisor
+  socket is mounted, and nothing is deployed. A7 proves each part:
+  - the client in Chromium over all three transports (locally);
+  - the host's listeners, certificate, scope and UDP media (H4);
+  - the router forward and certificate as a viewer sees them (the
+    recommended external `openssl` check).
+- **A person deciding an uncertain write sees the run's own record only.**
+  In the coordinator-killed-mid-write case the supervisor's journal can
+  already show the submit `done`. Showing the supervisor's record beside
+  the decision would help; proposed for A8.
+- **The two mid-write kill cases rely on the submit taking longer than
+  300 ms on the host.** If it finishes first, the case fails with a typed
+  detail and the delay is tuned (`A7_PROBE_SUBMIT_IN_FLIGHT_MS`).
+- **The reboot test** (`a6-reboot-check.py`) has not run; it runs only when
+  the user chooses.
+- S6/SEC/INF stay with the later security audit
+  (`fractionate-agents-security-audit-register.md`).

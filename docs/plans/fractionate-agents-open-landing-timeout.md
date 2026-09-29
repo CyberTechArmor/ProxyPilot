@@ -138,6 +138,13 @@ ahostsv4 slow_lookups=0 of 100
 - **What this means for the proxy:** the once-a-minute cache is enough. The
   worst stall seen (3.9 s) is far inside the runner's 10 s page wait, and a
   page now makes at most one lookup a minute.
+- **The second check (user, host):** `/etc/resolv.conf` is a plain file
+  (170 bytes, not a systemd-resolved link); **`ipv6_default_routes=0`**, so
+  the host cannot use an IPv6 answer at all; A-only and AAAA-only lookups:
+  0 of 100 each. At about 1 in 100, no stall showed this time, so which
+  question stalls stays unproven.
+- **Deployed 2026-09-29** (live `776045d7`) and installed in both proxy
+  copies by A6 host run 2, which passed the proxy, A3, A4 and A5 proofs.
 - **Not changed, as options:**
   - the proxy could ask for IPv4 only (the demo has no IPv6 address). That
     changes what the proxy accepts, so it is a decision, with the proxy's

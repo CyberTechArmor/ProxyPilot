@@ -1,7 +1,8 @@
 # A6 reference: current state for any conversation
 
-Snapshot: 2026-09-29, after the run deck's merge (#703, `cb576c16`), its
-deploy (live `08293733`) and A6 host run 1 (H0–H5, all passed).
+Snapshot: 2026-09-29, after the follow-ups' merge (#705, `24cfadbd`), their
+deploy (live `776045d7`) and A6 host run 2 (H1–H5, all passed). Host run 1
+passed on the run deck's deploy (#703, `cb576c16`, live `08293733`).
 
 This file is the orientation page. The dated
 [A6 evidence](fractionate-agents-a6-evidence.md) is the record; if the two
@@ -9,7 +10,9 @@ disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, receipt key) before acting.
 
 **Status in one line:** A6 is **implemented, merged and deployed, with the
-run deck live (`08293733`). Host run 1 passed: A3 20/20 including
+run deck and the follow-ups live (`776045d7`). Host run 2 passed on the
+fixed origin proxy (A3 20/20, A4 6/6, A5 17/17, canaries clean,
+`all_passed: true`). Host run 1 passed: A3 20/20 including
 `backend_view`, A4 6/6, A5 17/17 with one real human approval, both canaries
 clean, `all_passed: true`. A6 was ACCEPTED on 2026-09-29** (the evidence's
 last section carries the open items with the user's dispositions). The dashboard
@@ -43,20 +46,23 @@ The takeover direction for A7 is in the
 
 | Where | Revision | Notes |
 |---|---|---|
-| GitHub `main` | `52f26af18403dfceae6f63306521968a591ccab1` | A4–A6 merged as `469e98a9` (#700), toggles as `52f26af1` (#701) |
+| GitHub `main` | `24cfadbd4d2c7e1ff096b167b56046f816a4cf67` | A4–A6 merged as `469e98a9` (#700), toggles as `52f26af1` (#701), run deck `cb576c16` (#703), acceptance `61a27552` (#704), follow-ups `24cfadbd` (#705) |
 | A5 head (base) | `5210cfb7af3a840e1a7bbf62feca61c8993f2d68` | branch `claude/beautiful-maxwell-9bldxg` |
 | A6 code | `b8178074` (UI, service, routes, supervisor `view`); `ec986a88` (`a6-host-summary.py`) | The supervisor bytes are final at `b8178074` |
 | **A6 code, host steps** | **`5a8648f5cd4f453278908326cd36258714337f43`** | Stop retry for a fenced run, supervisor codes in words. **Stage this.** Later commits are docs |
 | Run deck | `cb576c16b6a73982de7c8c4a7578b0e9be61433c` | PR #703 merged into `main`. UI only (the finish prompt's Part A) plus the A7 prompt; changes no script, route or migration |
-| Live checkout | `082937337ca835fe7803ef3a86981c9bd93619c1` | The staging of `cb576c16`. Promoted 2026-09-29 12:01Z from `85586aea` (rollback tag `pp-rollback-20260929T120151Z`; DB backup `proxypilot-pre-A6-deck-promote-20260929T120129Z.db`) |
-| Candidate | `082937337ca835fe7803ef3a86981c9bd93619c1` | Same as live, 0 ahead |
-| Previous live | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | The staging of `52f26af1`, promoted 09:13Z from `33528751` (tag `pp-rollback-20260929T091306Z`) |
+| Follow-ups | `24cfadbd4d2c7e1ff096b167b56046f816a4cf67` | PR #705: nodemailer 10.0.12, the origin proxy's at-most-once rule and DNS cache, `a6-reboot-check.py`, the Lighthouse script, docs |
+| Live checkout | `776045d741e2126ae8a38bba83a620551f2b34c9` | The staging of `24cfadbd` (149 paths). Promoted 2026-09-29 13:40Z from `08293733` (rollback tag `pp-rollback-20260929T134047Z`; DB backup `proxypilot-pre-A6-followups-promote-20260929T134039Z.db`) |
+| Candidate | `776045d741e2126ae8a38bba83a620551f2b34c9` | Same as live, 0 ahead |
+| Previous live | `082937337ca835fe7803ef3a86981c9bd93619c1` | The staging of `cb576c16`, promoted 12:01Z from `85586aea` (tag `pp-rollback-20260929T120151Z`) |
 
 **File digests** (sha256; the installers copy byte-exact):
 
 | File | A5 (installed until host run 1) | A6 (`5a8648f5`; the same bytes at `52f26af1` and `cb576c16`; **installed by H1, 2026-09-29**) |
 |---|---|---|
 | `a3-worker-supervisor.py` | `151f1d24…` | **`9d195ea2…`** (backend `view`) |
+| `a3-origin-proxy.py` (both installed copies) | before #705: `f5e63612…` (the bytes at `61a27552`) | **`6c86bc36…`** from #705 (at most once; DNS cache), **installed by host run 2's H1** |
+| `a6-reboot-check.py` | — | `90caa35c…` (#705; not yet run) |
 | `a3-worker-guest.py` (runner) | `a631ad9d…` | `a631ad9d…` (unchanged) |
 | `a4-credential-broker.py` | `790a1957…` | unchanged |
 | `admin/frontend/demo/server.mjs` | `496846cd…` | unchanged |
@@ -64,14 +70,19 @@ The takeover direction for A7 is in the
 | `a5-probe.mjs` | `fbbda1c9…` | unchanged |
 | `a6-host-summary.py` | — | `a1dfa05c…` |
 
-**Receipt key:** `900607c01d177038374019c411fe8d348a8b73bb385049e3a977cdbc0152205a`
-since H1. The A5-era `f6304ffb…` is archived under
-`/var/lib/proxypilot-a3-proof/supervisor-keys/`.
+**Receipt key:** `f68c8aaf1bb23aa0c6190007717449aeae8f987e70c720aed47f2300dc1174e3`
+since host run 2's H1. The earlier `900607c0…` (host run 1) and `f6304ffb…`
+(A5) are archived under `/var/lib/proxypilot-a3-proof/supervisor-keys/`.
 
-**Proof VM boot:** `680ebdf3-5d00-453d-aec9-52e99f6ec888` since H2 (was
-`62801e3b…`). It changes whenever the A3 `guest_crash` case runs.
+**Proxy certificate SPKI:** `V7Qx86Hf+deTelbdyyiz1A+aN6hKY+9cuDxDbeSuU8w=`
+since host run 2's H1 (the renewal timer re-issues it every ~4 days).
 
-**A4 proof binding:** `d1edf152-efd5-4e08-b8bc-daee7bf8de22`.
+**Proof VM boot:** `c70bdf71-b77b-4911-9e1f-89c87d149837` since host run 2's
+H2 (was `680ebdf3…` after host run 1). It changes whenever the A3
+`guest_crash` case runs.
+
+**A4 proof binding:** `87151b55-b007-432a-a3be-483b4888a2d4` (host run 2;
+`d1edf152…` from host run 1 is revoked).
 
 ## Component map
 
@@ -140,7 +151,17 @@ result class when it is one a person decides (`challenge_required`,
 `uncertain_step`; `uncertain_steps` travels with it. The inbox lists the latest
 such run per profile (a newer run of the same profile closes it).
 
-## Host commands (A6 host run 1: run and passed 2026-09-29; kept for a rerun)
+## Host commands (A6 host runs 1 and 2: run and passed 2026-09-29; kept for a rerun)
+
+Host run 2 (after #705) ran the same steps with two differences:
+- **H1 reinstalled the proxy first:** `python3 a3-install-proxy.py reinstall`
+  before `a3-install-supervisor.py reinstall`, then `sha256sum` of both
+  installed proxy copies (`/etc/proxypilot-a3-proof/origin-proxy.py` and
+  `/etc/proxypilot-a3-proof/supervisor/a3-origin-proxy.py`).
+- **H2's check** greps `Traceback|Refused` instead of `Error` (a passing
+  `escape` case contains `refused:TimeoutError`) and counts the case lines;
+  26 at the end (20 A3 + 6 A4). The shell's `[1]+ Done` right after a
+  detached start is `setsid` handing over, not the end.
 
 H2 ran detached in host run 1:
 

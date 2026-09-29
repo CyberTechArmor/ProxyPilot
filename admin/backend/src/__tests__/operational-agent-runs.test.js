@@ -53,19 +53,20 @@ test('flags: agent-run routes answer 404 unless Operations, agent metadata and t
   assert.equal((await on.call(w.users.owner, 'GET', `/${w.p.id}/runs`)).statusCode, 200);
 });
 
-test('configuration: every flag is off by default; no supervisor means EXECUTION_UNAVAILABLE, never a launch', async () => {
-  const flags = { OPERATIONS_ENABLED: 'true', OPERATIONS_AGENTS_METADATA_ENABLED: 'true', OPERATIONS_AGENT_RUNS_ENABLED: 'true' };
-  assert.deepEqual(agentRunsConfiguration({}), { enabled: false, execution: null, reason: 'flag_off' });
-  assert.equal(agentRunsConfiguration({ ...flags, OPERATIONS_AGENTS_METADATA_ENABLED: 'false' }).enabled, false);
-  assert.deepEqual(agentRunsConfiguration(flags), { enabled: true, execution: null, reason: 'not_configured' });
+test('configuration: execution needs the supervisor configured; without it EXECUTION_UNAVAILABLE, never a launch', async () => {
+  // Whether agent runs exist at all is the administrators' toggle (operations-toggles.test.js);
+  // the environment only names the supervisor socket, its key and the VM.
+  const flags = {};
+  assert.deepEqual(agentRunsConfiguration({}), { enabled: true, execution: null, reason: 'not_configured' });
+  assert.deepEqual(agentRunsConfiguration({ OPERATIONS_AGENT_RUNS_ENABLED: 'true' }), { enabled: true, execution: null, reason: 'not_configured' });
   assert.equal(agentRunsConfiguration({ ...flags, OPERATIONS_AGENT_SUPERVISOR_SOCKET: '/run/x.sock' }).reason, 'invalid_configuration');
   assert.equal(agentRunsConfiguration({ ...flags, OPERATIONS_AGENT_SUPERVISOR_SOCKET: 'relative.sock',
     OPERATIONS_AGENT_SUPERVISOR_PUBLIC_KEY: '/k.pem', OPERATIONS_AGENT_VM_UUID: VM }).reason, 'invalid_configuration');
   const full = agentRunsConfiguration({ ...flags, OPERATIONS_AGENT_SUPERVISOR_SOCKET: '/run/proxypilot-a3/supervisor.sock',
     OPERATIONS_AGENT_SUPERVISOR_PUBLIC_KEY: '/etc/pub.pem', OPERATIONS_AGENT_VM_UUID: VM });
   assert.deepEqual(full.execution, { socket: '/run/proxypilot-a3/supervisor.sock', publicKeyPath: '/etc/pub.pem', vmUuid: VM });
-  assert.equal(createAgentRunRuntime(agentRunsConfiguration({})), null);
   const w = agentRunsWorld({ execution: false });
+  assert.equal(createAgentRunRuntime(agentRunsConfiguration({}), { db: w.f.db }).execution.reason, 'not_configured');
   const pem = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' });
   assert.equal(createAgentRunRuntime(full, { db: w.f.db, readFile: () => pem }).execution.available, true);
   assert.equal(createAgentRunRuntime(full, { db: w.f.db, readFile: () => 'not a key' }).execution.reason, 'invalid_configuration');

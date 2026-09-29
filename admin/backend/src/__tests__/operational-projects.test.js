@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { operationsFixture, fixtureRouter } from './helpers/operations-fixture.js';
-import { assertOperation, operationsEnabled, revision } from '../lib/operational-projects-logic.js';
+import { assertOperation, revision } from '../lib/operational-projects-logic.js';
 import { createOperationsRouter } from '../routes/operational-projects.js';
 import { csrfProtection } from '../middleware/csrf.js';
 
@@ -178,9 +178,6 @@ test('registered handlers enforce feature gate, revisions, strict body and exist
   const make=enabled=>createOperationsRouter({Router:fixtureRouter,store:enabled?f.store:null,enabled,lookupLimiter:(_r,_s,n)=>n()});
   const request=(router,method,path,body,extra={})=>router.dispatch({method,path,originalUrl:'/api/operational-projects'+path,user:a,body,
     cookies:{pp_csrf:'fixture'},headers:{'x-csrf-token':'fixture'},...extra},[csrfProtection]);
-  assert.equal(operationsEnabled({}),false);
-  assert.equal(operationsEnabled({OPERATIONS_ENABLED:'1'}),false);
-  assert.equal(operationsEnabled({OPERATIONS_ENABLED:'true'}),true);
   const off=make(false);
   assert.equal((await request(off,'GET','/capabilities')).body.enabled,false);
   assert.equal((await request(off,'POST','/',{name:'No'})).statusCode,404);

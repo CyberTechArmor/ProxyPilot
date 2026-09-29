@@ -6,7 +6,8 @@ import { createEvidenceService } from './operational-evidence-service.js';
 import { createEvidenceDecoder } from './operational-evidence-decoder.js';
 
 export function evidenceConfiguration(env=process.env) {
-  const requested=env.OPERATIONS_ENABLED==='true' && env.OPERATIONS_EVIDENCE_ENABLED==='true';
+  // Operations itself is an administrators' toggle enforced by the router.
+  const requested=env.OPERATIONS_EVIDENCE_ENABLED==='true';
   if(!requested) return {enabled:false};
   const quota=Number(env.OPERATIONS_EVIDENCE_QUOTA_BYTES);
   const root=env.OPERATIONS_EVIDENCE_DIR,runner=env.OPERATIONS_EVIDENCE_DECODER_RUNNER;

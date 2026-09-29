@@ -7,17 +7,26 @@ const noSudo = (_req, res) => res.status(401).json({ error: 'sudo_required', sud
   message: 'This action requires sudo re-authentication.' });
 
 // Router and limiter come from the server; never imports the production DB.
-// `agentRuns` (A6) is the supervision service, present only when its flag is on.
+// The switches are booleans or getters read on every request (the server passes
+// the administrators' toggles, lib/operations-toggles.js), so turning one off
+// takes effect at the next request. `agentRuns` (A6) is the supervision service.
 export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false,
-  agentRuns = null, requireSudo = noSudo }) {
+  agentRuns = null, agentRunsEnabled = true, requireSudo = noSudo }) {
   const router = Router();
-  const runsEnabled = enabled && agentsEnabled && !!agentRuns;
+  const on = value => (typeof value === 'function' ? value() : value) === true;
+  const opsOn = () => on(enabled), agentsOn = () => opsOn() && on(agentsEnabled);
+  const runsEnabled = () => agentsOn() && !!agentRuns && on(agentRunsEnabled);
   router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
-  router.get('/capabilities', (_req, res) => res.json({ enabled, stage: 'human-workflow', ui_available: enabled,
-    evidence_enabled: enabled && evidenceEnabled, agents_metadata_enabled: enabled && agentsEnabled,
-    agent_runs_enabled: runsEnabled, ...(runsEnabled ? { agent_execution_available: agentRuns.execution.available,
-      agent_execution_message: agentRuns.execution.message } : {}) }));
-  router.use((_req, res, next) => enabled ? next() : res.status(404).json({ error: 'Not found' }));
+  router.get('/capabilities', (req, res) => {
+    const ops = opsOn(), runs = runsEnabled();
+    res.json({ enabled: ops, stage: 'human-workflow', ui_available: ops,
+      evidence_enabled: ops && evidenceEnabled, agents_metadata_enabled: agentsOn(),
+      agent_runs_enabled: runs, ...(runs ? { agent_execution_available: agentRuns.execution.available,
+        agent_execution_message: agentRuns.execution.message } : {}),
+      // Only a hint for the sidebar; the settings routes check the role themselves.
+      can_manage_settings: req.user?.role === 'admin' });
+  });
+  router.use((_req, res, next) => opsOn() ? next() : res.status(404).json({ error: 'Not found' }));
   router.use((req, res, next) => {
     try {
       req.operationsActor = { ...req.user, requestId: randomUUID() };
@@ -58,11 +67,11 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
       });
     }
   };
-  const agentRunsOnly = (_req, res, next) => runsEnabled ? next() : res.status(404).json({ error: 'Not found' });
+  const agentRunsOnly = (_req, res, next) => runsEnabled() ? next() : res.status(404).json({ error: 'Not found' });
   const expected = req => revision(req.get('If-Match'));
   if (evidenceRouter) router.use('/:id/demonstrations', evidenceRouter);
   const empty = req => parse(schemas.empty, req.body ?? {});
-  const agentsOnly = (_req,res,next) => agentsEnabled ? next() : res.status(404).json({error:'Not found'});
+  const agentsOnly = (_req,res,next) => agentsOn() ? next() : res.status(404).json({error:'Not found'});
   router.get('/directory', agentsOnly, handle((r,a)=>store.directory(a,r.query),200,'directory_read'));
   // Human-only: approving needs the session's sudo elevation plus the typed digest.
   router.get('/agent-approvals', agentRunsOnly, agentHandle((_r,a)=>agentRuns.inbox(a),200,'agent_inbox_read'));

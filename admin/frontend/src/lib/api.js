@@ -2487,6 +2487,14 @@ export const operationsApi = {
   }),
 };
 
+// Administrators' Operations toggles (Operations, agent metadata, agent runs).
+// Changing one needs sudo; the shared request() opens the sudo prompt.
+export const operationsSettingsApi = {
+  get: () => request('/operations-settings', { cache: 'no-store' }),
+  set: (name, enabled) => request(`/operations-settings/${encodeURIComponent(name)}`, {
+    method: 'PUT', cache: 'no-store', body: JSON.stringify({ enabled }) }),
+};
+
 // Small still images restart as one bounded body. Never automatically retry bytes.
 function evidenceUpload(endpoint, file, signal, onProgress) {
   return new Promise((resolve, reject) => {

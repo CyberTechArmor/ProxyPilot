@@ -11,6 +11,8 @@ import { createServer } from 'vite';
 import express from '../../backend/node_modules/express/index.js';
 import { csrfProtection } from '../../backend/src/middleware/csrf.js';
 import { createOperationsRouter } from '../../backend/src/routes/operational-projects.js';
+import { createOperationsSettingsRouter } from '../../backend/src/routes/operations-settings.js';
+import { effectiveToggles } from '../../backend/src/lib/operations-toggles.js';
 import { agentRunsWorld } from '../../backend/src/__tests__/helpers/agent-runs-world.js';
 
 export const SUDO_PASSWORD = 'harness-password';
@@ -24,9 +26,16 @@ function cookies(req) {
   }));
 }
 
-export async function startHarness({ execution = true, delayMs = 350, world: worldOptions = {} } = {}) {
+// `toggles: true` serves the administrators' toggles (all off at start) exactly as
+// index.js does; otherwise Operations, agent metadata and agent runs are on.
+export async function startHarness({ execution = true, delayMs = 350, toggles = false, world: worldOptions = {} } = {}) {
   const world = agentRunsWorld({ execution, ...worldOptions });
   world.supervisor.scenario.delayMs = delayMs;
+  world.f.db.exec(`CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL,
+    resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+  const admin = world.f.addUser('admin');
+  world.f.db.prepare('UPDATE users SET username=? WHERE id=?').run('ada-admin', admin.id);
+  world.users.admin = { ...admin, username: 'ada-admin' };
   const byName = Object.fromEntries(Object.entries(world.users).map(([role, u]) => [role, u]));
   const sudoUntil = new Map();
   const requests = [];
@@ -38,7 +47,7 @@ export async function startHarness({ execution = true, delayMs = 350, world: wor
     res.setHeader('Set-Cookie', `pp_csrf=${csrf}; Path=/; SameSite=Strict`);
     const role = req.cookies.pp_harness_user;
     const u = role && byName[role];
-    if (u) req.user = { id: u.id, username: u.username, role: 'user' };
+    if (u) req.user = { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user' };
     requests.push({ method: req.method, path: req.path, role: role || null });
     next();
   });
@@ -64,9 +73,16 @@ export async function startHarness({ execution = true, delayMs = 350, world: wor
     sudoUntil.set(req.user.id, Date.now() + 4 * 3600_000);
     return next();
   };
-  app.use('/api/operational-projects', (req, res, next) => req.user ? next() : res.status(401).json({ error: 'Authentication required' }),
-    createOperationsRouter({ Router: express.Router, store: world.f.store, enabled: true, agentsEnabled: true,
-      agentRuns: world.service, requireSudo, lookupLimiter: (_req, _res, next) => next() }));
+  const authed = (req, res, next) => req.user ? next() : res.status(401).json({ error: 'Authentication required' });
+  const requireAdmin = (req, res, next) => req.user?.role === 'admin' ? next() : res.status(403).json({ error: 'Admin access required' });
+  const toggle = name => () => effectiveToggles(world.f.db)[name];
+  app.use('/api/operations-settings', authed, createOperationsSettingsRouter({ Router: express.Router, db: () => world.f.db,
+    requireAdmin, requireSudo }));
+  app.use('/api/operational-projects', authed,
+    createOperationsRouter({ Router: express.Router, store: world.f.store, lookupLimiter: (_req, _res, next) => next(),
+      agentRuns: world.service, requireSudo, ...(toggles
+        ? { enabled: toggle('operations'), agentsEnabled: toggle('agents_metadata'), agentRunsEnabled: toggle('agent_runs') }
+        : { enabled: true, agentsEnabled: true }) }));
   app.use('/api/', (_req, res) => res.status(404).json({ error: 'Not found in the A6 harness' }));
   const server = await createServer({ root, configFile: `${root}/vite.config.js`, logLevel: 'error',
     server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{ name: 'a6-harness',

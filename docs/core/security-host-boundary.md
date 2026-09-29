@@ -151,7 +151,9 @@ per second, and the reply is only `{png_base64, width, height}` (PNG magic,
 ≤ 3 MiB, the runner's page URL dropped, nothing journaled). Input, observe,
 takeover, the journal and the proof workloads stay on the operator socket;
 the socket stays unmounted from the backend container (A8). The backend adds
-Operations routes behind the false-default `OPERATIONS_AGENT_RUNS_ENABLED`
+Operations routes behind the administrators' **Agent runs** dashboard toggle
+(off until an administrator turns it on with sudo, audited; not an environment
+variable since 2026-09-29, and not writable over MCP)
 (`/:id/agent-runs`, stop, `view`, `/agent-approvals` behind `requireSudo`,
 model-guide consent, parsed rules) that call the unchanged A5 coordinator;
 with no supervisor configured they build no launcher and every execution

@@ -38,14 +38,14 @@ merged, deployed or promoted.
 |---|---|---|
 | GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted |
 | A5 head (base) | `5210cfb7af3a840e1a7bbf62feca61c8993f2d68` | branch `claude/beautiful-maxwell-9bldxg` |
-| A6 code | `b8178074` (UI, service, routes, supervisor `view`) | |
-| **A6 code, host steps** | **`ec986a88c2fb911bdf18df77e037b8b9a07c5150`** | Adds `a6-host-summary.py`. **Stage this.** Later commits change only docs and the browser journeys (not staged files the host runs) |
+| A6 code | `b8178074` (UI, service, routes, supervisor `view`); `ec986a88` (`a6-host-summary.py`) | The supervisor bytes are final at `b8178074` |
+| **A6 code, host steps** | **`5a8648f5cd4f453278908326cd36258714337f43`** | Stop retry for a fenced run, supervisor codes in words. **Stage this.** Later commits are docs |
 | Live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged |
 | Candidate | `8d25755c8853e302a15a66855cd35207365373d1` | A5 host run 3 staging; not promoted |
 
 **File digests** (sha256; the installers copy byte-exact):
 
-| File | A5 (installed) | A6 (`ec986a88`) |
+| File | A5 (installed) | A6 (`5a8648f5`) |
 |---|---|---|
 | `a3-worker-supervisor.py` | `151f1d24…` | **`9d195ea2…`** (backend `view`) |
 | `a3-worker-guest.py` (runner) | `a631ad9d…` | `a631ad9d…` (unchanged) |
@@ -75,7 +75,7 @@ makes a new one. Proof VM boot before A6: `62801e3b-8419-40aa-85bf-dffab35788c2`
 | `admin/frontend/src/components/operational-projects/agent-run-text.js` | Every sentence about a run: states, actions, rules, claims, result classes, help decisions, stale reasons |
 | `admin/frontend/src/components/operational-projects/Agents.jsx` | `ModelConsent` (owner), `EnforcedRules` (read-only) |
 | `admin/frontend/src/pages/OperationalProjectDetail.jsx`, `OperationalProjects.jsx` | The "Agent runs" section (`?section=Agent%20runs&run=<id>`), the Agent inbox panel |
-| Tests | `admin/backend/src/__tests__/operational-agent-runs.test.js` (14), `helpers/agent-runs-world.js`; `operational-worker-supervisor.test.js` (launcher view); `scripts/tests/test_a3_worker_supervisor.py` (backend view); `scripts/tests/test_a6_host_summary.py` |
+| Tests | `admin/backend/src/__tests__/operational-agent-runs.test.js` (15), `helpers/agent-runs-world.js`; `operational-worker-supervisor.test.js` (launcher view); `scripts/tests/test_a3_worker_supervisor.py` (backend view); `scripts/tests/test_a6_host_summary.py` |
 | Browser journeys | `admin/frontend/tests/agent-runs-harness.mjs` (UI harness) and `agent-runs.browser.mjs` (13 journeys, 60 layout checks) |
 
 ## Interfaces
@@ -96,7 +96,7 @@ CSRF as everywhere; every refusal is `{error, code, …typed fields}`):
 | `GET /:id/agent-runs` | run | `{own_role, execution, runs[], next_before, profiles[]}`; each profile carries `ready`, `reasons[]` (words), `active_run_id`, `binding{binding_id,revision,username}` |
 | `POST /:id/agent-runs` | run | `{profile_id, credential_binding_id?}` → 201 run detail; `RUN_ALREADY_ACTIVE` carries `active_run_id` |
 | `GET /:id/agent-runs/:runId` | run | run, steps (ordinal, action, decided_by, rule, state, typed claims, error_code), model_calls (allowed, choice, refusal, tokens, settled cost), approvals (the digest fields and digest, `open`), events, result (receipt as `{verified, key_id}`), `controls.stop/view {enabled, reason}`, `execution` |
-| `POST /:id/agent-runs/:runId/stop` | run | 200 when the receipt is collected, 202 `stopping: true` when the fence is set and the receipt still comes |
+| `POST /:id/agent-runs/:runId/stop` | run | 200 when the receipt is collected, 202 `stopping: true` when the fence is set and the receipt still comes; a fenced run whose receipt did not arrive (`cancelling`) may be stopped again (`controls.stop.retry`); `SUPERVISOR_UNREACHABLE`/`_TIMEOUT`/`_PROTOCOL` 503, `TEARDOWN_UNVERIFIED` 502 |
 | `GET /:id/agent-runs/:runId/view` | run | `{frame:{png_base64,width,height,captured_at,action_count}}`; `VIEW_UNAVAILABLE`, `VIEW_BUSY`, `VIEW_FAILED` |
 | `GET /agent-approvals` | any eligible | `{approvals[], help_requests[], execution}` across projects where the caller has run access |
 | `POST /agent-approvals/:approvalId` | run + **sudo** | `{digest, confirmation}`; `APPROVAL_CONFIRMATION_MISMATCH` (400), `APPROVAL_DIGEST_MISMATCH`, `APPROVAL_NOT_PENDING`, `APPROVAL_STALE` (409, with `approval_state`, `stale_reason`), `APPROVAL_UNKNOWN` (404, also for no access) |
@@ -139,16 +139,16 @@ Expected output:
 
 A different value is a question, not a failure: paste it.
 
-**Step H1 (stage `ec986a88`, reinstall the supervisor, proxy proof).** Only
+**Step H1 (stage `5a8648f5`, reinstall the supervisor, proxy proof).** Only
 the supervisor file changed among the installed files, so only the supervisor
 is reinstalled (with a new receipt key). The broker and the demo server stay.
 
 ```
-sudo sh -c 'set -e; C=ec986a88c2fb911bdf18df77e037b8b9a07c5150; mkdir -p -m 700 /var/lib/proxypilot-a6-proof; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git ccr-4216e4d3-jsij65; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-probe-proxy.py'
+sudo sh -c 'set -e; C=5a8648f5cd4f453278908326cd36258714337f43; mkdir -p -m 700 /var/lib/proxypilot-a6-proof; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git ccr-4216e4d3-jsij65; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-probe-proxy.py'
 ```
 
 Expected output, in order:
-1. `staged <sha> (was 8d25755c…) from ec986a88…; <n> paths match exactly`,
+1. `staged <sha> (was 8d25755c…) from 5a8648f5…; <n> paths match exactly`,
    then the new HEAD.
 2. The supervisor JSON: `"accepting_launch": true`, `"blockers": []`, a new
    `key_id` (`f6304ffb…` archived), supervisor **`9d195ea2…`**, runner

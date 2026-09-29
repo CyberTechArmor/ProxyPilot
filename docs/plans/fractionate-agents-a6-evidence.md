@@ -157,12 +157,12 @@ the real `createWorkerLauncher` and the real receipt verifier (it signs
 Ed25519 receipts and serves real PNG frames). Only the session cookie and the
 sudo check are fixtures. `index.js` never imports it.
 
-### Local verification (this session, code `ec986a88`)
+### Local verification (this session, code `5a8648f5`)
 
 | Check | Result |
 |---|---|
-| `node --test src/__tests__/operational-*.test.js` | **109/109** (14 new in `operational-agent-runs.test.js`, 1 new launcher test) |
-| Full backend `npm test` | 3385 pass, **11 fail**, 14 skipped of 3410. The same 11 fail on the untouched A5 head in this sandbox (run with the A6 changes stashed): 4 files `ERR_MODULE_NOT_FOUND` on `cli/node_modules` (`bcryptjs`, `better-sqlite3`), and source-ratchet assertions in `frontend-api-client`, `immediate-repairs`, `platform-overview`, `setup-post-launch` that A6 does not touch. Host run 3 had the candidate at 0 fail |
+| `node --test src/__tests__/operational-*.test.js` | **110/110** (15 new in `operational-agent-runs.test.js`, 1 new launcher test) |
+| Full backend `npm test` | 3386 pass, **11 fail**, 14 skipped of 3411. The same 11 fail on the untouched A5 head in this sandbox (run with the A6 changes stashed): 4 files `ERR_MODULE_NOT_FOUND` on `cli/node_modules` (`bcryptjs`, `better-sqlite3`), and source-ratchet assertions in `frontend-api-client`, `immediate-repairs`, `platform-overview`, `setup-post-launch` that A6 does not touch. Host run 3 had the candidate at 0 fail |
 | `python3 -m unittest discover -s scripts/tests -p 'test_a[3456]*py'` | **151 OK** (2 environment-conditional skips), including the new supervisor tests and `test_a6_host_summary.py` |
 | `python3 scripts/host-boundary-inventory.py` (no suppression) | 96 files inventoried, exit 0; S6 open |
 | `npm run build` (frontend) | built |
@@ -183,7 +183,10 @@ Backend tests cover:
   timeline; no receipt body, attestation, page text, prompt ID or vault path
   in any response);
 - the starter approving their own run (decision 3);
-- stop mid-run; both orders of the approval/stop race (no submit);
+- stop mid-run; a stop whose supervisor call fails leaves the run fenced
+  (`SUPERVISOR_UNREACHABLE`, 503) and a second Stop collects the verified
+  receipt (no submit, never resumed); both orders of the approval/stop race
+  (no submit);
 - stale approvals after a rotated binding, a revoked binding and a newly
   approved guide;
 - a removed grant: view, status, list and approve refused at the next request;
@@ -247,6 +250,11 @@ eye at 360, 768 and 1280 in both themes):
 - **Dev-only abort message** on the operation page under React StrictMode
   (pre-existing, not A6's); fixed by ignoring a request aborted by its own
   unmount.
+- **A stuck stop (found in review, fixed):** when the supervisor did not
+  answer the stop, the run stayed fenced in `cancelling` and the UI offered no
+  way to retry collecting the receipt (and the refusal was a generic 500).
+  Stop now stays available there as a retry, and the supervisor codes have
+  their own words and statuses.
 - **Frame timing:** `action_count` counts reserved steps, so a frame captured
   during step N is labelled "at step N", not "after".
 

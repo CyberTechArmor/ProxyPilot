@@ -19,7 +19,7 @@ decisions below before writing any code.
    (13 browser journeys, 60 layout checks) and its host steps H0–H5 are
    pending. If the gate does not hold, stop and name it.
 2. **Where the code lives.**
-   - A6: branch `ccr-4216e4d3-jsij65` (code `ec986a88`, built on the A5 head
+   - A6: branch `ccr-4216e4d3-jsij65` (code `5a8648f5`, built on the A5 head
      `5210cfb7`). A5 is on `claude/beautiful-maxwell-9bldxg`; A4 is draft PR
      #699. None is in `main`, and A5 and A6 have no PR.
    - If A4–A6 are merged into `main`, start from `main` at that merge.

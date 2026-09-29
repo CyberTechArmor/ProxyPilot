@@ -1,17 +1,22 @@
 # A6 reference: current state for any conversation
 
-Snapshot: 2026-09-29, after the A6 implementation and its local proof.
+Snapshot: 2026-09-29, after the A6 implementation, its local proof, the merge
+into `main` and the deploy (live `85586aea`).
 
 This file is the orientation page. The dated
 [A6 evidence](fractionate-agents-a6-evidence.md) is the record; if the two
 disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, receipt key) before acting.
 
-**Status in one line:** A6 is **implemented and proven locally; it is not
-accepted.** Acceptance needs the host steps below (the supervisor's backend
-socket gained a read-only `view`, so the A3/A4/A5 target proofs rerun, with the
-new A3 case `backend_view`), then a user decision. Nothing is activated,
-merged, deployed or promoted.
+**Status in one line:** A6 is **implemented, proven locally, merged and
+deployed; it is not accepted.** Acceptance needs the host steps below (the
+supervisor's backend socket gained a read-only `view`, so the A3/A4/A5 target
+proofs rerun, with the new A3 case `backend_view`), then a user decision. The
+dashboard toggles are off until an administrator turns them on, and execution
+is unavailable on the live dashboard until the supervisor socket is mounted
+(A8). What is left is written up in the
+[A6 finish prompt](fractionate-agents-a6-finish-prompt.md), with the as-built
+screens and the target mockups.
 
 ## Read first
 
@@ -36,16 +41,16 @@ merged, deployed or promoted.
 
 | Where | Revision | Notes |
 |---|---|---|
-| GitHub `main` | `0b743b2243761d578fbcaa7177b61e2cdb541dd5` | A3 accepted |
+| GitHub `main` | `52f26af18403dfceae6f63306521968a591ccab1` | A4–A6 merged as `469e98a9` (#700), toggles as `52f26af1` (#701) |
 | A5 head (base) | `5210cfb7af3a840e1a7bbf62feca61c8993f2d68` | branch `claude/beautiful-maxwell-9bldxg` |
 | A6 code | `b8178074` (UI, service, routes, supervisor `view`); `ec986a88` (`a6-host-summary.py`) | The supervisor bytes are final at `b8178074` |
 | **A6 code, host steps** | **`5a8648f5cd4f453278908326cd36258714337f43`** | Stop retry for a fenced run, supervisor codes in words. **Stage this.** Later commits are docs |
-| Live checkout | `33528751b0b68771a768a69ef42c0bd614069498` | Unchanged |
-| Candidate | `8d25755c8853e302a15a66855cd35207365373d1` | A5 host run 3 staging; not promoted |
+| Live checkout | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | Promoted 2026-09-29 09:13Z from `33528751` (rollback tag `pp-rollback-20260929T091306Z`); the staging of `52f26af1` |
+| Candidate | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | Same as live, 0 ahead. Its scripts carry the A6 bytes below; the INSTALLED supervisor is still the A5 one |
 
 **File digests** (sha256; the installers copy byte-exact):
 
-| File | A5 (installed) | A6 (`5a8648f5`) |
+| File | A5 (installed) | A6 (`5a8648f5`; the same bytes at `52f26af1`) |
 |---|---|---|
 | `a3-worker-supervisor.py` | `151f1d24…` | **`9d195ea2…`** (backend `view`) |
 | `a3-worker-guest.py` (runner) | `a631ad9d…` | `a631ad9d…` (unchanged) |
@@ -53,6 +58,7 @@ merged, deployed or promoted.
 | `admin/frontend/demo/server.mjs` | `496846cd…` | unchanged |
 | `a3-probe-worker.py` | — | `b770a4a9…` (adds `backend_view`) |
 | `a5-probe.mjs` | `fbbda1c9…` | unchanged |
+| `a6-host-summary.py` | — | `a1dfa05c…` |
 
 Receipt key before A6: `f6304ffb…`; the supervisor reinstall archives it and
 makes a new one. Proof VM boot before A6: `62801e3b-8419-40aa-85bf-dffab35788c2`
@@ -76,7 +82,7 @@ makes a new one. Proof VM boot before A6: `62801e3b-8419-40aa-85bf-dffab35788c2`
 | `admin/frontend/src/components/operational-projects/Agents.jsx` | `ModelConsent` (owner), `EnforcedRules` (read-only) |
 | `admin/frontend/src/pages/OperationalProjectDetail.jsx`, `OperationalProjects.jsx` | The "Agent runs" section (`?section=Agent%20runs&run=<id>`), the Agent inbox panel |
 | Tests | `admin/backend/src/__tests__/operational-agent-runs.test.js` (15), `helpers/agent-runs-world.js`; `operational-worker-supervisor.test.js` (launcher view); `scripts/tests/test_a3_worker_supervisor.py` (backend view); `scripts/tests/test_a6_host_summary.py` |
-| Browser journeys | `admin/frontend/tests/agent-runs-harness.mjs` (UI harness) and `agent-runs.browser.mjs` (13 journeys, 60 layout checks) |
+| Browser journeys | `admin/frontend/tests/agent-runs-harness.mjs` (UI harness) and `agent-runs.browser.mjs` (14 journeys, 72 layout checks); `agent-runs-screens.mjs` (the as-built screens in `assets/a6/`) |
 
 ## Interfaces
 
@@ -132,29 +138,31 @@ you can type. Review each output before the next. No step prints a secret.
 **Step H0 (read-only; gate 3).**
 
 ```
-sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; git -C .. rev-parse HEAD; python3 a3-install-supervisor.py status | grep -E "a3-worker-(supervisor|guest)|accepting_launch|key_id"; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-worker-operator.py status'
+sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; git -C .. rev-parse HEAD; sha256sum a3-worker-supervisor.py a3-probe-worker.py a6-host-summary.py; python3 a3-install-supervisor.py status | grep -E "a3-worker-(supervisor|guest)|accepting_launch|key_id"; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-worker-operator.py status'
 ```
 
 Expected output:
-- `8d25755c8853e302a15a66855cd35207365373d1`;
-- supervisor `151f1d24…`, runner `a631ad9d…`, `"accepting_launch": true`,
+- `85586aea843d04dd17f94d5ac4f605e7e15bf66c` (or the later staging of a
+  reviewed A6 UI commit; the scripts do not change);
+- the candidate files: `9d195ea2…`, `b770a4a9…`, `a1dfa05c…`;
+- installed supervisor `151f1d24…`, runner `a631ad9d…`, `"accepting_launch": true`,
   key `f6304ffb…`;
 - broker `790a1957…`, `"approle_login": "ok"`;
 - `"active": null`.
 
 A different value is a question, not a failure: paste it.
 
-**Step H1 (stage `5a8648f5`, reinstall the supervisor, proxy proof).** Only
-the supervisor file changed among the installed files, so only the supervisor
-is reinstalled (with a new receipt key). The broker and the demo server stay.
+**Step H1 (reinstall the supervisor, proxy proof).** The deploy already put
+the A6 script bytes in the candidate, so nothing is staged. Only the supervisor
+file changed among the installed files, so only the supervisor is reinstalled
+(with a new receipt key). The broker and the demo server stay.
 
 ```
-sudo sh -c 'set -e; C=5a8648f5cd4f453278908326cd36258714337f43; mkdir -p -m 700 /var/lib/proxypilot-a6-proof; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git ccr-4216e4d3-jsij65; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-probe-proxy.py'
+sudo sh -c 'set -e; mkdir -p -m 700 /var/lib/proxypilot-a6-proof; cd /var/lib/proxypilot/self/candidate/scripts; git -C .. rev-parse HEAD; sha256sum a3-worker-supervisor.py; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-probe-proxy.py'
 ```
 
 Expected output, in order:
-1. `staged <sha> (was 8d25755c…) from 5a8648f5…; <n> paths match exactly`,
-   then the new HEAD.
+1. The candidate HEAD, then `9d195ea2…  a3-worker-supervisor.py`.
 2. The supervisor JSON: `"accepting_launch": true`, `"blockers": []`, a new
    `key_id` (`f6304ffb…` archived), supervisor **`9d195ea2…`**, runner
    `a631ad9d…` (unchanged), every other file unchanged.
@@ -162,8 +170,6 @@ Expected output, in order:
 4. `"proxy_checks": "passed"` with 21 codes.
 
 If it fails:
-- "candidate differs from both base and reviewed commit: <path>": a
-  candidate-only change. Stop and report the path.
 - "A worker attempt is live": run `python3 a3-worker-operator.py status`, then
   `stop` it.
 - `supervisor_reinstall_failed`: the journal lines after it name the cause.
@@ -201,7 +207,8 @@ sudo sh -c 'cd /var/lib/proxypilot/self/candidate/scripts; node --no-warnings a5
 Expected output: 17 JSON case lines, each `"passed": true`; the final
 `"a5_proof": "passed"` line; `a5_exit=0`; `canary_exit=0` and
 `"canary_scan": "passed"`. If `BACKEND_MODULES_MISSING`, run `run_self_checks`
-with `backend-tests` and without `skip_install` once, then rerun H3.
+with `backend-tests` once (since the deploy, the live policy's install step
+restores the native addon itself), then rerun H3.
 
 **Step H4 (read-only summary; required).**
 
@@ -215,7 +222,7 @@ entries passed with `unclean_sinks: []`, `"all_passed": true`, then
 `summary_exit=0`. Paste the whole document.
 
 **Step H5 (from the session, read-only):** `run_self_checks` (`backend-tests`,
-`backend-syntax`, `skip_install: true`) on the new candidate head;
+`backend-syntax`) on the candidate head;
 `get_host_services proxypilot-a`; `inspect_a3_vm` (the boot changes in H2).
 
 **Local checks** (from a repository checkout's root):
@@ -231,10 +238,15 @@ python3 scripts/host-boundary-inventory.py
 
 1. Turn Agent runs (or Operations) off in Operations → Operations settings;
    keep every other activation off.
-2. Supervisor: in the candidate, `git revert --no-edit <the A6 staging
-   commit>`, then `python3 a3-install-supervisor.py reinstall`; `status` shows
-   `151f1d24…` again (with a new key).
-3. For the code, revert the branch. There is no migration in A6.
+2. Supervisor: in the candidate, `git checkout 8d25755c -- scripts/a3-worker-supervisor.py`
+   (the A5 staging, `151f1d24…`), commit, then
+   `python3 a3-install-supervisor.py reinstall`; `status` shows `151f1d24…`
+   again (with a new key).
+3. For the deployed code: `rollback_self` to `pp-rollback-20260929T091306Z`
+   (`33528751`) **and** restore the database backup taken before the promote
+   (`/data/db/backups/proxypilot-pre-A6-toggles-promote-20260929T091251Z.db`
+   inside the container), because the deploy applied the A4/A5 migrations
+   (up to 1111). A6 itself has no migration.
 
 ## Rules for every conversation
 

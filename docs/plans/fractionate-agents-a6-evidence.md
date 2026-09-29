@@ -345,3 +345,60 @@ What the new journey checks:
 **Finding (fixed):** the first run of that journey caught the settings panel
 remounting when Operations switched on, which dropped its confirmation. The
 panel now sits in one stable place on the page.
+
+## 2026-09-29 deploy; screens and the finish prompt
+
+### Deploy (user request: "make toggles, not env, and deploy")
+
+- **Staging.** The user ran the pinned stager as root:
+  `staged 85586aea… (was 8d25755c…) from 52f26af1…; 105 paths match exactly`.
+- **First checks red, and why.** `run_self_checks` ran without `skip_install`.
+  The live policy of that time (`33528751`) installed with
+  `npm ci --ignore-scripts` and no repair step, which deleted the native
+  `better-sqlite3` addon. Every test opening a real database then failed with
+  "Could not locate the bindings file". The frontend build failed with
+  `vite: not found`: the container installs without dev dependencies. This is
+  the condition the A3 evidence records.
+- **Repair (user, root, inside `proxypilot-admin`).** `prepare-self-check-native.mjs`
+  printed `Candidate better-sqlite3 12.11.1 native probe passed` and
+  `native_exit=0`. `npm ci --include=dev && npm run build` printed
+  `frontend_build_exit=0`.
+- **Checks green** (`backend-tests`, `backend-syntax`, `skip_install: true`)
+  on `85586aea`: 3,374 tests, 3,363 pass, **0 fail**, 11 skipped.
+- **Backup.** `/data/db/backups/proxypilot-pre-A6-toggles-promote-20260929T091251Z.db`,
+  8,785,920 bytes, sha256 `9192f694…`. update.sh also kept
+  `proxypilot.db.pre-update-20260929-051306`.
+- **Promote.** The preview (`33528751` → `85586aea`, 30 commits: the A3–A6
+  stagings and the toggles) was followed by the promote. Rollback tag
+  `pp-rollback-20260929T091306Z`. Update `025471f2…` succeeded in 59 s.
+  Migration 1111 applied, the health check passed, and all 33 routes match
+  their declared settings. `get_self_status`: live `85586aea`, clean. The
+  agent reports the same version.
+- **Since this deploy** the live policy carries the repair line
+  (`npm ci --ignore-scripts … && node ../../scripts/prepare-self-check-native.mjs`),
+  so a check run with its install step no longer deletes the addon.
+- **Not changed by the deploy:**
+  - the installed supervisor (still `151f1d24…`, without the backend
+    `view`);
+  - the toggles (off until an administrator turns them on);
+  - execution on the live dashboard (unavailable until A8).
+
+### Screens and target mockups
+
+- `admin/frontend/tests/agent-runs-screens.mjs` captures the as-built screens
+  into `docs/plans/assets/a6/`: eleven images covering desktop, phone and
+  tablet, both themes, and the execution-unavailable state.
+  - It runs the real app against the UI harness, with the toggles on.
+  - The scripted supervisor's frames are replaced by real screenshots of the
+    local demo site, so the Browser pane shows what a run on the demo looks
+    like.
+  - It is an illustration; the journeys remain the proof.
+- `docs/plans/assets/a6/target/` holds a static Flightdeck-style mockup of the
+  run deck (`mockup.html`) and its renders: desktop, phone Browser tab and
+  phone Activity tab.
+- `fractionate-agents-a6-finish-prompt.md` states what is left:
+  - the run deck (a user decision);
+  - the live-dashboard check;
+  - host run 1, with H0/H1 in the reference updated for the deployed state
+    (no staging, only the supervisor reinstall);
+  - the acceptance decision.

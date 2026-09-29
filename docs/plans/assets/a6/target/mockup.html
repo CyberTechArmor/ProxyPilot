@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A6 run deck mockup</title>
+<!-- Target mockup for the A6 finish (docs/plans/fractionate-agents-a6-finish-prompt.md).
+     Static and illustrative, not the product. The frames are real screenshots of the
+     local demo site. The as-built screens come from admin/frontend/tests/agent-runs-screens.mjs.
+     Each section (#desktop, #phone-browser, #phone-activity) is rendered to target-*.jpg. -->
+<style>
+  :root {
+    --bg: #171717; --panel: #232323; --inset: #1b1b1b; --line: #393939; --text: #f4f4f5; --muted: #a1a1aa;
+    --green: #15803d; --green-2: #22c55e; --red: #8f1d1d; --red-2: #ef4444; --amber: #d08a1c; --amber-bg: #2a2110;
+    --chip: #2e2e2e; --focus: #22c55e; --radius: 10px;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0d0d0d; color: var(--text); display: flex; flex-direction: column; gap: 40px; padding: 24px; }
+  .board { background: var(--bg); overflow: hidden; position: relative; }
+  .mono { font-family: ui-monospace, "DejaVu Sans Mono", Menlo, monospace; }
+  .muted { color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .btn { height: 44px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--inset); color: var(--text); font-size: 14px; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .btn.green { background: var(--green); border-color: var(--green); }
+  .btn.red { background: var(--red); border-color: var(--red); }
+  .btn.icon { width: 44px; padding: 0; justify-content: center; }
+  .badge { font-size: 12px; border-radius: 999px; padding: 2px 9px; border: 1px solid; white-space: nowrap; }
+  .badge.run { color: #86efac; border-color: #166534; background: #0f2a18; }
+  .badge.wait { color: #fcd34d; border-color: #92400e; background: #2a1d08; }
+  .badge.done { color: #86efac; border-color: #166534; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: .08em; color: #fecaca; background: #3b1111; border: 1px solid #7f1d1d; border-radius: 999px; padding: 2px 9px; }
+  .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--red-2); box-shadow: 0 0 0 3px rgba(239,68,68,.25); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); min-width: 0; }
+  .approval { border: 1px solid var(--amber); background: var(--amber-bg); border-radius: var(--radius); }
+  .switch { width: 40px; height: 24px; border-radius: 999px; background: var(--green); position: relative; flex: none; }
+  .switch::after { content: ""; position: absolute; right: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+  .frame { width: 100%; aspect-ratio: 16 / 10; object-fit: contain; background: #0b0b0b; border-radius: 8px; display: block; }
+  .kind { font-size: 10.5px; font-weight: 700; letter-spacing: .09em; padding: 2px 7px; border-radius: 5px; background: var(--chip); color: #d4d4d8; }
+  .kind.rule { background: #1d2c44; color: #93c5fd; } .kind.model { background: #2d1f47; color: #c4b5fd; }
+  .kind.approval { background: #3a2a0c; color: #fcd34d; } .kind.person { background: #123524; color: #86efac; }
+  .item { background: var(--inset); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; gap: 10px; min-width: 0; }
+  .item .body { flex: 1; min-width: 0; font-size: 13.5px; line-height: 1.35; }
+  .item .title { font-weight: 600; font-size: 14px; }
+  .thumb { width: 88px; aspect-ratio: 16/10; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); flex: none; }
+  .typing { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #fcd34d; padding: 6px 4px; }
+  .typing i { width: 6px; height: 6px; border-radius: 50%; background: #fcd34d; opacity: .5; display: inline-block; }
+  .tabs { display: flex; gap: 6px; }
+  .tab { height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); display: inline-flex; align-items: center; font-size: 14px; color: var(--muted); }
+  .tab.on { color: var(--text); background: var(--inset); }
+  .note { position: absolute; right: 12px; bottom: 10px; font-size: 11px; color: #71717a; }
+  /* shell */
+  .side { width: 232px; flex: none; border-right: 1px solid var(--line); padding: 18px 14px; display: flex; flex-direction: column; gap: 4px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; margin-bottom: 18px; }
+  .rocket { color: var(--green-2); font-size: 22px; }
+  .nav { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 8px; font-size: 14px; color: #d4d4d8; }
+  .nav.on { background: var(--green); color: #fff; }
+  /* phone */
+  .phone { width: 375px; height: 812px; display: flex; flex-direction: column; }
+  .appbar { height: 56px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 12px; flex: none; }
+  .phone .content { flex: 1; overflow: hidden; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .tabbar { height: 64px; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, 1fr); flex: none; background: #1a1a1a; }
+  .tabbar div { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 12px; color: var(--muted); }
+  .tabbar div.on { color: var(--green-2); }
+  .tabbar svg { width: 20px; height: 20px; }
+  .count { font-size: 10px; background: var(--chip); color: var(--text); border-radius: 999px; padding: 0 6px; margin-left: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ============ Desktop, 1280 × 860: run deck while waiting for approval ============ -->
+<section id="desktop" class="board" style="width:1280px;height:860px;display:flex">
+  <aside class="side">
+    <div class="brand"><span class="rocket">🚀</span>Fractionate</div>
+    <div class="nav">▦ Dashboard</div>
+    <div class="nav on">▤ Operations</div>
+    <div class="nav">◯ Profile</div>
+  </aside>
+  <main style="flex:1;min-width:0;padding:18px 28px;display:flex;flex-direction:column;gap:12px">
+    <div class="row muted" style="font-size:13px">Operations <span>›</span> Synthetic sign-in pilot <span>›</span> <span style="color:var(--text)">Agent runs</span></div>
+    <!-- Run bar -->
+    <div class="card" style="padding:12px 14px;display:flex;align-items:center;gap:16px">
+      <div style="flex:1;min-width:0">
+        <div class="row" style="gap:10px"><span style="font-weight:700;font-size:18px">Demo sign-in · run 4e0cd8c1</span><span class="badge run">Running</span><span class="badge wait">Awaiting approval</span></div>
+        <div class="muted" style="font-size:13px;margin-top:4px">Started by omar-operator · 09:24:30 · step 2 of at most 20 · guide v1 · binding e1568aa0 rev 1</div>
+      </div>
+      <div class="btn">Back to runs</div>
+      <div class="btn red">■ Stop run</div>
+    </div>
+    <!-- Approval banner (compact; the dialog carries every digest field) -->
+    <div class="approval" style="padding:10px 14px;display:flex;align-items:center;gap:14px">
+      <div style="font-size:22px">⚠</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700">Approval needed: Submit the bound credential</div>
+        <div style="font-size:13px;color:#e7d3a8">The agent is waiting. Requested 09:24:33 · digest <span class="mono">9f2d 0085 274a …</span> · approve with sudo and the digest</div>
+      </div>
+      <div class="btn green">Review and approve</div>
+    </div>
+    <!-- Deck: Browser (large) + Activity (chat column) -->
+    <div style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:12px">
+      <div class="card" style="padding:12px;display:flex;flex-direction:column;gap:10px;min-height:0">
+        <div class="row" style="gap:10px">
+          <span style="font-weight:700">Browser</span><span class="live">LIVE</span>
+          <span style="flex:1"></span>
+          <span class="row" style="gap:8px;font-size:13.5px;white-space:nowrap"><span class="switch"></span>Watch live (view only)</span>
+          <div class="btn icon" title="Enlarge">⤢</div>
+        </div>
+        <img class="frame" src="frame-login.jpg" alt="">
+        <div style="font-size:13.5px">At step 2 · Open the sign-in dialog <span class="muted">· captured 09:24:35</span></div>
+        <div class="muted" style="font-size:12.5px">One frame a second while the run is live; pixels only, never stored. Typing, clicking and takeover stay on the host.</div>
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;min-height:0">
+        <div class="row" style="padding:12px 14px;border-bottom:1px solid var(--line)"><span style="font-weight:700">Activity</span><span class="muted" style="font-size:13px">6 events · newest last</span></div>
+        <div style="flex:1;min-height:0;overflow:hidden;padding:10px;display:flex;flex-direction:column;gap:8px;justify-content:flex-end">
+          <div class="item"><div class="body"><div class="row"><span class="kind">SYSTEM</span><span class="muted" style="font-size:12px">09:24:30</span></div><div class="title" style="margin-top:4px">Run started by omar-operator</div><div class="muted">Browser started for this attempt</div></div></div>
+          <div class="item"><div class="body"><div class="row"><span class="kind rule">RULE</span><span class="muted" style="font-size:12px">09:24:30</span></div><div class="title" style="margin-top:4px">1 · Open the landing page</div><div class="muted">Start rule · done</div></div><img class="thumb" src="frame-landing.jpg" alt=""></div>
+          <div class="item"><div class="body"><div class="row"><span class="kind rule">RULE</span><span class="muted" style="font-size:12px">09:24:31</span></div><div class="title" style="margin-top:4px">2 · Open the sign-in dialog</div><div class="muted">Start rule · done</div></div><img class="thumb" src="frame-login.jpg" alt=""></div>
+          <div class="item"><div class="body"><div class="row"><span class="kind model">MODEL</span><span class="muted" style="font-size:12px">09:24:32</span></div><div class="title" style="margin-top:4px">Chose: Submit the bound credential</div><div class="muted">From 3 allowed actions · 216 tokens · $0.0000046</div></div></div>
+          <div class="item" style="border-color:var(--amber)"><div class="body"><div class="row"><span class="kind approval">APPROVAL</span><span class="muted" style="font-size:12px">09:24:33</span></div><div class="title" style="margin-top:4px">Waiting for a person to approve</div><div class="muted">Digest <span class="mono">9f2d 0085 274a …</span></div></div></div>
+          <div class="typing"><i></i><i style="opacity:.75"></i><i style="opacity:1"></i> The agent is paused until approval</div>
+        </div>
+      </div>
+    </div>
+    <div class="tabs"><div class="tab on">Result</div><div class="tab">Model calls (1)</div><div class="tab">Approvals (1)</div><div class="tab">Pins</div></div>
+  </main>
+  <div class="note">Target mockup · not built</div>
+</section>
+
+<!-- ============ Phone, 375 × 812: Browser tab ============ -->
+<div style="display:flex;gap:40px;align-items:flex-start">
+<section id="phone-browser" class="board phone">
+  <div class="appbar"><span style="font-size:22px">☰</span><span class="rocket">🚀</span><b style="font-size:19px">Fractionate</b><span style="flex:1"></span><span>☼</span></div>
+  <div class="content">
+    <div class="row" style="align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:17px">Demo sign-in · run 4e0cd8c1</div>
+        <div class="row" style="margin-top:6px"><span class="badge run">Running</span><span class="badge wait">Awaiting approval</span></div>
+      </div>
+      <div class="btn red" style="padding:0 12px">■ Stop</div>
+    </div>
+    <div class="approval" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px">
+      <div style="font-weight:700;font-size:14.5px">⚠ Approval needed: Submit the bound credential</div>
+      <div style="font-size:12.5px;color:#e7d3a8">Digest <span class="mono">9f2d 0085 274a …</span> · sudo and the digest</div>
+      <div class="btn green" style="justify-content:center">Review and approve</div>
+    </div>
+    <div class="card" style="padding:10px;display:flex;flex-direction:column;gap:8px">
+      <div class="row"><span style="font-weight:700">Browser</span><span class="live">LIVE</span><span style="flex:1"></span><div class="btn icon" style="height:36px;width:44px">⤢</div></div>
+      <img class="frame" src="frame-login.jpg" alt="">
+      <div class="muted" style="font-size:12.5px">At step 2 · Open the sign-in dialog · captured 09:24:35</div>
+      <div class="row" style="min-height:44px;gap:10px;font-size:14px"><span class="switch"></span>Watch live (view only)</div>
+    </div>
+    <div class="muted" style="font-size:12.5px">Pixels only; frames are never stored. Typing, clicking and takeover stay on the host.</div>
+  </div>
+  <div class="tabbar">
+    <div class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 8h18"/></svg>Browser</div>
+    <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v10H8l-4 4z"/></svg><span>Activity<span class="count">6</span></span></div>
+    <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>Details</div>
+  </div>
+</section>
+
+<!-- ============ Phone, 375 × 812: Activity tab ============ -->
+<section id="phone-activity" class="board phone">
+  <div class="appbar"><span style="font-size:22px">☰</span><span class="rocket">🚀</span><b style="font-size:19px">Fractionate</b><span style="flex:1"></span><span>☼</span></div>
+  <div class="content">
+    <div class="row" style="align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:17px">Demo sign-in · run 4e0cd8c1</div>
+        <div class="row" style="margin-top:6px"><span class="badge run">Running</span><span class="badge wait">Awaiting approval</span></div>
+      </div>
+      <div class="btn red" style="padding:0 12px">■ Stop</div>
+    </div>
+    <div class="approval" style="padding:10px 12px;display:flex;align-items:center;gap:10px">
+      <div style="flex:1;font-weight:700;font-size:14px">⚠ Approval needed</div>
+      <div class="btn green">Review</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="item"><div class="body"><div class="row"><span class="kind rule">RULE</span><span class="muted" style="font-size:12px">09:24:30</span></div><div class="title" style="margin-top:4px">1 · Open the landing page</div><div class="muted">Start rule · done</div></div><img class="thumb" style="width:72px" src="frame-landing.jpg" alt=""></div>
+      <div class="item"><div class="body"><div class="row"><span class="kind rule">RULE</span><span class="muted" style="font-size:12px">09:24:31</span></div><div class="title" style="margin-top:4px">2 · Open the sign-in dialog</div><div class="muted">Start rule · done</div></div><img class="thumb" style="width:72px" src="frame-login.jpg" alt=""></div>
+      <div class="item"><div class="body"><div class="row"><span class="kind model">MODEL</span><span class="muted" style="font-size:12px">09:24:32</span></div><div class="title" style="margin-top:4px">Chose: Submit the bound credential</div><div class="muted">3 allowed · 216 tokens · $0.0000046</div></div></div>
+      <div class="item" style="border-color:var(--amber)"><div class="body"><div class="row"><span class="kind approval">APPROVAL</span><span class="muted" style="font-size:12px">09:24:33</span></div><div class="title" style="margin-top:4px">Waiting for a person to approve</div><div class="muted">Digest <span class="mono">9f2d 0085 274a …</span></div></div></div>
+      <div class="typing"><i></i><i style="opacity:.75"></i><i style="opacity:1"></i> Paused until approval</div>
+    </div>
+  </div>
+  <div class="tabbar">
+    <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 8h18"/></svg>Browser</div>
+    <div class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v10H8l-4 4z"/></svg><span>Activity<span class="count">6</span></span></div>
+    <div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>Details</div>
+  </div>
+</section>
+</div>
+</body>
+</html>

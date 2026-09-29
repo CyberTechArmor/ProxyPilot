@@ -15,16 +15,15 @@ decisions below before writing any code.
    - `a6-host-summary.py` printing `"all_passed": true`;
    - the candidate `backend-tests` 0 fail.
 
-   As of 2026-09-29 it does **not**: A6 is implemented and proven locally
-   (13 browser journeys, 60 layout checks) and its host steps H0–H5 are
-   pending. If the gate does not hold, stop and name it.
+   As of 2026-09-29 it does **not**: A6 is implemented, proven locally
+   (14 browser journeys, 72 layout checks), merged and deployed (live
+   `85586aea`), and its host steps H0–H5 are pending
+   ([A6 finish prompt](fractionate-agents-a6-finish-prompt.md)). If the gate
+   does not hold, stop and name it.
 2. **Where the code lives.**
-   - A6: branch `ccr-4216e4d3-jsij65` (code `5a8648f5`, built on the A5 head
-     `5210cfb7`). A5 is on `claude/beautiful-maxwell-9bldxg`; A4 is draft PR
-     #699. None is in `main`, and A5 and A6 have no PR.
-   - If A4–A6 are merged into `main`, start from `main` at that merge.
-     Otherwise **ask the user** whether to build on the A6 head (name the SHA)
-     and which branch to use.
+   - A4–A6 are in `main`: PR #700 merged as `469e98a9` and the toggles
+     (PR #701) as `52f26af1`. Start from `main` at the A6 acceptance commit
+     or later, on the designated branch.
    - Never merge, un-draft or close a PR yourself.
 3. **Host state**, read-only, only if a host step is needed: the candidate
    and live SHAs, the installed supervisor/runner/broker/demo digests, the

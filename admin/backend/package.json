@@ -29,7 +29,7 @@
     "multer": "^2.4.0",
     "node-cron": "^4.6.0",
     "node-pty": "^1.0.0",
-    "nodemailer": "^9.1.1",
+    "nodemailer": "^10.0.12",
     "openid-client": "6.8.8",
     "otpauth": "^9.2.1",
     "pg": "8.23.0",

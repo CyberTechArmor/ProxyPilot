@@ -815,3 +815,86 @@ unavailable" plus screen 11 prove it.
 | Execution unavailable on the live dashboard | Stays until A8 (decision 2) |
 
 A7 (`fractionate-agents-a7-prompt.md`) is eligible.
+
+## 2026-09-29 follow-ups after acceptance (the user's dispositions)
+
+These are on branch `ccr-11407794-0pxrze` after #704. None is deployed. Host
+steps are listed where one is needed.
+
+- **Takeover authentication: once per session, with TOTP or a passkey.**
+  - Recorded in the A7 prompt's user direction, item 3.
+  - Both factors already exist for the session's re-authentication:
+    `POST /api/auth/sudo` (password plus TOTP) and `/api/auth/sudo/passkey/*`.
+  - Today the grant is a sliding 4 h window per session. A7 decides whether
+    takeover reuses it or holds its own grant for the session.
+- **The `open_landing` timeout: investigated.** See
+  [the note](fractionate-agents-open-landing-timeout.md).
+  - The demo answers in 1–2 ms.
+  - Every proof-browser request reaches Caddy from the LAN router
+    (`192.168.88.1`), so each one is hairpinned through the router's NAT.
+  - Each request makes a fresh DNS lookup and a new TCP and TLS connection
+    in the origin proxy. Its 8 s timeouts sit against the runner's 10 s
+    `load` wait.
+  - Most likely a stalled hairpin connection or a slow DNS answer.
+  - **The host measurement found the cause: DNS.** 5 of 200 requests by name
+    took 1.2–2.5 s, and every one of them was the name lookup; connect, TLS
+    and the reply added under 10 ms. With the lookup skipped, 200 of 200 took
+    under 10 ms.
+  - **Fix:** the proxy looks the origin up at most once a minute (failures
+    never cached; dropped when nothing connects). It ships with the
+    at-most-once fix in the same proxy reinstall.
+  - **Resolver check (user, host):** the host asks 1.1.1.1 and 9.9.9.9
+    directly, with no local cache. A+AAAA lookups (the way the proxy asks):
+    1 of 100 stalled, 3.9 s. A-only: 0 of 100. Every stall is under glibc's
+    5 s lost-reply wait, so it is a slow answer, most likely to the AAAA
+    question (the demo has no IPv6 address). The proxy's cache is enough;
+    IPv4-only in the proxy and a host caching resolver are recorded as
+    options, not done.
+- **Revocation (user, host):** `active_after=0`. No binding was active: the
+  A4 and A5 proofs revoke their own bindings in their revocation cases.
+- **The locally proven classes: to define together.** A7 decision 6.
+- **Reboot persistence: a test.** `scripts/a6-reboot-check.py`:
+  - `record` saves the boot IDs before a reboot;
+  - `check` proves the host and VM rebooted and that the fence, proxy,
+    supervisor, broker, renewal timer, proxy path and dashboard came back;
+  - 8 tests pass;
+  - the reboot is the user's decision.
+- **Security audit register:**
+  [`fractionate-agents-security-audit-register.md`](fractionate-agents-security-audit-register.md).
+  It lists S6, SEC-01–05, INF-01–04 and the items A3–A6 added, and explains
+  binding revocation.
+- **Revoking a binding** is the immediate stop.
+  - The broker refuses `BINDING_REVOKED` at its next call, and a pinned run
+    ends `binding_changed`.
+  - Replacing the AppRole secret ID is not a stop (tokens live up to 1 h).
+  - The user asked for "revoke the binding". The paste that lists and
+    revokes every active proof binding is in the session's reply. Nothing
+    uses one between host runs.
+- **`nodemailer` upgraded to 10.0.12** (GHSA-6vj9-mwq6-2f5v).
+  - `npm audit`: 0 vulnerabilities.
+  - The one declared break (Node ≥ 20) fits the container's Node 24.
+  - The existing real-SMTP regression passes.
+- **The origin proxy's resend: fixed in code.**
+  - A request reaches the origin at most once; only a failed connection
+    tries the next address.
+  - The new test fails on the old code (the POST was resent and answered
+    401) and passes now.
+  - Python suites 161 OK.
+  - **Host proof pending:** reinstall the proxy and the supervisor's copy,
+    then the proxy, A3, A4 and A5 proofs, as host run 2.
+- **Lighthouse (mobile, accessibility): 100 on six pages.** The script is
+  `admin/frontend/tests/agent-runs-lighthouse.mjs`. It uses Playwright's
+  Chromium as a persistent context with a debugging port, because
+  Lighthouse's own Chrome launch fails in the sandbox.
+- **Neko: researched.**
+  [`fractionate-agents-a7-neko-research.md`](fractionate-agents-a7-neko-research.md),
+  from its v3 documentation at commit `3f4f9408`:
+  - WebRTC with an ephemeral UDP range or one UDP/TCP mux port, or TURN (it
+    cannot go through a reverse proxy);
+  - member profiles (`can_watch`, `can_host`, `can_access_clipboard`);
+  - control take/give/release over HTTP;
+  - file-transfer and chat plugins.
+
+  Adopting it replaces the A3 browser layer (kiosk lock-down, WebRTC through
+  the fence, a teardown proof). The runner screencast stays inside the
+  accepted boundary. This is A7 decision 1.

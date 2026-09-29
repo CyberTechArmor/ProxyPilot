@@ -11,6 +11,18 @@ Content-Length of 1..1024 bytes, still one request per tunnel. Its body is
 forwarded as-is and never logged, stored or inspected; this proxy logs
 nothing per request at all. Every other POST keeps the A3 rule (only
 POST /api/logout with an empty body).
+
+A request reaches the origin at most once. Only a failure to establish the
+connection (TCP or TLS, before any byte of the request is written) moves on
+to the next public address; once the request is being sent, any failure
+answers 502 and nothing is sent again, so the one sign-in POST is never
+repeated after an upstream timeout.
+
+The origin's public addresses are looked up at most once a minute and shared
+by every request: on the proof host some DNS lookups take 1-2.5 s, and one per
+request (several per page) could exceed the runner's 10 s page-load wait. A
+failed lookup is never cached, and the cache is dropped when no cached address
+connects, so a changed address is picked up by the next request.
 """
 import argparse
 import http.client
@@ -21,6 +33,8 @@ import socket
 import socketserver
 import ssl
 import sys
+import threading
+import time
 from urllib.parse import urlsplit
 
 ORIGIN = 'demo.fractionate.ai'
@@ -35,6 +49,9 @@ LOGIN = '/api/login'
 MAX_LOGIN_BODY = 1024
 LOGIN_TYPES = frozenset(('application/json', 'application/json; charset=utf-8'))
 MAX_RESPONSE = 5 * 1024 * 1024
+DNS_TTL = 60
+_addresses = {'at': 0.0, 'list': None}
+_addresses_lock = threading.Lock()
 HOP = frozenset(('connection', 'proxy-connection', 'keep-alive',
                  'transfer-encoding', 'te', 'trailer', 'upgrade',
                  'proxy-authenticate', 'proxy-authorization'))
@@ -83,7 +100,23 @@ def valid_location(value):
     return value.startswith('/') and not value.startswith('//') and not parts.query and not parts.fragment
 
 
-def public_addresses():
+def public_addresses(clock=time.monotonic):
+    """The approved origin's public addresses, looked up at most once per DNS_TTL."""
+    with _addresses_lock:
+        cached = _addresses['list']
+        if cached and clock() - _addresses['at'] < DNS_TTL:
+            return list(cached)
+        fresh = lookup_addresses()
+        _addresses.update(at=clock(), list=fresh)
+        return list(fresh)
+
+
+def forget_addresses():
+    with _addresses_lock:
+        _addresses.update(at=0.0, list=None)
+
+
+def lookup_addresses():
     candidates = []
     for family, _, _, _, sockaddr in socket.getaddrinfo(ORIGIN, 443, type=socket.SOCK_STREAM):
         address = ipaddress.ip_address(sockaddr[0])
@@ -178,22 +211,32 @@ class Handler(socketserver.BaseRequestHandler):
                     raise ValueError('Short sign-in body')
             upstream = None
             for _, address in public_addresses():
+                candidate = FixedConnection(address)
                 try:
-                    upstream = FixedConnection(address)
-                    forward = {k: v for k, v in headers.items() if k not in HOP
-                               and k not in ('host', 'content-length', 'accept-encoding')}
-                    forward['Host'] = ORIGIN
-                    forward['Accept-Encoding'] = 'identity'
-                    forward['Connection'] = 'close'
-                    upstream.request(method, target, body=body if method == 'POST' else None,
-                                     headers=forward)
-                    response = upstream.getresponse()
-                    break
+                    # Nothing of the request is written yet, so trying the next
+                    # address cannot repeat it.
+                    candidate.connect()
                 except (OSError, ssl.SSLError):
-                    if upstream:
-                        upstream.close()
-                    upstream = None
+                    candidate.close()
+                    continue
+                upstream = candidate
+                break
             if upstream is None:
+                forget_addresses()   # the next request looks the origin up again
+                send_error(writer, 502)
+                return
+            forward = {k: v for k, v in headers.items() if k not in HOP
+                       and k not in ('host', 'content-length', 'accept-encoding')}
+            forward['Host'] = ORIGIN
+            forward['Accept-Encoding'] = 'identity'
+            forward['Connection'] = 'close'
+            try:
+                upstream.request(method, target, body=body if method == 'POST' else None, headers=forward)
+                response = upstream.getresponse()
+            except (OSError, ssl.SSLError, http.client.HTTPException):
+                # The request may already have reached the origin: never send it
+                # again, to this address or another.
+                upstream.close()
                 send_error(writer, 502)
                 return
             try:

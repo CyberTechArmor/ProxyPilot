@@ -34,6 +34,7 @@ Never pp-nodus, never an Incus upgrade or archive.
 import argparse
 import hashlib
 import importlib.util
+import io
 import ipaddress
 import json
 import os
@@ -45,6 +46,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 
@@ -110,8 +112,11 @@ HOSTNAME = re.compile(r'(?=.{4,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-
 def execute(argv, input=None, timeout=120, check=True):
     result = subprocess.run(argv, input=input, capture_output=True, text=not isinstance(input, bytes), timeout=timeout)
     if check and result.returncode:
-        err = result.stderr if isinstance(result.stderr, str) else result.stderr.decode('utf-8', 'replace')
-        raise ValueError('%s failed: %s' % (' '.join(argv[:3]), err.strip()[-400:]))
+        text = [x if isinstance(x, str) else (x or b'').decode('utf-8', 'replace') for x in (result.stderr, result.stdout)]
+        # apt names what it could not do on stdout (unmet dependencies), the
+        # verdict on stderr: keep the end of both.
+        detail = text[0].strip()[-400:] + (' | ' + text[1].strip()[-800:] if text[1].strip() else '')
+        raise ValueError('%s failed: %s' % (' '.join(argv[:3]), detail))
     return result.stdout
 
 
@@ -255,6 +260,43 @@ def guest(argv, timeout=120, input=None):
     return execute(['incus', 'exec', VM, '--', *argv], timeout=timeout, input=input)
 
 
+# The packages go in as one tar stream (a Debian epoch makes a file name like
+# xvfb_2%3a21.1.16-1.3_amd64.deb, which `incus file push` does not land as named)
+# and are read back by sha256. apt then sees only what is installed and these
+# files: no package lists and no sources, so nothing can be fetched and a gap is
+# named as an unmet dependency instead of a download it cannot make.
+VM_DEBS = '/root/pp-a7-debs'
+OFFLINE_INSTALL = ('set -e; d=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; mkdir -p "$d/lists/partial" "$d/parts"; '
+                   'apt-get install -y -q --no-install-recommends -o Dir::Etc::SourceList=/dev/null '
+                   '-o Dir::Etc::SourceParts="$d/parts" -o Dir::State::Lists="$d/lists" '
+                   '-o Dir::Cache::pkgcache= -o Dir::Cache::srcpkgcache= ' + VM_DEBS + '/*.deb')
+
+
+def push_debs(names):
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w') as archive:
+        for name in names:
+            info = archive.gettarinfo(str(DEBS / name), arcname=name)
+            info.uid = info.gid = 0
+            info.uname = info.gname = 'root'
+            info.mode = 0o644
+            with open(DEBS / name, 'rb') as handle:
+                archive.addfile(info, handle)
+    guest(['rm', '-rf', VM_DEBS])
+    guest(['install', '-d', '-m', '0700', VM_DEBS])
+    guest(['tar', '-x', '--no-same-owner', '-f', '-', '-C', VM_DEBS], input=stream.getvalue(), timeout=900)
+    listed = guest(['sh', '-c', 'cd %s && sha256sum -- *.deb' % VM_DEBS])
+    listed = listed if isinstance(listed, str) else listed.decode('utf-8', 'replace')
+    got = {}
+    for line in listed.splitlines():
+        digest, _, name = line.partition('  ')
+        got[name] = digest
+    want = {name: sha256_file(DEBS / name) for name in names}
+    if got != want:
+        missing = sorted(set(want) - set(got)) + sorted(n for n in want if n in got and got[n] != want[n])
+        raise ValueError('The packages in the VM do not read back as pushed: %s' % ', '.join(missing or sorted(got)))
+
+
 def provision_vm():
     journal = read_journal()
     neko = journal.get('neko') or {}
@@ -283,14 +325,9 @@ def provision_vm():
     if not all(re.fullmatch(r'[A-Za-z0-9.+~_:%-]+\.deb', name) for name in debs):
         raise ValueError('The package download has an unexpected file name')
     if debs:
-        guest(['rm', '-rf', '/root/pp-a7-debs'])
-        guest(['install', '-d', '-m', '0700', '/root/pp-a7-debs'])
-        for name in debs:
-            execute(['incus', 'file', 'push', '--uid', '0', '--gid', '0', '--mode', '0644', str(DEBS / name),
-                     '%s/root/pp-a7-debs/%s' % (VM, name)], timeout=300)
-        guest(['sh', '-c', 'apt-get install -y -q --no-download --no-install-recommends /root/pp-a7-debs/*.deb'],
-              timeout=1800)
-        guest(['rm', '-rf', '/root/pp-a7-debs'])
+        push_debs(debs)
+        guest(['sh', '-c', OFFLINE_INSTALL], timeout=1800)
+        guest(['rm', '-rf', VM_DEBS])
     shutil.rmtree(DEBS)
     guest(['install', '-d', '-m', '0755', str(Path(VM_NEKO).parent), str(Path(VM_POLICY).parent)])
     execute(['incus', 'file', 'push', '--uid', '0', '--gid', '0', '--mode', '0755', str(NEKO_OUT), VM + VM_NEKO],
@@ -304,6 +341,9 @@ def provision_vm():
         raise ValueError('The files in the VM do not read back as pushed')
     if read['missing_libraries']:
         raise ValueError('Neko is missing libraries in the VM: %s' % ', '.join(read['missing_libraries']))
+    if not all(read['tools'].values()):
+        raise ValueError('The live desktop tools are missing in the VM: %s'
+                         % ', '.join(t for t, ok in read['tools'].items() if not ok))
     journal['vm_files'] = {'snapshot': snapshot, 'packages': list(VM_PACKAGES), 'debs': debs, **read,
                            'provisioned_at': stamp()}
     write_journal(journal)

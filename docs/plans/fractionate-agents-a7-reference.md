@@ -78,7 +78,7 @@ and 5350/TCP forwarded to 192.168.88.161**.
 | `a3-probe-worker.py` | `b770a4a9…` | **`d1bdda8a95595ceb…`** (backend `takeover` expectations) |
 | `a4-fixture-account.py` | — | `f5551b96fdd583f6…` (mode `slow`) |
 | `a4-canary-scan.py` | — | `95b03fc40248ad04…` (`--a7-dir`) |
-| `a7-install-live.py` | — | **`de0f93014387657a…`** after the port move (3479/5350, refuses taken ports); `69dda3db…` at `9e1d66a5` |
+| `a7-install-live.py` | — | **`2a8ee479d320d615…`** with the VM package fix (one tar stream read back by sha256, apt without lists); `de0f9301…` after the port move; `69dda3db…` at `9e1d66a5` |
 | `a7-neko-unix-socket.patch` | — | `a4fedb0f77048c4c…` (pinned in the installer) |
 | `a7-probe.mjs` | — | `2dd2b259e180d75e…` (a comment); `b1a33ea6…` at `9e1d66a5` |
 | `a7-host-summary.py` | — | `63a1c630bdbf2ad3…` |
@@ -320,6 +320,30 @@ Expected: the TURN status (`"active": "active"`, ports `3479` and `5350`
 `"missing_libraries": []` and the Neko/policy digests; after `enable`,
 `"fence_live_relay": true`, `"live_marker": true`; `"accepting_launch": true`,
 `"blockers": []`; then `h3_end` with no `_failed` line.
+
+**Step H3b (this host only: H3 stopped at `provision-vm` on 2026-09-29).**
+The relay, Neko and the probe are already built (their journal entries and
+binaries stay), so only the VM step and the enable run again, from the
+candidate carrying the package fix. It takes a new `pp-a7-pre-live-…` snapshot
+first, like H3.
+
+```
+setsid nohup sudo sh -c 'trap "echo h3b_end" EXIT; set -e; cd /var/lib/proxypilot/self/candidate/scripts; git -C .. rev-parse HEAD; sha256sum a7-install-live.py; python3 a7-install-live.py provision-vm || { echo provision_failed; exit 1; }; python3 a7-install-live.py enable || { echo enable_failed; exit 1; }; python3 a3-install-supervisor.py status | grep -E "accepting_launch|blockers"' > /var/lib/proxypilot-a7-proof/h3b.log 2>&1 < /dev/null &
+```
+
+Read it (repeat until `h3b_end`):
+
+```
+sudo grep -E '"(snapshot|debs|neko_sha256|policy_sha256|missing_libraries|live_marker|fence_live_relay|accepting_launch)"|_failed|refused|h3b_end' /var/lib/proxypilot-a7-proof/h3b.log
+```
+
+Expected: the candidate HEAD and the installer's digest; `"snapshot":
+"pp-a7-pre-live-…"`, the package list, the Neko and policy digests,
+`"missing_libraries": []`; after `enable`, `"fence_live_relay": true` and
+`"live_marker": true`; `"accepting_launch": true`, `"blockers": []`; then
+`h3b_end`. If the VM lacks a package, the refusal now names it
+(`… Depends: <package> … but it is not installable`): paste
+`sudo tail -40 /var/lib/proxypilot-a7-proof/h3b.log`.
 
 **Recommended, from a machine outside your network** (a phone hotspot is
 enough):

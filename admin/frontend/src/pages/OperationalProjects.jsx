@@ -3,13 +3,14 @@ import { Link, useNavigate } from 'react-router-dom';
 import { operationsApi as api } from '@/lib/api';
 import { Action, Panel, Field, Choice } from '@/components/operational-projects/shared';
 import { AgentInbox } from '@/components/operational-projects/AgentRuns';
+import { OperationsSettings } from '@/components/operational-projects/OperationsSettings';
 
 export default function OperationalProjects() {
   const [enabled,setEnabled]=useState(null),[rows,setRows]=useState([]),[cursor,setCursor]=useState(null);
   const [state,setState]=useState('active'),[name,setName]=useState(''),[description,setDescription]=useState('');
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const [agentCapability,setAgentCapability]=useState(false),[directory,setDirectory]=useState([]),[directoryCursor,setDirectoryCursor]=useState(null);
-  const [runsCapability,setRunsCapability]=useState(false);
+  const [runsCapability,setRunsCapability]=useState(false),[canManage,setCanManage]=useState(false);
   const navigate=useNavigate();
   async function load(after=null) {
     setBusy(true);setError('');
@@ -17,7 +18,12 @@ export default function OperationalProjects() {
     catch(e){setError(e.message);if([401,403,404].includes(e.status)){setRows([]);setName('');setDescription('');}}
     finally{setBusy(false);}
   }
-  useEffect(()=>{let active=true;api.get('/capabilities').then(c=>{if(active){setEnabled(c.enabled&&c.ui_available);setAgentCapability(c.enabled&&c.agents_metadata_enabled);setRunsCapability(!!c.agent_runs_enabled);}}).catch(e=>{if(active){setError(e.message);setEnabled(false);}});return()=>{active=false;};},[]);
+  // Capabilities follow the administrators' toggles; reloaded after a toggle changes.
+  async function loadCapabilities() {
+    try {const c=await api.get('/capabilities');setEnabled(c.enabled&&c.ui_available);setAgentCapability(c.enabled&&c.agents_metadata_enabled);setRunsCapability(!!c.agent_runs_enabled);setCanManage(c.can_manage_settings===true);}
+    catch(e){setError(e.message);setEnabled(false);}
+  }
+  useEffect(()=>{loadCapabilities();},[]);
   useEffect(()=>{if(enabled)load();},[enabled,state]);
   async function loadDirectory(after=null) {try {const data=await api.get(`/directory${after?`?after=${after}`:''}`);setDirectory(old=>after?[...old,...data.projects]:data.projects);setDirectoryCursor(data.next_cursor);}catch(e){setError(e.message);setDirectory([]);setDirectoryCursor(null);}}
   useEffect(()=>{if(agentCapability)loadDirectory();},[agentCapability]);
@@ -29,7 +35,7 @@ export default function OperationalProjects() {
   return <div className="max-w-5xl mx-auto space-y-6 p-4 sm:p-6">
     <header><h1 className="text-2xl font-bold">Operations</h1><p className="text-muted-foreground mt-2">Store instructions and record work performed by people.</p></header>
     {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
-    {enabled===null?<p role="status">Loading Operations…</p>:!enabled?<p>Operations is not enabled on this installation.</p>:<>
+    {enabled===null?<p role="status">Loading Operations…</p>:!enabled?<p>Operations is not turned on for this installation.{canManage?' Turn it on in Operations settings below.':' An administrator turns it on in Operations settings.'}</p>:<>
       {runsCapability&&<AgentInbox/>}
       <Panel title="New operation"><form onSubmit={create} className="space-y-4">
         <Field label="Name" required maxLength={200} value={name} onChange={e=>setName(e.target.value)}/>
@@ -49,5 +55,7 @@ export default function OperationalProjects() {
         {directoryCursor&&<Action variant="outline" disabled={busy} onClick={()=>loadDirectory(directoryCursor)}>Load more discoverable operations</Action>}
       </Panel>}
     </>}
+    {/* One stable place, so turning Operations on or off keeps the panel (and its message) mounted. */}
+    {canManage&&<OperationsSettings onChanged={loadCapabilities}/>}
   </div>;
 }

@@ -271,3 +271,77 @@ eye at 360, 768 and 1280 in both themes):
    the container socket mount and a live run behind the UI (A8).
 4. Lighthouse mobile accessibility score (not available here).
 5. No exact-head Security CI: only on a draft PR, if the user asks for one.
+
+## 2026-09-29 merge; activation becomes dashboard toggles
+
+### Merge
+
+At the user's request, PR #700 (this branch: A4, A5 and A6) was merged into
+`main` as `469e98a9` with a merge commit, so the SHAs these documents cite
+stay reachable. GitHub marked draft PR #699 (A4) merged because its head is
+now in `main`. Six checks passed. `audit (admin/backend)` failed on
+GHSA-6vj9-mwq6-2f5v (nodemailer ≤ 10.0.1, moderate). The PR does not touch the
+backend's package files, and `main` fails the same audit. The fix, nodemailer
+10, is a major upgrade and a separate change; this is recorded on the PR.
+
+### Deploy attempt
+
+The candidate slot needs the A6 code before `promote_self`. Sending the code
+patch to the host over MCP (`apply_self_patch` via an upload ticket) was denied
+by the session's safety check as data exfiltration, and the sandbox cannot
+reach the host's upload URL. The GitHub update path (`run_proxypilot_update`)
+runs `git pull origin main` in a live checkout that sits on a local commit
+(`33528751`) GitHub does not know, so it would merge divergent history; it was
+not used. The live host is unchanged.
+
+### Decision (user, 2026-09-29): toggles, not env
+
+The user asked first for the three switches to be on by default; that was
+declined by the session's safety check as weakening a security gate, and
+nothing was changed. The user then asked for **toggles, not env**. Implemented:
+- `lib/operations-toggles.js` has three toggles: Operations, Agent metadata
+  and Agent runs. Each requires the one before it. They are stored as
+  `operations_toggle:*` rows in `app_settings` and are **off until an
+  administrator turns them on**. The only writer re-reads the role from the
+  database and writes the setting and one `OPERATIONS_TOGGLE_CHANGED` audit
+  row in one transaction.
+- `routes/operations-settings.js` serves `GET /api/operations-settings`
+  (administrators) and `PUT /api/operations-settings/:name` (administrators
+  plus sudo; the body is exactly `{enabled}`; turning one on before the one it
+  requires answers 409).
+- The Operations router takes the switches as getters read on every request.
+  A change takes effect at once, with no restart; capabilities add
+  `can_manage_settings`.
+- The env vars `OPERATIONS_ENABLED`, `OPERATIONS_AGENTS_METADATA_ENABLED` and
+  `OPERATIONS_AGENT_RUNS_ENABLED` are removed. Evidence keeps its own env
+  switches; the Operations toggle now stands in for `OPERATIONS_ENABLED`
+  there. The supervisor socket, key and VM stay configuration.
+- UI: `OperationsSettings.jsx` on the Operations page, in one stable place.
+  Administrators always see the Operations sidebar entry; others see it only
+  when Operations is on. The sidebar refreshes when a toggle changes.
+- MCP cannot reach the toggles: they are not in the `set_setting` allowlist or
+  the feature-flag policy. A ratchet test also refuses the old env names in
+  any backend source file.
+
+### Local verification (toggles)
+
+| Check | Result |
+|---|---|
+| `node --test src/__tests__/operational-*.test.js src/__tests__/operations-toggles.test.js` | 114/114 (4 new) |
+| Browser journeys | **14/14, 72 layout checks**, including the new toggles journey |
+| Frontend build | built |
+
+What the new journey checks:
+- a person sees "not turned on" and no sidebar entry;
+- at 375 px, an administrator sees the three toggles, with Agent runs
+  disabled and a stated reason;
+- turning Operations on asks for sudo; the page switches on;
+- Agent metadata and Agent runs follow; the Agent inbox appears;
+- three audit rows are written;
+- the person can then start runs;
+- turning Operations off shuts it for the person at the next request;
+- no supervisor call is made.
+
+**Finding (fixed):** the first run of that journey caught the settings panel
+remounting when Operations switched on, which dropped its confirmation. The
+panel now sits in one stable place on the page.

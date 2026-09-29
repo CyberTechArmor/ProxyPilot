@@ -4,7 +4,6 @@ export class OperationsError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 export const fail = (status, message) => { throw new OperationsError(status, message); };
-export const operationsEnabled = (env = process.env) => env.OPERATIONS_ENABLED === 'true';
 export const roles = ['viewer', 'operator', 'editor', 'reviewer'];
 const uuid = z.string().uuid();
 const text = (max) => z.string().max(max);

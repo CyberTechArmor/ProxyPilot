@@ -7,11 +7,21 @@ agent or credential. Recording a run is a human report, not a task launcher.
 
 ## Feature gate and data
 
-`OPERATIONS_ENABLED` defaults off. Only the exact value `true` enables the API
-and navigation. Authenticated eligible users may query
-`GET /api/operational-projects/capabilities` while off; it reports
-`stage: human-workflow` and whether the interface is available. Other Operations
-routes return 404 while disabled. Configuration is read at server startup.
+Operations is off until an administrator turns it on in the dashboard:
+Operations → **Operations settings** (administrators always see the Operations
+entry, so they can reach it while it is off). Three toggles, each requiring the
+one before it: **Operations**, **Agent metadata** (A2) and **Agent runs** (A6).
+They are dashboard settings, not environment variables (user decision,
+2026-09-29): `lib/operations-toggles.js` stores them as `operations_toggle:*`
+rows in `app_settings`; the only writer is `PUT /api/operations-settings/:name`
+(administrator, role re-read from the database, sudo, one `OPERATIONS_TOGGLE_CHANGED`
+audit row per change). They are outside the MCP `set_setting` allowlist and the
+MCP feature-flag policy, so no MCP client can change them. The routes read them
+on every request, so a change takes effect at once without a restart.
+Authenticated eligible users may query `GET /api/operational-projects/capabilities`
+while off; it reports `stage: human-workflow`, whether the interface is
+available and `can_manage_settings` (a hint for the sidebar). Other Operations
+routes return 404 while Operations is off.
 
 Main-database migrations 1100–1102 are additive and run through the normal
 migration runner even if the feature is disabled. 1100 adds private records,
@@ -24,8 +34,8 @@ Historical migrations are unchanged. Historical account IDs survive user deletio
 Migration 1106 adds an optional `site_origin`, monotonic `site_revision`, a
 visibility preset, membership requests and project-scoped profile metadata.
 It is additive and applies even while the feature is off. The separate
-`OPERATIONS_AGENTS_METADATA_ENABLED=true` gate requires Operations and is false
-by default. A site and profile are optional when a project is created. Saving
+**Agent metadata** toggle requires Operations and is off until an administrator
+turns it on. A site and profile are optional when a project is created. Saving
 the site changes no route, DNS, worker or credential. Only the current owner may
 set or clear a canonical HTTPS origin. Changing it advances `site_revision` and
 invalidates the profile's site assignment pin.
@@ -175,8 +185,8 @@ release/security checks must pass before publication or deployment.
 
 ## Private image evidence
 
-Evidence remains off by default. Both `OPERATIONS_ENABLED=true` and
-`OPERATIONS_EVIDENCE_ENABLED=true` are necessary. Missing finite
+Evidence remains off by default. The Operations toggle and
+`OPERATIONS_EVIDENCE_ENABLED=true` are both necessary. Missing finite
 `OPERATIONS_EVIDENCE_QUOTA_BYTES`, absolute `OPERATIONS_EVIDENCE_DIR`, absolute
 `OPERATIONS_EVIDENCE_DECODER_RUNNER`, or the separate deployment assertion
 `OPERATIONS_EVIDENCE_BOUNDARY_REVIEWED=true` leaves the capability closed.
@@ -347,7 +357,9 @@ Evidence-free guides continue to work while evidence is disabled. An explicit
 start-revision action still resets the iteration and its references as described
 above; it is never an implicit fallback during submission or approval.
 
-Before rolling back to an older writer, set `OPERATIONS_ENABLED=false` and stop
+Before rolling back to an older writer, turn Operations off in Operations
+settings (an older build reads `OPERATIONS_ENABLED` instead: leave it unset or
+`false`) and stop
 Operations writes for the entire rollback period. Keep migrations 1100–1105,
 history, file receipts, blobs and disposition records; do not drop tables or
 triggers to make an older binary write. The new-submission seal trigger adds a

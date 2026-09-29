@@ -27,7 +27,7 @@ async function as(role, { width = 1280, theme = 'dark' } = {}) {
   const u = h.world.users[role];
   await ctx.addInitScript(({ user, theme }) => {
     localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', theme);
-  }, { user: { id: u.id, username: u.username, role: 'user' }, theme });
+  }, { user: { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user' }, theme });
   const page = await ctx.newPage();
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
@@ -448,6 +448,54 @@ try {
       await result(page, 'Stopped');
       assert.deepEqual(page.errors, [], theme);
     }
+  });
+} finally {
+  for (const ctx of contexts.splice(0)) await ctx.close();
+  await h.close();
+}
+
+// The administrators' toggles, all off at start: only an administrator (with
+// sudo) turns them on, each after the one before it; a person sees the result.
+h = await startHarness({ toggles: true });
+try {
+  await journey('toggles: off until an administrator turns them on with sudo; everyone sees the result', async () => {
+    const person = await as('operator');
+    await person.goto(`${h.origin}/operational-projects`);
+    await person.getByText('Operations is not turned on for this installation. An administrator turns it on in Operations settings.').waitFor(WAIT);
+    assert.equal(await person.getByRole('link', { name: 'Operations' }).count(), 0, 'no sidebar entry for a person while off');
+    assert.equal(await person.getByRole('heading', { name: 'Operations settings' }).count(), 0);
+    const admin = await as('admin', { width: 375 });
+    await admin.goto(`${h.origin}/operational-projects`);
+    await admin.getByText('Operations is not turned on for this installation. Turn it on in Operations settings below.').waitFor(WAIT);
+    await admin.getByText('Turn on Operations first.').first().waitFor(WAIT);
+    assert.equal(await admin.getByRole('button', { name: 'Turn on Agent runs' }).isDisabled(), true);
+    assert.deepEqual(await deadControls(admin), []);
+    await layoutCheck(admin, 'settings-off');
+    await admin.setViewportSize({ width: 375, height: 900 });
+    await admin.getByRole('button', { name: 'Turn on Operations' }).click();
+    await admin.getByRole('dialog').filter({ hasText: 'Confirm with password' }).waitFor(WAIT);
+    await sudoIfAsked(admin);
+    await admin.getByText('Operations turned on.').waitFor(WAIT);
+    await admin.getByRole('heading', { name: 'New operation' }).waitFor(WAIT);
+    await admin.getByRole('button', { name: 'Turn on Agent metadata' }).click();
+    await admin.getByText('Agent metadata turned on.').waitFor(WAIT);
+    await admin.getByRole('button', { name: 'Turn on Agent runs' }).click();
+    await admin.getByText('Agent runs turned on.').waitFor(WAIT);
+    await admin.getByRole('heading', { name: 'Agent inbox' }).waitFor(WAIT);
+    await layoutCheck(admin, 'settings-on');
+    const audit = h.world.f.db.prepare("SELECT resource_id FROM audit_log WHERE action='OPERATIONS_TOGGLE_CHANGED' ORDER BY rowid").all();
+    assert.deepEqual(audit.map(a => a.resource_id), ['operations', 'agents_metadata', 'agent_runs']);
+    await person.goto(runsUrl());
+    await person.getByRole('button', { name: 'Start run' }).waitFor(WAIT);
+    await person.getByRole('link', { name: 'Operations' }).first().waitFor(WAIT);
+    // Off again: the person's next request is refused and the page says why.
+    await admin.setViewportSize({ width: 1280, height: 900 });
+    await admin.getByRole('button', { name: 'Turn off Operations' }).click();
+    await admin.getByText('Operations turned off.').waitFor(WAIT);
+    await admin.getByText('Operations is not turned on for this installation. Turn it on in Operations settings below.').waitFor(WAIT);
+    await person.goto(`${h.origin}/operational-projects`);
+    await person.getByText('Operations is not turned on for this installation.', { exact: false }).waitFor(WAIT);
+    assert.equal(h.world.supervisor.calls.length, 0);
   });
 } finally {
   for (const ctx of contexts.splice(0)) await ctx.close();

@@ -276,16 +276,20 @@ export default function Layout() {
     return () => { cancelled = true; };
   }, [canDevelop]);
 
+  // Administrators always see Operations: its settings (the on/off toggles) live there.
   const [operationsEnabled, setOperationsEnabled] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setOperationsEnabled(false);
-    if (user && !user.linkOnly && user.role !== 'pending') {
+    const check = () => {
+      if (!user || user.linkOnly || user.role === 'pending') return;
       operationsApi.get('/capabilities').then(data => {
-        if (!cancelled) setOperationsEnabled(data.enabled && data.ui_available);
+        if (!cancelled) setOperationsEnabled((data.enabled && data.ui_available) || data.can_manage_settings === true);
       }).catch(() => { if (!cancelled) setOperationsEnabled(false); });
-    }
-    return () => { cancelled = true; };
+    };
+    check();
+    window.addEventListener('pp-operations-changed', check);
+    return () => { cancelled = true; window.removeEventListener('pp-operations-changed', check); };
   }, [user?.id, user?.role, user?.linkOnly]);
 
   const navigation = [

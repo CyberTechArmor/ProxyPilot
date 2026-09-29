@@ -3,7 +3,8 @@ import { recoveryBoundary } from './lib/sso/sessions.js';
 import express from 'express';
 import { createOperationsRouter } from './routes/operational-projects.js';
 import { createOperationsStore } from './lib/operational-projects-store.js';
-import { operationsEnabled } from './lib/operational-projects-logic.js';
+import { effectiveToggles } from './lib/operations-toggles.js';
+import { createOperationsSettingsRouter } from './routes/operations-settings.js';
 import { evidenceConfiguration, createEvidenceRuntime } from './lib/operational-evidence-runtime.js';
 import { agentRunsConfiguration, createAgentRunRuntime } from './lib/operational-agent-runtime.js';
 import { createEvidenceRouter, evidenceHeaders } from './routes/operational-evidence.js';
@@ -41,7 +42,7 @@ import { createMcpRouter, createMcpAdminRouter } from './routes/mcp.js';
 import { createEditorMcpRouter, createEditorAdminRouter } from './routes/mcp-editor.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
 import { brandingRouter } from './routes/branding.js';
-import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole, requireSudo } from './middleware/auth.js';
+import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole, requireSudo, requireAdmin } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { cacheControlFor, NO_CACHE } from './lib/static-cache-logic.js';
 import { brandedManifest, publicBranding, withInstalledAppHint } from './lib/branding-logic.js';
@@ -603,15 +604,20 @@ app.use('/api/services', authenticateToken, blockPendingRole, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
 const evidenceConfig = evidenceConfiguration();
 const evidenceRuntime = createEvidenceRuntime(evidenceConfig);
-const operationsStore = operationsEnabled() ? createOperationsStore(getDb(), { evidenceFactory: evidenceRuntime?.factory }) : null;
-// A6: null unless OPERATIONS_AGENT_RUNS_ENABLED (and Operations + agent metadata)
-// are on; without a configured supervisor it answers EXECUTION_UNAVAILABLE.
+// Operations, agent metadata and agent runs are administrators' dashboard
+// toggles (lib/operations-toggles.js, off until turned on), read per request.
+const operationsStore = createOperationsStore(getDb(), { evidenceFactory: evidenceRuntime?.factory });
+// A6: without a configured supervisor every execution control answers EXECUTION_UNAVAILABLE.
 const agentRuns = createAgentRunRuntime(agentRunsConfiguration(), { db: getDb(),
   log: entry => console.log('[agent-runs]', JSON.stringify(entry)) });
+const operationsToggle = name => () => effectiveToggles(getDb())[name];
+app.use('/api/operations-settings', authenticateToken, blockPendingRole, createOperationsSettingsRouter({
+  Router: express.Router, db: getDb, requireAdmin, requireSudo }));
 app.use('/api/operational-projects', authenticateToken, blockPendingRole, createOperationsRouter({
   Router: express.Router,
-  enabled: operationsEnabled(),
-  agentsEnabled: process.env.OPERATIONS_AGENTS_METADATA_ENABLED === 'true',
+  enabled: operationsToggle('operations'),
+  agentsEnabled: operationsToggle('agents_metadata'),
+  agentRunsEnabled: operationsToggle('agent_runs'),
   store: operationsStore,
   agentRuns,
   requireSudo,

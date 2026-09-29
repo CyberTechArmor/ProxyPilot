@@ -27,7 +27,7 @@ merged, deployed or promoted.
 | Decision | Choice |
 |---|---|
 | Base and branch | The A5 head `5210cfb7` (A5 code `9b9a15ed`, acceptance docs `21507dc`), on `ccr-4216e4d3-jsij65`. A4 (PR #699, draft) and A5 (no PR) are not in `main` |
-| 1. Where a run executes | **Option A.** Routes and UI behind the false-default `OPERATIONS_AGENT_RUNS_ENABLED`. With no supervisor configured the backend builds no launcher and every execution control answers `EXECUTION_UNAVAILABLE`. Journeys run against a separate UI harness. Nothing live changes |
+| 1. Where a run executes | **Option A.** Routes and UI behind the false-default `OPERATIONS_AGENT_RUNS_ENABLED` (replaced on 2026-09-29 by the administrators' Agent runs dashboard toggle, still off until turned on). With no supervisor configured the backend builds no launcher and every execution control answers `EXECUTION_UNAVAILABLE`. Journeys run against a separate UI harness. Nothing live changes |
 | 2. Approval gesture | Sudo elevation (`requireSudo`, the api.js modal) **plus at least the first 12 characters of the digest** (spaces and capitals allowed; any correct longer prefix accepted) |
 | 3. Four-eyes | **Allow**: the person who started a run may approve its submit (as in A5) |
 | 4. View-only stream | **Both**: typed progress, and a live browser view modelled on Flightdeck chat (text and screenshots). A boundary decision: the supervisor's backend socket gains a read-only `view` (pixels only), which needs its own host proof |
@@ -80,8 +80,13 @@ makes a new one. Proof VM boot before A6: `62801e3b-8419-40aa-85bf-dffab35788c2`
 
 ## Interfaces
 
-**Flags** (`.env.example`): `OPERATIONS_AGENT_RUNS_ENABLED` (false by default;
-also needs `OPERATIONS_ENABLED` and `OPERATIONS_AGENTS_METADATA_ENABLED`).
+**Activation** (user decision, 2026-09-29): dashboard toggles, not env.
+Operations → Operations settings (administrators; sudo; audited;
+`lib/operations-toggles.js`, `routes/operations-settings.js`): **Operations**,
+**Agent metadata**, **Agent runs**, each requiring the one before, all off until
+turned on, read on every request, not writable over MCP. The former
+`OPERATIONS_ENABLED`, `OPERATIONS_AGENTS_METADATA_ENABLED` and
+`OPERATIONS_AGENT_RUNS_ENABLED` env vars are gone.
 Execution also needs `OPERATIONS_AGENT_SUPERVISOR_SOCKET`,
 `OPERATIONS_AGENT_SUPERVISOR_PUBLIC_KEY` (PEM path) and
 `OPERATIONS_AGENT_VM_UUID`; none set = `not_configured`, some or invalid =
@@ -224,7 +229,8 @@ python3 scripts/host-boundary-inventory.py
 
 ## Rollback order
 
-1. Keep `OPERATIONS_AGENT_RUNS_ENABLED` and every other activation flag off.
+1. Turn Agent runs (or Operations) off in Operations → Operations settings;
+   keep every other activation off.
 2. Supervisor: in the candidate, `git revert --no-edit <the A6 staging
    commit>`, then `python3 a3-install-supervisor.py reinstall`; `status` shows
    `151f1d24…` again (with a new key).

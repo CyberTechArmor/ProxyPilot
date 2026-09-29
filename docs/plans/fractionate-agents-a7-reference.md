@@ -207,7 +207,8 @@ sudo sh -c 'N=streamview.fractionate.ai; cd /var/lib/proxypilot/self/candidate; 
 ```
 
 Expected output:
-- the deployed merge commit (live and candidate the same);
+- `9341dd93267de145b4abd636645c3b187b8847e8` (the deployed staging of the
+  merge `9e1d66a5`; live and candidate the same);
 - supervisor `9d195ea2…`, runner `a631ad9d…`, `"accepting_launch": true`,
   key `f68c8aaf…`; broker `790a1957…`, `"approle_login": "ok"`;
   `"active": null`; demo `496846cd…`;
@@ -229,7 +230,7 @@ sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git rev-parse HEAD; c
 ```
 
 Expected output, in order:
-1. The deployed merge commit.
+1. `9341dd93267de145b4abd636645c3b187b8847e8`.
 2. `73a89f61…`, `7185ee26…`, `10aa2a73…`, `d1bdda8a…`, `69dda3db…`,
    `b1a33ea6…`, `63a1c630…`, `d4693668…`.
 3. The supervisor JSON: `"accepting_launch": true`, `"blockers": []`, a new

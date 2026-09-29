@@ -369,3 +369,52 @@ for)"; "for this instance I don't use cloudflare, just use caddy".
     one network step the code cannot do.
 - **The deploy path** is in the reference: the PR and merge, D1 (the pinned
   stager, a user paste), and D2 (checks, backup, promote over MCP).
+
+## 2026-09-29 merge and deploy (user: "commit, merge, deploy")
+
+- **PR [CyberTechArmor/ProxyPilot#707](https://github.com/CyberTechArmor/ProxyPilot/pull/707)** merged as
+  **`9e1d66a58d2ca048991d390036a13e1fc7e46be5`** (a merge commit). Its tree
+  is identical to the tested head `316364ee`.
+  - The first CI run (head `ec7e972e`) failed in `backend`: the new
+    installer tests called `os.chown` to uid 0, which a non-root runner
+    cannot do.
+  - Fixed in `316364ee`: a non-root run records the ownership changes
+    instead. Reproduced locally as `nobody` first.
+  - On `316364ee` all 7 checks were green: `backend`, `frontend`, `agent`
+    and four `audit` jobs.
+- **Staging (user, root, the pinned stager, 2026-09-29):**
+  `staged 9341dd93267de145b4abd636645c3b187b8847e8 (was 776045d741e2…) from
+  9e1d66a58d2c…; 189 paths match exactly`. The candidate digests are
+  `73a89f61…` (supervisor), `69dda3db…` (`a7-install-live.py`) and
+  `d4693668…` (demo `server.mjs`).
+- **Checks** on `9341dd93` (`backend-tests`, `backend-syntax`, with the
+  install step): 3,408 tests, 3,397 pass, **0 fail**, 11 skipped.
+- **Backup:** `/data/db/backups/proxypilot-pre-A7-promote-20260929T200120Z.db`,
+  8,998,912 bytes, sha256 `7bd71de83c99a2a2…`. `update.sh` also kept
+  `proxypilot.db.pre-update-20260929-160131`.
+- **Promote:**
+  - the preview showed `776045d7` → `9341dd93`, one commit (the staging of
+    `9e1d66a5`);
+  - rollback tag `pp-rollback-20260929T200130Z` (at `776045d7`);
+  - update `a5049c12-2f01-44bf-bd9a-b8e5409960cc`: `success`, exit 0,
+    20:01:30–20:02:31Z;
+  - `Applied schema migration 1112: operational_practice_recovery`, the
+    health check passed, and all 33 routes match their declared settings;
+  - the `git pull` "divergent branches" message is the known one: the live
+    `main` carries the staged commit;
+  - `get_self_status`: live `9341dd93`, clean; candidate the same, 0 ahead.
+- **Seen in the update log, for the host run:** the host firewall's managed
+  bridge is `incusbr0`, the proof VM's bridge. It is admitted by the input
+  hook, so H2 will print `relay_ports_admitted_by_bridge_rule` and adds no
+  relay-port rule.
+- **Not changed by the deploy:**
+  - the installed supervisor, runner, broker and demo server (still the A6
+    bytes until H1);
+  - no TURN relay, no Neko (H2–H3);
+  - execution on the live dashboard stays unavailable (A8);
+  - the toggles.
+- **Rollback, if needed:** `rollback_self` to `pp-rollback-20260929T200130Z`
+  (`776045d7`) **and** restore the backup above, because migration 1112 has
+  applied.
+- **Next:** the router's forwards of 3478/UDP, 3478/TCP and 5349/TCP to this
+  host, then the host run H0–H7 (reference).

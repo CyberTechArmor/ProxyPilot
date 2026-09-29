@@ -1,39 +1,23 @@
 # A5 reference: current state for any conversation
 
-Snapshot: 2026-09-28, after the first A5 host run and its fixes. Host run 2
-is next.
+Snapshot: 2026-09-29, after host run 3 and the A5 acceptance.
 
 This file is the orientation page. The dated
 [A5 evidence](fractionate-agents-a5-evidence.md) is the record; if the two
 disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, proxy SPKI) before acting.
 
-**Status in one line:** A5 is **not accepted**. Host run 1 (2026-09-28)
-installed the A5 supervisor, runner, broker and demo server:
-- The A3 proof passed 19/19, including both `model_step` refusals.
-- 14 of the 18 A5 cases passed, with a real person's approval.
-- A runner misclassification failed every successful sign-in
-  (`unexpected_origin`). The failed cases were A4 `login`/`rotation` and A5
-  `supervised_run`, `rule_only` and `outcome_classes` (challenge).
-- `outside_set` depended on the model misbehaving.
-- The marker scan counted its own sudo command line.
-
-All three are fixed in `b9bd56e6` (see the evidence).
-
-Host run 2 (2026-09-28):
-- Installed the new runner and demo server.
-- A5 reached 17 of 18 cases across two tries. The A5 canary scan passed
-  (0 values, 0 markers) twice.
-- Not yet run: step R2 (the A3 proof on the new runner, the A4 proof and the
-  A4 canary).
-- `outside_set` is now proven locally only (user decision: the provider
-  rejects a 1-token cap).
-- A 13-character approval was refused, as designed; any prefix of 12 or more
-  characters now approves.
-- `coordinator_restart` no longer depends on a page loading.
-
-These are in `9b9a15ed`. **Host run 3** below is next. Nothing is activated,
-merged, deployed or promoted. PR #686 and PR #699 stay draft.
+**Status in one line:** A5 is **ACCEPTED (2026-09-29)**.
+- **Host run 3** (candidate `8d25755c`, code `9b9a15ed`):
+  - A3 19/19, A4 6/6 and A5 17/17 (one real human approval, verified
+    account);
+  - both canary scans 0 (values and markers);
+  - candidate `backend-tests` 0 fail.
+- Host runs 1 and 2 found a runner misclassification and three harness
+  defects. They are fixed, and the details are in the evidence.
+- Open items are named in the evidence's acceptance section.
+- Nothing is activated, merged, deployed or promoted. PR #686 and PR #699 stay
+  draft.
 
 ## Read first
 
@@ -221,7 +205,7 @@ evidence.
 Every command runs as root on the proof host, as one paste. Review each
 output before the next. No step prints a secret.
 
-### Host run 3 (next): stage `9b9a15ed`, then the A3/A4 regression (R2) and the A5 proof
+### Host run 3 (2026-09-29, done; A5 accepted): stage `9b9a15ed`, then the A3/A4 regression (R2) and the A5 proof
 
 Only the harness changed since host run 2. There is nothing to reinstall:
 the installed supervisor (`151f1d24…`), runner (`a631ad9d…`), broker
@@ -475,6 +459,5 @@ python3 scripts/host-boundary-inventory.py
   not add a socket method, a proxy path, a fence rule or a unit property.
 - Proof runs never trip the live demo's shared sign-in limit. The fixture
   modes never count, and the harness never submits a wrong value.
-- Do not start A6 until the A5 evidence records A5 as accepted from observed
-  host evidence. The [A6 prompt](fractionate-agents-a6-prompt.md) is gated on
-  that.
+- A5 is accepted. A6 (the [A6 prompt](fractionate-agents-a6-prompt.md)) is
+  eligible, and it asks its own decisions before any code.

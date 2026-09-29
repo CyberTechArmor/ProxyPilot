@@ -13,10 +13,10 @@ Do not execute merely by reading this file. Check the gate first.
    - the canary scan with the A5 sinks and the marker.
 
    Its open items must be named. If it does not, stop and name the open A5
-   gate. At writing (2026-09-28), A5 is implemented and locally verified,
-   **not accepted**.
+   gate. **It does:** "Acceptance decision: A5 is ACCEPTED (2026-09-29)",
+   host run 3.
 2. **Where A5's code lives.** A5 is on branch `claude/beautiful-maxwell-9bldxg`
-   (code `6d420735`), built on draft PR #699's head (A4). Neither is merged.
+   (code `9b9a15ed`), built on draft PR #699's head (A4). Neither is merged.
    - If both are merged, start from `main` at that merge.
    - Otherwise ask the user whether to build on the A5 head. Name its SHA.
    - Never merge, un-draft or close a PR yourself.

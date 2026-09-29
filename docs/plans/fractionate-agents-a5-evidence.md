@@ -1,18 +1,16 @@
 # A5 supervised execution loop — evidence
 
-**A5 is NOT accepted.** Host runs 1 and 2 (2026-09-28, the last two
-sections) installed and exercised A5 on the proof host:
-- Host run 1: A3 19/19 on runner `57770035…`.
-- Host run 2: A5 cases passed across two tries, with real human approvals,
-  and the A5 canary was clean twice.
+**A5 is ACCEPTED (2026-09-29).** Host run 3 (last section) passed on the
+installed A5 supervisor (`151f1d24…`), runner (`a631ad9d…`), broker
+(`790a1957…`) and demo server (`496846cd…`):
+- the full A3 proof, 19/19;
+- the A4 proof, 6/6;
+- all 17 A5 cases, with one real person's approval and a verified account;
+- both canary scans (0 values, 0 markers);
+- the candidate `backend-tests`, 0 fail.
 
-Still open:
-- step R2 on the current runner `a631ad9d…` (the full A3 proof, the A4 proof
-  and the A4 canary);
-- one A5 run with all 17 cases green, including the supervised run.
-
-The harness fixes are in `9b9a15ed`. Host run 3 is next: the
-[A5 reference](fractionate-agents-a5-reference.md), steps S1–S4.
+Open items are named in the acceptance decision. Nothing is activated, merged,
+deployed or promoted. PR #686 and PR #699 stay draft.
 
 The [A5 reference](fractionate-agents-a5-reference.md) is the orientation page.
 This file is the record: later dated sections win.
@@ -593,3 +591,122 @@ the A4 proof and the A4 canary) **was not run.**
 - The receipt key is `f6304ffb…` and the boot is `83df9a03…`.
 - The price table is at revision 9 (restored by `unknown_price`).
 - All bindings are revoked, and the fixture mode is cleared.
+
+## 2026-09-29 host run 3: A3, A4 and A5 pass; acceptance
+
+The user ran steps S1–S3 and pasted them as terminal screenshots, then ran a
+read-only summary of the three proof reports. No value appears anywhere.
+
+### S1: staged only (nothing to reinstall)
+
+- `staged 8d25755c8853e302a15a66855cd35207365373d1 (was 39787edb…) from
+  9b9a15ed…; 77 paths match exactly`.
+- Installed supervisor `151f1d242d7cdf35…`, runner `a631ad9d6062b675…`, key
+  `f6304ffb…`, `"accepting_launch": true`.
+
+### S2: A3 and A4 regression on the A5 runner, and the A4 canary
+
+- **A3:** `worker-proof-20260929T003859Z.json`, `worker_proof: passed`, **19
+  cases, failed []**. The guest-crash case moved the boot from `83df9a03…` to
+  `62801e3b-8419-40aa-85bf-dffab35788c2`; QEMU PID 272179 is unchanged
+  (`inspect_a3_vm`, read after the run).
+- **A4:** `a4-proof-20260929T004200Z.json`, `a4_proof: passed`, **6 cases,
+  failed []**.
+  - `login` and `rotation` pass on runner `a631ad9d…`. That is the host
+    confirmation of the `unexpected_origin` fix on A4's own proof.
+  - `budget` made one real call, settled $0.000004625; the retry replayed; the
+    refusals were `BUDGET_EXHAUSTED` (tokens and dollars), `MODEL_NOT_ALLOWED`,
+    `REVISION_MISMATCH`, `PRICE_UNKNOWN` (restored at price revision 13) and
+    `PROVIDER_ERROR` (one request).
+- **A4 canary:** binding `9441ae77-088f-4004-ba62-8074d5af2409` (revision 2,
+  after `rotation`), all sinks 0 matches, `canary_exit=0`.
+
+### S3: the A5 proof, `a5-proof-20260929T004454Z.json`
+
+- **`a5_proof: passed`, 17 cases, failed [].**
+- **`supervised_run`:** passed, result `verified_account`, logout `done`.
+  - The explicit start, the rules steps and the model's choices led to the
+    **human approval**, then the submit, a verification by the runner's own
+    session read, the model's `read_files`, the rule `sign_out`, and stop with
+    a verified receipt and a durable result.
+  - The injected file entry was on the page the worker read.
+- **Approvals:** exactly one `('tty', 'APPROVED')` (the person at the host
+  terminal) and ten `('proof-harness', 'APPROVED')` (refusal and class cases,
+  labelled as such).
+- **Cleanup:** fixture `cleared`, and 16 bindings revoked at the broker and in
+  the proof database.
+- **A5 canary:** binding `0ec49e96-b48b-4c3e-897c-ca55b8107213`. All sinks,
+  including `a5_proof_database_files`, `a5_proof_database_dump` and
+  `a5_harness_log_and_reports`, show `matches: 0, marker_matches: 0`.
+  `canary_exit=0`.
+
+### S4: from the session (MCP)
+
+- **`run_self_checks`** (`backend-tests`, `backend-syntax`, `skip_install`) on
+  candidate `8d25755c`: **3354 tests, 3343 pass, 0 fail, 11 skipped**
+  (environment); syntax ok. The tool reports `promote_ready`. **Nothing was
+  promoted.**
+- **`get_host_services proxypilot-a`:** fence active/exited; proxy,
+  supervisor and broker active/running; renewal timer active/waiting.
+- **`get_self_status`:** live `33528751…` unchanged, candidate `8d25755c`
+  (29 ahead, clean).
+- **`inspect_a3_vm`:** UUID `49592202-…`, boot `62801e3b-…`, running, 2 vCPU
+  / 4096 MiB / 12 GiB, no swap.
+
+### Acceptance decision: A5 is ACCEPTED (2026-09-29)
+
+Criteria from the A1 acceptance matrix (A5 row) and the A5 prompt:
+
+| Criterion | Evidence |
+|---|---|
+| One synthetic end-to-end workflow completes | `supervised_run` (host run 3): verified account, logout, verified receipt, durable result |
+| Explicit user start; one active run | Start needs `run` access (`stale_guide_and_grant`: a removed grant refuses); `duplicate_start` gives `RUN_ALREADY_ACTIVE` |
+| Atomic guide, profile and policy pin | `prepare` and the pin row in one transaction; `pins_and_consent`: altered guide `GUIDE_HASH_MISMATCH`, altered policy `RUN_POLICY_MISMATCH` at the installed supervisor |
+| Typed action broker; refusal outside permitted actions; wrong domain or action | Supervisor typed actions only; `pins_and_consent` `not_offered` gives `INVALID_REQUEST`; A3 `backend_refusals` (other origin, unknown action, URL field, `model_step` foreign policy and proof flag); the store refuses a non-demo origin (local) |
+| Approval digest, stale, duplicate, race and revocation | `approval_checks`, `approval_race` (both orders, no submit), `approval_after_revocation`, `binding_changed_mid_run` (broker-side revoke and rotate refuse the submit, no delivery), `stale_guide_and_grant` |
+| Human-only approval | One TTY approval by a person (digest shown, prefix typed). An unelevated or ineligible actor is refused. No MCP tool or route exists |
+| Durable events and results | Migration 1111 rows, immutable after close; one result per outcome class (`outcome_classes`: `credential_rejected`, `rate_limited`, `challenge_required`, `unexpected_origin`) |
+| Cancellation fence, stop and recovery | `operator_stop`, `takeover` (hand-over, then receipt), `coordinator_restart` (SIGKILL after the reservation: the step is never sent, `interrupted`, needs human, receipt verified) |
+| Provider errors, unknown price, budget | `provider_error`, `unknown_price`, `budget_exhausted` (refused before any request); A4 `budget` |
+| Hybrid: a rule-decided step makes no model call; no consent means no model step | `rule_only` (0 calls at the broker and the supervisor); `pins_and_consent` `GUIDE_NOT_SHAREABLE` and a no-consent run with 0 calls |
+| Prompt injection and untrusted page content; redacted observation | The injected entry was served to the worker in `supervised_run`. Claims are typed; the marker count is 0 in every sink, including the model prompts (the prompt is not stored; the fixture runner test proves it absent) |
+| No credential, cookie or token in any sink | Both canary scans: 0 in all 16 sinks |
+| A3/A4 boundaries intact | A3 19/19 and A4 6/6 on the A5 supervisor, runner and broker; proxy proof 21 |
+
+**Open by name, allowed by the criteria:**
+- **A model reply outside the allowed set** is proven locally only (user
+  decision, 2026-09-28): the real Supervisor and Broker classes, the
+  launcher and the coordinator. The provider rejects a 1-token cap, and 2
+  tokens can spell `read_files`. The installed supervisor is byte-identical
+  to the tested one.
+- **Unknown usage** (a provider reply without usage) is proven locally only,
+  as in A4; the real provider cannot be made to omit it.
+- **The `timeout` outcome class** is proven locally only (real Chromium
+  through the real proxy policy). It is never run on the live demo because
+  of the next item.
+- **The origin proxy can resend the one admitted sign-in POST** after an
+  upstream timeout (first A5 section, findings). The proxy is unchanged; fix
+  it in a later section.
+- **One `open_landing` BROWSER_TIMEOUT** in about 60 launches (host run 2).
+  It is recorded, not explained.
+- **The coordinator runs only in the host proof harness** (decision 1,
+  option A). The backend container socket mount and any route are A8.
+  Activation stays off.
+- **Carried from A3/A4:** host reboot persistence, S6 / SEC-01 / SEC-04, and
+  secret-ID rotation not being an immediate stop.
+- **No PR and no exact-head Security CI for the A5 branch.** CI runs on a
+  draft PR, only if the user asks for one.
+
+**Operational state:**
+- The candidate is `8d25755c`, not promoted.
+- The live demo serves `server.mjs` `496846cd…`. The A5 fixture file is
+  cleared, so public users are unaffected. `server.mjs.a4` (the A4 server) and
+  `server.mjs.pre-a4` (the original) are kept.
+- The synthetic account verifier stays in place; every binding is revoked.
+  Retire it with the A4 reference's rollback if it is not wanted.
+- The proof databases under `/var/lib/proxypilot-a5-proof/` hold typed
+  fields only.
+
+Accepting A5 does not authorize A6, activation, deployment or promotion; each
+is a separate user decision. The [A6 prompt](fractionate-agents-a6-prompt.md)
+is now eligible, and work stops here for review.

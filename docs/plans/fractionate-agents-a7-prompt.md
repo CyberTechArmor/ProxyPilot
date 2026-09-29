@@ -45,9 +45,16 @@ decisions below before writing any code.
      `terminate`, `awaitTakeover`, the `NEEDS_HUMAN` classes) and
      `operational-worker-boundary.js` (`recover`, fences, attempts);
    - `admin/backend/src/lib/operational-agent-runs.js` (help requests, the
-     inbox) and `components/operational-projects/AgentRuns.jsx`;
+     inbox, the in-memory frame cache) and
+     `components/operational-projects/AgentRuns.jsx`, `RunDeck.jsx` (the
+     Browser pane the dashboard takeover goes into) and `run-deck-logic.js`;
    - `scripts/a3-worker-supervisor.py` (takeover, the operator socket, the
-     journal's uncertain actions, the receipt's `uncertain_actions`);
+     journal's uncertain actions, the receipt's `uncertain_actions`,
+     `backend_view` and `frame_only`);
+   - `scripts/a3-worker-operator.py` (`human`: today's host-only page with
+     the view, Take over, Stop and the bounded input on one screen);
+   - `scripts/a3-worker-guest.py` (`submit_bound_fixture` clears both login
+     fields in a `finally`; the input vocabulary `validate_input`);
    - `scripts/a5-probe.mjs` (`coordinator_restart`, `takeover`,
      `operator_stop`).
 3. `CLAUDE.md` (the A3–A6 gotchas and the mobile-first UI rule), then
@@ -68,17 +75,98 @@ Practice and recovery for the one synthetic sign-in workflow:
   with a typed decision (for example "the sign-in happened" / "it did not" /
   "unknown, leave blocked"), recorded and audited; nothing is re-sent on
   their behalf.
-- **Takeover and resume:** explicit human takeover ownership, and an explicit
-  resume that starts a new attempt with a new fence (never the old attempt).
+- **Takeover in the dashboard and resume:** a real-time view and takeover on
+  the same screen, the run deck's Browser pane. That means explicit human
+  takeover ownership from the dashboard (see the user's direction below) and
+  an explicit resume that starts a new attempt with a new fence, never the
+  old attempt.
 - **Basic critique:** a short, typed summary of what went well or wrong per
   run, from durable state only.
 
+## User direction on takeover (2026-09-29, decided)
+
+The user asked for this before A7 starts. It answers what used to be
+decision 1 ("where takeover is driven").
+
+1. **Takeover is in the dashboard, on the same screen as the live view.**
+   - It goes in the run deck's Browser pane: a Take over control, then
+     clicks on the frame, fixed keys, bounded text and scroll.
+   - The host page (`a3-worker-operator.py human`) stays as the root
+     fallback. It is no longer the only way to take over.
+2. **Who may take over: anyone with run access** (owner, operator, editor,
+   reviewer), the same people who may start, stop and approve. Viewers and
+   outsiders may not.
+   - A regular user gets no host sudo or root and no new dashboard role.
+     Taking over from the dashboard grants control of that one attempt's
+     browser, through the backend, and nothing else.
+3. **The gesture: re-enter one's own password and TOTP at Take over.**
+   - This is the dashboard's `requireSudo` re-authentication, as for
+     approval. It proves who is acting and grants no privilege; any user
+     with TOTP can do it for their own session.
+   - It is asked because takeover hands a person a signed-in session.
+4. **Real time.**
+   - One frame every 2 s is too slow to click on. While a person watches
+     and while they hold control, the view must be near real time and
+     pushed to the page.
+   - The technology is decision 1 below. The user expected Neko. Neko is
+     named nowhere in the A1–A6 documents or the repository, so this
+     direction is where it enters the plan.
+5. **After a takeover.** Today the run ends as `taken_over` (blocked, a help
+   request in the inbox) once the person finishes. Handing back to the agent
+   is decision 2 (resume).
+6. **Record.**
+   - Record who took over, when, for how long, and the count and kind of
+     inputs, never the typed text: it may be an MFA code.
+   - Frames stay in memory only.
+   - No MCP tool, catalog entry or policy allowlist reaches takeover, input
+     or the stream.
+
+**What this widens, and must prove on the host** (like A6's
+`backend_view`):
+- **The new backend path.** The dashboard's backend gains `takeover` and
+  `input`, on its socket or on a dedicated third socket. Anyone who controls
+  the backend process could then drive the agent's browser by hand. Today
+  they could only launch, act within the allowed actions, view and stop.
+- **Only the coordinator's own attempt, while it runs.** There is one
+  controller at a time. Other viewers stay view-only. The lease and deadline
+  still apply, and human input renews the lease exactly as on the operator
+  socket.
+- **The same input limits as the host page.** Clicks, fixed keys, text of at
+  most 256 characters, and scroll. No URL bar, DevTools, script, clipboard
+  or file transfer. Every request still passes the origin policy, the host
+  proxy and the fence.
+- **Nothing but pixels comes back.** No page URL, text or DOM.
+- **The credential stays out of reach.** Human input waits until an
+  in-flight `submit_bound_fixture` has finished and cleared the fields, so a
+  person can never reach a filled password field (for example through the
+  site's "show password").
+- **Refusals in the dashboard.** A viewer, an outsider, a revoked grant or a
+  lapsed re-authentication are each refused, and the refusal says why.
+
 ## Decisions to ask the user before writing code
 
-1. **Where takeover is driven.** Today takeover and human input exist only on
-   the host operator socket. Options: keep them there and only record
-   ownership and the resume decision in the product (recommended), or add a
-   UI path (a boundary change with its own host proof).
+1. **The real-time view: which technology.**
+   - **Neko** (`m1k1o/neko`, the user's expectation): a self-hosted
+     browser in a container, streamed over WebRTC, with built-in control
+     handover (one person controls, others watch). It gives smooth video and
+     a native "take control". But it replaces the browser layer A3
+     accepted:
+     - Its browser runs under its own X server, not the runner's hardened
+       Chromium over `--remote-debugging-pipe`.
+     - Its default input is the full keyboard and mouse, plus clipboard and
+       file transfer, not the bounded input vocabulary.
+     - WebRTC media needs UDP ports or a TURN relay through the default-deny
+       fence and the origin proxy.
+     - It adds a new image and daemon inside the proof VM, and a stream
+       that must be authenticated to the dashboard.
+
+     Choosing it reopens A3-class proofs: the fence, the unit, the input
+     limits, the canary and teardown.
+   - **Screencast from the existing runner** (CDP `Page.startScreencast`):
+     frames pushed through the supervisor to the dashboard over one
+     server-sent or WebSocket channel. It stays inside the accepted
+     boundary and bounded input, with a new method but not a new browser
+     layer. It gives several frames a second rather than video.
 2. **Resume semantics.** A new run pinned from the taken-over run's policy
    (same guide, profile and binding revisions, refused if any changed), or a
    new attempt within the same run (needs a coordinator change and the A5
@@ -100,7 +188,9 @@ Practice and recovery for the one synthetic sign-in workflow:
 - Human-only: no MCP tool, catalog entry or policy allowlist starts,
   approves, stops, reconciles, takes over or resumes a run.
 - The A3/A4/A5/A6 boundaries do not widen without a decision: the socket
-  methods (A6 added only the read-only backend `view`), the root-peer rule,
+  methods (A6 added only the read-only backend `view`; the user's direction
+  above adds dashboard `takeover` and `input` for run-access users, with
+  its own host proof, and nothing else), the root-peer rule,
   the fence, the unit properties, the origin proxy's one bounded
   `POST /api/login`, the broker's value path, typed claims only, and
   "results and receipts carry binding ID, revision and outcome only".
@@ -140,9 +230,15 @@ Practice and recovery for the one synthetic sign-in workflow:
 - Local: the Operations and backend suites (sandbox failures named), the
   A3–A7 script suites, the host-boundary inventory without suppression, the
   frontend build, and the A6 browser journeys plus new A7 journeys.
-- Target: the kill cases on the proof host (coordinator and worker, mid-read,
-  mid-approval, mid-write), takeover ownership and resume with a new fence,
-  grant and key loss, the regression proofs and the canary.
+- Target:
+  - the kill cases on the proof host (coordinator and worker, mid-read,
+    mid-approval, mid-write);
+  - dashboard takeover through the backend path, meeting every limit in
+    "What this widens" above;
+  - the real-time view: its frame rate and its authentication;
+  - resume with a new fence;
+  - grant and key loss;
+  - the regression proofs and the canary.
 - CI: exact-head Security CI on a draft PR, only if the user authorizes one.
 
 ## Record and stop

@@ -1,0 +1,38 @@
+diff --git a/server/internal/http/manager.go b/server/internal/http/manager.go
+index 6176568..ba67f2b 100644
+--- a/server/internal/http/manager.go
++++ b/server/internal/http/manager.go
+@@ -6,6 +6,7 @@ import (
+ 	"net/http"
+ 	"os"
+ 	"path"
++	"strings"
+ 
+ 	"github.com/prometheus/client_golang/prometheus/promhttp"
+ 	"github.com/rs/zerolog"
+@@ -131,6 +132,25 @@ func New(WebSocketManager types.WebSocketManager, ApiManager types.ApiManager, c
+ }
+ 
+ func (manager *HttpManagerCtx) Start() {
++	// ProxyPilot A7: a bind of "unix:<path>" serves on a Unix socket (mode 0600)
++	// instead of TCP, so the server opens no network listener, loopback included.
++	if socketPath, ok := strings.CutPrefix(manager.config.Bind, "unix:"); ok {
++		_ = os.Remove(socketPath)
++		listener, err := net.Listen("unix", socketPath)
++		if err != nil {
++			manager.logger.Panic().Err(err).Msg("unable to start unix socket server")
++		}
++		if err := os.Chmod(socketPath, 0o600); err != nil {
++			manager.logger.Panic().Err(err).Msg("unable to restrict unix socket")
++		}
++		go func() {
++			if err := manager.http.Serve(listener); err != http.ErrServerClosed {
++				manager.logger.Panic().Err(err).Msg("unable to serve unix socket")
++			}
++		}()
++		manager.logger.Info().Msgf("http listening on unix socket %s", socketPath)
++		return
++	}
+ 	if manager.config.Cert != "" && manager.config.Key != "" {
+ 		go func() {
+ 			if err := manager.http.ListenAndServeTLS(manager.config.Cert, manager.config.Key); err != http.ErrServerClosed {

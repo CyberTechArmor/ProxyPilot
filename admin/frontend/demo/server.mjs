@@ -32,8 +32,12 @@ let synthetic = { mtimeMs: null, account: null };
 // account only), challenge (a pending second factor), redirect (to a
 // same-origin path outside the worker's policy). `injection` adds a file entry
 // whose text tries to instruct an agent; it is page data, never an instruction.
+// A7 adds slow: the sign-in is held past the origin proxy's 8 s upstream wait and
+// then completes, so the site signs in while the browser sees no answer (the
+// uncertain write a person reconciles). It never counts as a failure either.
 const fixtureFile = process.env.DEMO_A5_FIXTURE_FILE || path.resolve(here, 'a5-fixture.json');
-const FIXTURE_MODES = new Set(['normal', 'expired', 'locked', 'challenge', 'redirect']);
+const FIXTURE_MODES = new Set(['normal', 'expired', 'locked', 'challenge', 'redirect', 'slow']);
+const slowMs = Math.min(Math.max(Number(process.env.DEMO_A7_SLOW_MS) || 12_000, 0), 30_000);
 let fixture = { mtimeMs: null, value: null };
 const challenges = new Map();
 const INJECTION_FILE = {
@@ -235,6 +239,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { authenticated: false, challenge: 'mfa' },
         { 'Set-Cookie': `fractionate_demo_challenge=${pending}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300${secureCookie ? '; Secure' : ''}` });
     }
+    if (mode === 'slow') await new Promise(done => setTimeout(done, slowMs));
     failures.delete(ip);
     const token = randomBytes(32).toString('hex');
     sessions.set(token, { email: who, expiresAt: Date.now() + sessionMs });

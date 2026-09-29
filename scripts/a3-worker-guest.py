@@ -24,8 +24,10 @@ import os
 import queue
 import re
 import select
+import hashlib
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -184,7 +186,10 @@ def receive_credential(path, seconds=None, on_open=None):
 
 
 def validate_config(value):
-    if not isinstance(value, dict) or set(value) != {'attempt_id', 'workload', 'spki'}:
+    # A7: `live` (true) asks for the real-time view (Neko); a browser workload only.
+    if not isinstance(value, dict) or set(value) - {'live'} != {'attempt_id', 'workload', 'spki'}:
+        raise Refused('INVALID_CONFIG')
+    if 'live' in value and (value['live'] is not True or value['workload'] != 'browser'):
         raise Refused('INVALID_CONFIG')
     if not isinstance(value['attempt_id'], str) or not UUID.fullmatch(value['attempt_id']):
         raise Refused('INVALID_CONFIG')
@@ -250,6 +255,476 @@ def high_fd(fd):
     moved = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
     os.close(fd)
     return moved
+
+
+# ------------------------------------------------------------------ A7 live
+# The real-time view and dashboard takeover (user decisions 1 and 1a,
+# 2026-09-29): Neko inside this unit. Xvfb draws the browser on a private
+# display (its socket and cookie live on this unit's private tmpfs); Neko's
+# server streams that display over WebRTC and listens only on a Unix socket here
+# (ProxyPilot's reviewed patch, scripts/a7-neko-unix-socket.patch); the browser
+# stays this runner's own sandboxed Chromium on the pipe, now headful in kiosk
+# mode under the managed policy below. This runner is Neko's only administrator:
+# the API token and every member token stay in this process and never cross the
+# control channel. Viewers reach Neko only through the relay (live_open /
+# live_send / live_close), which passes signalling events only; handing control
+# to a person (live_give) is a queued command, so it runs only after any
+# in-flight submit_bound_fixture has finished and cleared the fields. Human
+# input is counted by kind from X (never which key); the agent's own input goes
+# through the DevTools pipe, not X, so it is never counted.
+LIVE_DISPLAY = ':99'
+LIVE_UDP_PORT = 18091
+NEKO_BINARY = '/usr/local/lib/proxypilot-live/neko'
+XVFB = '/usr/bin/Xvfb'
+XINPUT = '/usr/bin/xinput'
+LIVE_POLICY_PATH = '/etc/chromium/policies/managed/proxypilot-live.json'
+LIVE_MAX_CONNS = 6
+LIVE_MAX_MESSAGE = 256 * 1024
+LIVE_SILENCE = ('audiotestsrc wave=silence is-live=true ! audio/x-raw,channels=2,rate=48000 ! audioconvert '
+                '! opusenc bitrate=16000 ! appsink name=appsink')
+# The managed Chromium policy the A7 installer writes, byte for byte.
+LIVE_POLICY = {
+    'AllowFileSelectionDialogs': False, 'AudioCaptureAllowed': False, 'AutofillAddressEnabled': False,
+    'AutofillCreditCardEnabled': False, 'BookmarkBarEnabled': False, 'BrowserAddPersonEnabled': False,
+    'BrowserGuestModeEnabled': False, 'BrowserSignin': 0, 'DefaultClipboardSetting': 2,
+    'DefaultNotificationsSetting': 2, 'DefaultPopupsSetting': 2, 'DeveloperToolsAvailability': 2,
+    'DownloadRestrictions': 3, 'EditBookmarksEnabled': False, 'ExtensionInstallBlocklist': ['*'],
+    'IncognitoModeAvailability': 1, 'PasswordManagerEnabled': False, 'PrintingEnabled': False,
+    'PromptForDownloadLocation': False, 'SavingBrowserHistoryDisabled': True, 'ScreenCaptureAllowed': False,
+    'SpellcheckEnabled': False, 'SyncDisabled': True, 'TaskManagerEndProcessEnabled': False,
+    'TranslateEnabled': False, 'URLAllowlist': ['about:blank'],
+    'URLBlocklist': ['file://*', 'chrome://*', 'chrome-untrusted://*', 'devtools://*', 'view-source:*',
+                     'javascript://*', 'data:*', 'blob:*', 'about:*'],
+    'VideoCaptureAllowed': False,
+}
+
+
+def live_policy_bytes():
+    return (json.dumps(LIVE_POLICY, indent=1, sort_keys=True) + '\n').encode()
+
+
+# Relay allowlists: only signalling crosses. Input never travels this way (it
+# goes over the WebRTC data channel, and only for the host Neko has given
+# control to); clipboard, chat, members, screen and admin events never cross.
+LIVE_FROM_VIEWER = frozenset(('client/heartbeat', 'signal/request', 'signal/answer', 'signal/candidate',
+                              'signal/restart', 'signal/video'))
+LIVE_TO_VIEWER = frozenset(('system/init', 'system/disconnect', 'system/heartbeat', 'signal/provide',
+                            'signal/offer', 'signal/answer', 'signal/candidate', 'signal/restart', 'signal/close',
+                            'signal/video', 'control/host', 'control/release', 'screen/updated'))
+
+
+def live_filter(message, allowed):
+    """One relayed Neko message, or None: an allowed event, a JSON object payload."""
+    if not isinstance(message, dict) or set(message) - {'event', 'payload'}:
+        return None
+    if message.get('event') not in allowed:
+        return None
+    payload = message.get('payload')
+    if payload is not None and not isinstance(payload, dict):
+        return None
+    out = {'event': message['event']}
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        if message['event'] == 'system/init':
+            # Other members and the room's settings are not the viewer's business.
+            payload = {k: payload[k] for k in ('session_id', 'control_host', 'screen_size', 'webrtc') if k in payload}
+        elif message['event'] == 'signal/provide':
+            payload.pop('iceservers', None)   # the dashboard mints its own TURN credentials
+        out['payload'] = payload
+    return out
+
+
+def xauthority(display_number, cookie):
+    """One MIT-MAGIC-COOKIE-1 entry for any address (FamilyWild)."""
+    def field(data):
+        return len(data).to_bytes(2, 'big') + data
+    return (0xffff).to_bytes(2, 'big') + field(b'') + field(display_number.encode()) + \
+        field(b'MIT-MAGIC-COOKIE-1') + field(cookie)
+
+
+class UnixHttp:
+    """HTTP/1.1 to Neko's Unix socket, with this runner's admin token."""
+
+    def __init__(self, path, token, timeout=10):
+        self.path, self.token, self.timeout = path, token, timeout
+
+    def request(self, method, target, body=None, token=None):
+        payload = b'' if body is None else json.dumps(body, separators=(',', ':')).encode()
+        head = ['%s %s HTTP/1.1' % (method, target), 'Host: localhost', 'Connection: close',
+                'Authorization: Bearer %s' % (token or self.token), 'Content-Length: %d' % len(payload)]
+        if body is not None:
+            head.append('Content-Type: application/json')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(self.timeout)
+            s.connect(self.path)
+            s.sendall(('\r\n'.join(head) + '\r\n\r\n').encode() + payload)
+            data = b''
+            while len(data) < 1024 * 1024:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        header, _, content = data.partition(b'\r\n\r\n')
+        try:
+            status = int(header.split(b' ', 2)[1])
+        except (IndexError, ValueError) as error:
+            raise Refused('LIVE_PROTOCOL') from error
+        if b'transfer-encoding: chunked' in header.lower():
+            content = dechunk(content)
+        try:
+            return status, (json.loads(content) if content.strip() else None)
+        except ValueError:
+            return status, None
+
+
+def dechunk(data):
+    out = b''
+    while data:
+        size, _, rest = data.partition(b'\r\n')
+        try:
+            length = int(size.split(b';')[0], 16)
+        except ValueError:
+            break
+        if length == 0:
+            break
+        out += rest[:length]
+        data = rest[length + 2:]
+    return out
+
+
+class NekoSocket:
+    """One viewer's WebSocket to Neko over the Unix socket (RFC 6455, client side)."""
+
+    def __init__(self, path, token, on_message, on_close):
+        self.on_message, self.on_close = on_message, on_close
+        self.lock = threading.Lock()
+        self.closed = False
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(10)
+        self.sock.connect(path)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall(('GET /api/ws?token=%s HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
+                           'Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n'
+                           % (token, key)).encode())
+        head = b''
+        while b'\r\n\r\n' not in head:
+            chunk = self.sock.recv(4096)
+            if not chunk or len(head) > 16384:
+                raise Refused('LIVE_PROTOCOL')
+            head += chunk
+        head, _, self.buffer = head.partition(b'\r\n\r\n')
+        accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest())
+        if not head.startswith(b'HTTP/1.1 101') or accept not in head:
+            raise Refused('LIVE_PROTOCOL')
+        self.sock.settimeout(None)
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _frame(self, opcode, data):
+        mask = os.urandom(4)
+        n = len(data)
+        head = bytes([0x80 | opcode]) + (bytes([0x80 | n]) if n < 126 else bytes([0x80 | 126]) + n.to_bytes(2, 'big')
+                                          if n < 65536 else bytes([0x80 | 127]) + n.to_bytes(8, 'big'))
+        return head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+
+    def send(self, text, opcode=1):
+        with self.lock:
+            if self.closed:
+                raise Refused('LIVE_CLOSED')
+            try:
+                self.sock.sendall(self._frame(opcode, text.encode() if isinstance(text, str) else text))
+            except OSError as error:
+                raise Refused('LIVE_CLOSED') from error
+
+    def _read(self, n):
+        while len(self.buffer) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError('closed')
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:n], self.buffer[n:]
+        return data
+
+    def _reader(self):
+        message, reason = b'', 'closed'
+        try:
+            while True:
+                b0, b1 = self._read(2)
+                opcode, length = b0 & 0x0f, b1 & 0x7f
+                if length == 126:
+                    length = int.from_bytes(self._read(2), 'big')
+                elif length == 127:
+                    length = int.from_bytes(self._read(8), 'big')
+                if length > LIVE_MAX_MESSAGE:
+                    reason = 'too_large'
+                    break
+                mask = self._read(4) if b1 & 0x80 else None
+                data = self._read(length)
+                if mask:
+                    data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+                if opcode == 8:
+                    break
+                if opcode == 9:
+                    self.send(data, 10)
+                    continue
+                if opcode in (0, 1):
+                    message += data
+                    if len(message) > LIVE_MAX_MESSAGE:
+                        reason = 'too_large'
+                        break
+                    if b0 & 0x80:
+                        try:
+                            self.on_message(json.loads(message))
+                        except ValueError:
+                            pass
+                        message = b''
+        except (OSError, Refused, ValueError):
+            pass
+        self.close(reason)
+
+    def close(self, reason='closed'):
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.on_close(reason)
+
+
+class InputCounter:
+    """Counts human X input by kind (keys, clicks, scrolls) from XI2 raw events.
+    Only the event type and button number are read; a key's code never is."""
+
+    def __init__(self, env):
+        self.lock = threading.Lock()
+        self.counts = {'key': 0, 'click': 0, 'scroll': 0}
+        self.process = subprocess.Popen([XINPUT, 'test-xi2', '--root'], stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        kind = None
+        for raw in self.process.stdout:
+            line = raw.decode('ascii', 'replace').strip()
+            if line.startswith('EVENT type '):
+                kind = {'13': 'key', '15': 'button'}.get(line.split()[2])
+            elif kind and line.startswith('detail:'):
+                if kind == 'key':
+                    self.add('key')
+                else:
+                    try:
+                        button = int(line.split(':', 1)[1])
+                    except ValueError:
+                        button = 0
+                    self.add('click' if 1 <= button <= 3 else 'scroll' if 4 <= button <= 7 else None)
+                kind = None
+
+    def add(self, kind):
+        if kind:
+            with self.lock:
+                self.counts[kind] += 1
+
+    def take(self):
+        with self.lock:
+            counts, self.counts = dict(self.counts), {'key': 0, 'click': 0, 'scroll': 0}
+        return counts
+
+
+class LiveDesktop:
+    """Xvfb, the input counter and Neko for one attempt, all inside this unit."""
+
+    def __init__(self, channel):
+        self.channel = channel
+        self.dir = os.path.join(WORKSPACE, 'live')
+        self.processes = []
+        self.conns = {}
+        self.lock = threading.Lock()
+        self.controller = None
+
+    def start(self):
+        for path in (NEKO_BINARY, XVFB, XINPUT):
+            if not os.path.isfile(path):
+                raise Refused('LIVE_UNAVAILABLE')
+        try:
+            with open(LIVE_POLICY_PATH, 'rb') as stream:
+                if stream.read(65536) != live_policy_bytes():
+                    raise Refused('LIVE_POLICY_MISMATCH')
+        except OSError as error:
+            raise Refused('LIVE_POLICY_MISMATCH') from error
+        os.makedirs(os.path.join(self.dir, 'home'), mode=0o700, exist_ok=True)
+        auth = os.path.join(self.dir, 'xauth')
+        with open(os.open(auth, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as stream:
+            stream.write(xauthority(LIVE_DISPLAY[1:], os.urandom(16)))
+        self.env = {'DISPLAY': LIVE_DISPLAY, 'XAUTHORITY': auth, 'HOME': os.path.join(self.dir, 'home'),
+                    'XDG_RUNTIME_DIR': self.dir, 'LANG': 'C.UTF-8', 'PATH': '/usr/bin:/bin'}
+        # No TCP listener and no abstract-namespace socket: only the path socket
+        # on this unit's private /tmp, guarded by the cookie.
+        self._spawn([XVFB, LIVE_DISPLAY, '-screen', '0', '%dx%dx24' % VIEWPORT, '-nolisten', 'tcp',
+                     '-nolisten', 'local', '-noreset', '-auth', auth, '-dpi', '96'])
+        self._wait(lambda: os.path.exists('/tmp/.X11-unix/X' + LIVE_DISPLAY[1:]), 'LIVE_DISPLAY_FAILED')
+        self.counter = InputCounter(self.env)
+        self.processes.append(self.counter.process)
+        self.socket = os.path.join(self.dir, 'neko.sock')
+        self.token = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('=')
+        config = os.path.join(self.dir, 'neko.yaml')
+        with open(os.open(config, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as stream:
+            json.dump(self.neko_config(), stream)
+        self._spawn([NEKO_BINARY, 'serve', '--config', config], log=os.path.join(self.dir, 'neko.log'))
+        self.api = UnixHttp(self.socket, self.token)
+        self._wait(self._healthy, 'LIVE_NEKO_FAILED', seconds=30)
+        with open(NEKO_BINARY, 'rb') as stream:
+            self.neko_sha256 = hashlib.sha256(stream.read()).hexdigest()
+        return self
+
+    def neko_config(self):
+        return {
+            'server': {'bind': 'unix:' + self.socket, 'metrics': False, 'pprof': False, 'static': ''},
+            'desktop': {'display': LIVE_DISPLAY, 'screen': '%dx%d@25' % VIEWPORT, 'input': {'enabled': False},
+                        'upload_drop': False, 'file_chooser_dialog': False, 'unminimize': True},
+            'capture': {'audio': {'pipeline': LIVE_SILENCE}, 'video': {'codec': 'vp8'},
+                        'screencast': {'enabled': False}, 'microphone': {'enabled': False},
+                        'webcam': {'enabled': False}, 'broadcast': {'autostart': False}},
+            'member': {'provider': 'object', 'object': {'users': '[]'}},
+            'session': {'api_token': self.token, 'locked_controls': True, 'implicit_hosting': False,
+                        'control_protection': False, 'inactive_cursors': False, 'private_mode': False,
+                        'merciful_reconnect': True, 'heartbeat_interval': 10, 'cookie': {'enabled': False}},
+            'webrtc': {'udpmux': LIVE_UDP_PORT, 'icelite': True, 'ip_retrieval_url': '',
+                       'estimator': {'enabled': False}},
+            'plugins': {'enabled': False}, 'chat': {'enabled': False},
+            'filetransfer': {'enabled': False}, 'openinapp': {'enabled': False},
+        }
+
+    def _spawn(self, argv, log=None):
+        out = subprocess.DEVNULL if log is None else open(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb')
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=self.env)
+        if log is not None:
+            out.close()
+        self.processes.append(process)
+        return process
+
+    def _wait(self, ready, code, seconds=15):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if any(p.poll() is not None for p in self.processes):
+                raise Refused(code)
+            try:
+                if ready():
+                    return
+            except (OSError, Refused):
+                pass
+            time.sleep(0.1)
+        raise Refused(code)
+
+    def _healthy(self):
+        return os.path.exists(self.socket) and self.api.request('GET', '/health')[0] == 200
+
+    # -- relay (handled as soon as it arrives; never touches the browser)
+
+    def open(self, conn):
+        if not isinstance(conn, str) or not re.fullmatch(r'[a-z0-9]{8,32}', conn):
+            raise Refused('INVALID_COMMAND')
+        with self.lock:
+            if conn in self.conns:
+                raise Refused('LIVE_CONN_EXISTS')
+            if len(self.conns) >= LIVE_MAX_CONNS:
+                raise Refused('LIVE_BUSY')
+            self.conns[conn] = None
+        try:
+            member, secret = 'v' + conn, base64.urlsafe_b64encode(os.urandom(24)).decode()
+            status, created = self.api.request('POST', '/api/members', {'username': member, 'password': secret,
+                                                                         'profile': self.profile(False)})
+            if status != 200 or not isinstance(created, dict) or not isinstance(created.get('id'), str):
+                raise Refused('LIVE_MEMBER_FAILED')
+            status, login = self.api.request('POST', '/api/login', {'username': member, 'password': secret})
+            if status != 200 or not isinstance(login, dict) or not isinstance(login.get('token'), str):
+                raise Refused('LIVE_MEMBER_FAILED')
+            ws = NekoSocket(self.socket, login['token'], lambda m, c=conn: self._to_viewer(c, m),
+                            lambda reason, c=conn: self._closed(c, reason))
+        except (OSError, Refused) as error:
+            with self.lock:
+                self.conns.pop(conn, None)
+            raise Refused(getattr(error, 'code', 'LIVE_MEMBER_FAILED'))
+        with self.lock:
+            self.conns[conn] = {'member': created['id'], 'session': login.get('id') or created['id'], 'ws': ws}
+        return {'conn': conn}
+
+    def send(self, conn, data):
+        entry = self.conns.get(conn)
+        message = live_filter(data, LIVE_FROM_VIEWER)
+        if entry is None or message is None:
+            return False
+        entry['ws'].send(json.dumps(message, separators=(',', ':')))
+        return True
+
+    def close_conn(self, conn):
+        entry = self.conns.get(conn)
+        if entry and entry.get('ws'):
+            entry['ws'].close('viewer_closed')
+
+    def _to_viewer(self, conn, message):
+        message = live_filter(message, LIVE_TO_VIEWER)
+        if message is not None:
+            self.channel.emit({'event': 'live', 'conn': conn, 'data': message})
+
+    def _closed(self, conn, reason):
+        with self.lock:
+            entry = self.conns.pop(conn, None)
+        if entry is None:
+            return
+        try:
+            self.api.request('DELETE', '/api/members/%s' % entry['member'])
+        except (OSError, Refused):
+            pass
+        self.channel.emit({'event': 'live_closed', 'conn': conn, 'reason': reason})
+
+    @staticmethod
+    def profile(host):
+        return {'name': 'viewer', 'is_admin': False, 'can_login': True, 'can_connect': True, 'can_watch': True,
+                'can_host': host, 'can_share_media': False, 'can_access_clipboard': False,
+                'sends_inactive_cursor': False, 'can_see_inactive_cursors': False,
+                'plugins': {'chat.can_send': False, 'chat.can_receive': False, 'filetransfer.enabled': False}}
+
+    # -- control (queued behind any browser command)
+
+    def give(self, conn):
+        entry = self.conns.get(conn)
+        if entry is None:
+            raise Refused('LIVE_CONN_UNKNOWN')
+        if self.controller is not None:
+            raise Refused('LIVE_CONTROL_HELD')
+        status, _ = self.api.request('POST', '/api/members/%s' % entry['member'], self.profile(True))
+        if not 200 <= status < 300:
+            raise Refused('LIVE_CONTROL_FAILED')
+        status, _ = self.api.request('POST', '/api/room/control/give/%s' % entry['session'])
+        if not 200 <= status < 300:
+            raise Refused('LIVE_CONTROL_FAILED')
+        self.counter.take()
+        self.controller = conn
+        return {'controlling': True}
+
+    def release(self):
+        self.api.request('POST', '/api/room/control/reset')
+        entry = self.conns.get(self.controller) if self.controller else None
+        if entry:
+            self.api.request('POST', '/api/members/%s' % entry['member'], self.profile(False))
+        self.controller = None
+        return {'inputs': self.counter.take()}
+
+    def close(self):
+        with self.lock:
+            conns = list(self.conns)
+        for conn in conns:
+            self.close_conn(conn)
+        for process in reversed(self.processes):
+            if process.poll() is None:
+                process.terminate()
+        for process in self.processes:
+            try:
+                process.wait(3)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 class Cdp:
@@ -482,7 +957,7 @@ EGRESS_PROBE = '''(async () => {
 class Browser:
     """One Chromium process tree and its single page, driven by fixed code."""
 
-    def __init__(self, spki, channel):
+    def __init__(self, spki, channel, live=None):
         self.channel = channel
         self.statuses = {}
         self.blocked = []
@@ -509,7 +984,10 @@ class Browser:
         null = high_fd(os.open('/dev/null', os.O_RDWR))
         log = high_fd(os.open(self.log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
         proxy_host = PROXY.split(':', 1)[0]
-        argv = [CHROMIUM, '--headless=new', '--remote-debugging-pipe',
+        # A7 live: the same browser, drawn on the unit's private display in kiosk
+        # mode (no address bar or tabs) under the managed policy; still the pipe.
+        mode = ['--kiosk', '--ozone-platform=x11', '--window-position=0,0'] if live else ['--headless=new']
+        argv = [CHROMIUM, *mode, '--remote-debugging-pipe',
                 '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check',
                 '--disable-background-networking', '--disable-component-update',
                 '--disable-sync', '--disable-extensions', '--disable-default-apps',
@@ -524,6 +1002,8 @@ class Browser:
         env = {'HOME': home, 'XDG_CONFIG_HOME': os.path.join(home, '.config'),
                'XDG_CACHE_HOME': os.path.join(home, '.cache'), 'TMPDIR': WORKSPACE,
                'LANG': 'C.UTF-8', 'PATH': '/usr/bin:/bin'}
+        if live:
+            env.update(DISPLAY=live.env['DISPLAY'], XAUTHORITY=live.env['XAUTHORITY'])
         started = time.monotonic()
         # No --no-sandbox: Chromium keeps its own namespace/seccomp sandbox
         # inside the unprivileged unit.
@@ -1083,12 +1563,46 @@ PROOF_RUN = {'proof:cpu': proof_cpu, 'proof:memory': proof_memory, 'proof:tasks'
              'proof:disk': proof_disk, 'proof:escape': proof_escape, 'proof:descendant': proof_descendant}
 
 
-def commands(stream, sink):
+# A7: relay operations are answered as they arrive (they only move signalling
+# to and from Neko); everything else, including handing control to a person,
+# waits its turn in the one command queue behind any browser action.
+RELAY_OPS = frozenset(('live_open', 'live_send', 'live_close'))
+
+
+def relay(command, live, channel):
+    ident, op = command.get('id'), command.get('op')
+    try:
+        if type(ident) is not int or live is None:
+            raise Refused('LIVE_UNAVAILABLE' if live is None else 'INVALID_COMMAND')
+        shape = {'live_open': {'id', 'op', 'conn'}, 'live_send': {'id', 'op', 'conn', 'data'},
+                 'live_close': {'id', 'op', 'conn'}}[op]
+        if set(command) != shape:
+            raise Refused('INVALID_COMMAND')
+        if op == 'live_open':
+            channel.emit({'id': ident, 'ok': True, 'result': live.open(command['conn'])})
+        elif op == 'live_send':
+            # No reply on success: signalling is fire-and-forget; a refusal is an event.
+            if not live.send(command['conn'], command['data']):
+                channel.emit({'event': 'live_dropped', 'conn': command['conn']})
+        else:
+            live.close_conn(command['conn'])
+            channel.emit({'id': ident, 'ok': True, 'result': {'closed': True}})
+    except Refused as error:
+        if op == 'live_send':
+            channel.emit({'event': 'live_dropped', 'conn': command.get('conn')})
+        else:
+            channel.emit({'id': ident, 'ok': False, 'error': error.code})
+
+
+def commands(stream, sink, live=None, channel=None):
     for line in stream:
         try:
             value = json.loads(line)
         except ValueError:
             value = {'malformed': True}
+        if isinstance(value, dict) and value.get('op') in RELAY_OPS:
+            relay(value, live[0] if live else None, channel)
+            continue
         sink.put(value)
     sink.put(None)
 
@@ -1100,18 +1614,26 @@ def serve(config, channel, stream=None):
         channel.emit({'event': 'failed', 'code': 'PROOF_LAUNCH_FAILURE'})
         return 3
     inbox = queue.Queue()
-    threading.Thread(target=commands, args=(stream or sys.stdin, inbox), daemon=True).start()
+    live_box = [None]
+    threading.Thread(target=commands, args=(stream or sys.stdin, inbox, live_box, channel), daemon=True).start()
     browser = None
     ready = {'event': 'ready', 'workload': workload, 'workspace': workspace_identity(),
              'cgroup': own_cgroup(), 'uid': os.getuid()}
     if workload == 'browser':
         try:
-            browser = Browser(config['spki'], channel)
+            if config.get('live'):
+                live_box[0] = LiveDesktop(channel).start()
+            browser = Browser(config['spki'], channel, live_box[0])
         except Refused as error:
+            if live_box[0] is not None:
+                live_box[0].close()
             channel.emit({'event': 'failed', 'code': error.code,
                           'diagnostic': getattr(error, 'diagnostic', None)})
             return 4
         ready.update(browser_pid=browser.pid, browser_start_seconds=browser.start_seconds)
+        if live_box[0] is not None:
+            ready['live'] = {'udp_port': LIVE_UDP_PORT, 'neko_sha256': live_box[0].neko_sha256,
+                             'policy_sha256': hashlib.sha256(live_policy_bytes()).hexdigest()}
     channel.emit(ready)
     try:
         while True:
@@ -1130,7 +1652,8 @@ def serve(config, channel, stream=None):
                 shape = {'ping': {'id', 'op'}, 'stop': {'id', 'op'}, 'view': {'id', 'op'},
                          'observe': {'id', 'op'}, 'egress_probe': {'id', 'op'}, 'proof': {'id', 'op'},
                          'action': {'id', 'op', 'action'}, 'input': {'id', 'op', 'input'},
-                         'locate': {'id', 'op', 'target'}}.get(op)
+                         'locate': {'id', 'op', 'target'}, 'live_give': {'id', 'op', 'conn'},
+                         'live_release': {'id', 'op'}}.get(op)
                 if op == 'action' and command.get('action') == 'submit_bound_fixture':
                     shape = {'id', 'op', 'action', 'binding_id'}
                 if shape is None or set(command) != shape:
@@ -1160,6 +1683,12 @@ def serve(config, channel, stream=None):
                     result = browser.view()
                 elif op == 'input':
                     result = browser.human_input(command['input'])
+                elif op in ('live_give', 'live_release'):
+                    # Queued: an in-flight submit has finished and cleared both
+                    # fields before a person can touch the page.
+                    if live_box[0] is None:
+                        raise Refused('LIVE_UNAVAILABLE')
+                    result = live_box[0].give(command['conn']) if op == 'live_give' else live_box[0].release()
                 elif op == 'observe':
                     result = browser.observe()
                 elif op == 'locate':
@@ -1177,6 +1706,8 @@ def serve(config, channel, stream=None):
     finally:
         if browser is not None:
             browser.close()
+        if live_box[0] is not None:
+            live_box[0].close()
 
 
 def main():

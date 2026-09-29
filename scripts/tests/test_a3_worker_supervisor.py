@@ -342,7 +342,11 @@ class SupervisorTests(unittest.TestCase):
 
     def test_takeover_fences_model_and_operator_only_controls(self):
         self.sup.launch(launch_spec())
-        self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'takeover', self.ref())
+        # A7 (user decision): the backend's takeover is the dashboard one. It needs
+        # a viewer's live relay on a live attempt; input and observe stay operator-only.
+        self.assertRefused('INVALID_REQUEST', self.sup.dispatch, 'takeover', self.ref())
+        self.assertRefused('LIVE_UNAVAILABLE', self.sup.dispatch, 'takeover', self.ref(conn='0123456789abcdef'))
+        self.assertRefused('LIVE_UNAVAILABLE', self.sup.dispatch, 'live', self.ref())
         self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'input',
                            self.ref(input={'kind': 'key', 'key': 'Tab'}))
         self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'observe', self.ref())

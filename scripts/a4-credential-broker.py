@@ -81,6 +81,15 @@ MODEL_ROUTES = {'gpt-6-luna': {'provider': 'openai', 'url': 'https://api.openai.
 MAX_OUTPUT_TOKENS = 4096
 # A5: room for an approved guide in one model step (the supervisor checks it first).
 MAX_PROMPT_BYTES = 16000
+# A7: the automatic run summary is one more call on the run's pinned budget, with
+# its own output cap; its text (bounded, untrusted) is the only model text that
+# leaves the broker for the backend.
+SUMMARY_MAX_OUTPUT_TOKENS = 300
+SUMMARY_TEXT_CHARS = 800
+# Operator-socket proofs (through the supervisor's operator model_step only):
+# provider_error asks the provider with a zero token cap; the two A7 proofs never
+# read the key or contact the provider, and settle a fixed reply instead.
+MODEL_PROOFS = frozenset(('provider_error', 'reply_outside_set', 'usage_missing'))
 PROVIDER_SECONDS = 60
 # A byte-level BPE token covers at least one byte, so UTF-8 bytes bound the
 # prompt tokens; the chat framing overhead is bounded generously on top.
@@ -235,7 +244,18 @@ def worst_case(prompt_bytes, max_output_tokens, price):
             nano_cost(tokens_in, rate_in) + nano_cost(max_output_tokens, price['output']))
 
 
-def settle_usage(body, requested, route, price):
+def proof_answer(proof, call_id, model, prompt_bytes):
+    """A fixed provider reply for an operator proof; nothing is sent anywhere."""
+    body = {'id': 'proof-%s-%s' % (proof, call_id), 'model': model,
+            'choices': [{'message': {'content': 'I would choose shell' if proof == 'reply_outside_set' else 'read_files'},
+                         'finish_reason': 'stop'}]}
+    if proof == 'reply_outside_set':
+        body['usage'] = {'prompt_tokens': prompt_bytes // 4 + 1, 'completion_tokens': 5,
+                         'total_tokens': prompt_bytes // 4 + 6}
+    return 200, body
+
+
+def settle_usage(body, requested, route, price, excerpt=200):
     """Validate a 200 response and price its usage; any doubt raises Refused."""
     if not isinstance(body, dict) or not isinstance(body.get('id'), str) or not 0 < len(body['id']) <= 200:
         raise Refused('USAGE_MISSING', 'response id')
@@ -273,7 +293,7 @@ def settle_usage(body, requested, route, price):
             'tokens': prompt + completion, 'nano_usd': cost,
             'finish_reason': str(choice.get('finish_reason'))[:32] if isinstance(choice, dict) else None,
             # Untrusted provider output, bounded; never an instruction.
-            'untrusted_response_excerpt': text[:200] if isinstance(text, str) else '',
+            'untrusted_response_excerpt': text[:excerpt] if isinstance(text, str) else '',
             'response_sha256': hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()
             if isinstance(text, str) else None}
 
@@ -738,16 +758,24 @@ class Broker:
         raise Refused(code)
 
     def model_call(self, params):
-        fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens', 'prompt')
         proof = None
         if isinstance(params, dict) and 'proof' in params:
             params = dict(params)
             proof = params.pop('proof')
-            if proof != 'provider_error':
+            if proof not in MODEL_PROOFS:
                 raise Refused('INVALID_REQUEST', 'proof')
+        return self._model_call(params, proof, MAX_OUTPUT_TOKENS, 200)
+
+    def summary_call(self, params):
+        """A7: one summary of a finished run, on the run's pinned budget."""
+        result = self._model_call(params, None, SUMMARY_MAX_OUTPUT_TOKENS, SUMMARY_TEXT_CHARS)
+        return dict(result, kind='summary')
+
+    def _model_call(self, params, proof, max_output, excerpt):
+        fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens', 'prompt')
         if (not exact(params, fields) or not uuid_ok(params['run_id']) or not uuid_ok(params['call_id'])
                 or not safe_int(params['project_limits_revision']) or not isinstance(params['model'], str)
-                or not safe_int(params['max_output_tokens'], 1) or params['max_output_tokens'] > MAX_OUTPUT_TOKENS
+                or not safe_int(params['max_output_tokens'], 1) or params['max_output_tokens'] > max_output
                 or not isinstance(params['prompt'], str)):
             raise Refused('INVALID_REQUEST')
         prompt_bytes = len(params['prompt'].encode('utf-8'))
@@ -764,6 +792,7 @@ class Broker:
                         raise Refused(existing.get('refusal') or 'CALL_REFUSED')
                     return dict(self._call_result(existing), replayed=True)
                 call = {'call_id': params['call_id'], 'run_id': params['run_id'], 'model_requested': params['model'],
+                        'kind': 'summary' if max_output == SUMMARY_MAX_OUTPUT_TOKENS else 'step',
                         'max_output_tokens': params['max_output_tokens'], 'prompt_bytes': prompt_bytes,
                         'prompt_sha256': hashlib.sha256(params['prompt'].encode('utf-8')).hexdigest(),
                         'started_at': stamp(self.clock()), 'price_table_revision': self.state['prices']['revision']}
@@ -797,31 +826,38 @@ class Broker:
                 self.state['calls'][params['call_id']] = call
                 # Durable before the provider can see anything.
                 self._save()
-            key = None
-            try:
-                key = self._vault().read(provider['vault_key'], provider['vault_version'])
-            except Refused as error:
-                with self.lock:
-                    self._release(call, 'refused', error.code)
-                    self._save()
-                raise
-            body = {'model': params['model'], 'messages': [{'role': 'user', 'content': params['prompt']}],
-                    'max_completion_tokens': output_tokens, 'reasoning_effort': 'none',
-                    'service_tier': route['service_tier'], 'store': False, 'n': 1}
-            with self.lock:
-                call['state'] = 'sent'
-                self._save()
             started = time.monotonic()
-            try:
-                status, answer = self.host.provider(route['url'], key, body)
-            except (OSError, ValueError, TimeoutError) as error:
+            if proof in ('reply_outside_set', 'usage_missing'):
+                # A7 operator proofs: no key is read and no provider is contacted.
                 with self.lock:
-                    call.update(state='uncertain', refusal='PROVIDER_ERROR', finished_at=stamp(self.clock()),
-                                error=type(error).__name__)
+                    call.update(state='sent', provider_contacted=False)
                     self._save()
-                raise Refused('PROVIDER_ERROR', 'uncertain; reservation kept') from error
-            finally:
-                wipe(key)
+                status, answer = proof_answer(proof, params['call_id'], params['model'], prompt_bytes)
+            else:
+                key = None
+                try:
+                    key = self._vault().read(provider['vault_key'], provider['vault_version'])
+                except Refused as error:
+                    with self.lock:
+                        self._release(call, 'refused', error.code)
+                        self._save()
+                    raise
+                body = {'model': params['model'], 'messages': [{'role': 'user', 'content': params['prompt']}],
+                        'max_completion_tokens': output_tokens, 'reasoning_effort': 'none',
+                        'service_tier': route['service_tier'], 'store': False, 'n': 1}
+                with self.lock:
+                    call['state'] = 'sent'
+                    self._save()
+                try:
+                    status, answer = self.host.provider(route['url'], key, body)
+                except (OSError, ValueError, TimeoutError) as error:
+                    with self.lock:
+                        call.update(state='uncertain', refusal='PROVIDER_ERROR', finished_at=stamp(self.clock()),
+                                    error=type(error).__name__)
+                        self._save()
+                    raise Refused('PROVIDER_ERROR', 'uncertain; reservation kept') from error
+                finally:
+                    wipe(key)
             with self.lock:
                 call['http_status'] = status
                 call['latency_ms'] = int((time.monotonic() - started) * 1000)
@@ -837,7 +873,7 @@ class Broker:
                     self._save()
                     raise Refused('PROVIDER_ERROR', 'HTTP %d' % status)
                 try:
-                    settled = settle_usage(answer, params['model'], route, call['price'])
+                    settled = settle_usage(answer, params['model'], route, call['price'], excerpt)
                 except Refused as error:
                     # The provider did the work but its usage or price is unknown:
                     # keep the whole reservation as spent. Never assume zero.
@@ -890,7 +926,7 @@ class Broker:
         handler = {'status': self.status, 'bind': self.bind, 'rotate': self.rotate, 'revoke': self.revoke,
                    'bindings': self.bindings, 'pin_run': self.pin_run, 'check': self.check, 'deliver': self.deliver,
                    'provider_bind': self.provider_bind, 'price_set': self.price_set, 'price_clear': self.price_clear,
-                   'model_call': self.model_call, 'ledger': self.ledger}.get(method)
+                   'model_call': self.model_call, 'summary_call': self.summary_call, 'ledger': self.ledger}.get(method)
         if handler is None:
             raise Refused('METHOD_NOT_ALLOWED')
         return handler(params)

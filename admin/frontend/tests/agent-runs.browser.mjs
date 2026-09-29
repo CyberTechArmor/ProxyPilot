@@ -346,11 +346,18 @@ try {
     const page = await as('editor');
     await page.goto(runsUrl());
     await page.getByRole('button', { name: 'Start run' }).waitFor(WAIT);
+    // Reach a control by Tab alone, and require a visible focus indicator on it.
     async function tabTo(name, limit = 80) {
       for (let i = 0; i < limit; i += 1) {
         await page.keyboard.press('Tab');
         const focused = await page.evaluate(() => { const e = document.activeElement; return (e?.getAttribute('aria-label') || e?.innerText || '').trim(); });
-        if (focused === name) return;
+        if (focused === name) {
+          const ring = await page.evaluate(() => { const s = getComputedStyle(document.activeElement);
+            return { visible: document.activeElement.matches(':focus-visible'), shadow: s.boxShadow, outline: s.outlineStyle }; });
+          assert.ok(ring.visible && (ring.shadow !== 'none' || ring.outline !== 'none'), `no visible focus on "${name}"`);
+          (report.keyboard_focus ??= []).push({ control: name, ...ring });
+          return;
+        }
       }
       throw new Error(`could not reach "${name}" with Tab`);
     }
@@ -372,8 +379,6 @@ try {
     await page.keyboard.press('Enter');
     await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
     await result(page, 'Signed in and verified');
-    const outline = await page.evaluate(() => getComputedStyle(document.activeElement).outlineStyle + getComputedStyle(document.activeElement).boxShadow);
-    report.keyboard_focus_style = outline;
   });
 
   await journey('each result class and help banner; the inbox lists the open help request', async () => {

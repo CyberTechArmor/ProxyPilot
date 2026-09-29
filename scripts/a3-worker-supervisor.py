@@ -1046,7 +1046,8 @@ class Supervisor:
         if taken is not None:
             # A7: who took over is the backend's record; the receipt says only that a
             # dashboard takeover held the attempt and the count and kind of inputs.
-            payload['dashboard_takeover'] = {'state': taken.get('state'), 'inputs': taken.get('inputs')}
+            payload['dashboard_takeover'] = {'state': taken.get('state'), 'inputs': taken.get('inputs'),
+                                             'uncontrolled_inputs': taken.get('uncontrolled_inputs')}
         credential = (self.state['runs'].get(attempt['run_id']) or {}).get('credential')
         if credential is not None:
             # Binding ID, revision and outcomes only: never a value or a hash of one.
@@ -1795,16 +1796,24 @@ class Supervisor:
             reply = worker.request('live_give', ACTION_SECONDS + runner.DELIVERY_SECONDS + 15, conn=ref['conn'])
         except Refused as error:
             reply = {'ok': False, 'error': error.code}
+        # The runner reports two facts from its own command queue: no password
+        # field held a value, and the X input counted while nobody had control.
+        given = reply.get('result') if reply.get('ok') else None
+        uncontrolled = given.get('uncontrolled_inputs') if isinstance(given, dict) else None
+        if reply.get('ok') and not (given.get('password_fields_empty') is True and exact(uncontrolled, ('key', 'click', 'scroll'))
+                                    and all(safe_int(n) for n in uncontrolled.values())):
+            reply = {'ok': False, 'error': 'LIVE_PROTOCOL'}
         with self.lock:
             if not reply.get('ok'):
                 attempt['dashboard_takeover']['state'] = 'failed'
                 self._note(attempt, 'dashboard_takeover_failed')
                 self._save()
                 raise Refused(str(reply.get('error'))[:64])
-            attempt['dashboard_takeover']['state'] = 'holding'
+            attempt['dashboard_takeover'].update(state='holding', uncontrolled_inputs=dict(uncontrolled))
             attempt['lease'] = self._next_lease(run)
             self._save()
-        return {'state': 'human', 'controlling': True}
+        return {'state': 'human', 'controlling': True, 'uncontrolled_inputs': dict(uncontrolled),
+                'password_fields_empty': True}
 
     def release(self, params):
         ref = validate_ref(params)

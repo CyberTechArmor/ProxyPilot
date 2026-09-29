@@ -700,9 +700,12 @@ class LiveDesktop:
         status, _ = self.api.request('POST', '/api/room/control/give/%s' % entry['session'])
         if not 200 <= status < 300:
             raise Refused('LIVE_CONTROL_FAILED')
-        self.counter.take()
+        # X input while nobody had control: none should exist (Neko applies input
+        # only from the controlling session; the agent's DevTools input is not X
+        # input). Reported, so the host proof and the audit can see it.
+        uncontrolled = self.counter.take()
         self.controller = conn
-        return {'controlling': True}
+        return {'controlling': True, 'uncontrolled_inputs': uncontrolled}
 
     def release(self):
         self.api.request('POST', '/api/room/control/reset')
@@ -1125,6 +1128,11 @@ class Browser:
                                 {'frameId': self._frame(), 'worldName': 'pp-a3-broker'},
                                 self.session)['executionContextId']
         return self._evaluate(expression, await_promise, timeout, context)
+
+    def password_fields_empty(self):
+        """A7: true when no password field in the page (and its same-origin frames)
+        holds a value. A boolean only; the value is never read out."""
+        return self.isolated(PASSWORD_FIELDS_EMPTY) is True
 
     def main_world(self, expression, timeout):
         return self._evaluate(expression, True, timeout, None)
@@ -1567,6 +1575,12 @@ PROOF_RUN = {'proof:cpu': proof_cpu, 'proof:memory': proof_memory, 'proof:tasks'
 # to and from Neko); everything else, including handing control to a person,
 # waits its turn in the one command queue behind any browser action.
 RELAY_OPS = frozenset(('live_open', 'live_send', 'live_close'))
+# A7: checked before a person is given control (a boolean, never a value).
+PASSWORD_FIELDS_EMPTY = '''(() => {
+  const docs = [document];
+  for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument) docs.push(f.contentDocument); } catch (e) {} }
+  return docs.every(d => [...d.querySelectorAll('input[type="password"]')].every(i => i.value === ''));
+})()'''
 
 
 def relay(command, live, channel):
@@ -1685,10 +1699,17 @@ def serve(config, channel, stream=None):
                     result = browser.human_input(command['input'])
                 elif op in ('live_give', 'live_release'):
                     # Queued: an in-flight submit has finished and cleared both
-                    # fields before a person can touch the page.
+                    # fields before a person can touch the page. Checked again
+                    # here: no password field on the page holds a value, or
+                    # control is not handed over.
                     if live_box[0] is None:
                         raise Refused('LIVE_UNAVAILABLE')
-                    result = live_box[0].give(command['conn']) if op == 'live_give' else live_box[0].release()
+                    if op == 'live_give':
+                        if not browser.password_fields_empty():
+                            raise Refused('LIVE_FIELDS_NOT_CLEAR')
+                        result = dict(live_box[0].give(command['conn']), password_fields_empty=True)
+                    else:
+                        result = live_box[0].release()
                 elif op == 'observe':
                     result = browser.observe()
                 elif op == 'locate':

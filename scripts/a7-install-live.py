@@ -7,6 +7,9 @@ Root only. Each subcommand is one reviewed step (user decisions 1, 1a and 1b,
   build-neko      Clone Neko at the pinned commit, apply ProxyPilot's reviewed
                   Unix-socket patch, build the server in the pinned Debian trixie
                   Go image (Docker on this host), record the binary's sha256.
+  build-probe     Build the host proof's WebRTC viewer (cmd/a7-live-probe from
+                  this checkout) in the same image, every module checked against
+                  its reviewed go.sum; record the binary's sha256.
   provision-vm    Snapshot the proof VM, then push the built Neko, the managed
                   Chromium policy and the Debian packages the live desktop needs
                   (never while a worker attempt runs); read every file back.
@@ -65,6 +68,8 @@ STATE = Path('/var/lib/proxypilot-a7')
 JOURNAL = STATE / 'live-install.json'
 BUILD = STATE / 'build'
 NEKO_OUT = STATE / 'neko'
+PROBE_OUT = STATE / 'a7-live-probe'
+PROBE_SOURCE = HERE.parent / 'cmd' / 'a7-live-probe'
 DEBS = STATE / 'debs'
 TURN_CONF = CONFIG / 'turnserver.conf'
 TURN_SECRET = CONFIG / 'turn-secret'
@@ -204,6 +209,36 @@ def build_neko():
                        'sha256': sha256_bytes(data), 'bytes': len(data), 'built_at': stamp()}
     write_journal(journal)
     return {'neko': journal['neko']}
+
+
+def build_probe():
+    for path in (CONFIG, STATE):
+        secure(path)
+    STATE.mkdir(mode=0o700, exist_ok=True)
+    names = sorted(p.name for p in PROBE_SOURCE.iterdir())
+    if names != ['go.mod', 'go.sum', 'main.go']:
+        raise ValueError('Unexpected files in %s: %s' % (PROBE_SOURCE, names))
+    if BUILD.exists():
+        secure(BUILD)
+        shutil.rmtree(BUILD)
+    BUILD.mkdir(mode=0o700)
+    source = BUILD / 'probe'
+    source.mkdir(mode=0o700)
+    for name in names:
+        (source / name).write_bytes((PROBE_SOURCE / name).read_bytes())
+    execute(['docker', 'pull', '--quiet', BUILD_IMAGE], timeout=900)
+    image = execute(['docker', 'image', 'inspect', '--format', '{{index .RepoDigests 0}}', BUILD_IMAGE]).strip()
+    execute(['docker', 'run', '--rm', '-e', 'GOFLAGS=-mod=readonly', '-e', 'CGO_ENABLED=0', '-v', '%s:/src' % source,
+             '-w', '/src', image, 'sh', '-c', 'go mod verify && go build -trimpath -o a7-live-probe .'], timeout=1800)
+    data = (source / 'a7-live-probe').read_bytes()
+    save(PROBE_OUT, data, mode=0o755)
+    shutil.rmtree(BUILD)
+    journal = read_journal()
+    journal['probe'] = {'go_sum_sha256': sha256_file(PROBE_SOURCE / 'go.sum'),
+                        'main_sha256': sha256_file(PROBE_SOURCE / 'main.go'), 'build_image': image,
+                        'sha256': sha256_bytes(data), 'bytes': len(data), 'built_at': stamp()}
+    write_journal(journal)
+    return {'probe': journal['probe'], 'path': str(PROBE_OUT)}
 
 
 def stamp():
@@ -575,7 +610,7 @@ def status():
         relay = fence_state.get('live_relay')
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         relay = 'unverified: %s' % error
-    return {'neko': journal.get('neko'), 'vm_files': journal.get('vm_files'), **status_turn(),
+    return {'neko': journal.get('neko'), 'probe': journal.get('probe'), 'vm_files': journal.get('vm_files'), **status_turn(),
             'fence_live_relay': relay, 'live_marker': marker is not None,
             'live_marker_sha256': sha256_file(LIVE_MARKER) if marker is not None else None,
             'enabled': journal.get('enabled')}
@@ -584,7 +619,7 @@ def status():
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('build-neko', 'provision-vm', 'enable', 'disable', 'status'):
+    for name in ('build-neko', 'build-probe', 'provision-vm', 'enable', 'disable', 'status'):
         sub.add_parser(name)
     turn = sub.add_parser('install-turn')
     turn.add_argument('--hostname', required=True)
@@ -595,7 +630,7 @@ def main():
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
-    actions = {'build-neko': build_neko, 'provision-vm': provision_vm, 'enable': enable, 'disable': disable,
+    actions = {'build-neko': build_neko, 'build-probe': build_probe, 'provision-vm': provision_vm, 'enable': enable, 'disable': disable,
                'status': status, 'cert-sync': lambda: cert_sync(args.hostname),
                'install-turn': lambda: install_turn(args.hostname, args.listen_ip, args.caddy_site)}
     print(json.dumps(actions[args.command](), indent=2, sort_keys=True))

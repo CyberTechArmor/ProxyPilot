@@ -219,14 +219,19 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       ttl_seconds: opened.ttl_seconds, send: opened.send, close: opened.close });
     },
     // A7: hand the running attempt to one viewer. The supervisor fences the
-    // model first (the attempt becomes human), then Neko gives that viewer control.
+    // model first (the attempt becomes human), then Neko gives that viewer
+    // control. The runner reports, from its own command queue, that no password
+    // field held a value and how much X input arrived while nobody had control.
     async takeover(ref, viewer) {
       if (!validRef(ref) || !LIVE_CONN.test(viewer ?? '')) fail('INVALID_TAKEOVER');
       const result=await connected().request('takeover', {run_id:ref.run_id,attempt_id:ref.attempt_id,
         fence:ref.fence,conn:viewer});
-      if (!fields(result,['state','controlling']) || result.state!=='human' || result.controlling!==true)
-        fail('SUPERVISOR_PROTOCOL');
-      return Object.freeze({state:'human'});
+      const before=result?.uncontrolled_inputs;
+      if (!fields(result,['state','controlling','uncontrolled_inputs','password_fields_empty']) || result.state!=='human' ||
+          result.controlling!==true || result.password_fields_empty!==true || !fields(before,['key','click','scroll']) ||
+          !Object.values(before).every(n=>Number.isSafeInteger(n) && n>=0 && n<=1_000_000)) fail('SUPERVISOR_PROTOCOL');
+      return Object.freeze({state:'human',password_fields_empty:true,
+        uncontrolled_inputs:Object.freeze({key:before.key,click:before.click,scroll:before.scroll})});
     },
     // A7: take control back from the person. Only the count and kind of inputs
     // come back, never what was typed.

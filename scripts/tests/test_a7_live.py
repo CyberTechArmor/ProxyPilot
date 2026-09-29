@@ -227,7 +227,8 @@ class LiveDesktopTests(unittest.TestCase):
         # Before anyone is given control, Neko has no host and members cannot take it.
         self.assertEqual(self.live.api.request('GET', '/api/room/control')[1]['has_host'], False)
         member_token = None
-        self.assertEqual(self.live.give('conn0001'), {'controlling': True})
+        self.assertEqual(self.live.give('conn0001'), {'controlling': True,
+                                                      'uncontrolled_inputs': {'key': 0, 'click': 0, 'scroll': 0}})
         control = self.live.api.request('GET', '/api/room/control')[1]
         self.assertEqual((control['has_host'], control['host_id']), (True, self.live.conns['conn0001']['session']))
         with self.assertRaises(g.Refused) as second:
@@ -251,6 +252,15 @@ class LiveDesktopTests(unittest.TestCase):
         self.assertEqual(closed['reason'], 'viewer_closed')
         members = self.live.api.request('GET', '/api/members')[1]
         self.assertNotIn('vconn0002', json.dumps(members))
+
+    def test_a_filled_password_field_is_seen_before_control_is_given(self):
+        self.assertTrue(self.browser.password_fields_empty())
+        self.browser.main_world("(() => { const i = document.createElement('input'); i.type = 'password'; i.id = 'pp-a7';"
+                                " i.value = 'x'; document.documentElement.appendChild(i); return true; })()", 10)
+        self.assertFalse(self.browser.password_fields_empty())
+        self.browser.main_world("(() => { document.getElementById('pp-a7').value = ''; return true; })()", 10)
+        self.assertTrue(self.browser.password_fields_empty())
+        self.browser.main_world("(() => { document.getElementById('pp-a7').remove(); return true; })()", 10)
 
     def test_the_kiosk_browser_still_serves_frames_on_the_pipe(self):
         frame = self.browser.view()

@@ -90,7 +90,14 @@ while True:
         reply['result'] = {'at': command['action']}
     elif op == 'live_give':
         order.write('live_give\n'); order.flush()
-        reply['result'] = {'controlling': True}
+        mode = os.environ.get('A7_FAKE_GIVE', 'clean')
+        if mode == 'filled':
+            reply = {'id': command['id'], 'ok': False, 'error': 'LIVE_FIELDS_NOT_CLEAR'}
+        elif mode == 'unchecked':
+            reply['result'] = {'controlling': True}
+        else:
+            reply['result'] = {'controlling': True, 'uncontrolled_inputs': {'key': 0, 'click': 0, 'scroll': 0},
+                               'password_fields_empty': True}
     elif op == 'live_release':
         reply['result'] = {'inputs': {'key': 4, 'click': 2, 'scroll': 1}}
     elif op == 'view':
@@ -295,7 +302,8 @@ class SupervisorA7Tests(unittest.TestCase):
         time.sleep(0.3)
         taken = self.sup.dispatch('takeover', self.ref(conn=conn))
         action.join(10)
-        self.assertEqual(taken, {'state': 'human', 'controlling': True})
+        self.assertEqual(taken, {'state': 'human', 'controlling': True, 'password_fields_empty': True,
+                                 'uncontrolled_inputs': {'key': 0, 'click': 0, 'scroll': 0}})
         self.assertEqual(results['action']['result'], {'at': 'open_login'})
         order = (self.root / 'order.txt').read_text().split()
         self.assertEqual(order, ['action:open_login:start', 'action:open_login:end', 'live_give'])
@@ -310,7 +318,31 @@ class SupervisorA7Tests(unittest.TestCase):
         ok, payload = self.host.verify(receipt['attestation'])
         self.assertTrue(ok)
         self.assertEqual((payload['reason'], payload['dashboard_takeover']),
-                         ('taken_over', {'state': 'released', 'inputs': {'key': 4, 'click': 2, 'scroll': 1}}))
+                         ('taken_over', {'state': 'released', 'inputs': {'key': 4, 'click': 2, 'scroll': 1},
+                                         'uncontrolled_inputs': {'key': 0, 'click': 0, 'scroll': 0}}))
+
+    def test_no_hand_over_with_a_filled_password_field_or_without_the_runner_s_facts(self):
+        for mode, code in (('filled', 'LIVE_FIELDS_NOT_CLEAR'), ('unchecked', 'LIVE_PROTOCOL')):
+            with self.subTest(mode=mode), patch.dict(os.environ, {'A7_FAKE_GIVE': mode}):
+                self.sup.launch(st.launch_spec())
+                path = self.serve()
+                client = socket.socket(socket.AF_UNIX)
+                client.settimeout(10)
+                client.connect(str(path))
+                stream = client.makefile('rwb')
+                stream.write((json.dumps({'method': 'live', 'params': self.ref()}) + '\n').encode())
+                stream.flush()
+                conn = json.loads(stream.readline())['result']['conn']
+                self.assertRefused(code, self.sup.dispatch, 'takeover', self.ref(conn=conn))
+                attempt = self.sup.state['attempts'][st.ATTEMPT]
+                self.assertEqual(attempt['dashboard_takeover']['state'], 'failed')
+                # The model stays fenced; the run ends with a normal stop.
+                self.assertRefused('TAKEN_OVER', self.sup.action, self.ref(action='read_session'))
+                receipt = self.sup.dispatch('stop', self.ref(reason='blocked'))['receipt']
+                self.assertTrue(self.host.verify(receipt['attestation'])[0])
+                client.close()
+                self.tearDown()
+                self.setUp()
 
     def test_summarize_takes_typed_facts_only_once_per_run_after_it_ends(self):
         self.sup.launch(st.launch_spec())

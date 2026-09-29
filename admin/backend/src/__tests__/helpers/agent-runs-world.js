@@ -131,7 +131,8 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
         if (scenario.takeoverError) { a.dashboard = 'failed'; throw coded(scenario.takeoverError); }
         a.dashboard = 'holding';
         for (const conn of viewers.keys()) neko(conn, 'control/host', { has_host: true, host_id: params.conn, id: 'x' });
-        return { state: 'human', controlling: true };
+        return { state: 'human', controlling: true, password_fields_empty: true,
+          uncontrolled_inputs: { ...(scenario.uncontrolled ?? { key: 0, click: 0, scroll: 0 }) } };
       }
       if (method === 'release') {
         const a = attempts.get(params.attempt_id);

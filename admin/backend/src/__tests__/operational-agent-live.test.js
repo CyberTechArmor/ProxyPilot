@@ -173,6 +173,8 @@ test('takeover: session verification, the caller\'s own view, one controller, th
   assert.ok(done.critique.check.some(c => c.code === 'takeover'));
   assert.deepEqual(audit.filter(a => a[1].startsWith('AGENT_RUN_TAKE')).map(a => [a[0], a[1]]),
     [[w.users.operator.id, 'AGENT_RUN_TAKEN_OVER'], [w.users.operator.id, 'AGENT_RUN_TAKEOVER_ENDED']]);
+  assert.deepEqual(audit.find(a => a[1] === 'AGENT_RUN_TAKEN_OVER')[2].uncontrolled_inputs, { key: 0, click: 0, scroll: 0 });
+  assert.equal(audit.find(a => a[1] === 'AGENT_RUN_TAKEN_OVER')[2].password_fields_empty, true);
   // Renewal stopped with the takeover.
   const renewsAfter = w.supervisor.calls.filter(c => c.method === 'renew').length;
   await new Promise(done2 => setTimeout(done2, 80));
@@ -359,11 +361,18 @@ test('launcher: a live answer, a takeover, a release or a summary of the wrong s
     await assert.rejects(launcher.live(ref), e => e.code === 'SUPERVISOR_PROTOCOL');
   }
   assert.equal(closed, 7);
-  answer = { state: 'human', controlling: true };
-  assert.deepEqual(await launcher.takeover(ref, '0123456789abcdef'), { state: 'human' });
+  const zero = { key: 0, click: 0, scroll: 0 };
+  answer = { state: 'human', controlling: true, uncontrolled_inputs: zero, password_fields_empty: true };
+  assert.deepEqual(await launcher.takeover(ref, '0123456789abcdef'),
+    { state: 'human', password_fields_empty: true, uncontrolled_inputs: zero });
   await assert.rejects(launcher.takeover(ref, 'nope'), e => e.code === 'INVALID_TAKEOVER');
-  answer = { state: 'running', controlling: true };
-  await assert.rejects(launcher.takeover(ref, '0123456789abcdef'), e => e.code === 'SUPERVISOR_PROTOCOL');
+  // Without the runner's two facts (or with a field still filled) nothing is handed over.
+  for (const bad of [{ state: 'running', controlling: true, uncontrolled_inputs: zero, password_fields_empty: true },
+    { state: 'human', controlling: true }, { state: 'human', controlling: true, uncontrolled_inputs: zero, password_fields_empty: false },
+    { state: 'human', controlling: true, uncontrolled_inputs: { key: -1, click: 0, scroll: 0 }, password_fields_empty: true }]) {
+    answer = bad;
+    await assert.rejects(launcher.takeover(ref, '0123456789abcdef'), e => e.code === 'SUPERVISOR_PROTOCOL');
+  }
   answer = { inputs: { key: 1, click: 0, scroll: 0 } };
   assert.deepEqual(await launcher.release(ref), { inputs: { key: 1, click: 0, scroll: 0 } });
   for (const bad of [{ inputs: { key: -1, click: 0, scroll: 0 } }, { inputs: { key: 1, click: 0 } },

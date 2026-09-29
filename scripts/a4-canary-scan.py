@@ -132,6 +132,14 @@ def a5_sources(directory):
     }
 
 
+def a7_sources(directory):
+    """The A7 proof harness's own sinks (the same layout as A5's)."""
+    return {'a7' + name[2:]: read for name, read in a5_sources(directory).items()}
+
+
+A7_STATE = Path('/var/lib/proxypilot-a7')
+
+
 def sink_sources(database=None, backend_container='proxypilot-admin', since='2 days ago'):
     """name -> zero-argument reader returning bytes. Each raises when unreadable."""
     db = database or next((p for p in DB_CANDIDATES if Path(p).is_file()), None)
@@ -152,6 +160,11 @@ def sink_sources(database=None, backend_container='proxypilot-admin', since='2 d
         _missing('proof reports'),
         'incus_logs': lambda: b''.join(p.read_bytes() for p in files(['/var/log/incus/*.log'])),
     }
+    if A7_STATE.is_dir():
+        # A7 live view: the TURN relay's journal and the live install's own state.
+        readers['turn_journal'] = journal('-u', 'proxypilot-a7-turn.service')
+        readers['a7_live_install_state'] = lambda: b''.join(p.read_bytes() for p in files(
+            [str(A7_STATE / '*.json'), '/etc/proxypilot-a3-proof/live.json'])) or _missing('A7 live install state')
     if db:
         readers['database_files'] = lambda: b''.join(p.read_bytes() for p in files([db, db + '-wal', db + '-journal']))
         readers['database_dump'] = lambda: database_dump(db)
@@ -190,6 +203,7 @@ def main():
     parser.add_argument('--database', help='ProxyPilot SQLite path when it is not in a standard location')
     parser.add_argument('--backend-container', default='proxypilot-admin')
     parser.add_argument('--a5-dir', help='an A5 proof harness directory to scan as well')
+    parser.add_argument('--a7-dir', help='an A7 proof harness directory to scan as well')
     parser.add_argument('--a5-marker', action='store_true',
                         help='also count the A5 injected-fixture marker (from this file) in every sink')
     args = parser.parse_args()
@@ -204,6 +218,8 @@ def main():
         readers = sink_sources(args.database, args.backend_container)
         if args.a5_dir:
             readers.update(a5_sources(args.a5_dir))
+        if args.a7_dir:
+            readers.update(a7_sources(args.a7_dir))
         result = scan(value, readers, A5_MARKER if args.a5_marker else None)
     finally:
         broker.wipe(value)

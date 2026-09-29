@@ -305,6 +305,25 @@ class HostTests(unittest.TestCase):
                 live.build_neko()
         self.assertEqual(self.calls, [])
 
+    def test_build_probe_copies_only_the_reviewed_sources_and_verifies_modules(self):
+        def fake(argv, input=None, timeout=120, check=True):
+            self.calls.append(('execute', list(argv)))
+            if argv[:3] == ['docker', 'image', 'inspect']:
+                return 'golang@sha256:%s\n' % ('b' * 64)
+            if argv[:2] == ['docker', 'run']:
+                src = [a for a in argv if a.endswith(':/src')][0].rsplit(':', 1)[0]
+                Path(src, 'a7-live-probe').write_bytes(b'probe-binary')
+            return ''
+        with patch.object(live, 'execute', fake), patch.object(live, 'BUILD', self.paths['STATE'] / 'build'), \
+                patch.object(live, 'PROBE_OUT', self.paths['STATE'] / 'a7-live-probe'):
+            result = live.build_probe()
+        self.assertEqual(result['probe']['sha256'], live.sha256_bytes(b'probe-binary'))
+        self.assertEqual(result['probe']['go_sum_sha256'], live.sha256_file(live.PROBE_SOURCE / 'go.sum'))
+        run = [c[1] for c in self.calls if c[1][:2] == ['docker', 'run']][0]
+        self.assertIn('GOFLAGS=-mod=readonly', run)
+        self.assertIn('go mod verify && go build -trimpath -o a7-live-probe .', run[-1])
+        self.assertFalse((self.paths['STATE'] / 'build').exists())
+
     def test_the_reviewed_patch_is_the_pinned_one(self):
         self.assertEqual(live.sha256_file(live.PATCH), live.PATCH_SHA256)
 

@@ -760,8 +760,9 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       let begun;
       try { begun = coordinator.beginTakeover({ id: actor.id }, runId); }
       catch (error) { throw toRunError(error); }
+      let handed;
       try {
-        await launcher.takeover(begun.ref, v.viewer);
+        handed = await launcher.takeover(begun.ref, v.viewer);
       } catch (error) {
         const cause = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'INTERNAL';
         note({ event: 'takeover_failed', run_id: runId, code: cause });
@@ -773,8 +774,10 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       coordinator.holdTakeover(begun.takeover_id);
       entry.holding = true;
       startRenewal(runId, begun.ref);
-      audit(actor, 'AGENT_RUN_TAKEN_OVER', { project_id: projectId, run_id: runId });
-      note({ event: 'takeover_holding', run_id: runId, by: actor.id });
+      // X input while nobody had control should be none; recorded either way.
+      audit(actor, 'AGENT_RUN_TAKEN_OVER', { project_id: projectId, run_id: runId,
+        uncontrolled_inputs: handed.uncontrolled_inputs, password_fields_empty: handed.password_fields_empty });
+      note({ event: 'takeover_holding', run_id: runId, by: actor.id, uncontrolled_inputs: handed.uncontrolled_inputs });
       // The view may have closed while control was being handed over.
       if (entry.gone) { entry.gone = false; viewerGone(entry, 'viewer_left'); }
       return detail(runIn(projectId, runId));

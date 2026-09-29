@@ -37,12 +37,21 @@ const lib = name => import(pathToFileURL(path.join(LIB, name)).href);
 const SUMMARY_STATEMENT = "Send this profile's finished runs, as typed facts, to the model provider for a summary";
 const ZERO = { key: 0, click: 0, scroll: 0 };
 
+function installedListenIp(journal = process.env.A7_PROBE_LIVE_JOURNAL || '/var/lib/proxypilot-a7/live-install.json') {
+  try {
+    const value = JSON.parse(fs.readFileSync(journal, 'utf8'))?.turn?.listen_ip;
+    return typeof value === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(value) ? value : '';
+  } catch { return ''; }
+}
+
 // Resolved at call time, so tests can point the harness at their own sockets.
 export const settings = () => ({
   ...a5Settings(),
   root: process.env.A7_PROBE_ROOT || '/var/lib/proxypilot-a7-proof',
   viewer: process.env.A7_PROBE_VIEWER || '/var/lib/proxypilot-a7/a7-live-probe',
-  turnAddress: process.env.A7_PROBE_TURN_ADDRESS || '',
+  // Reach the relay on the address it listens on (the host cannot always reach
+  // its own public name): the install journal's, unless set.
+  turnAddress: process.env.A7_PROBE_TURN_ADDRESS || installedListenIp(),
   guestPeer: process.env.A7_PROBE_GUEST_PEER || '10.185.17.179:18091',
   otherPeers: (process.env.A7_PROBE_OTHER_PEERS || '10.185.17.1:22,127.0.0.1:18091,1.1.1.1:53').split(','),
   minFps: Number(process.env.A7_PROBE_MIN_FPS || 10),

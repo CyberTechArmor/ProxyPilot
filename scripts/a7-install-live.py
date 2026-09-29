@@ -14,7 +14,8 @@ Root only. Each subcommand is one reviewed step (user decisions 1, 1a and 1b,
                   Chromium policy and the Debian packages the live desktop needs
                   (never while a worker attempt runs); read every file back.
   install-turn    coturn under its own unit and config: TURN on 3478 UDP/TCP and
-                  TURN over TLS on 5349 for viewers, relaying only to the VM's one
+                  TURN over TLS on 5349 for viewers (on this host's default-route
+                  address unless --listen-ip), relaying only to the VM's one
                   Neko port from the gateway address. A new shared secret (root
                   0600; never printed). Optionally a Caddy site for the hostname
                   so Caddy obtains its certificate.
@@ -446,6 +447,16 @@ def valid_listen_ip(value, local=None):
     return str(address)
 
 
+def default_listen_ip():
+    """This host's source address on its default route: the address the router
+    forwards to (a routing lookup only; nothing is sent). --listen-ip overrides."""
+    rows = json.loads(execute(['ip', '-j', '-4', 'route', 'get', '1.1.1.1']))
+    source = rows[0].get('prefsrc') if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+    if not isinstance(source, str) or not source:
+        raise ValueError('This host has no default route source address; pass --listen-ip')
+    return source
+
+
 def host_addresses():
     rows = json.loads(execute(['ip', '-j', '-4', 'addr', 'show']))
     return {info['local'] for row in rows for info in row.get('addr_info', []) if 'local' in info}
@@ -486,8 +497,9 @@ def turn_group():
         raise ValueError('coturn is not installed (no %s group); install it first' % TURN_USER) from error
 
 
-def install_turn(hostname, listen_ip, write_caddy_site=False):
-    hostname, listen_ip = valid_hostname(hostname), valid_listen_ip(listen_ip)
+def install_turn(hostname, listen_ip=None, write_caddy_site=False):
+    hostname = valid_hostname(hostname)
+    listen_ip = valid_listen_ip(listen_ip or default_listen_ip())
     if not TURNSERVER.exists():
         raise ValueError('coturn is not installed (apt-get install coturn)')
     if execute(['systemctl', 'is-active', 'coturn.service'], check=False).strip() == 'active':
@@ -623,7 +635,7 @@ def main():
         sub.add_parser(name)
     turn = sub.add_parser('install-turn')
     turn.add_argument('--hostname', required=True)
-    turn.add_argument('--listen-ip', required=True)
+    turn.add_argument('--listen-ip', help='default: this host\'s address on its default route')
     turn.add_argument('--caddy-site', action='store_true')
     cert = sub.add_parser('cert-sync')
     cert.add_argument('--hostname')

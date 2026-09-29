@@ -77,6 +77,16 @@ class RenderTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 live.valid_listen_ip(bad, local)
 
+    def test_the_listen_address_defaults_to_the_default_route_source(self):
+        route = '[{"dst":"1.1.1.1","gateway":"192.168.1.1","dev":"eno1","prefsrc":"192.168.1.20","flags":[],"uid":0}]'
+        calls = []
+        with patch.object(live, 'execute', lambda argv, **kw: calls.append(argv) or route):
+            self.assertEqual(live.default_listen_ip(), '192.168.1.20')
+        self.assertEqual(calls, [['ip', '-j', '-4', 'route', 'get', '1.1.1.1']])
+        for bad in ('[]', '[{"dst":"1.1.1.1","dev":"eno1"}]', '{}'):
+            with patch.object(live, 'execute', lambda argv, **kw: bad), self.assertRaises(ValueError):
+                live.default_listen_ip()
+
 
 class HostTests(unittest.TestCase):
     """A temporary root for every path; `execute`, the fence installer and the
@@ -184,6 +194,16 @@ class HostTests(unittest.TestCase):
         live.install_turn('turn.example.com', '192.168.1.20')
 
     # ------------------------------------------------------------ tests
+
+    def test_install_turn_listens_on_the_default_route_address_unless_told(self):
+        self.journal()
+        self.caddy_cert()
+        with patch.object(live, 'default_listen_ip', lambda: '192.168.1.20'):
+            result = live.install_turn('turn.example.com')
+        self.assertEqual(result['turn']['listen_ip'], '192.168.1.20')
+        self.assertIn('listening-ip=192.168.1.20', self.paths['TURN_CONF'].read_text())
+        with patch.object(live, 'default_listen_ip', lambda: '192.168.1.99'), self.assertRaises(ValueError):
+            live.install_turn('turn.example.com')
 
     def test_install_turn_writes_the_relay_and_never_prints_the_secret(self):
         self.journal()

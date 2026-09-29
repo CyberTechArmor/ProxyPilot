@@ -1,12 +1,12 @@
 # A6 supervision UI — evidence
 
-**A6 is implemented and proven locally; it is NOT accepted.** The supervisor's
-backend socket gained one read-only method (`view`, user decision 4), so the
-A3/A4/A5 target proofs must rerun on the proof host with the new A3 case
-`backend_view`. The host steps are in the
-[A6 reference](fractionate-agents-a6-reference.md) (H0–H5, all required) and
-have not been run. Nothing is activated, merged, deployed or promoted; no PR
-was opened.
+**A6 is implemented, proven locally, merged and deployed (live `85586aea`);
+it is NOT accepted.** The supervisor's backend socket gained one read-only
+method (`view`, user decision 4), so the A3/A4/A5 target proofs must rerun on
+the proof host with the new A3 case `backend_view`. The host steps are in the
+[A6 reference](fractionate-agents-a6-reference.md) (H0–H5, all required). The
+run deck (the finish prompt's Part A) is built and proven locally on branch
+`ccr-11407794-0pxrze`; it is not merged or deployed.
 
 The [A6 reference](fractionate-agents-a6-reference.md) is the orientation page.
 This file is the record: later dated sections win.
@@ -402,3 +402,213 @@ panel now sits in one stable place on the page.
   - host run 1, with H0/H1 in the reference updated for the deployed state
     (no staging, only the supervisor reinstall);
   - the acceptance decision.
+
+## 2026-09-29 finish: gate, decisions and the run deck
+
+### Gate
+
+1. **A6 is not accepted.** This file had no "Acceptance decision" section.
+2. **Code.** Branch `ccr-11407794-0pxrze`, from `main` at `55ffa38d` (the
+   finish prompt, #702), which contains `52f26af1`. Nothing was merged,
+   deployed or promoted.
+3. **Host state, read-only over MCP (2026-09-29, about 09:55 UTC)**, because
+   a host step comes next:
+
+   | What | Observed | Expected |
+   |---|---|---|
+   | Live checkout | `85586aea843d04dd17f94d5ac4f605e7e15bf66c`, `main`, clean | `85586aea…` |
+   | Candidate | `85586aea…`, 0 ahead, clean; last checks `backend-tests`, `backend-syntax` ok (09:12:49Z) | `85586aea…` |
+   | Proof VM | UUID `49592202-a8b0-45af-9ac6-5439761d73e4`, boot `62801e3b-8419-40aa-85bf-dffab35788c2`, running, 2 vCPU / 4096 MiB / 12 GiB, no swap, Debian 13.7, Incus 7.5.1 | boot `62801e3b…` |
+   | Services | fence active/exited; origin proxy, supervisor, broker active/running; renewal timer active/waiting | matches |
+   | Script bytes at `55ffa38d` (= `52f26af1` = the candidate's) | supervisor `9d195ea2…`, probe `b770a4a9…`, summary `a1dfa05c…`, runner `a631ad9d…`, broker `790a1957…`, demo `496846cd…`, `a5-probe.mjs` `fbbda1c9…` | matches |
+
+   The installed digests and the receipt key are readable by host root only.
+   Step H0 prints them.
+
+### Decisions (user, 2026-09-29)
+
+| Decision | Choice |
+|---|---|
+| 1. The run deck | **Build it as specified** (the target images and the as-built images 1 and 7 were shown) |
+| 2. Execution on the live dashboard | **Keep it unavailable until A8** |
+| 3. Order | **Host run first.** The deck is built on this branch at the same time and changes no host script, so H0–H5 run against the candidate `85586aea` as it is |
+
+### The run deck (Part A): what changed
+
+A layout over the same data. **No data change:** no route, field, socket
+method, MCP surface or migration. The only backend change is one new test
+file. Frames stay in the page's memory.
+
+| File | Change |
+|---|---|
+| `components/operational-projects/RunDeck.jsx` (new) | The deck: run bar, compact approval banner, Browser pane (LIVE / Paused / Ended pill, `role="switch"` watch toggle, Enlarge, caption, note), Activity column (kind chips, 88/72 px step thumbnails, the paused line, follow-latest with **Jump to latest (n new)**), Details tabs (Radix: Result · Model calls · Approvals · Pins, arrow keys), the phone panel bar (the shared `MobilePanelBar`, not a copy). The shared pieces moved here from `AgentRuns.jsx` unchanged: `Badge`, `StateBadge`, `HelpBanner`, `ApprovalFields`, `FrameDialog`, `Claims`, and the result summary |
+| `components/operational-projects/run-deck-logic.js` (new) | Pure rules: `acceptFrame` (no frame before step 1 has finished; an identical frame is not attached again; one thumbnail per step), `panelFor`, `feedOf` (frames are no longer feed items), `callSummary` |
+| `components/operational-projects/AgentRuns.jsx` | `AgentRunDetail` keeps the state (polling, frames, stop, dialogs) and renders `RunDeck`. It asks for no frame before step 1 has finished. The phone panel is in the URL (`&panel=`, replace, no history entry). Details returns to Result when the run ends. The Agent runs list shows the run without the old "Agent run" panel frame |
+| `components/operational-projects/agent-run-text.js` | `DECK_TEXT` and `KIND_TEXT`: every new sentence. Also `clock` (time of day) and `whenShort` |
+| `pages/OperationalProjectDetail.jsx` | While a run is open: a breadcrumb (Operations › operation › Agent runs, `lg` and up) and an `sr-only` `h1`, instead of the page header, section buttons and "Refresh server state". The layout's own 16/32 px gutters apply (`MOBILE_FIRST.md` §1), with no extra `p-4` |
+| `admin/backend/src/__tests__/agent-run-deck.test.js` (new) | 4 tests over `run-deck-logic.js` |
+| `tests/agent-runs.browser.mjs` | Selectors updated (Back to runs; Refresh and the result under Details on a phone; Activity chosen for the interrupted case). 6 new journeys, and the layout journey also checks the phone Activity and Details panels |
+| `tests/agent-runs-screens.mjs` | Deck screens at the viewport size (1280 × 800, 375 × 812), plus two new phone screens (Activity; the result under Details) |
+
+**How the spec was read** (choices made while building, each visible in the
+screens):
+
+- **The breadcrumb replaces the page header while a run is open.** The target
+  mockup shows it, and the 1280 × 800 fit needs the space. It is `lg` and up
+  only. On a phone the run header's **Back to runs** returns to the list and
+  its section buttons.
+- **Run bar meta on one line.** It is truncated with the full text as its
+  `title`. The Pins tab repeats it in full at every width. Today's runs show
+  the time only.
+- **Banner line.** "Requested <time> · digest <12, grouped> … · approve with
+  sudo and the digest". The mockup's leading "The agent is waiting." is
+  dropped, so the line fits one row at 1280. The Activity column says "The
+  agent is paused until approval".
+- **Browser note.** "At most one frame a second while the run is live;
+  pixels only, never stored. Typing, clicking and takeover stay on the
+  host." The spec wrote "One frame a second", which would overstate: the
+  page asks every 2 s, the service caches a frame for 1.5 s, and the
+  supervisor allows at most one a second.
+- **"Before the first page".** A frame is asked for only once step 1 has a
+  `finished_at`. A frame captured before that moment is ignored. A
+  thumbnail attaches to step `action_count`. `action_count` counts
+  *reserved* steps, so "at step N" means during or after step N (already
+  noted in the A6 findings).
+- **Identical frames.** The pane still advances (the caption's capture time
+  moves on). The feed attaches a thumbnail only when the base64 differs
+  from the last attached one. A newer, different frame of the same step
+  replaces that step's thumbnail.
+- **Feed items.** One title line and one muted line:
+  - Step state badges sit in the head line.
+  - A model call reads "From 3 allowed actions · 216 tokens · $…"; the
+    full allowed list is in Details → Model calls.
+  - The existing step sentences ("Decided by the start rule (rule: start).")
+    stay.
+  - The open approval item keeps "Approval requested: …" with an amber
+    border.
+  - The result is a RESULT item coloured by its final state. The full
+    summary is in Details → Result.
+- **Phone scrolling.**
+  - The Activity panel scrolls with the page, not as a nested scroller: as
+    its own scroller, its end sat behind the bottom bar.
+  - Follow-latest follows whichever element scrolls: the column at `lg`, the
+    page below it.
+  - The bottom bar is `fixed` below `md` and `sticky` at `md`–`lg`, where
+    the sidebar appears.
+  - The approval banner is sticky under the app bar, with a background strip
+    covering the layout scroller's padding.
+- **Which phone panel shows.**
+  - The panel chosen in the URL stays after the run ends.
+  - With none chosen: Browser while running, Details after the end.
+
+### Local verification (this session)
+
+| Check | Result |
+|---|---|
+| `node --test src/__tests__/operational-*.test.js src/__tests__/operations-toggles.test.js src/__tests__/agent-run-deck.test.js` | **118/118** (4 new) |
+| Full backend `npm test` | 3419: 3394 pass, **11 fail**, 14 skipped. The untouched `main` (`55ffa38d`) in the same sandbox: 3415, **11 fail**, the **identical set**: `frontend-api-client` (request bodies), two MCP-key ratchets, the A-17.6 and A-17.7 ratchets, the Platform MCP flag test, `root-recovery`, `security-bootstrap-migration`, `security-bootstrap`, the `guest_setup` registry test, `vpn-mtu` |
+| `python3 -m unittest discover -s scripts/tests -p 'test_a[3456]*py'` | **151 OK** |
+| `python3 scripts/host-boundary-inventory.py` | 96 files inventoried; S6 open |
+| `npm run build` (frontend) | built |
+| `npm run demo:build && npm run demo:test` | 3/3 |
+| Browser journeys `node tests/agent-runs.browser.mjs` | **19/19, 96 layout checks** (was 14 and 72) |
+| `npm run demo:build && node tests/agent-runs-screens.mjs docs/plans/assets/a6/deck` | 13 screens in [`assets/a6/deck/`](assets/a6/deck/). The as-built images in `assets/a6/` are kept as the before record |
+
+New and changed journeys:
+
+| Journey | Proves |
+|---|---|
+| Run deck at 1280 × 800 | While an approval is open: the whole frame and the **latest four** activity items are inside the viewport and inside the column, with the page not scrolled. The banner carries no digest field list, only the 12-character prefix. No dead control. Focus order by Tab: run bar → approval → Browser → Activity → Details |
+| Phone panels (375) | Browser is the default while running, with the full banner. Activity sets `&panel=activity`, the banner becomes one row ("Review"), and the Browser pane is hidden. A reload keeps Activity (`aria-pressed`). Details survives a reload too. After Stop, the chosen Browser panel stays and shows Ended |
+| Follow-latest (1280 × 700) | The feed overflows its column and follows the bottom. A reader who scrolled to the top stays at `scrollTop` 0 while the approved run adds items, and sees **Jump to latest (n new)**. The pill returns to the bottom and disappears. The result then arrives at the bottom |
+| Frames | Step 1 held: the pane says "Starting the browser…" and **no `view` call is made** for 3 s. After release, with the supervisor answering an identical frame each time, ≥ 2 more frames arrive and exactly **one** thumbnail is attached |
+| Browser state | LIVE with "At step N · … · captured …". The switch (`aria-checked`) pauses: Paused, and no `view` call for 3 s. LIVE again, then Stop: Ended, "Last frame · at step N", "Last browser frame at step N", no switch, no dead control. Details: Result is selected at the end. ArrowRight → Model calls → Approvals, End → Pins, Home → Result, ArrowLeft wraps to Pins; each tab is focused (`:focus-visible`) and shows its panel |
+| Layout (changed) | Also the phone Activity and Details panels at 360/375/390/768/1280/1920 in both themes, with no dead control |
+
+### Target and as built, side by side
+
+| Target (mockup) | Run deck as built (this branch) | Before (as built at `85586aea`) |
+|---|---|---|
+| <img src="assets/a6/target/target-desktop.jpg" width="300" alt="Target desktop"> | <img src="assets/a6/deck/01-run-live-desktop.jpg" width="300" alt="Deck desktop, 1280 × 800"> | <img src="assets/a6/01-run-live-desktop.jpg" width="150" alt="Before, desktop"> |
+| <img src="assets/a6/target/target-phone-browser.jpg" width="200" alt="Target phone Browser"> | <img src="assets/a6/deck/07-run-live-phone.jpg" width="200" alt="Deck phone Browser"> | <img src="assets/a6/07-run-live-phone.jpg" width="200" alt="Before, phone"> |
+| <img src="assets/a6/target/target-phone-activity.jpg" width="200" alt="Target phone Activity"> | <img src="assets/a6/deck/12-run-activity-phone.jpg" width="200" alt="Deck phone Activity"> | (no such view) |
+
+Every image in [`assets/a6/deck/`](assets/a6/deck/):
+
+| # | Screen |
+|---|---|
+| 01 | Run deck, 1280 × 800, waiting for approval |
+| 02 | Approval dialog, desktop (unchanged) |
+| 03 | The finished run: Ended with the last frame, the RESULT item, Details → Result |
+| 04–06 | Runs overview, Operations settings and inbox, Agents (unchanged views) |
+| 07 | Phone Browser panel with the full banner |
+| 08 | Approval dialog on a phone (full-screen, unchanged) |
+| 09 | Help request: taken over (768) |
+| 10 | Run deck, light theme |
+| 11 | Execution unavailable (what the live dashboard shows today) |
+| 12 | Phone Activity panel with the one-row banner |
+| 13 | Phone Details → Result after the run |
+
+Remaining differences from the mockup, all deliberate:
+- the app's real sidebar and fonts;
+- **Back to runs** on the phone header (the spec lists it; the mockup omits
+  it);
+- the step sentences kept from the as-built view;
+- the banner and note wording above.
+
+### MOBILE_FIRST pre-merge checklist (recorded)
+
+- [x] Builds (`npm run build`) and runs under Vite without errors (page
+  errors asserted empty in the role, flow, stop and layout journeys).
+- [x] 360 px: no horizontal scroll on any A6 view, each phone panel included
+  (automated at 360/375/390/768/1280/1920, page and element level, both
+  themes).
+- [x] 375 px: the approval dialog is full-screen below `sm` and completable
+  (completed at 360 px with sudo). The phone panel journey runs at 375.
+- [x] 768 px: one panel at a time with the bar sticky under the content and
+  the sidebar present (screen 09). Not an upscaled phone: the run header
+  keeps its meta line.
+- [x] 1280/1920 px: the fixed-height deck. At 1280 × 800 the frame and the
+  latest four items are visible without page scroll (automated).
+- [x] Touch targets ≥ 44 × 44 below 640 px (automated): Stop, Enlarge, the
+  switch row, thumbnails, tabs, Jump to latest and the panel bar.
+- [x] Dialogs: unchanged (`max-w-full h-full rounded-none` below `sm`).
+- [x] Grids start at one column. The deck grid exists at `lg` only, and the
+  tab list is `grid-cols-2` below `sm`, per §7.
+- [x] Default breakpoints and existing tokens only. The new colours are
+  Tailwind defaults (blue, violet, amber, emerald, red and zinc) in both
+  themes.
+- [x] `prefers-reduced-motion`: the paused dots and the switch do not animate.
+- [ ] Lighthouse mobile accessibility ≥ 90: not run (no Lighthouse in this
+  sandbox), as before.
+
+### Findings while building (fixed before commit)
+
+- **The first desktop render missed the 1280 × 800 fit.** The meta line and
+  the banner wrapped, and feed items were 140–160 px tall, so the latest
+  item fell below 800 px. Fixed: the meta is one truncated line, the banner
+  one row, and feed items are compact.
+- **Phone Activity as a nested scroller** put the newest item behind the
+  bottom bar. It now scrolls with the page, and follow-latest uses the
+  page's scroller there.
+- **The sticky banner** let content show through the layout scroller's
+  16 px top padding. It now carries a background strip.
+- **Radix tabs move focus on a timer** after an arrow key, so the keyboard
+  journey waits for the selection instead of reading it at once.
+
+### Still open for acceptance
+
+1. **Host run 1** (H0–H5): not yet run in this session.
+2. **Part B, the live-dashboard check** (the user, in a browser).
+3. **Part D, deploying the deck:** only if the user asks. It needs a PR
+   merged on the user's word, then staging, checks, a backup and a promote
+   preview.
+4. **The acceptance decision** (user).
+5. Carried, unchanged:
+   - the origin proxy's resend-after-timeout;
+   - the one `open_landing` timeout;
+   - the locally-proven classes;
+   - S6, SEC-01, SEC-04;
+   - host reboot persistence;
+   - the container socket mount (A8);
+   - Lighthouse.

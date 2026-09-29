@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { createRunCoordinator } from '../../backend/src/lib/operational-run-coordinator.js';
-import { guideWith, baseRules } from '../../backend/src/__tests__/helpers/agent-runs-world.js';
+import { guideWith, baseRules, pngFrame } from '../../backend/src/__tests__/helpers/agent-runs-world.js';
 import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs';
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
@@ -20,8 +20,8 @@ let h;
 const contexts = [];
 const shell404 = /\/api\/(branding|lxc\/containers\/snapshot-export-queue)$/;
 
-async function as(role, { width = 1280, theme = 'dark' } = {}) {
-  const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+async function as(role, { width = 1280, height = 900, theme = 'dark' } = {}) {
+  const ctx = await browser.newContext({ viewport: { width, height } });
   contexts.push(ctx);
   await ctx.addCookies([{ name: 'pp_harness_user', value: role, url: h.origin }, { name: 'pp_csrf', value: 'a6-csrf', url: h.origin }]);
   const u = h.world.users[role];
@@ -61,9 +61,13 @@ async function startFromUi(page) {
   const start = page.getByRole('button', { name: 'Start run' });
   await start.waitFor(WAIT);
   await start.click();
-  await page.getByRole('button', { name: 'Back to agent runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
+// The run deck: a phone shows one panel at a time behind the bottom bar.
+const panelButton = (page, name) => page.getByRole('navigation', { name: 'Run panels' }).getByRole('button', { name: new RegExp(`^${name}`) });
+const views = runId => h.world.supervisor.calls.filter(c => c.method === 'view' && c.params?.run_id === runId).length;
+const feedEnd = page => page.getByTestId('activity-scroller').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight);
 const approvalCard = page => page.getByRole('region', { name: 'Approval needed' });
 async function digestShown(page) { return (await page.getByRole('dialog').getByTestId('approval-digest').innerText()).replace(/\s+/g, ''); }
 async function sudoIfAsked(page) {
@@ -196,6 +200,185 @@ try {
     report.flow_run = runId;
   });
 
+  await journey('run deck at 1280×800: the whole frame and the latest activity are in view while an approval is open', async () => {
+    resetScenario();
+    const page = await as('operator', { height: 800 });
+    await startFromUi(page);
+    await approvalCard(page).waitFor(WAIT);
+    await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
+    await page.getByText('The agent is paused until approval').waitFor(WAIT);
+    await page.waitForTimeout(300);
+    const fit = await page.evaluate(() => {
+      const viewport = { top: 0, left: 0, bottom: innerHeight, right: innerWidth };
+      const inside = (r, c) => r.top >= c.top - 1 && r.bottom <= c.bottom + 1 && r.left >= c.left - 1 && r.right <= c.right + 1;
+      const column = document.querySelector('[data-testid="activity-scroller"]');
+      const items = [...column.querySelectorAll('ol > li')].slice(-4).map(li => li.getBoundingClientRect());
+      return { frame: inside(document.querySelector('[data-testid="browser-frame"]').getBoundingClientRect(), viewport),
+        items: items.map(r => inside(r, viewport) && inside(r, column.getBoundingClientRect())),
+        pageScrolled: document.querySelector('main > .overflow-y-auto').scrollTop };
+    });
+    assert.deepEqual(fit, { frame: true, items: [true, true, true, true], pageScrolled: 0 });
+    report.deck_fit = fit;
+    // The banner is one row; its nine fields stay in the dialog.
+    assert.equal(await approvalCard(page).getByTestId('approval-digest').count(), 0);
+    await approvalCard(page).getByText(/digest [0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4} …/).waitFor(WAIT);
+    assert.deepEqual(await deadControls(page), []);
+    // Focus order: run bar → approval → Browser → Activity → Details.
+    await page.getByRole('button', { name: 'Back to runs' }).focus();
+    const order = [];
+    for (let i = 0; i < 30 && order.at(-1) !== 'details'; i += 1) {
+      const where = await page.evaluate(() => {
+        const e = document.activeElement;
+        if (e.closest('[aria-label="Approval needed"]')) return 'approval';
+        if (e.closest('[aria-label="Details"]')) return 'details';
+        const heading = e.closest('section')?.querySelector('h2, h3')?.textContent;
+        return heading === 'Browser' ? 'browser' : heading === 'Activity' ? 'activity' : e.closest('section')?.querySelector('h2') ? 'run bar' : 'other';
+      });
+      if (order.at(-1) !== where) order.push(where);
+      await page.keyboard.press('Tab');
+    }
+    assert.deepEqual(order, ['run bar', 'approval', 'browser', 'activity', 'details']);
+    report.focus_order = order;
+    await shot(page, 'deck-1280x800');
+    await page.getByRole('button', { name: 'Stop run' }).click();
+    await result(page, 'Stopped');
+  });
+
+  await journey('phone panels: one at a time, the choice survives a refresh (&panel=), the banner follows the panel', async () => {
+    resetScenario();
+    const page = await as('operator', { width: 375, height: 812 });
+    const runId = await startFromUi(page);
+    await approvalCard(page).waitFor(WAIT);
+    // Browser is the default while the run is running: the full banner form.
+    assert.equal(await panelButton(page, 'Browser').getAttribute('aria-pressed'), 'true');
+    assert.equal((await page.getByRole('button', { name: 'Review and approve' }).innerText()).trim(), 'Review and approve');
+    await panelButton(page, 'Activity').click();
+    assert.equal(new URL(page.url()).searchParams.get('panel'), 'activity');
+    await page.getByTestId('step-1').waitFor(WAIT);
+    assert.equal(await page.getByTestId('browser-frame').isVisible(), false);
+    assert.equal((await page.getByRole('button', { name: 'Review and approve' }).innerText()).trim(), 'Review');
+    await page.reload();
+    await page.getByTestId('step-1').waitFor(WAIT);
+    assert.equal(await panelButton(page, 'Activity').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.getByTestId('browser-frame').isVisible(), false);
+    assert.equal(new URL(page.url()).searchParams.get('run'), runId);
+    await panelButton(page, 'Details').click();
+    await page.getByRole('button', { name: 'Refresh run' }).waitFor(WAIT);
+    await page.reload();
+    await page.getByRole('tab', { name: 'Result' }).waitFor(WAIT);
+    assert.equal(await page.getByTestId('step-1').isVisible(), false);
+    assert.deepEqual(await deadControls(page), []);
+    await shot(page, 'phone-details');
+    await panelButton(page, 'Browser').click();
+    await page.getByTestId('browser-frame').waitFor(WAIT);
+    assert.equal(new URL(page.url()).searchParams.get('panel'), 'browser');
+    // The reader chose Browser, so it stays after the run ends: Ended, with the last frame.
+    await page.getByRole('button', { name: 'Stop run' }).click();
+    await page.getByTestId('browser-state').filter({ hasText: 'Ended' }).waitFor(WAIT);
+    await panelButton(page, 'Details').click();
+    await result(page, 'Stopped');
+  });
+
+  await journey('follow-latest: new items keep the feed at the bottom; a reader who scrolled up sees Jump to latest and is not moved', async () => {
+    resetScenario();
+    const page = await as('operator', { height: 700 });
+    await startFromUi(page);
+    await approvalCard(page).waitFor(WAIT);
+    await page.getByText('The agent is paused until approval').waitFor(WAIT);
+    const scroller = page.getByTestId('activity-scroller');
+    const size = await scroller.evaluate(el => ({ scroll: el.scrollHeight, client: el.clientHeight }));
+    assert.ok(size.scroll > size.client + 40, `the feed overflows its column (${size.scroll} > ${size.client})`);
+    assert.ok(await feedEnd(page) < 32, 'following: at the bottom');
+    await scroller.evaluate(el => { el.scrollTop = 0; });
+    await page.waitForTimeout(200);
+    await approveInUi(page);
+    const jump = page.getByRole('button', { name: /^Jump to latest \(\d+ new\)$/ });
+    await jump.waitFor(WAIT);
+    assert.equal(await scroller.evaluate(el => el.scrollTop), 0, 'a reader who scrolled up is not moved');
+    report.follow_latest = { jump: await jump.innerText() };
+    await jump.click();
+    assert.equal(await jump.count(), 0);
+    assert.ok(await feedEnd(page) < 32, 'Jump to latest reaches the bottom');
+    await page.getByTestId('feed-result').waitFor(WAIT);
+    await page.waitForTimeout(300);
+    assert.ok(await feedEnd(page) < 32, 'following again: the result arrived at the bottom');
+    await result(page, 'Signed in and verified');
+  });
+
+  await journey('frames: none before step 1 has finished (no blank first frame); an identical frame is not attached again', async () => {
+    resetScenario({ holds: new Set(['open_landing']) });
+    const client = h.world.supervisor.client, request = client.request;
+    const same = pngFrame(640, 400, [37, 99, 235]);
+    client.request = async (method, params) => { const reply = await request.call(client, method, params); return method === 'view' ? { ...reply, png_base64: same } : reply; };
+    try {
+      const page = await as('operator');
+      const runId = await startFromUi(page);
+      await page.getByTestId('step-1').filter({ hasText: 'in progress' }).waitFor(WAIT);
+      await page.getByTestId('browser-frame').getByText('Starting the browser…').waitFor(WAIT);
+      await page.waitForTimeout(3000);
+      assert.equal(views(runId), 0, 'no frame is asked for before step 1 has finished');
+      assert.equal(await page.getByRole('img', { name: /browser frame/i }).count(), 0);
+      h.world.supervisor.release('open_landing');
+      await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
+      await approvalCard(page).waitFor(WAIT);
+      const before = views(runId);
+      await page.waitForTimeout(4500);
+      assert.ok(views(runId) >= before + 2, 'more identical frames arrived');
+      assert.equal(await page.getByTestId('activity-scroller').getByRole('img').count(), 1, 'an identical frame is attached once');
+      await page.getByRole('button', { name: 'Stop run' }).click();
+      await result(page, 'Stopped');
+    } finally { client.request = request; }
+  });
+
+  await journey('browser state: LIVE, Paused (no frames), Ended with "Last frame · at step N"; Details tabs by keyboard', async () => {
+    resetScenario({ holds: new Set(['open_login']) });
+    const page = await as('editor');
+    const runId = await startFromUi(page);
+    const pill = page.getByTestId('browser-state');
+    await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
+    assert.equal((await pill.innerText()).trim(), 'LIVE');
+    await page.getByTestId('browser-caption').filter({ hasText: /^At step \d+ · .+ · captured / }).waitFor(WAIT);
+    const watch = page.getByRole('switch', { name: 'Watch live (view only)' });
+    assert.equal(await watch.getAttribute('aria-checked'), 'true');
+    await watch.click();
+    await pill.filter({ hasText: 'Paused' }).waitFor(WAIT);
+    assert.equal(await watch.getAttribute('aria-checked'), 'false');
+    await page.waitForTimeout(500);
+    const paused = views(runId);
+    await page.waitForTimeout(3000);
+    assert.equal(views(runId), paused, 'paused: no frames are asked for');
+    await watch.click();
+    await pill.filter({ hasText: 'LIVE' }).waitFor(WAIT);
+    await page.getByRole('button', { name: 'Stop run' }).click();
+    await result(page, 'Stopped');
+    await pill.filter({ hasText: 'Ended' }).waitFor(WAIT);
+    await page.getByTestId('browser-caption').filter({ hasText: /^Last frame · at step \d+$/ }).waitFor(WAIT);
+    await page.getByRole('img', { name: /^Last browser frame at step \d+$/ }).waitFor(WAIT);
+    assert.equal(await page.getByRole('switch').count(), 0);
+    assert.deepEqual(await deadControls(page), []);
+    // Details: Result is selected when the run ends; arrows move between tabs.
+    const tab = name => page.getByRole('tab', { name });
+    assert.equal(await tab('Result').getAttribute('aria-selected'), 'true');
+    await tab('Result').focus();
+    // Radix moves focus on a timer after the key, so wait for the selection.
+    const selected = async (name, text) => {
+      await page.getByRole('tab', { name, selected: true }).waitFor(WAIT);
+      assert.equal(await tab(name).evaluate(e => e === document.activeElement && e.matches(':focus-visible')), true, `${name} focused`);
+      await page.getByRole('tabpanel').getByText(text).first().waitFor(WAIT);
+    };
+    await page.keyboard.press('ArrowRight');
+    await selected(/^Model calls/, 'No model call: every step was decided by a rule.');
+    await page.keyboard.press('ArrowRight');
+    await selected(/^Approvals/, 'No approval was requested.');
+    await page.keyboard.press('End');
+    await selected('Pins', 'Policy digest');
+    await page.keyboard.press('Home');
+    await selected('Result', 'Teardown receipt: verified');
+    await page.keyboard.press('ArrowLeft');
+    await selected('Pins', 'Policy digest');
+    report.tabs_keyboard = true;
+  });
+
   await journey('stop mid-run: the run is fenced and says why Stop is gone', async () => {
     resetScenario({ holds: new Set(['open_login']) });
     const page = await as('editor');
@@ -238,7 +421,7 @@ try {
     await page.getByRole('dialog').getByText(/The approval is stale/).waitFor(WAIT);
     await page.keyboard.press('Escape');
     await result(page, 'Approval stale');
-    await page.getByRole('button', { name: 'Back to agent runs' }).click();
+    await page.getByRole('button', { name: 'Back to runs' }).click();
     await page.getByText('The assigned guide is no longer the current approved version.').waitFor(WAIT);
     assert.equal(await page.getByRole('button', { name: 'Start run' }).isDisabled(), true);
     assert.deepEqual(await deadControls(page), []);
@@ -325,6 +508,8 @@ try {
     await page.context().setOffline(true);
     await page.waitForTimeout(3500);
     await page.context().setOffline(false);
+    // Refresh lives in Details; on a phone that is its own panel.
+    await panelButton(page, 'Details').click();
     await page.getByRole('button', { name: 'Refresh run' }).click();
     await approvalCard(page).waitFor(WAIT);
     await page.getByRole('button', { name: 'Review and approve' }).click();
@@ -409,11 +594,15 @@ try {
     // A restart while a run is active: fenced, never resumed, needs a person.
     resetScenario({ holds: new Set(['open_login']) });
     const runId = await startFromUi(page);
+    await panelButton(page, 'Activity').click();
     await page.getByTestId('step-2').filter({ hasText: 'in progress' }).waitFor(WAIT);
     await createRunCoordinator({ db: h.world.f.db, launcher: h.world.supervisor.launcher, verifyTeardown: h.world.supervisor.verifyTeardown }).recover();
-    await result(page, 'Interrupted');
-    await page.getByRole('note').filter({ hasText: 'A person needs to decide: Interrupted' }).waitFor(WAIT);
+    // The reader chose Activity, so it stays; the result is its last item, the summary is in Details.
+    await page.getByTestId('feed-result').filter({ hasText: 'Result: Interrupted' }).waitFor(WAIT);
     await page.getByText('Error: COORDINATOR_RESTART').waitFor(WAIT);
+    await page.getByRole('note').filter({ hasText: 'A person needs to decide: Interrupted' }).waitFor(WAIT);
+    await panelButton(page, 'Details').click();
+    await result(page, 'Interrupted');
     report.result_classes.push({ label: 'Interrupted', help: true });
     await shot(page, 'help-interrupted');
     await page.goto(`${h.origin}/operational-projects`);
@@ -432,6 +621,12 @@ try {
       await approvalCard(page).waitFor(WAIT);
       await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
       await layoutCheck(page, `run-detail-${theme}`);
+      for (const name of ['Activity', 'Details']) {
+        await page.setViewportSize({ width: 375, height: 900 });
+        await panelButton(page, name).click();
+        await layoutCheck(page, `run-${name.toLowerCase()}-${theme}`);
+        assert.deepEqual(await deadControls(page), [], `run-${name}-${theme}`);
+      }
       await page.goto(`${h.origin}/operational-projects`);
       await page.getByText('Pending approvals (1)').waitFor(WAIT);
       await layoutCheck(page, `inbox-${theme}`);

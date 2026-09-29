@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { operationsApi as api } from '@/lib/api';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Action, Panel } from './shared';
-import { ACTION_TEXT, ACTIVE_STATES, CLAIM_TEXT, HELP_DECISION, RESULT_TEXT, RULE_TEXT, STALE_TEXT, STATE_TEXT,
-  eventText, grouped, resultLabel, shortId, when } from './agent-run-text';
+import { ACTION_TEXT, ACTIVE_STATES, DECK_TEXT, STALE_TEXT, STATE_TEXT, resultLabel, shortId, when } from './agent-run-text';
+import { ApprovalFields, Badge, FrameDialog, HelpBanner, RunDeck, StateBadge } from './RunDeck';
+import { EMPTY_VIEW, acceptFrame, feedOf, firstStepFinishedAt, panelFor } from './run-deck-logic';
 
 // A6 supervision UI. Everything shown comes from durable server state except the
 // live browser frames (pixels only, held in this page's memory and gone on
-// refresh). Every control either acts or says why it cannot.
+// refresh). Every control either acts or says why it cannot. The run detail is
+// laid out by RunDeck.jsx.
 
 const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
 // Runs `load` now, then every `interval` ms while enabled and the page is
@@ -24,38 +26,6 @@ function usePolling(load, interval, enabled = true) {
     window.addEventListener('focus', tick);
     return () => { stopped = true; if (timer) clearInterval(timer); window.removeEventListener('focus', tick); };
   }, [interval, enabled]);
-}
-
-function Badge({ children, tone = 'neutral' }) {
-  const tones = { neutral: 'border-border', warn: 'border-amber-500/70 text-amber-700 dark:text-amber-300',
-    good: 'border-emerald-600/70 text-emerald-700 dark:text-emerald-300', bad: 'border-destructive/70 text-destructive' };
-  return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${tones[tone]}`}>{children}</span>;
-}
-const stateTone = s => s === 'completed' ? 'good' : ['blocked', 'failed'].includes(s) ? 'bad' : s === 'cancelled' ? 'neutral' : 'warn';
-function StateBadge({ run }) {
-  return <Badge tone={stateTone(run.state)}>{STATE_TEXT[run.state] ?? run.state}</Badge>;
-}
-
-function HelpBanner({ help }) {
-  if (!help) return null;
-  return <div role="note" className="rounded-md border-2 border-amber-500/70 bg-amber-500/10 p-3 space-y-1">
-    <p className="font-semibold">A person needs to decide: {resultLabel(help.result_class)}</p>
-    <p className="text-sm break-words">{HELP_DECISION[help.result_class] ?? RESULT_TEXT[help.result_class]?.[1]}</p>
-    {help.uncertain_steps > 0 && help.result_class !== 'uncertain_step' && <p className="text-sm break-words">{help.uncertain_steps === 1 ? 'One step' : `${help.uncertain_steps} steps`} may or may not have taken effect; see the activity.</p>}
-  </div>;
-}
-
-export function ApprovalFields({ approval }) {
-  const rows = [['Action', ACTION_TEXT[approval.action] ?? approval.action, false], ['Run', approval.run_id, true],
-    ['Attempt', approval.attempt_id, true], ['Fence', approval.fence, false], ['Binding', approval.binding_id ?? 'None', true],
-    ['Binding revision', approval.binding_revision ?? 'Not active', false], ['Guide hash', approval.guide_hash, true],
-    ['Policy digest', approval.policy_digest, true], ['Origin', approval.origin, false]];
-  return <dl className="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-1 text-sm min-w-0">
-    {rows.map(([label, value, mono]) => <div key={label} className="contents"><dt className="text-muted-foreground">{label}</dt>
-      <dd className={`sm:col-span-2 mb-2 sm:mb-0 break-all ${mono ? 'font-mono text-xs sm:text-sm' : ''}`}>{String(value)}</dd></div>)}
-    <dt className="text-muted-foreground">Approval digest</dt>
-    <dd className="sm:col-span-2 break-words font-mono text-sm font-semibold" data-testid="approval-digest">{grouped(approval.digest)}</dd>
-  </dl>;
 }
 
 // The one approval gesture: the session's sudo elevation (the api client opens
@@ -115,97 +85,6 @@ export function ApprovalDialog({ approval, onClose, onApproved }) {
   </Dialog>;
 }
 
-function FrameDialog({ frame, onClose }) {
-  return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent className="max-w-full h-full rounded-none sm:max-w-5xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg flex flex-col">
-      <DialogHeader><DialogTitle>Browser frame</DialogTitle>
-        <DialogDescription>Captured {when(frame.captured_at)} at step {frame.action_count ?? 0}. Live frames are not stored.</DialogDescription></DialogHeader>
-      <div className="overflow-auto min-h-0"><img src={`data:image/png;base64,${frame.png_base64}`} width={frame.width} height={frame.height}
-        className="max-w-full h-auto rounded border" alt={`Browser frame at step ${frame.action_count ?? 0}`}/></div>
-      <Action variant="outline" onClick={onClose}>Close</Action>
-    </DialogContent>
-  </Dialog>;
-}
-
-function Claims({ claims }) {
-  const entries = Object.entries(claims ?? {});
-  if (!entries.length) return null;
-  return <ul className="flex flex-wrap gap-2" aria-label="Typed claims">{entries.map(([key, value]) =>
-    <li key={key}><Badge tone={value === true || value === 'signed_in' ? 'good' : value === false ? 'neutral' : 'warn'}>
-      {CLAIM_TEXT[key] ?? key}: {typeof value === 'boolean' ? (value ? 'yes' : 'no') : String(value).replaceAll('_', ' ')}</Badge></li>)}</ul>;
-}
-
-function feedOf(data, frames) {
-  const items = [];
-  const calls = new Map(data.model_calls.map(c => [c.call_id, c]));
-  const stepCalls = new Set(data.steps.map(s => s.model_call_id).filter(Boolean));
-  items.push({ key: 'start', at: data.run.started_at, order: 0, kind: 'system',
-    title: `Run started by ${data.run.started_by.username ?? data.run.started_by.id}`,
-    body: `Profile ${data.run.profile_name ?? data.run.profile_id} · guide v${data.run.guide_version_number ?? '?'}` });
-  for (const e of data.events) {
-    const text = eventText(e.kind);
-    if (text) items.push({ key: `e${e.id}`, at: e.created_at, order: 1, kind: 'system', title: text });
-  }
-  for (const c of data.model_calls) if (!stepCalls.has(c.call_id)) items.push({ key: c.call_id, at: c.created_at, order: 2,
-    kind: 'model', title: c.state === 'chosen' ? `The model chose ${ACTION_TEXT[c.choice] ?? c.choice}` : c.state === 'reserved'
-      ? 'Asking the model to choose the next step' : `Model call ${c.state}${c.refusal_code ? `: ${c.refusal_code}` : ''}`,
-    body: `Allowed: ${c.allowed.map(a => ACTION_TEXT[a] ?? a).join(', ')}` });
-  for (const s of data.steps) {
-    const call = s.model_call_id ? calls.get(s.model_call_id) : null;
-    items.push({ key: `s${s.ordinal}`, at: s.created_at, order: 3, kind: s.decided_by, step: s, call });
-  }
-  for (const a of data.approvals) {
-    items.push({ key: `a${a.id}`, at: a.requested_at, order: 2, kind: 'approval',
-      title: `Approval requested: ${ACTION_TEXT[a.action] ?? a.action}`, body: `Digest ${grouped(a.digest.slice(0, 16))}…` });
-    if (a.decided_at) items.push({ key: `d${a.id}`, at: a.decided_at, order: 4, kind: 'person',
-      title: `Approved by ${a.decided_by?.username ?? a.decided_by?.id}` });
-    if (['stale', 'expired'].includes(a.state)) items.push({ key: `c${a.id}`, at: a.closed_at, order: 4, kind: 'system',
-      title: a.state === 'expired' ? 'The approval expired unanswered.' : `The approval became stale: ${STALE_TEXT[a.stale_reason] ?? a.stale_reason}.` });
-  }
-  for (const f of frames) items.push({ key: `f${f.captured_at}`, at: f.captured_at, order: 5, kind: 'frame', frame: f });
-  if (data.result) items.push({ key: 'result', at: data.result.created_at, order: 9, kind: 'result' });
-  return items.sort((a, b) => String(a.at).localeCompare(String(b.at)) || a.order - b.order);
-}
-
-const who = { rule: 'Rule', model: 'Model', person: 'Person', approval: 'Approval', system: 'System', frame: 'Browser', result: 'Result' };
-function FeedItem({ item, data, onFrame }) {
-  const head = <p className="text-xs text-muted-foreground flex flex-wrap gap-x-3"><span className="font-semibold uppercase tracking-wide">{who[item.kind] ?? item.kind}</span><time dateTime={item.at}>{when(item.at)}</time></p>;
-  if (item.step) {
-    const { step: s, call } = item;
-    return <li className="rounded-md border p-3 space-y-2 min-w-0" data-testid={`step-${s.ordinal}`}>{head}
-      <p className="font-medium break-words">Step {s.ordinal}: {ACTION_TEXT[s.action] ?? s.action} <Badge tone={s.state === 'done' ? 'good' : s.state === 'reserved' ? 'warn' : 'bad'}>{s.state === 'reserved' ? 'in progress' : s.state}</Badge></p>
-      <p className="text-sm break-words">{s.decided_by === 'rule' ? `Decided by ${RULE_TEXT[s.rule] ?? s.rule} (rule: ${s.rule}).`
-        : `Decided by the model, choosing from ${(call?.allowed ?? []).map(a => ACTION_TEXT[a] ?? a).join(', ')}${call ? ` · ${(call.prompt_tokens ?? 0) + (call.completion_tokens ?? 0)} tokens · $${call.settled_usd ?? '?'}` : ''}.`}</p>
-      {s.approval_id && <p className="text-sm">Performed under a person's approval.</p>}
-      <Claims claims={s.claims}/>
-      {s.error_code && <p className="text-sm text-destructive break-all">Error: {s.error_code}</p>}
-    </li>;
-  }
-  if (item.kind === 'frame') {
-    const f = item.frame;
-    return <li className="rounded-md border p-3 space-y-2 min-w-0">{head}
-      <button type="button" onClick={() => onFrame(f)} className="block w-full sm:w-72 max-w-full min-h-11 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <img src={`data:image/png;base64,${f.png_base64}`} alt={`Browser frame at step ${f.action_count ?? 0}; open it larger`} className="w-full h-auto rounded border"/></button>
-      <p className="text-xs text-muted-foreground">Live frame at step {f.action_count ?? 0}. Not stored: a refresh shows only the durable record.</p>
-    </li>;
-  }
-  if (item.kind === 'result') {
-    const r = data.result;
-    return <li className="rounded-md border-2 p-3 space-y-2 min-w-0" data-testid="run-result">{head}
-      <p className="font-semibold break-words">Result: {resultLabel(r.result_class)} <Badge tone={stateTone(r.final_state)}>{STATE_TEXT[r.final_state]}</Badge></p>
-      <p className="text-sm break-words">{RESULT_TEXT[r.result_class]?.[1]}</p>
-      <ul className="text-sm grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1">
-        <li>Verified account: {r.verified_account ? 'yes' : 'no'}</li><li>Steps: {r.steps} ({r.rule_steps} by rule, {r.model_steps} by the model)</li>
-        <li>Model calls: {r.model_calls}</li><li>Uncertain steps: {r.uncertain_steps}</li>
-        <li>Submit outcome: {r.submit_outcome?.replaceAll('_', ' ') ?? 'no submit'}</li><li>Sign-out: {r.logout ?? 'not recorded'}</li>
-        <li className="break-all">Binding: {r.binding_id ? `${r.binding_id} · revision ${r.binding_revision}` : 'none'}</li>
-        <li className="break-all">Teardown receipt: {r.receipt.verified ? `verified · key ${r.receipt.key_id ? shortId(r.receipt.key_id) : 'unknown'}` : 'none (no worker was started)'}</li>
-      </ul>
-    </li>;
-  }
-  return <li className="rounded-md border p-3 space-y-1 min-w-0">{head}<p className="font-medium break-words">{item.title}</p>{item.body && <p className="text-sm break-words">{item.body}</p>}</li>;
-}
-
 function announcementFor(prev, next) {
   if (!next) return '';
   if (!prev) return `Run ${STATE_TEXT[next.run.state] ?? next.run.state}.`;
@@ -219,10 +98,11 @@ function announcementFor(prev, next) {
 
 export function AgentRunDetail({ base, runId, onBack }) {
   const [data, setData] = useState(null), [refusal, setRefusal] = useState(''), [announce, setAnnounce] = useState('');
-  const [live, setLive] = useState(null), [frames, setFrames] = useState([]), [viewNote, setViewNote] = useState('');
+  const [view, setView] = useState(EMPTY_VIEW), [viewNote, setViewNote] = useState(''), [tab, setTab] = useState('result');
   const [watch, setWatch] = useState(true), [approving, setApproving] = useState(null), [enlarged, setEnlarged] = useState(null);
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState('');
-  const previous = useRef(null), alive = useRef(true), viewing = useRef(false);
+  const [params, setParams] = useSearchParams();
+  const previous = useRef(null), alive = useRef(true), viewing = useRef(false), steps = useRef([]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const load = useCallback(async () => {
     try {
@@ -230,26 +110,31 @@ export function AgentRunDetail({ base, runId, onBack }) {
       if (!alive.current) return;
       const text = announcementFor(previous.current, next);
       if (text) setAnnounce(text);
+      // Details open on the result when the run ends.
+      if (previous.current && ACTIVE_STATES.includes(previous.current.run.state) && !ACTIVE_STATES.includes(next.run.state)) setTab('result');
       previous.current = next;
+      steps.current = next.steps;
       setData(next); setRefusal('');
     } catch (e) {
       if (!alive.current) return;
-      if ([401, 403, 404].includes(e.status)) { setData(null); setLive(null); setFrames([]); setApproving(null); setRefusal(e.message); }
+      if ([401, 403, 404].includes(e.status)) { setData(null); setView(EMPTY_VIEW); setApproving(null); setRefusal(e.message); }
       else setError(e.message);
     }
   }, [base, runId]);
-  useEffect(() => { previous.current = null; setData(null); setLive(null); setFrames([]); load(); }, [load]);
+  useEffect(() => { previous.current = null; steps.current = []; setData(null); setView(EMPTY_VIEW); setTab('result'); load(); }, [load]);
   const active = !!data && ACTIVE_STATES.includes(data.run.state);
   usePolling(load, active ? 1500 : 0, !!data);
-  const viewEnabled = !!data?.controls.view.enabled && watch;
+  // No frame is asked for before step 1 has finished: the browser before its
+  // first page is a blank frame.
+  const viewEnabled = !!data?.controls.view.enabled && watch && firstStepFinishedAt(data.steps) !== null;
   const loadFrame = useCallback(async () => {
     if (viewing.current) return;
     viewing.current = true;
     try {
       const { frame } = await api.get(`${base}/agent-runs/${runId}/view`);
       if (!alive.current) return;
-      setLive(frame); setViewNote('');
-      setFrames(old => old.length && old.at(-1).action_count === frame.action_count ? old : [...old, frame].slice(-12));
+      setViewNote('');
+      setView(old => acceptFrame(old, frame, steps.current));
     } catch (e) {
       if (!alive.current) return;
       if (e.code === 'VIEW_BUSY') return;
@@ -259,7 +144,7 @@ export function AgentRunDetail({ base, runId, onBack }) {
   }, [base, runId, load]);
   useEffect(() => { if (viewEnabled) loadFrame(); }, [viewEnabled, loadFrame]);
   usePolling(loadFrame, 2000, viewEnabled);
-  const feed = useMemo(() => data ? feedOf(data, frames) : [], [data, frames]);
+  const feed = useMemo(() => data ? feedOf(data) : [], [data]);
   async function stop() {
     if (busy) return;
     setBusy(true); setError(''); setMessage('');
@@ -270,75 +155,22 @@ export function AgentRunDetail({ base, runId, onBack }) {
     } catch (e) { setError(e.message); if ([403, 404].includes(e.status)) load(); }
     finally { setBusy(false); }
   }
-  const openApproval = data?.approvals.find(a => a.open) ?? null;
+  // A phone shows one panel at a time; the choice rides in the URL (&panel=).
+  const panel = panelFor(params.get('panel'), active);
+  const choosePanel = key => setParams(old => { const next = new URLSearchParams(old); next.set('panel', key); return next; }, { replace: true });
   const dialogApproval = approving ? data?.approvals.find(a => a.id === approving) ?? null : null;
-  const stopHint = useId(), viewHint = useId();
   if (!data) return <div className="space-y-3">
-    <Action variant="outline" onClick={onBack}>Back to agent runs</Action>
+    <Action variant="outline" onClick={onBack}>{DECK_TEXT.back}</Action>
     <p role={refusal ? 'alert' : 'status'} className={refusal ? 'text-destructive break-words' : ''}>{refusal ? `This run is not available to you: ${refusal}` : error || 'Loading the run…'}</p>
   </div>;
-  const { run, controls } = data;
-  return <div className="space-y-4 min-w-0">
-    <p className="sr-only" role="status" aria-live="polite">{announce}</p>
-    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-      <Action variant="outline" onClick={onBack}>Back to agent runs</Action>
-      <div className="flex flex-wrap gap-2">
-        <Action variant="outline" disabled={busy} onClick={() => load()}>Refresh run</Action>
-        <Action variant={controls.stop.enabled ? 'destructive' : 'outline'} disabled={!controls.stop.enabled || busy} aria-describedby={stopHint} onClick={stop}>Stop run</Action>
-      </div>
-    </div>
-    <p id={stopHint} className="text-sm text-muted-foreground">{!controls.stop.enabled ? `Stop is not available: ${controls.stop.reason}`
-      : controls.stop.retry ? 'The run is fenced and stopping. Stop again retries collecting the verified teardown receipt; the run never resumes.'
-        : 'Stop fences the run at once; nothing more happens, and the verified teardown receipt is collected.'}</p>
-    <header className="space-y-1 min-w-0">
-      <h3 className="text-lg font-semibold break-words">{run.profile_name ?? 'Agent run'} · run {shortId(run.id)} <StateBadge run={run}/>{run.awaiting_approval && <> <Badge tone="warn">Awaiting approval</Badge></>}</h3>
-      <p className="text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1"><span>Started by {run.started_by.username ?? run.started_by.id}</span><span>{when(run.started_at)}</span>
-        <span>Steps {run.action_count}{run.max_actions ? ` of at most ${run.max_actions}` : ''}</span><span>Guide v{run.guide_version_number ?? '?'}</span><span className="break-all">Binding {run.credential_binding_id ? `${shortId(run.credential_binding_id)} · rev ${run.credential_binding_revision}` : 'none'}</span></p>
-    </header>
-    {error && <p role="alert" className="text-destructive break-words">{error}</p>}
-    <p role="status" aria-live="polite" className="text-sm">{busy ? 'Working…' : message}</p>
-    <HelpBanner help={run.help}/>
-    {openApproval && <section className="rounded-lg border-2 border-amber-500/70 p-4 space-y-3 min-w-0" aria-label="Approval needed">
-      <h4 className="font-semibold">Approval needed: {ACTION_TEXT[openApproval.action] ?? openApproval.action}</h4>
-      <p className="text-sm">The agent is waiting. Nothing is submitted until a person with run access approves with sudo and the digest; the approval closes if the run, binding, guide or policy changes.</p>
-      <ApprovalFields approval={openApproval}/>
-      <Action onClick={() => setApproving(openApproval.id)}>Review and approve</Action>
-    </section>}
-    <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 min-w-0">
-      <section className="lg:col-span-2 lg:order-2 lg:sticky lg:top-4 lg:self-start space-y-2 min-w-0" aria-labelledby={`${runId}-browser`}>
-        <h4 id={`${runId}-browser`} className="font-semibold">Browser</h4>
-        {controls.view.enabled ? <label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={watch} onChange={e => setWatch(e.target.checked)}/><span>Watch the browser live (view only)</span></label>
-          : <p id={viewHint} className="text-sm">Live view is not available: {controls.view.reason}</p>}
-        {live && (controls.view.enabled || frames.length) ? <button type="button" onClick={() => setEnlarged(live)} className="block w-full min-h-11 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <img src={`data:image/png;base64,${live.png_base64}`} alt={`Live browser frame at step ${live.action_count ?? 0}; open it larger`} className="w-full h-auto rounded border"/></button>
-          : <div className="aspect-[16/10] w-full rounded border border-dashed flex items-center justify-center p-4 text-sm text-muted-foreground text-center">{controls.view.enabled ? (watch ? 'Waiting for the first frame…' : 'Watching is paused.') : 'No live browser.'}</div>}
-        {live && <p className="text-xs text-muted-foreground">{controls.view.enabled ? 'Live' : 'Last'} frame · captured {when(live.captured_at)} · at step {live.action_count ?? 0}. Pixels only; frames are not stored.</p>}
-        {viewNote && controls.view.enabled && <p className="text-sm break-words" role="status">{viewNote}</p>}
-      </section>
-      <section className="lg:col-span-3 lg:order-1 space-y-2 min-w-0" aria-labelledby={`${runId}-activity`}>
-        <h4 id={`${runId}-activity`} className="font-semibold">Activity</h4>
-        <p className="text-sm text-muted-foreground">Typed progress from the durable record: each step, who decided it (a rule or the model), the claims kept and any error. Page text never reaches this view.</p>
-        <ol className="space-y-2" aria-label="Run activity">{feed.map(item => <FeedItem key={item.key} item={item} data={data} onFrame={setEnlarged}/>)}</ol>
-      </section>
-    </div>
-    <details className="rounded-md border p-3"><summary className="cursor-pointer min-h-11 py-2 font-medium">Model calls ({data.model_calls.length})</summary>
-      <ul className="space-y-2 pt-2">{data.model_calls.map(c => <li key={c.call_id} className="text-sm break-words border-t pt-2">
-        <span className="font-medium">{c.state}</span>{c.choice && ` · chose ${ACTION_TEXT[c.choice] ?? c.choice}`}{c.refusal_code && ` · refused ${c.refusal_code}`} · allowed {c.allowed.join(', ')} · {c.prompt_tokens ?? 0}+{c.completion_tokens ?? 0} tokens · ${c.settled_usd ?? '—'}{c.replayed ? ' · replayed' : ''}</li>)}
-      {!data.model_calls.length && <li className="text-sm">No model call: every step was decided by a rule.</li>}</ul></details>
-    <details className="rounded-md border p-3"><summary className="cursor-pointer min-h-11 py-2 font-medium">Approvals ({data.approvals.length})</summary>
-      <ul className="space-y-3 pt-2">{data.approvals.map(a => <li key={a.id} className="space-y-2 border-t pt-2">
-        <p className="text-sm font-medium">{ACTION_TEXT[a.action] ?? a.action} · {a.state}{a.stale_reason ? ` (${STALE_TEXT[a.stale_reason] ?? a.stale_reason})` : ''}{a.decided_by ? ` · approved by ${a.decided_by.username ?? a.decided_by.id}` : ''}</p>
-        <ApprovalFields approval={a}/></li>)}
-      {!data.approvals.length && <li className="text-sm">No approval was requested.</li>}</ul></details>
-    <details className="rounded-md border p-3"><summary className="cursor-pointer min-h-11 py-2 font-medium">Pins</summary>
-      <dl className="grid grid-cols-1 sm:grid-cols-3 gap-x-4 gap-y-1 text-sm pt-2">
-        {[['Run', run.id], ['Fence', run.fence], ['Policy digest', run.policy_digest], ['Guide hash', run.guide_hash], ['Deadline', run.deadline_at ?? 'none']].map(([k, v]) =>
-          <div key={k} className="contents"><dt className="text-muted-foreground">{k}</dt><dd className="sm:col-span-2 mb-2 sm:mb-0 break-all font-mono text-xs sm:text-sm">{String(v)}</dd></div>)}
-      </dl></details>
+  return <>
+    <RunDeck data={data} feed={feed} view={view} active={active} panel={panel} onPanel={choosePanel} tab={tab} onTab={setTab}
+      watch={watch} onWatch={setWatch} viewNote={viewNote} busy={busy} message={message} error={error} announce={announce}
+      onBack={onBack} onStop={stop} onRefresh={() => load()} onReview={setApproving} onFrame={setEnlarged}/>
     {approving && <ApprovalDialog approval={dialogApproval} onClose={() => setApproving(null)}
       onApproved={() => { setApproving(null); setMessage('Approved. The agent may now submit the bound credential.'); load(); }}/>}
     {enlarged && <FrameDialog frame={enlarged} onClose={() => setEnlarged(null)}/>}
-  </div>;
+  </>;
 }
 
 export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) {
@@ -359,7 +191,7 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
   useEffect(() => { if (!runId) load(); }, [load, runId, project.revision]);
   const anyActive = !!list?.runs.some(r => ACTIVE_STATES.includes(r.state));
   usePolling(load, anyActive ? 4000 : 20000, !runId);
-  if (runId) return <Panel title="Agent run"><AgentRunDetail base={base} runId={runId} onBack={() => { onCloseRun(); load(); }}/></Panel>;
+  if (runId) return <AgentRunDetail base={base} runId={runId} onBack={() => { onCloseRun(); load(); }}/>;
   async function start(profile) {
     if (busy) return;
     setBusy(true); setError(''); setMessage(''); setActiveLink(null);

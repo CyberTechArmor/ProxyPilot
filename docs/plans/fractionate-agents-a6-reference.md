@@ -1,7 +1,8 @@
 # A6 reference: current state for any conversation
 
 Snapshot: 2026-09-29, after the A6 implementation, its local proof, the merge
-into `main` and the deploy (live `85586aea`).
+into `main`, the deploy (live `85586aea`) and the run deck built on branch
+`ccr-11407794-0pxrze` (not merged).
 
 This file is the orientation page. The dated
 [A6 evidence](fractionate-agents-a6-evidence.md) is the record; if the two
@@ -16,7 +17,9 @@ dashboard toggles are off until an administrator turns them on, and execution
 is unavailable on the live dashboard until the supervisor socket is mounted
 (A8). What is left is written up in the
 [A6 finish prompt](fractionate-agents-a6-finish-prompt.md), with the as-built
-screens and the target mockups.
+screens and the target mockups. Its decisions (user, 2026-09-29): build the
+run deck (done on `ccr-11407794-0pxrze`, proven locally, not merged), keep
+execution unavailable until A8, host run first.
 
 ## Read first
 
@@ -47,6 +50,7 @@ screens and the target mockups.
 | **A6 code, host steps** | **`5a8648f5cd4f453278908326cd36258714337f43`** | Stop retry for a fenced run, supervisor codes in words. **Stage this.** Later commits are docs |
 | Live checkout | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | Promoted 2026-09-29 09:13Z from `33528751` (rollback tag `pp-rollback-20260929T091306Z`); the staging of `52f26af1` |
 | Candidate | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | Same as live, 0 ahead. Its scripts carry the A6 bytes below; the INSTALLED supervisor is still the A5 one |
+| Run deck | branch `ccr-11407794-0pxrze` (from `main` `55ffa38d`) | UI only (the finish prompt's Part A); changes no script, route or migration. Not merged, not staged |
 
 **File digests** (sha256; the installers copy byte-exact):
 
@@ -77,12 +81,14 @@ makes a new one. Proof VM boot before A6: `62801e3b-8419-40aa-85bf-dffab35788c2`
 | `scripts/a3-worker-supervisor.py` | `backend_view` + `frame_only` |
 | `scripts/a3-probe-worker.py` | Host case `backend_view` (A3 proof now 20 cases) |
 | `scripts/a6-host-summary.py` | Read-only: every verdict from the newest A3/A4/A5 reports and the saved canary results |
-| `admin/frontend/src/components/operational-projects/AgentRuns.jsx` | `AgentRunsPanel`, `AgentRunDetail`, `ApprovalDialog`, `AgentInbox` |
+| `admin/frontend/src/components/operational-projects/AgentRuns.jsx` | `AgentRunsPanel`, `AgentRunDetail` (state: polling, frames, stop, dialogs), `ApprovalDialog`, `AgentInbox` |
+| `admin/frontend/src/components/operational-projects/RunDeck.jsx` | The run deck (branch `ccr-11407794-0pxrze`): run bar, compact approval banner, Browser pane (LIVE/Paused/Ended), Activity column (thumbnails per step, follow-latest), Details tabs, the phone panel bar (`MobilePanelBar`, `&panel=`); the shared `Badge`, `HelpBanner`, `ApprovalFields`, `FrameDialog` |
+| `admin/frontend/src/components/operational-projects/run-deck-logic.js` | Pure: `acceptFrame` (no frame before step 1 has finished, no repeated identical frame), `panelFor`, `feedOf`; tested by `admin/backend/src/__tests__/agent-run-deck.test.js` |
 | `admin/frontend/src/components/operational-projects/agent-run-text.js` | Every sentence about a run: states, actions, rules, claims, result classes, help decisions, stale reasons |
 | `admin/frontend/src/components/operational-projects/Agents.jsx` | `ModelConsent` (owner), `EnforcedRules` (read-only) |
 | `admin/frontend/src/pages/OperationalProjectDetail.jsx`, `OperationalProjects.jsx` | The "Agent runs" section (`?section=Agent%20runs&run=<id>`), the Agent inbox panel |
 | Tests | `admin/backend/src/__tests__/operational-agent-runs.test.js` (15), `helpers/agent-runs-world.js`; `operational-worker-supervisor.test.js` (launcher view); `scripts/tests/test_a3_worker_supervisor.py` (backend view); `scripts/tests/test_a6_host_summary.py` |
-| Browser journeys | `admin/frontend/tests/agent-runs-harness.mjs` (UI harness) and `agent-runs.browser.mjs` (14 journeys, 72 layout checks); `agent-runs-screens.mjs` (the as-built screens in `assets/a6/`) |
+| Browser journeys | `admin/frontend/tests/agent-runs-harness.mjs` (UI harness) and `agent-runs.browser.mjs` (19 journeys, 96 layout checks with the run deck; 14 and 72 before it); `agent-runs-screens.mjs` (the as-built screens: before the deck in `assets/a6/`, the deck in `assets/a6/deck/`) |
 
 ## Interfaces
 

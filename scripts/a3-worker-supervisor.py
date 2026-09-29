@@ -71,6 +71,7 @@ Operator takeover, input and the proofs stay operator-only.
 import argparse
 import base64
 import hashlib
+import hmac
 import importlib.util
 import json
 import math
@@ -190,6 +191,12 @@ LIVE = frozenset(('launching', 'running', 'human', 'stopping'))
 # reviewed Neko build and managed policy and the TURN relay and fence rule are in
 # place; without it every launch stays headless (A6 behaviour).
 LIVE_MARKER = installer.CONFIG / 'live.json'
+# The TURN relay's shared secret (root 0600). Each viewer gets a credential that
+# expires (TURN REST scheme: "<expiry>:<viewer>", HMAC-SHA1); the secret itself
+# never leaves the host, like the receipt key.
+TURN_SECRET = Path('/etc/proxypilot-a7/turn-secret')
+TURN_TTL_SECONDS = 3600
+TURN_URL = re.compile(r'(turn:[a-z0-9.-]{1,253}:3478\?transport=(udp|tcp)|turns:[a-z0-9.-]{1,253}:5349\?transport=tcp)\Z')
 LIVE_MAX_VIEWERS = 6
 LIVE_IDLE_SECONDS = 60
 LIVE_MAX_LINE = 256 * 1024
@@ -1718,6 +1725,23 @@ class Supervisor:
             return None
         return data if isinstance(data, dict) and data.get('version') == 1 else None
 
+    def turn_credentials(self, viewer):
+        """Short-lived TURN credentials for one viewer, from live.json and the secret."""
+        marker = self.live_available() or {}
+        urls = (marker.get('turn') or {}).get('urls')
+        if not isinstance(urls, list) or not urls or not all(isinstance(u, str) and TURN_URL.fullmatch(u) for u in urls):
+            raise Refused('LIVE_UNAVAILABLE', 'turn')
+        try:
+            installer.secure(TURN_SECRET)
+            secret = TURN_SECRET.read_bytes().strip()
+        except (OSError, ValueError) as error:
+            raise Refused('LIVE_UNAVAILABLE', 'turn secret') from error
+        if len(secret) < 32:
+            raise Refused('LIVE_UNAVAILABLE', 'turn secret')
+        username = '%d:%s' % (int(self.clock()) + TURN_TTL_SECONDS, viewer)
+        credential = base64.b64encode(hmac.new(secret, username.encode(), hashlib.sha1).digest()).decode()
+        return [{'urls': list(urls), 'username': username, 'credential': credential}]
+
     def live_open(self, params):
         ref = validate_ref(params)
         with self.lock:
@@ -1734,13 +1758,18 @@ class Supervisor:
             sink = queue.Queue(maxsize=2000)
             worker.live_sinks[conn] = sink
         try:
+            ice = self.turn_credentials(conn)
+        except Refused:
+            worker.live_sinks.pop(conn, None)
+            raise
+        try:
             reply = worker.request('live_open', 20, conn=conn)
         except Refused as error:
             reply = {'ok': False, 'error': error.code}
         if not reply.get('ok'):
             worker.live_sinks.pop(conn, None)
             raise Refused(str(reply.get('error'))[:64])
-        return LiveStream(self, worker, ref, conn, sink)
+        return LiveStream(self, worker, ref, conn, sink, ice)
 
     def dashboard_takeover(self, params):
         """Hand the coordinator's own running attempt to one viewer (A7)."""
@@ -1962,8 +1991,9 @@ class LiveStream:
     From the backend {"send": msg} or {"close": true}; to it {"recv": msg},
     {"dropped": true} and finally {"closed": reason}. Nothing here is journaled."""
 
-    def __init__(self, supervisor, worker, ref, conn, sink):
+    def __init__(self, supervisor, worker, ref, conn, sink, ice_servers):
         self.supervisor, self.worker, self.ref, self.conn, self.sink = supervisor, worker, ref, conn, sink
+        self.ice_servers = ice_servers
         self.write_lock = threading.Lock()
         self.done = threading.Event()
         self.closed_sent = False
@@ -2003,7 +2033,8 @@ class LiveStream:
         self.done.set()
 
     def run(self, rfile, wfile, sock):
-        self._write(wfile, {'ok': True, 'result': {'conn': self.conn}})
+        self._write(wfile, {'ok': True, 'result': {'conn': self.conn, 'ice_servers': self.ice_servers,
+                                                    'ttl_seconds': TURN_TTL_SECONDS}})
         sock.settimeout(LIVE_IDLE_SECONDS)
         threading.Thread(target=self._pump, args=(wfile,), daemon=True).start()
         window, count, reason = time.monotonic(), 0, 'viewer_closed'

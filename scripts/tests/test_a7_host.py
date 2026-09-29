@@ -190,9 +190,13 @@ class SupervisorA7Tests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.marker = self.root / 'live.json'
-        self.marker.write_text(json.dumps({'version': 1}))
+        self.marker.write_text(json.dumps({'version': 1, 'turn': {'urls': [
+            'turn:turn.example.test:3478?transport=udp', 'turns:turn.example.test:5349?transport=tcp']}}))
+        self.secret = self.root / 'turn-secret'
+        self.secret.write_text('s' * 64 + '\n')
         self.patches = [patch.object(s.installer, 'secure', lambda path: None), patch.object(s, 'ACTION_SECONDS', 5),
-                        patch.object(s, 'READY_SECONDS', 10), patch.object(s, 'LIVE_MARKER', self.marker)]
+                        patch.object(s, 'READY_SECONDS', 10), patch.object(s, 'LIVE_MARKER', self.marker),
+                        patch.object(s, 'TURN_SECRET', self.secret)]
         for item in self.patches:
             item.start()
         self.host = LiveHost(self.root)
@@ -247,6 +251,14 @@ class SupervisorA7Tests(unittest.TestCase):
             opened = json.loads(stream.readline())
             conn = opened['result']['conn']
             self.assertRegex(conn, r'^[0-9a-f]{16}$')
+            # The viewer's TURN credential expires and is bound to this relay; the secret never leaves.
+            ice = opened['result']['ice_servers'][0]
+            expiry, viewer = ice['username'].split(':')
+            self.assertEqual((viewer, int(expiry) - int(self.clock.value)), (conn, s.TURN_TTL_SECONDS))
+            import base64 as b64, hashlib, hmac
+            self.assertEqual(ice['credential'], b64.b64encode(hmac.new(b's' * 64, ice['username'].encode(),
+                                                                         hashlib.sha1).digest()).decode())
+            self.assertNotIn('s' * 64, json.dumps(opened))
             self.assertEqual(json.loads(stream.readline()), {'recv': {'event': 'system/init', 'payload': {'session_id': 'x'}}})
             stream.write((json.dumps({'send': {'event': 'client/heartbeat'}}) + '\n').encode())
             stream.flush()

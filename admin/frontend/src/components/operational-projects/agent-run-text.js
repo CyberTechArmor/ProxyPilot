@@ -92,11 +92,76 @@ export function eventText(kind) {
   return null;
 }
 
+// The run deck: the run bar, the approval banner, the Browser pane, the
+// Activity column, the Details tabs and the phone panel bar.
+export const DECK_TEXT = {
+  back: 'Back to runs',
+  stop: 'Stop run',
+  stopShort: 'Stop',
+  stopHint: 'Stop fences the run at once; nothing more happens, and the verified teardown receipt is collected.',
+  stopRetry: 'The run is fenced and stopping. Stop again retries collecting the verified teardown receipt; the run never resumes.',
+  stopUnavailable: reason => `Stop is not available: ${reason}`,
+  approvalNeeded: 'Approval needed',
+  approvalTitle: action => `Approval needed: ${action}`,
+  approvalLine: (at, digest) => `Requested ${at} · digest ${digest} … · approve with sudo and the digest`,
+  review: 'Review and approve',
+  reviewShort: 'Review',
+  browser: 'Browser',
+  live: 'LIVE',
+  paused: 'Paused',
+  ended: 'Ended',
+  watch: 'Watch live (view only)',
+  enlarge: 'Enlarge the browser frame',
+  starting: 'Starting the browser…',
+  firstFrame: 'Waiting for the first frame…',
+  watchingPaused: 'Watching is paused.',
+  noBrowser: 'No live browser.',
+  viewUnavailable: reason => `Live view is not available: ${reason}`,
+  liveAlt: step => `Live browser frame at step ${step}`,
+  lastAlt: step => `Last browser frame at step ${step}`,
+  thumbAlt: step => `Browser frame at step ${step}; open it larger`,
+  captionLive: (step, action, at) => `At step ${step} · ${action} · captured ${at}`,
+  captionEnded: step => `Last frame · at step ${step}`,
+  viewNote: 'At most one frame a second while the run is live; pixels only, never stored. Typing, clicking and takeover stay on the host.',
+  activity: 'Activity',
+  events: n => `${n} ${n === 1 ? 'event' : 'events'} · newest last`,
+  activityNote: 'Typed progress from the durable record: each step, who decided it (a rule or the model), the claims kept and any error. Page text never reaches this view.',
+  pausedUntilApproval: 'The agent is paused until approval',
+  jump: n => `Jump to latest (${n} new)`,
+  details: 'Details',
+  result: 'Result',
+  modelCalls: n => `Model calls (${n})`,
+  approvals: n => `Approvals (${n})`,
+  pins: 'Pins',
+  noResult: 'No result yet: it appears here when the run ends.',
+  refresh: 'Refresh run',
+  panels: 'Run panels',
+  runMeta: ({ by, at, step, max, guide, binding }) =>
+    [`Started by ${by}`, at, `step ${step}${max ? ` of at most ${max}` : ''}`, `guide v${guide}`, `binding ${binding}`].join(' · '),
+  // A model call in one line; the full allowed list is in Details → Model calls.
+  callSummary: (allowed, tokens, usd) => `${allowed} allowed ${allowed === 1 ? 'action' : 'actions'}${tokens === null ? '' : ` · ${tokens} tokens · $${usd}`}`,
+  anyAllowed: 'the allowed actions',
+  modelFrom: summary => `From ${summary}`,
+};
+// The kind chip on each activity item.
+export const KIND_TEXT = { system: 'System', rule: 'Rule', model: 'Model', approval: 'Approval', person: 'Person', result: 'Result' };
+
 export const shortId = id => (id ? String(id).slice(0, 8) : '—');
 export const when = iso => {
   if (!iso) return '—';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+};
+// Time of day alone today, else the date and time.
+export const whenShort = iso => {
+  const d = new Date(iso ?? '');
+  return !Number.isNaN(d.getTime()) && d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString() : when(iso);
+};
+// Time of day only, for the activity feed and the frame caption.
+export const clock = iso => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
 };
 // Groups of four so a person can compare a digest by eye.
 export const grouped = hex => String(hex ?? '').replace(/(.{4})/g, '$1 ').trim();

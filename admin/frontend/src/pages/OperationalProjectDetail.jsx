@@ -75,6 +75,17 @@ function Operation({id}) {
   async function chooseRun(version,old=null) {
     setRunVersion(version);setCorrecting(old);setRunForm(old?{...blankRun,started_at:localTime(old.started_at),ended_at:localTime(old.ended_at),notes:old.notes,outcome:old.outcome}:blankRun);setSection('Runs');retry.current=null;
   }
+  const runsPanel=<AgentRunsPanel base={base} project={p} runId={openRun} onOpenRun={run=>setParams({section:'Agent runs',run})} onCloseRun={()=>setParams({section:'Agent runs'})}/>;
+  // An open agent run is a deck of its own (RunDeck.jsx): a breadcrumb instead of the page header and sections, and the layout's own gutters.
+  if(section==='Agent runs'&&runsCapability&&openRun)return <div className="max-w-5xl mx-auto w-full flex flex-col gap-3 min-w-0">
+    <h1 className="sr-only">{p.name}</h1>
+    <nav aria-label="Breadcrumb" className="hidden lg:block"><ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+      <li><Link className="hover:text-foreground hover:underline" to="/operational-projects">Operations</Link></li><li aria-hidden="true">›</li>
+      <li className="min-w-0 [overflow-wrap:anywhere]"><Link className="hover:text-foreground hover:underline" to={`/operational-projects/${id}`} onClick={()=>setSection('Overview')}>{p.name}</Link></li><li aria-hidden="true">›</li>
+      <li><Link className="hover:text-foreground hover:underline" to={`/operational-projects/${id}?section=${encodeURIComponent('Agent runs')}`}>Agent runs</Link></li></ol></nav>
+    {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
+    {runsPanel}
+  </div>;
   return <div className="max-w-5xl mx-auto space-y-6 p-4 sm:p-6 min-w-0">
     <header className="space-y-2"><Link className="underline inline-flex min-h-11 items-center" to="/operational-projects">Back to Operations</Link><h1 className="text-2xl font-bold break-words [overflow-wrap:anywhere]">{p.name}</h1><p className="text-sm text-muted-foreground">Your role: {p.own_role} · {p.archived_at?'Archived':'Active'} · {p.current_version?`Current guide v${p.current_version.version_number}`:'No current approved guide'}</p></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
@@ -149,7 +160,7 @@ function Operation({id}) {
       {p.ownership_offer&&active&&<div className="space-y-3 border rounded-md p-3"><p>Ownership offer expires {p.ownership_offer.expires_at}.</p><div className="flex flex-wrap gap-2">{(owner?['cancel']:['accept','decline']).map(decision=><Action key={decision} disabled={busy} variant={decision==='accept'?'default':'outline'} onClick={()=>perform(()=>write(`/ownership-offers/${p.ownership_offer.id}/decision`,{decision},p.revision),`Ownership offer ${decision} completed.`)}>{decision==='accept'?'Accept ownership':decision==='decline'?'Decline ownership':'Cancel ownership offer'}</Action>)}</div></div>}
     </Panel>}
     {section==='Agents'&&agentCapability&&<AgentConfiguration base={base} project={p} runsEnabled={runsCapability} onChanged={()=>refresh(false)}/>}
-    {section==='Agent runs'&&runsCapability&&<AgentRunsPanel base={base} project={p} runId={openRun} onOpenRun={run=>setParams({section:'Agent runs',run})} onCloseRun={()=>setParams({section:'Agent runs'})}/>}
+    {section==='Agent runs'&&runsCapability&&runsPanel}
   </div>;
 }
 

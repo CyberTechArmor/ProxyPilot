@@ -18,8 +18,12 @@ decisions below before writing any code.
    As of 2026-09-29 it does **not**: A6 is implemented, proven locally
    (14 browser journeys, 72 layout checks), merged and deployed (live
    `85586aea`), and its host steps H0–H5 are pending
-   ([A6 finish prompt](fractionate-agents-a6-finish-prompt.md)). If the gate
-   does not hold, stop and name it.
+   ([A6 finish prompt](fractionate-agents-a6-finish-prompt.md)). The finish
+   decisions were: build the run deck, keep execution unavailable until A8,
+   and run the host proof first. The run deck (`RunDeck.jsx`,
+   `run-deck-logic.js`; 19 journeys, 96 layout checks) is built on branch
+   `ccr-11407794-0pxrze` and is not merged. If the gate does not hold, stop
+   and name it.
 2. **Where the code lives.**
    - A4–A6 are in `main`: PR #700 merged as `469e98a9` and the toggles
      (PR #701) as `52f26af1`. Start from `main` at the A6 acceptance commit

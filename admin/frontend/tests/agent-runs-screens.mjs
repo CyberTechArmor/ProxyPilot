@@ -5,6 +5,8 @@
 // shows what an agent run on demo.fractionate.ai looks like. Illustration only:
 // the journeys in agent-runs.browser.mjs are the proof. Run from admin/frontend:
 //   npm run demo:build && node tests/agent-runs-screens.mjs [outDir]
+// The run deck fits the viewport on a laptop (its height follows 100dvh), so
+// its screens are taken at the viewport size, not grown to the content.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -83,7 +85,7 @@ async function harness(options) {
 
 let h;
 const contexts = [];
-async function as(role, { width = 1280, height = 860, theme = 'dark', scale = 1 } = {}) {
+async function as(role, { width = 1280, height = 800, theme = 'dark', scale = 1 } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: scale });
   contexts.push(ctx);
   await ctx.addCookies([{ name: 'pp_harness_user', value: role, url: h.origin }, { name: 'pp_csrf', value: 'a6-csrf', url: h.origin }]);
@@ -114,7 +116,7 @@ const liveFrame = page => page.getByRole('img', { name: /Live browser frame/ }).
 async function startRun(page) {
   await page.goto(runsUrl());
   await page.getByRole('button', { name: 'Start run' }).click();
-  await page.getByRole('button', { name: 'Back to agent runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
 async function openApproval(page) {
@@ -148,13 +150,15 @@ try {
   await startRun(page);
   await liveFrame(page);
   await page.getByRole('region', { name: 'Approval needed' }).waitFor(WAIT);
-  await page.waitForTimeout(1200);
-  await shot(page, '01-run-live-desktop');
+  await page.waitForTimeout(2600);
+  await shot(page, '01-run-live-desktop', { full: false });
   await openApproval(page);
   await shot(page, '02-approval-dialog-desktop', { full: false });
   await approve(page);
   await page.getByTestId('run-result').filter({ hasText: 'Signed in and verified' }).waitFor(WAIT);
-  await shot(page, '03-run-result-desktop');
+  await page.waitForTimeout(600);
+  await page.getByTestId('run-result').scrollIntoViewIfNeeded();
+  await shot(page, '03-run-result-desktop', { full: false });
   await page.goto(runsUrl());
   await page.getByText('Runs').first().waitFor(WAIT);
   await shot(page, '04-runs-overview-desktop');
@@ -176,18 +180,25 @@ try {
   await page.getByTestId('run-result').filter({ hasText: 'Stopped' }).waitFor(WAIT);
   await done();
 
-  // Phone (375 px), dark: the Browser pane comes first; the dialog is full-screen.
+  // Phone (375 px), dark: one panel at a time; Browser first; the dialog is full-screen.
   page = await as('operator', { width: 375, height: 812, scale: 2 });
   await startRun(page);
   await liveFrame(page);
   await page.getByRole('region', { name: 'Approval needed' }).waitFor(WAIT);
-  await page.waitForTimeout(1200);
-  await page.getByRole('img', { name: /Live browser frame/ }).evaluate(n => n.scrollIntoView({ block: 'center' }));
+  await page.waitForTimeout(2600);
   await shot(page, '07-run-live-phone', { full: false });
+  const panel = name => page.getByRole('navigation', { name: 'Run panels' }).getByRole('button', { name: new RegExp(`^${name}`) });
+  await panel('Activity').click();
+  await page.waitForTimeout(400);
+  await shot(page, '12-run-activity-phone', { full: false });
+  await panel('Browser').click();
   await openApproval(page);
   await shot(page, '08-approval-dialog-phone', { full: false });
   await approve(page);
+  await panel('Details').click();
   await page.getByTestId('run-result').filter({ hasText: 'Signed in and verified' }).waitFor(WAIT);
+  await page.evaluate(() => { document.querySelector('main > .overflow-y-auto').scrollTop = 0; });
+  await shot(page, '13-run-result-phone', { full: false });
   await done();
 
   // A help request: the agent's browser was taken over on the host.
@@ -204,8 +215,8 @@ try {
   await startRun(page);
   await liveFrame(page);
   await page.getByRole('region', { name: 'Approval needed' }).waitFor(WAIT);
-  await page.waitForTimeout(1200);
-  await shot(page, '10-run-live-light-desktop');
+  await page.waitForTimeout(2600);
+  await shot(page, '10-run-live-light-desktop', { full: false });
   await page.getByRole('button', { name: 'Stop run' }).click();
   await page.getByTestId('run-result').filter({ hasText: 'Stopped' }).waitFor(WAIT);
   await done();

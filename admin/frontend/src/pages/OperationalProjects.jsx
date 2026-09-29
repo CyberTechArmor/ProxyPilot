@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { operationsApi as api } from '@/lib/api';
 import { Action, Panel, Field, Choice } from '@/components/operational-projects/shared';
+import { AgentInbox } from '@/components/operational-projects/AgentRuns';
 
 export default function OperationalProjects() {
   const [enabled,setEnabled]=useState(null),[rows,setRows]=useState([]),[cursor,setCursor]=useState(null);
   const [state,setState]=useState('active'),[name,setName]=useState(''),[description,setDescription]=useState('');
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const [agentCapability,setAgentCapability]=useState(false),[directory,setDirectory]=useState([]),[directoryCursor,setDirectoryCursor]=useState(null);
+  const [runsCapability,setRunsCapability]=useState(false);
   const navigate=useNavigate();
   async function load(after=null) {
     setBusy(true);setError('');
@@ -15,7 +17,7 @@ export default function OperationalProjects() {
     catch(e){setError(e.message);if([401,403,404].includes(e.status)){setRows([]);setName('');setDescription('');}}
     finally{setBusy(false);}
   }
-  useEffect(()=>{let active=true;api.get('/capabilities').then(c=>{if(active){setEnabled(c.enabled&&c.ui_available);setAgentCapability(c.enabled&&c.agents_metadata_enabled);}}).catch(e=>{if(active){setError(e.message);setEnabled(false);}});return()=>{active=false;};},[]);
+  useEffect(()=>{let active=true;api.get('/capabilities').then(c=>{if(active){setEnabled(c.enabled&&c.ui_available);setAgentCapability(c.enabled&&c.agents_metadata_enabled);setRunsCapability(!!c.agent_runs_enabled);}}).catch(e=>{if(active){setError(e.message);setEnabled(false);}});return()=>{active=false;};},[]);
   useEffect(()=>{if(enabled)load();},[enabled,state]);
   async function loadDirectory(after=null) {try {const data=await api.get(`/directory${after?`?after=${after}`:''}`);setDirectory(old=>after?[...old,...data.projects]:data.projects);setDirectoryCursor(data.next_cursor);}catch(e){setError(e.message);setDirectory([]);setDirectoryCursor(null);}}
   useEffect(()=>{if(agentCapability)loadDirectory();},[agentCapability]);
@@ -28,6 +30,7 @@ export default function OperationalProjects() {
     <header><h1 className="text-2xl font-bold">Operations</h1><p className="text-muted-foreground mt-2">Store instructions and record work performed by people.</p></header>
     {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
     {enabled===null?<p role="status">Loading Operations…</p>:!enabled?<p>Operations is not enabled on this installation.</p>:<>
+      {runsCapability&&<AgentInbox/>}
       <Panel title="New operation"><form onSubmit={create} className="space-y-4">
         <Field label="Name" required maxLength={200} value={name} onChange={e=>setName(e.target.value)}/>
         <Field label="Description (optional)" textarea rows={3} maxLength={20000} value={description} onChange={e=>setDescription(e.target.value)}/>

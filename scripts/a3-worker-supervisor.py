@@ -41,6 +41,15 @@ fixed prompt, forwards it to the broker's model_call under the run's pinned
 token/spend limits, and returns one action name from the allowed set or a
 refusal. Model text never comes back to the caller. `completed` is a stop
 reason label for a normal end; it grants nothing a cancel does not.
+
+A6: the backend socket may also ask for `view`, one read-only frame of the
+model's live attempt for the supervision UI (user decision, 2026-09-29). It is
+narrower than the operator's view: only while the coordinator's attempt runs
+(never during a takeover), it never renews the lease, at most one frame is in
+flight per attempt and at most one per second, and only the pixels cross (a
+bounded PNG and its size; no page URL, text or DOM). Frames are not journaled.
+The runner types a bound value only into a password input, so a frame shows
+it masked. Input, takeover and every other operator control stay operator-only.
 """
 import argparse
 import base64
@@ -118,8 +127,8 @@ LIMIT_KEYS = frozenset(('cpu', 'memory_mib', 'temporary_disk_mib', 'max_seconds'
 MAX_SAFE = 2 ** 53 - 1
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
-BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'model_step', 'stop'))
-OPERATOR_METHODS = BACKEND_METHODS | frozenset(('takeover', 'view', 'input', 'observe', 'locate',
+BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop'))
+OPERATOR_METHODS = BACKEND_METHODS | frozenset(('takeover', 'input', 'observe', 'locate',
                                                 'egress_probe', 'proof', 'unit_stats', 'journal',
                                                 'proof_crash_mid_action'))
 BACKEND_STOP_REASONS = frozenset(('cancelled', 'blocked', 'failed', 'completed'))
@@ -133,6 +142,12 @@ POLICY_KEYS = ('v', 'origin', 'guide_hash', 'rules', 'model_guide_consent')
 MAX_MODEL_OUTPUT_TOKENS = 16
 MAX_PROMPT_BYTES = 16000     # the broker's own cap; checked here first for a typed refusal
 MODEL_STEP_SECONDS = 90      # the broker's provider timeout (60 s) plus its vault read
+# A6 backend view: the guest runs one command at a time, so a frame may wait
+# behind one action; one in flight and one per second keep it from piling up.
+VIEW_SECONDS = 40
+VIEW_MIN_SECONDS = 1.0
+MAX_VIEW_BASE64 = 3 * 1024 * 1024
+PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
 SUBMIT_OUTCOMES = ('signed_in', 'rejected', 'rate_limited', 'challenge_required', 'unexpected_origin',
                    'timeout', 'unknown')
 OBSERVATION_CLAIMS = {'authenticated': 'bool', 'as_bound_account': 'bool', 'sample_present': 'bool',
@@ -240,6 +255,23 @@ def validate_ref(value, extra=()):
             or not safe_int(value['fence'], 1)):
         raise Refused('INVALID_REQUEST')
     return value
+
+
+def frame_only(result):
+    """A6 backend view reply: a bounded PNG and its size, nothing else (no URL)."""
+    if not isinstance(result, dict):
+        raise Refused('VIEW_INVALID')
+    shot, width, height = result.get('png_base64'), result.get('width'), result.get('height')
+    if not isinstance(shot, str) or not 0 < len(shot) <= MAX_VIEW_BASE64 \
+            or not safe_int(width, 1) or not safe_int(height, 1) or width > 4096 or height > 4096:
+        raise Refused('VIEW_INVALID')
+    try:
+        raw = base64.b64decode(shot, validate=True)
+    except ValueError as error:
+        raise Refused('VIEW_INVALID') from error
+    if not raw.startswith(PNG_MAGIC):
+        raise Refused('VIEW_INVALID')
+    return {'png_base64': shot, 'width': width, 'height': height}
 
 
 def valid_observation(value):
@@ -828,6 +860,7 @@ class Supervisor:
         self.launch_lock = threading.Lock()
         self.workers = {}
         self.gates = {}
+        self.views = {}
         self.retry_at = {}
         self.boundary_cache = (0, None)
         self.last_health = 0
@@ -1462,6 +1495,30 @@ class Supervisor:
     def view(self, params):
         return self._operator_call(params, (), ('running', 'human'), 'view', renew=True)
 
+    def backend_view(self, params):
+        """A6: one frame of the model's live attempt, pixels only (see the module notes)."""
+        ref = validate_ref(params)
+        with self.lock:
+            attempt = self._attempt(ref, ('running',))
+            if attempt.get('workload') != 'browser':
+                raise Refused('ATTEMPT_NOT_ACTIVE')
+            self._usable(attempt)
+            last = self.views.get(ref['attempt_id'])
+            if last is True or (last is not None and time.monotonic() - last < VIEW_MIN_SECONDS):
+                raise Refused('VIEW_BUSY')
+            worker = self.workers.get(ref['attempt_id'])
+            if worker is None:
+                raise Refused('CHANNEL_CLOSED')
+            self.views[ref['attempt_id']] = True
+        try:
+            reply = worker.request('view', VIEW_SECONDS)
+            if not reply.get('ok'):
+                raise Refused(str(reply.get('error'))[:64])
+            return frame_only(reply.get('result'))
+        finally:
+            with self.lock:
+                self.views[ref['attempt_id']] = time.monotonic()
+
     def human_input(self, params):
         try:
             runner.validate_input(params.get('input') if isinstance(params, dict) else None)
@@ -1634,8 +1691,10 @@ class Supervisor:
                     raise Refused('INVALID_REQUEST', 'proof')
                 return self.model_step(params, proof)
             return self.model_step(params)
+        if method == 'view':
+            return self.view(params) if operator else self.backend_view(params)
         return {'status': self.status, 'renew': self.renew, 'action': self.action,
-                'takeover': self.takeover, 'view': self.view, 'input': self.human_input,
+                'takeover': self.takeover, 'input': self.human_input,
                 'observe': self.observe, 'locate': self.locate, 'egress_probe': self.egress_probe,
                 'proof': self.proof, 'unit_stats': self.unit_stats, 'journal': self.journal,
                 'proof_crash_mid_action': self.crash_mid_action}[method](params)

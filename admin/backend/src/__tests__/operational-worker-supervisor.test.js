@@ -196,3 +196,28 @@ test('store binds the attempt to the supervisor VM and boot and refuses a foreig
     assert.throws(() => f.db.prepare("UPDATE ops_agent_worker_attempts SET boot_id='x' WHERE id=?").run(a.attempt_id));
   } finally { f.close(); }
 });
+
+test('A6 launcher view returns a bounded PNG frame and nothing else', async () => {
+  const s = spec(), ref = {run_id:s.run_id,attempt_id:s.attempt_id,fence:1};
+  const png = Buffer.concat([Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]), Buffer.from('frame')]).toString('base64');
+  let reply = {png_base64:png,width:1280,height:800};
+  const calls = [];
+  const launcher = createWorkerLauncher({client:{request:async (method, params) => { calls.push([method, params]); return reply; }},
+    vmUuid:VM});
+  assert.deepEqual(await launcher.view(ref), {png_base64:png,width:1280,height:800});
+  assert.deepEqual(calls, [['view', ref]]);
+  await assert.rejects(launcher.view({...ref,url:'https://x'}), {code:'INVALID_VIEW'});
+  await assert.rejects(launcher.view({...ref,fence:0}), {code:'INVALID_VIEW'});
+  for (const bad of [{...reply,untrusted_page_url:'https://demo.fractionate.ai/'}, {png_base64:Buffer.from('GIF89a..').toString('base64'),width:1,height:1},
+    {...reply,width:0}, {...reply,height:5000}, {...reply,png_base64:'not base64!'}, {...reply,png_base64:''},
+    {...reply,png_base64:png + 'A'.repeat(3 * 1024 * 1024)}, null]) {
+    reply = bad;
+    await assert.rejects(launcher.view(ref), {code:'SUPERVISOR_PROTOCOL'});
+  }
+  await assert.rejects(createWorkerLauncher().view(ref), {code:'BOUNDARY_UNVERIFIED'});
+  const fake = await fakeSupervisor(request => ({ok:false,error:request.method === 'view' ? 'VIEW_BUSY' : 'X'}));
+  try {
+    await assert.rejects(createSupervisorClient(fake.path, {timeoutMs:5000}).request('view', ref), {code:'VIEW_BUSY'});
+    assert.deepEqual(fake.seen.map(r => r.method), ['view']);
+  } finally { await fake.close(); }
+});

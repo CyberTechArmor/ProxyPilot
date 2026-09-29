@@ -104,6 +104,8 @@ export function validateModelStep(value) {
   return value;
 }
 
+const MAX_VIEW_BASE64 = 3 * 1024 * 1024;
+const PNG_MAGIC = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
 const validRef = ref => fields(ref, ['run_id','attempt_id','fence']) &&
   validUuid(ref.run_id) && validUuid(ref.attempt_id) && Number.isSafeInteger(ref.fence) && ref.fence >= 1;
 
@@ -155,6 +157,19 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       // The call is settled at the broker; a choice outside the set is refused, never used.
       if (!valid.allowed.includes(result.choice)) fail('MODEL_CHOICE_INVALID');
       return result;
+    },
+    // A6: one frame of the model's live attempt for the supervision UI. Pixels
+    // only; the supervisor drops the page URL, and a reply with any other field,
+    // a non-PNG or an oversized frame is a protocol error, never shown.
+    async view(ref) {
+      if (!validRef(ref)) fail('INVALID_VIEW');
+      const result=await connected().request('view', {run_id:ref.run_id,attempt_id:ref.attempt_id,fence:ref.fence});
+      if (!fields(result,['png_base64','width','height']) || typeof result.png_base64!=='string' ||
+          result.png_base64.length===0 || result.png_base64.length>MAX_VIEW_BASE64 ||
+          !/^[A-Za-z0-9+/]+={0,2}$/.test(result.png_base64) ||
+          !Buffer.from(result.png_base64.slice(0,12),'base64').subarray(0,8).equals(PNG_MAGIC) ||
+          ![result.width,result.height].every(n=>Number.isSafeInteger(n) && n>=1 && n<=4096)) fail('SUPERVISOR_PROTOCOL');
+      return Object.freeze({png_base64:result.png_base64,width:result.width,height:result.height});
     },
     async stop(ref, reason='cancelled') {
       if (!validRef(ref) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');

@@ -566,3 +566,97 @@ address's traffic from MEET's.
 
 **Next:** stage the fix, then H3b (`provision-vm` and `enable` only; the
 relay, Neko and the probe stay).
+
+## 2026-09-29 host run: #709 deployed, H3b passed, H4 stopped at every launch
+
+**Deploy of #709** (merge `a3a22bb0`):
+- Staging (user, pinned stager): `staged 58df8b9a… (was ce36ad54…) from
+  a3a22bb0…; 189 paths match exactly`.
+- Checks on `58df8b9a`: 3,408 tests, 3,397 pass, 0 fail, 11 skipped.
+- Backup: `proxypilot-pre-A7-vm-debs-promote-20260929T213348Z.db` (sha256
+  `5a60c598…`).
+- Promote `ce36ad54` → `58df8b9a`, rollback tag
+  `pp-rollback-20260929T213438Z`; update `5e8e98f1…` succeeded in 63 s and
+  its health check passed.
+
+**H3b (user, detached):** HEAD `58df8b9a…`, installer `2a8ee479…`.
+- `provision-vm`: snapshot `pp-a7-pre-live-20260929-214143`; Neko
+  `a19dc462…` and the live policy `8c026b11…` read back in the VM as
+  pushed; `missing_libraries: []`.
+- `enable`: `fence_live_relay: true`, `live_marker: true`.
+- Supervisor: `accepting_launch: true`, `blockers: []`; `h3b_end`.
+
+**H4 (user, detached):** binding `3c86853d-…`, `provisioned: true`; then
+every browser launch failed within about a second:
+- A3: `sessions`, `minimums`, `human_takeover`, `origin_refusals` failed
+  with `CallFailed: LAUNCH_FAILED`.
+- A7: `dashboard_takeover`, `takeover_during_submit` and
+  `grant_loss_while_holding` timed out waiting for the approval request;
+  `resume_new_run` failed its assertion because the case before it had not
+  run.
+- The supervisor's state recorded 29 launch failures, each
+  `BROWSER_START_FAILED`. Its stored diagnostic (the last 1,500 bytes of
+  Chromium's log) held only D-Bus noise and one fontconfig line, not the
+  cause.
+- No sign-in and no model call can have happened: each run stopped at its
+  launch.
+
+**Finding: the live policy refused the runner's own pipe.**
+- The managed policy set `DeveloperToolsAvailability: 2`. On current
+  Chromium that also refuses the DevTools protocol on
+  `--remote-debugging-pipe`, which is how the runner drives the browser.
+  Chromium started, and the runner's first attach was refused
+  (`BROWSER_PROTOCOL`, then `BROWSER_START_FAILED`).
+- Only H3b put the policy file in the VM, and headless Chromium reads the
+  same directory, so every launch after H3b failed, live or not.
+- Why the local proof missed it: the live tests pointed the runner at a
+  temporary policy path that Chromium never reads, so the policy was never
+  in force. The fault was in the test, not in what it asserted.
+- Reproduced locally in a copy of the worker unit's sandbox (user nobody, a
+  private `/tmp`, `/var` and `/run` read-only and empty) with the real
+  policy path:
+  - with the policy, Chromium started headless or in kiosk mode, and the
+    runner's attach was refused;
+  - with no policy it started;
+  - with `URLBlocklist`, `URLAllowlist`, `DownloadRestrictions` or
+    `IncognitoModeAvailability` removed (one at a time) it still failed;
+    with only `DeveloperToolsAvailability` removed it started.
+
+**The fix** (runner `a3-worker-guest.py` `d0724e5f…`, policy
+`b515d84c…`):
+- The policy leaves out `DeveloperToolsAvailability`. Two layers keep
+  DevTools away from a person taking over, each proven on its own with real
+  Chromium:
+  - **kiosk mode:** F12, Ctrl+Shift+I, J and C, and Ctrl+U open nothing. The
+    page received the keys, so they reached Chromium and it opened nothing;
+    they were not lost.
+  - **the existing `devtools://*` block:** in a normal window it blocks the
+    DevTools front end itself, so DevTools opens by no path. The same window
+    without the block opens `devtools://devtools/bundled/devtools_app.html`
+    on F12, which shows the check can fail.
+  - Unchanged: the runner's `LIVE_FIELDS_NOT_CLEAR` refusal of a takeover
+    while a password field holds text.
+- The launch diagnostic now names the cause first: the refused call and
+  Chromium's own message (for example `BROWSER_PROTOCOL at
+  Target.setDiscoverTargets: …`), within the 1,500 characters the supervisor
+  keeps, and without the D-Bus lines. It stays in the supervisor's state;
+  only codes cross the control channel, as before.
+- Machine check, `scripts/tests/test_a7_live_policy.py` (opt in with
+  `A7_TEST_POLICY=1`, as root). It writes the runner's policy bytes to the
+  real path, puts back what was there afterwards, and proves:
+  - the runner drives Chromium under the policy;
+  - with `DeveloperToolsAvailability: 2` added, the start fails, and the
+    diagnostic names the refused call;
+  - both DevTools layers, as above.
+
+  It fails on the old policy with the host's exact error.
+- Ratchet in `test_a7_live.py`: the policy must not carry
+  `DeveloperToolsAvailability`, and the live browser must keep `--kiosk`.
+
+**Next (host):**
+1. Stage the merge and deploy it.
+2. H3c: reinstall the supervisor (new runner copy, new receipt key), then
+   `provision-vm` (pushes the new policy; the packages are already in, so
+   nothing is downloaded), then `enable` (the marker takes the new policy
+   digest).
+3. H4 again, unchanged.

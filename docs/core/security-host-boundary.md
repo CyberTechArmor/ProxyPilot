@@ -186,8 +186,13 @@ reply, no key read, no provider contacted). The supervisor now answers
 a command was written, instead of `CHANNEL_CLOSED` (uncertain).
 **Worker unit:** Xvfb, Neko's server on a Unix socket in the unit's private
 tmpfs, and the runner's sandboxed Chromium in kiosk mode under managed
-policies. Neko has clipboard, upload, file transfer, chat and media sharing
-off. The unit's limits, the origin policy, the one-shot credential FIFO and
+policies. DevTools stays shut to a person taking over through two layers:
+kiosk mode, and the `devtools://*` URL block, which blocks the DevTools front
+end itself. The policy does not set `DeveloperToolsAvailability`, because
+Chromium then also refuses the runner's own DevTools pipe (the host run's H4,
+2026-09-29). `scripts/tests/test_a7_live_policy.py` proves both layers with
+real Chromium reading the real policy path. Neko has clipboard, upload, file
+transfer, chat and media sharing off. The unit's limits, the origin policy, the one-shot credential FIFO and
 the signed receipt are unchanged.
 **Network:** coturn on the host (`proxypilot-a7-turn.service`, installed by
 `scripts/a7-install-live.py`, its own user, a hardened unit), listening on

@@ -254,6 +254,19 @@ except OSError:
 '''
 
 
+# `incus exec <vm> -- systemctl kill --signal=SIG<name> <unit>.service` for the
+# kill cases: signals the scripted runner's process group (its own session).
+FAKE_INCUS = r'''#!/usr/bin/env python3
+import os, signal, sys
+argv = sys.argv[1:]
+if argv[:1] != ['exec'] or argv[2:6] != ['--', 'systemctl', 'kill', argv[5]] or not argv[5].startswith('--signal='):
+    sys.exit(2)
+unit = argv[6][:-len('.service')] if argv[6].endswith('.service') else argv[6]
+pid = int(open(os.path.join(os.environ['A7_FAKE_PIDS'], unit)).read())
+os.killpg(pid, getattr(signal, argv[5][len('--signal='):]))
+'''
+
+
 class HarnessHost(cred_tests.A4Host):
     def spawn(self, unit, properties, source, config):
         self.spawns += 1
@@ -264,6 +277,8 @@ class HarnessHost(cred_tests.A4Host):
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
                                    start_new_session=True, env=env)
         self.units[unit] = process
+        self.pids.mkdir(exist_ok=True)
+        (self.pids / unit).write_text(str(process.pid))
         return process
 
 
@@ -300,6 +315,10 @@ class A7ProbeHarnessTests(unittest.TestCase):
         self.host = HarnessHost(self.root)
         self.host.mode = self.root / 'mode.json'
         self.host.input = self.root / 'input.txt'
+        self.host.pids = self.root / 'pids'
+        incus = self.root / 'incus'
+        incus.write_text(FAKE_INCUS)
+        incus.chmod(incus.stat().st_mode | stat.S_IXUSR)
         self.provider = ProviderHost(self.host, str(self.host.workspace))
         self.broker = b.Broker(host=self.provider, vault=broker_tests.FakeVault(), journal=self.root / 'broker.json')
         self.broker.price_set(broker_tests.PRICE)
@@ -320,7 +339,7 @@ class A7ProbeHarnessTests(unittest.TestCase):
                         A5_PROBE_VAULT_KEY='a4-fixture-password', A5_PROBE_APPROVAL_SECONDS='60',
                         A7_PROBE_ROOT=str(self.root / 'proof'), A7_PROBE_VIEWER=str(viewer),
                         A7_PROBE_FIXTURES='file:%s' % self.host.mode, A7_FAKE_INPUT=str(self.host.input),
-                        A7_PROBE_HELD_SECONDS='60')
+                        A7_PROBE_HELD_SECONDS='60', A7_PROBE_INCUS=str(incus), A7_FAKE_PIDS=str(self.host.pids))
 
     def tearDown(self):
         for server in self.servers:
@@ -345,10 +364,14 @@ class A7ProbeHarnessTests(unittest.TestCase):
         self.assertEqual(final.get('a7_proof'), 'passed', (failed, result.stderr[-3000:]))
         self.assertEqual(result.returncode, 0)
         report = json.loads(Path(final['report']).read_text())
+        if os.environ.get('A7_HARNESS_REPORT_COPY'):
+            shutil.copyfile(final['report'], os.environ['A7_HARNESS_REPORT_COPY'])
         self.assertEqual([c['case'] for c in report['cases']], [
             'live_view', 'live_refusals', 'dashboard_takeover', 'resume_new_run', 'takeover_during_submit',
             'grant_loss_while_holding', 'coordinator_killed_while_holding', 'timeout_is_a_decision',
-            'model_proof_switches', 'model_summary'])
+            'model_proof_switches', 'model_summary', 'account_loss_while_holding', 'key_loss_while_holding',
+            'worker_killed_mid_read', 'worker_killed_mid_approval', 'coordinator_killed_mid_read',
+            'coordinator_killed_mid_approval', 'coordinator_killed_mid_write', 'worker_killed_mid_write'])
         observed = {c['case']: c['observed'] for c in report['cases']}
         self.assertEqual(observed['dashboard_takeover']['counted'], {'key': 5, 'click': 1, 'scroll': 2})
         self.assertEqual(observed['dashboard_takeover']['journal']['stop_reason'], 'taken_over')
@@ -356,6 +379,10 @@ class A7ProbeHarnessTests(unittest.TestCase):
         self.assertEqual(observed['coordinator_killed_while_holding']['end_reason'], 'coordinator_restart')
         self.assertEqual(observed['model_proof_switches']['reply_outside_set']['result']['result_class'], 'model_choice_invalid')
         self.assertEqual(observed['model_summary']['summary']['state'], 'written')
+        self.assertEqual(observed['key_loss_while_holding']['resume'], 'RESUME_STALE')
+        self.assertEqual(observed['coordinator_killed_mid_write']['after_unknown'], 'RECONCILIATION_REQUIRED')
+        self.assertEqual(observed['worker_killed_mid_write']['gate'], 'RECONCILIATION_REQUIRED')
+        self.assertEqual(observed['worker_killed_mid_read']['step'][1], 'uncertain')
         # Typed fields only in the report and the log: no model text, no TURN
         # credential. The summary itself lives in the database by design (the
         # Review tab shows it), labelled as model text.

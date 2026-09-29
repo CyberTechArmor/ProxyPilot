@@ -475,6 +475,8 @@ print(json.dumps(out, sort_keys=True))'''
             'unknown_action': refused('action', dict(ref, action='download'), True),
             'url_field': refused('action', dict(ref, action='open_landing', url='https://example.com'), True),
             'operator_stop_reason': refused('stop', dict(ref, reason='taken_over'), True),
+            # A7: the backend's takeover hands control only to an open live viewer of this attempt.
+            'takeover_unknown_viewer': refused('takeover', dict(ref, conn='0' * 16), True),
             # A5: model_step is bound to the pinned policy bytes; the proof flag is operator-only.
             'model_step_foreign_policy': refused('model_step', dict(ref, call_id=str(uuid.uuid4()), policy='{}',
                                                                     guide='{}', observations=[],
@@ -482,15 +484,19 @@ print(json.dumps(out, sort_keys=True))'''
             'model_step_proof_flag': refused('model_step', dict(ref, call_id=str(uuid.uuid4()), policy='{}', guide='{}',
                                                                 observations=[], allowed=['read_files', 'read_workspace'],
                                                                 proof='provider_error'), True)})
+        live = call('status', {}, backend=True).get('live') is True
         receipt = call('stop', dict(ref, reason='cancelled'), backend=True)['receipt']
         receipt_ok(receipt)
-        expected = {'journal': 'METHOD_NOT_ALLOWED', 'takeover': 'METHOD_NOT_ALLOWED', 'input': 'METHOD_NOT_ALLOWED',
+        # A7 made `takeover` a backend method (the dashboard's, which needs a
+        # viewer connection); the operator's takeover and input stay operator-only.
+        expected = {'journal': 'METHOD_NOT_ALLOWED', 'takeover': 'INVALID_REQUEST', 'input': 'METHOD_NOT_ALLOWED',
                     'proof_workload': 'INVALID_LAUNCH', 'argv_field': 'INVALID_LAUNCH', 'other_origin': 'INVALID_LAUNCH',
                     'below_minimum': 'PROJECT_LIMIT_BELOW_WORKER_MINIMUM',
                     'credential_action': 'CREDENTIAL_NOT_BOUND', 'credential_action_without_binding': 'INVALID_REQUEST',
                     'unknown_action': 'INVALID_BROWSER_ACTION',
                     'url_field': 'INVALID_REQUEST', 'operator_stop_reason': 'INVALID_REQUEST',
-                    'model_step_foreign_policy': 'RUN_POLICY_MISMATCH', 'model_step_proof_flag': 'INVALID_REQUEST'}
+                    'model_step_foreign_policy': 'RUN_POLICY_MISMATCH', 'model_step_proof_flag': 'INVALID_REQUEST',
+                    'takeover_unknown_viewer': 'LIVE_CONN_UNKNOWN' if live else 'LIVE_UNAVAILABLE'}
         assert found == expected, found
         return found
 

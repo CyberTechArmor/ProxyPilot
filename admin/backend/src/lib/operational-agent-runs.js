@@ -719,7 +719,8 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         const code = error?.code;
         if (code === 'LIVE_UNAVAILABLE' || code === 'LIVE_BUSY')
           refuse(409, code, CODES[code][1]);
-        if (['ATTEMPT_NOT_ACTIVE', 'STALE_FENCE', 'UNKNOWN_ATTEMPT', 'LEASE_EXPIRED', 'DEADLINE', 'CHANNEL_CLOSED'].includes(code))
+        if (['ATTEMPT_NOT_ACTIVE', 'STALE_FENCE', 'UNKNOWN_ATTEMPT', 'LEASE_EXPIRED', 'DEADLINE', 'CHANNEL_CLOSED',
+          'WORKER_EXITED'].includes(code))
           refuse(409, 'LIVE_UNAVAILABLE', 'The browser is not running.');
         throw toRunError(error);
       }

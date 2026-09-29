@@ -1384,9 +1384,7 @@ class Supervisor:
             # The reservation is durable before the browser can act on it.
             self._save()
             worker = self.workers.get(ref['attempt_id'])
-        if worker is None:
-            self._fail_channel(ref['attempt_id'])
-            raise Refused('CHANNEL_CLOSED')
+        self._refuse_if_exited(ref['attempt_id'], worker, record)
         started = time.monotonic()
         try:
             reply = worker.request('action', ACTION_SECONDS, action=ref['action'])
@@ -1409,6 +1407,19 @@ class Supervisor:
         if not reply.get('ok'):
             raise Refused(str(reply.get('error'))[:64])
         return {'ordinal': record['ordinal'], 'result': reply.get('result'), 'untrusted': True}
+
+    def _refuse_if_exited(self, attempt_id, worker, record):
+        """A runner that had already gone before a command was written never got
+        it: the action certainly did not happen (A7, found by the kill proof).
+        Only a runner that goes while a command is in flight leaves it uncertain."""
+        if worker is not None and not worker.ended.is_set():
+            return
+        with self.lock:
+            record['state'] = 'failed'
+            record['error'] = 'WORKER_EXITED'
+            self._save()
+        self._fail_channel(attempt_id)
+        raise Refused('WORKER_EXITED')
 
     def _submit_target(self, ref):
         attempt = self._attempt(ref, ('running',))
@@ -1452,9 +1463,7 @@ class Supervisor:
             attempt['credential_submitted'] = True
             self._save()
             worker = self.workers.get(ref['attempt_id'])
-        if worker is None:
-            self._fail_channel(ref['attempt_id'])
-            raise Refused('CHANNEL_CLOSED')
+        self._refuse_if_exited(ref['attempt_id'], worker, record)
         started = time.monotonic()
         worker.credential_channel.clear()
         try:

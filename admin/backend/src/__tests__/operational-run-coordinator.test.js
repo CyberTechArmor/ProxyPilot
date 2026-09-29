@@ -433,6 +433,20 @@ test('an uncertain browser step becomes a human decision; a takeover hands the r
   } finally { t.f.close(); }
 });
 
+test('a step the supervisor never sent (the runner had already exited) fails; it is not uncertain', async () => {
+  const s = setup({ rules: { ...baseRules, model_actions: ['read_workspace'], stop_when: ['verified_account'] },
+    bind: false });
+  try {
+    const sup = fakeSupervisor({ actionErrors: { read_workspace: 'WORKER_EXITED' } });
+    const { c } = coordinator(s, sup);
+    const result = await c.execute(c.start(s.operator, startInput(s)).run_id);
+    assert.deepEqual([result.final_state, result.result_class, result.needs_human, result.uncertain_steps],
+      ['failed', 'attempt_lost', 0, 0]);
+    const step = s.f.db.prepare("SELECT state,error_code FROM ops_agent_run_steps WHERE action='read_workspace'").get();
+    assert.deepEqual({ ...step }, { state: 'failed', error_code: 'WORKER_EXITED' });
+  } finally { s.f.close(); }
+});
+
 test('without a binding the submit is never offered, and a run with nothing left ends blocked', async () => {
   const s = setup({ bind: false, rules: { ...baseRules, model_actions: ['submit_bound_fixture', 'read_files'] } });
   try {

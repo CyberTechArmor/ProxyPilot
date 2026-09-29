@@ -48,6 +48,10 @@ export const settings = () => ({
   minFps: Number(process.env.A7_PROBE_MIN_FPS || 10),
   heldSeconds: Number(process.env.A7_PROBE_HELD_SECONDS || 120),
   submitInFlightMs: Number(process.env.A7_PROBE_SUBMIT_IN_FLIGHT_MS || 300),
+  readInFlightMs: Number(process.env.A7_PROBE_READ_IN_FLIGHT_MS || 150),
+  // The kill cases stop the worker unit inside the proof VM (root on the host).
+  incus: process.env.A7_PROBE_INCUS || 'incus',
+  vm: process.env.A7_PROBE_VM || 'pp-agents-a3-debian13-proof-20260927',
 });
 
 const coded = (code, detail) => Object.assign(new Error(code), { code, detail });
@@ -101,10 +105,11 @@ export async function createA7World(dir) {
 
 // A coordinator and a service over it. `approve`: 'hold' records the request
 // and waits; 'proof' approves as the proof operator (labelled in the report).
-function context(world, { approve = 'hold', launcher } = {}) {
+function context(world, { approve = 'hold', launcher, onRequest } = {}) {
   const ctx = { requests: [] };
   ctx.c = world.coordinator({ launcher, onApprovalRequested: (request) => {
     ctx.requests.push(request);
+    onRequest?.(request);
     if (approve !== 'proof') return;
     setImmediate(() => {
       try {
@@ -141,7 +146,24 @@ async function journalOf(world, attemptId) {
   return { state: attempt.state, stop_reason: attempt.stop_reason ?? null,
     dashboard_takeover: attempt.dashboard_takeover ? { state: attempt.dashboard_takeover.state,
       inputs: attempt.dashboard_takeover.inputs ?? null, uncontrolled_inputs: attempt.dashboard_takeover.uncontrolled_inputs ?? null } : null,
-    notes: (attempt.log || []).map(entry => entry[1]).filter(kind => /takeover|refused|receipt/.test(kind)) };
+    notes: (attempt.log || []).map(entry => entry[1]).filter(kind => /takeover|refused|receipt/.test(kind)),
+    actions: (attempt.actions || []).map(a => [a.action, a.state]) };
+}
+
+// The worker unit in the proof VM (root on the host): SIGSTOP freezes every
+// process in it, so a command already sent cannot be answered; SIGKILL ends it.
+async function signalWorker(world, attemptId, signal) {
+  const unit = `pp-a3-worker-${attemptId}.service`;
+  const out = await new Promise((resolve) => {
+    const child = spawn(world.a7.incus, ['exec', world.a7.vm, '--', 'systemctl', 'kill', `--signal=${signal}`, unit],
+      { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    child.on('error', error => resolve({ code: codeOf(error), err: '' }));
+    child.on('exit', code => resolve({ code, err: err.slice(-300) }));
+  });
+  check(out.code === 0, `the worker unit took ${signal}`, out);
 }
 const attemptOf = (world, runId) => world.db.prepare(
   'SELECT id,fence FROM ops_agent_worker_attempts WHERE run_id=? ORDER BY attempt_no DESC LIMIT 1').get(runId);
@@ -537,22 +559,271 @@ export const CASES = {
       world.store.modelSummaryConsent(world.owner, project.id, profileId, now.revision, { model_summary_consent: false });
     }
   },
+
+  // Account loss while holding control: the holder's account stops being an
+  // eligible one; the view closes at the next check, the takeover ends with it
+  // and the run ends.
+  async account_loss_while_holding(world) {
+    const ctx = context(world);
+    const binding = await bindFresh(world, 'rules');
+    const { project, runId } = await startRun(world, ctx, 'rules', { binding });
+    await held(world, ctx);
+    const r = relay(world, ctx, world.reviewer, 'session-reviewer', project.id, runId);
+    await r.ready;
+    const v = viewer(world, r.file, ['-seconds', '60']);
+    const opened = await expectEvent(v, 'opened');
+    await expectEvent(v, 'connected', 60_000);
+    await ctx.s.takeover(world.reviewer, project.id, runId, { viewer: opened.conn }, { verified: true, sessionId: 'session-reviewer' });
+    world.db.prepare("UPDATE users SET role='pending' WHERE id=?").run(world.reviewer.id);
+    try {
+      const closed = await v.next('report', 30_000);
+      const done = await finish(world, ctx, project.id, runId);
+      const late = await refusal(ctx.s.takeover(world.reviewer, project.id, runId, { viewer: opened.conn },
+        { verified: true, sessionId: 'session-reviewer' }));
+      check(done.takeovers[0].end_reason === 'viewer_left' && done.result.result_class === 'taken_over' &&
+        done.result.receipt.verified, 'the takeover ended with the view; the run ended', { takeovers: done.takeovers, result: done.result });
+      check(late !== 'ACCEPTED', 'no takeover without an account', late);
+      return { end_reason: done.takeovers[0].end_reason, viewer_closed: closed.closed ?? closed.event, late_takeover: late,
+        result: publicResult(done.result) };
+    } finally {
+      world.db.prepare("UPDATE users SET role='user' WHERE id=?").run(world.reviewer.id);
+    }
+  },
+
+  // Key loss while holding control: the credential binding is revoked at the
+  // broker and in the backend while a person holds the browser. Giving it back
+  // ends the run; resuming it is refused (the binding changed), never resumed
+  // with a revoked key.
+  async key_loss_while_holding(world) {
+    const ctx = context(world);
+    const binding = await bindFresh(world, 'rules');
+    const { project, runId } = await startRun(world, ctx, 'rules', { binding });
+    await held(world, ctx);
+    const r = relay(world, ctx, world.operator, 'session-operator', project.id, runId);
+    await r.ready;
+    const v = viewer(world, r.file, ['-seconds', '60']);
+    const opened = await expectEvent(v, 'opened');
+    await expectEvent(v, 'connected', 60_000);
+    await ctx.s.takeover(world.operator, project.id, runId, { viewer: opened.conn }, { verified: true, sessionId: 'session-operator' });
+    await revokeBinding(world, binding);
+    await ctx.s.endTakeover(world.operator, project.id, runId);
+    const done = await finish(world, ctx, project.id, runId);
+    await ctx.s.reconcile(world.operator, project.id, runId, { subject: 'run', decision: 'acknowledged' }, { verified: true });
+    const resumed = await refusal(ctx.s.resume(world.operator, project.id, runId));
+    check(done.result.result_class === 'taken_over' && done.result.receipt.verified, 'the run ended taken_over', done.result);
+    check(resumed === 'RESUME_STALE', 'no resume with a revoked key', resumed);
+    return { resume: resumed, result: publicResult(done.result) };
+  },
+
+  // Kill cases (A7 goal: every case ends in a durable terminal result, never a
+  // blind replay). The worker unit is killed while a read is in flight (frozen
+  // first, so the read cannot finish before the kill), while the approval is
+  // pending, and while the submit is in flight.
+  async worker_killed_mid_read(world) {
+    let killed = null;
+    const wrapped = { ...world.launcher, action: async (request) => {
+      if (request.action !== 'open_landing' || killed) return world.launcher.action(request);
+      killed = request.attempt_id;
+      await signalWorker(world, request.attempt_id, 'SIGSTOP');
+      const sent = world.launcher.action(request);
+      // It rejects once the worker is killed, possibly before it is returned.
+      sent.catch(() => {});
+      await sleep(1000);
+      await signalWorker(world, request.attempt_id, 'SIGKILL');
+      return sent;
+    } };
+    const ctx = context(world, { launcher: wrapped });
+    const binding = await bindFresh(world, 'rules');
+    const { project, runId } = await startRun(world, ctx, 'rules', { binding });
+    const done = await finish(world, ctx, project.id, runId);
+    const journal = await journalOf(world, killed);
+    const step = done.steps.at(-1);
+    const item = done.reconciliation.items.find(i => i.subject === `step:${step?.ordinal}`);
+    check(done.steps.length === 1 && step.action === 'open_landing' && step.state === 'uncertain',
+      'the read in flight is uncertain; nothing after it', done.steps.map(x => [x.action, x.state, x.error_code]));
+    check(done.result.needs_human && done.result.receipt.verified && item?.kind === 'read' && !item.gates,
+      'a person looks; an uncertain read does not gate the profile', { result: done.result, item });
+    check(journal.actions.length === 1 && journal.actions[0][0] === 'open_landing', 'sent once, never replayed', journal);
+    return { step: [step.action, step.state, step.error_code], journal: { state: journal.state, stop_reason: journal.stop_reason,
+      actions: journal.actions }, result: publicResult(done.result) };
+  },
+
+  async worker_killed_mid_approval(world) {
+    const ctx = context(world);
+    const binding = await bindFresh(world, 'rules');
+    const { project, runId } = await startRun(world, ctx, 'rules', { binding });
+    const request = await held(world, ctx).then(() => ctx.requests[0]);
+    const attempt = attemptOf(world, runId);
+    await signalWorker(world, attempt.id, 'SIGKILL');
+    await sleep(3000);
+    // A person approves after the worker died: nothing is submitted.
+    const approved = await refusal(Promise.resolve().then(() => ctx.c.approve({ id: world.operator.id, elevated: true },
+      { approval_id: request.approval_id, digest: request.digest })));
+    world.approvals.push({ approval_id: request.approval_id, source: 'proof-harness', outcome: approved });
+    const done = await finish(world, ctx, project.id, runId);
+    const journal = await journalOf(world, attempt.id);
+    check(!done.steps.some(x => x.action === 'submit_bound_fixture' && x.state === 'done') &&
+      !journal.actions.some(a => a[0] === 'submit_bound_fixture' && a[1] !== 'failed'), 'nothing was submitted',
+    { steps: done.steps.map(x => [x.action, x.state, x.error_code]), journal });
+    check(done.result.final_state !== 'succeeded' && done.result.receipt.verified &&
+      !done.reconciliation.items.some(i => i.gates), 'a terminal result; no uncertain write', { result: done.result,
+      items: done.reconciliation.items });
+    return { approve_after_kill: approved, steps: done.steps.map(x => [x.action, x.state, x.error_code]),
+      journal: { state: journal.state, stop_reason: journal.stop_reason }, result: publicResult(done.result) };
+  },
+
+  // The coordinator is killed (a child process, SIGKILL) while a read is at the
+  // supervisor, while the approval is pending, and while the submit is at the
+  // supervisor. A new coordinator recovers: the run is fenced, the step it
+  // never recorded is uncertain, and nothing is sent again.
+  async coordinator_killed_mid_read(world) {
+    const k = await coordinatorKilled(world, 'rules', 'read');
+    const step = k.done.steps.at(-1);
+    const item = k.done.reconciliation.items.find(i => i.subject === `step:${step?.ordinal}`);
+    check(k.done.result.result_class === 'interrupted' && k.done.result.needs_human && k.done.result.receipt.verified,
+      'fenced, needing a person, a verified receipt', k.done.result);
+    check(k.done.steps.length === 1 && step.action === 'open_landing' && step.state === 'uncertain' &&
+      step.error_code === 'COORDINATOR_RESTART' && item?.kind === 'read' && !item.gates, 'the read it never recorded is uncertain',
+    { steps: k.done.steps, item });
+    check(k.journal.actions.length === 1 && k.journal.actions[0][0] === 'open_landing', 'sent once, never replayed', k.journal);
+    return { steps: k.done.steps.map(x => [x.action, x.state, x.error_code]), journal: k.journal.actions,
+      result: publicResult(k.done.result) };
+  },
+
+  async coordinator_killed_mid_approval(world) {
+    const k = await coordinatorKilled(world, 'rules', 'approval');
+    const late = await refusal(Promise.resolve().then(() => k.ctx.c.approve({ id: world.operator.id, elevated: true },
+      { approval_id: k.killed.approval_id, digest: k.killed.digest })));
+    world.approvals.push({ approval_id: k.killed.approval_id, source: 'proof-harness', outcome: late });
+    const approval = k.done.approvals.find(a => a.id === k.killed.approval_id);
+    check(k.done.result.result_class === 'interrupted' && k.done.result.needs_human && k.done.result.receipt.verified,
+      'fenced, needing a person, a verified receipt', k.done.result);
+    check(approval?.state === 'stale' && late !== 'ACCEPTED', 'the pending approval closed and cannot be used', { approval, late });
+    check(!k.done.steps.some(x => x.action === 'submit_bound_fixture') && !k.journal.actions.some(a => a[0] === 'submit_bound_fixture'),
+      'nothing was submitted', { steps: k.done.steps, journal: k.journal });
+    return { approval: [approval.state, approval.stale_reason], late_approve: late, result: publicResult(k.done.result) };
+  },
+
+  async coordinator_killed_mid_write(world) {
+    const k = await coordinatorKilled(world, 'rules', 'write');
+    const submit = k.done.steps.find(x => x.action === 'submit_bound_fixture');
+    const item = k.done.reconciliation.items.find(i => i.subject === `step:${submit?.ordinal}`);
+    const gate = await refusal(k.ctx.s.start(world.operator, k.project.id, { profile_id: k.project.profiles.rules,
+      credential_binding_id: k.binding }));
+    // "Not known yet" keeps the profile blocked.
+    await k.ctx.s.reconcile(world.operator, k.project.id, k.runId, { subject: item.subject, decision: 'unknown' }, { verified: true });
+    const still = await refusal(k.ctx.s.start(world.operator, k.project.id, { profile_id: k.project.profiles.rules,
+      credential_binding_id: k.binding }));
+    check(submit?.state === 'uncertain' && submit.error_code === 'COORDINATOR_RESTART' && k.done.steps.at(-1) === submit,
+      'the submit it never recorded is uncertain; nothing after it', k.done.steps.map(x => [x.action, x.state, x.error_code]));
+    check(k.journal.actions.filter(a => a[0] === 'submit_bound_fixture').length === 1, 'the submit was sent once', k.journal);
+    check(item?.kind === 'write' && item.gates && gate === 'RECONCILIATION_REQUIRED' && still === 'RECONCILIATION_REQUIRED',
+      'an uncertain write gates the profile until a person decides', { item, gate, still });
+    return { submit: [submit.state, submit.error_code], journal: k.journal.actions, gate, after_unknown: still,
+      result: publicResult(k.done.result) };
+  },
+
+  async worker_killed_mid_write(world) {
+    let killed = null;
+    const wrapped = { ...world.launcher, action: async (request) => {
+      if (request.action !== 'submit_bound_fixture') return world.launcher.action(request);
+      killed = request.attempt_id;
+      const sent = world.launcher.action(request);
+      sent.catch(() => {});
+      await sleep(world.a7.submitInFlightMs);
+      await signalWorker(world, request.attempt_id, 'SIGKILL');
+      return sent;
+    } };
+    const ctx = context(world, { approve: 'proof', launcher: wrapped });
+    const binding = await bindFresh(world, 'main');
+    const { project, runId } = await startRun(world, ctx, 'main', { binding });
+    const done = await finish(world, ctx, project.id, runId);
+    const journal = await journalOf(world, killed);
+    const submit = done.steps.find(x => x.action === 'submit_bound_fixture');
+    const item = done.reconciliation.items.find(i => i.subject === `step:${submit?.ordinal}`);
+    const gate = await refusal(ctx.s.start(world.operator, project.id, { profile_id: project.profiles.main, credential_binding_id: binding }));
+    check(submit?.state === 'uncertain' && done.steps.at(-1) === submit && done.result.needs_human && done.result.receipt.verified,
+      'the submit in flight is uncertain; nothing after it', { steps: done.steps.map(x => [x.action, x.state, x.error_code]), result: done.result });
+    check(journal.actions.filter(a => a[0] === 'submit_bound_fixture').length === 1, 'the submit was sent once', journal);
+    check(item?.kind === 'write' && item.gates && gate === 'RECONCILIATION_REQUIRED', 'the profile waits for a person', { item, gate });
+    return { submit: [submit.state, submit.error_code], journal: { state: journal.state, stop_reason: journal.stop_reason,
+      actions: journal.actions }, gate, result: publicResult(done.result) };
+  },
 };
 export const ORDER = ['live_view', 'live_refusals', 'dashboard_takeover', 'resume_new_run', 'takeover_during_submit',
   'grant_loss_while_holding', 'coordinator_killed_while_holding', 'timeout_is_a_decision', 'model_proof_switches',
-  'model_summary'];
+  'model_summary', 'account_loss_while_holding', 'key_loss_while_holding', 'worker_killed_mid_read',
+  'worker_killed_mid_approval', 'coordinator_killed_mid_read', 'coordinator_killed_mid_approval',
+  // These two leave their profiles waiting for a person's decision: last.
+  'coordinator_killed_mid_write', 'worker_killed_mid_write'];
+
+// A coordinator in a child process that SIGKILLs itself at one point of a
+// run; the parent recovers with a new coordinator.
+async function coordinatorKilled(world, key, point) {
+  const project = world.projects[key];
+  const binding = await bindFresh(world, key);
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child-kill', world.dir, binding, key, point],
+    { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+  world.children.push(child);
+  let out = '', err = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  child.stderr.on('data', (chunk) => { err = (err + chunk).slice(-600); });
+  const code = await new Promise(done => child.on('exit', (c, signal) => done(signal ?? c)));
+  const killed = JSON.parse(out.trim().split('\n').at(-1) || '{}');
+  check(code === 'SIGKILL' && killed.run_id && killed.point === point, `the coordinator died mid-${point}`,
+    { code, killed, stderr: code === 'SIGKILL' ? '' : err.replace(/\(node:\d+\) ExperimentalWarning[^\n]*\n?/g, '') });
+  const ctx = context(world);
+  const recovered = await ctx.c.recover();
+  const done = await finish(world, ctx, project.id, killed.run_id);
+  const journal = await journalOf(world, attemptOf(world, killed.run_id).id);
+  return { ctx, project, binding, runId: killed.run_id, killed, done, journal, recovered: recovered.length };
+}
+
+// A child process's world over the parent's proof database: one project.
+async function childWorld(dir, key) {
+  const world = await createWorld(dir);
+  const first = world.db.prepare("SELECT id FROM users WHERE username LIKE 'a5-proof-operator-%'").get();
+  const project = world.db.prepare(`SELECT p.id, pr.id AS profile FROM ops_projects p JOIN ops_agent_profiles pr
+    ON pr.project_id=p.id WHERE p.name=?`).get(`A5 proof ${key}`);
+  world.operator = { id: first.id, role: 'user' };
+  world.projects = { [key]: { id: project.id, profiles: { [key]: project.profile } } };
+  Object.assign(world, { a7: settings(), audit: [], children: [], relays: [], approvals: [] });
+  const { createAgentRunService } = await lib('operational-agent-runs.js');
+  world.service = (coordinator, { launcher } = {}) => createAgentRunService({ db: world.db, coordinator,
+    launcher: launcher ?? world.launcher, fixtures: { apply: async () => ({}) }, renewMs: 5000, audit: () => {} });
+  return world;
+}
+
+// The killed coordinator of the kill cases. It writes one line (the run, and
+// for `approval` the pending approval) and SIGKILLs itself: `read` and `write`
+// once that action has been at the supervisor for a moment (its outcome is
+// never recorded), `approval` as soon as the approval is requested.
+async function childKill([dir, binding, key, point]) {
+  const world = await childWorld(dir, key);
+  const die = (line) => { process.stdout.write(`${JSON.stringify({ ...line, point })}\n`); process.kill(process.pid, 'SIGKILL'); };
+  const target = { read: 'open_landing', write: 'submit_bound_fixture' }[point];
+  const wait = point === 'write' ? world.a7.submitInFlightMs : world.a7.readInFlightMs;
+  const launcher = target ? { ...world.launcher, action: async (request) => {
+    const sent = world.launcher.action(request);
+    if (request.action !== target) return sent;
+    sent.catch(() => {});
+    await sleep(wait);
+    die({ run_id: request.run_id });
+    return new Promise(() => {});
+  } } : undefined;
+  const ctx = context(world, { approve: point === 'write' ? 'proof' : 'hold', launcher,
+    onRequest: point === 'approval' ? request => die({ run_id: request.run_id, approval_id: request.approval_id,
+      digest: request.digest }) : undefined });
+  await startRun(world, ctx, key, { binding });
+  await sleep(600_000);
+}
 
 // The killed coordinator: holds control through the backend path, then dies.
 async function childTakeover([dir, binding]) {
-  const world = await createWorld(dir);
-  const first = world.db.prepare("SELECT id FROM users WHERE username LIKE 'a5-proof-operator-%'").get();
-  const project = world.db.prepare("SELECT p.id, pr.id AS profile FROM ops_projects p JOIN ops_agent_profiles pr ON pr.project_id=p.id WHERE p.name='A5 proof rules'").get();
-  world.operator = { id: first.id, role: 'user' };
-  world.projects = { rules: { id: project.id, profiles: { rules: project.profile } } };
-  Object.assign(world, { a7: settings(), audit: [], children: [], relays: [], approvals: [] });
-  const { createAgentRunService } = await lib('operational-agent-runs.js');
-  world.service = (coordinator) => createAgentRunService({ db: world.db, coordinator, launcher: world.launcher,
-    fixtures: { apply: async () => ({}) }, renewMs: 5000, audit: () => {} });
+  const world = await childWorld(dir, 'rules');
+  const project = world.projects.rules;
   const ctx = context(world);
   const { runId } = await startRun(world, ctx, 'rules', { binding });
   await held(world, ctx);
@@ -598,6 +869,7 @@ async function cleanup(world) {
 
 export async function main(argv = process.argv.slice(2)) {
   if (argv[0] === '--child-takeover') return childTakeover(argv.slice(1));
+  if (argv[0] === '--child-kill') return childKill(argv.slice(1));
   if (argv[0] === '--list') { process.stdout.write(`${ORDER.join('\n')}\n`); return 0; }
   const only = argv[0] === '--only' ? String(argv[1] || '').split(',').filter(Boolean) : ORDER;
   const unknown = only.filter(name => !CASES[name]);

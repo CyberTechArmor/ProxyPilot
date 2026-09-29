@@ -51,6 +51,8 @@ const ACTION_STOP = Object.freeze({
   LEASE_EXPIRED: ['failed', 'lease_expired'],
   STALE_FENCE: ['failed', 'attempt_lost'],
   ATTEMPT_NOT_ACTIVE: ['failed', 'attempt_lost'],
+  // The supervisor never sent the step: the runner had already exited (A7).
+  WORKER_EXITED: ['failed', 'attempt_lost'],
   UNKNOWN_ATTEMPT: ['failed', 'attempt_lost'],
   STALE_WORKER: ['failed', 'lease_expired'],
   STALE_CONFIGURATION: ['blocked', 'stale_configuration'],

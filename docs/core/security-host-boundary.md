@@ -40,7 +40,7 @@ verification pending.” Do not describe all eight audit findings as closed.
   legacy root-equivalent baseline secure.
 - CI records new/changed direct-host candidates through
   `scripts/host-boundary-inventory.py`. The checked-in
-  [candidate inventory](security-host-interfaces.json) covers 96 backend files
+  [candidate inventory](security-host-interfaces.json) covers 97 backend files
   matched by namespace, command, process-import and host-path patterns. It
   deliberately includes comments/imports. It is review evidence, not a claim
   that all matches execute or that nonmatching indirect access is safe.
@@ -163,6 +163,56 @@ backend memory for a moment and never written to the database, a log or a
 report; the runner types a bound value only into a password input, so a
 frame shows it masked. It does not close S6: a compromised backend that
 reaches the socket could now also read frames of a running attempt.
+
+A7 (user decisions 1–1c and the takeover direction, 2026-09-29) adds the
+real-time view and dashboard takeover. **Supervisor backend socket:** four
+more methods, each bound to the coordinator's own running browser attempt and
+fence. `live` is a stream: it opens one viewer's relay of Neko's WebRTC
+signalling (at most six per attempt; the backend relay filter
+passes only Neko's signalling events, bounded in size and rate). It returns a
+per-viewer TURN REST credential (`<expiry>:<viewer>`, HMAC-SHA1 of a
+host-held secret, one hour). `takeover` hands control to one open viewer:
+the model is fenced first, and control is given only after any in-flight
+action (a submit clears both fields first). The runner must report
+`password_fields_empty: true` and the input X counted while nobody had
+control, or the reply is `LIVE_PROTOCOL`. `release` returns input counts by
+kind only. `summarize` sends typed facts of a finished run to the broker's
+new `summary_call` under the run's pinned budget and returns bounded text
+labelled as model text. Input, observe, the journal and proof workloads stay
+on the operator socket. The broker gains `summary_call` and two operator-only
+proof switches on `model_call` (`reply_outside_set`, `usage_missing`: a fixed
+reply, no key read, no provider contacted). The supervisor now answers
+`WORKER_EXITED` (a certain failure) when the runner had already gone before
+a command was written, instead of `CHANNEL_CLOSED` (uncertain).
+**Worker unit:** Xvfb, Neko's server on a Unix socket in the unit's private
+tmpfs, and the runner's sandboxed Chromium in kiosk mode under managed
+policies. Neko has clipboard, upload, file transfer, chat and media sharing
+off. The unit's limits, the origin policy, the one-shot credential FIFO and
+the signed receipt are unchanged.
+**Network:** coturn on the host (`proxypilot-a7-turn.service`, installed by
+`scripts/a7-install-live.py`, its own user, a hardened unit), listening on
+the host's LAN address on 3478 UDP/TCP and TURN over TLS on 5349 with the
+certificate Caddy keeps for the TURN name. It relays from the proof bridge's
+gateway address only to the VM's one Neko UDP port: every other peer is
+denied (`403 Forbidden IP`), with no TCP relay and a per-session rate cap.
+The fence gains one line: UDP from the VM's Neko port to the gateway's relay
+ports. The VM still has no internet-facing listener.
+**Backend:** a WebSocket route `/api/operational-projects/:id/agent-runs/:runId/live`
+(exact Origin, session cookie, the Operations toggles and run access, checked
+again every ten seconds). Four more routes: `takeover`, `takeover/end`,
+`reconcile`, `resume`. Model-summary consent. The session's own takeover
+grant: `POST /api/auth/agent-control` and its passkey pair, password plus
+TOTP or a passkey, never sudo. A practice start writes the demo's fixture mode
+through one fixed `incus exec pp-fractionate-demo` write
+(`lib/operational-demo-fixtures.js`: constant argv, a small non-secret
+document on stdin, byte-exact read-back). Migration 1112.
+**Unchanged:** frames and video are never stored, typed text is never
+recorded (counts only), and no MCP tool reaches any of it. With no supervisor
+configured every execution control still answers `EXECUTION_UNAVAILABLE`,
+and the socket stays unmounted from the backend container (A8).
+It does not close S6: a compromised backend that reaches the socket could
+now also watch a running attempt live and hand its control to a viewer it
+opens, within the run's pins.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

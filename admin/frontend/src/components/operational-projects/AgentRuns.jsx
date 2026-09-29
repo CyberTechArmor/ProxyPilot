@@ -287,7 +287,9 @@ export function AgentRunDetail({ base, runId, onBack }) {
         <Action variant={controls.stop.enabled ? 'destructive' : 'outline'} disabled={!controls.stop.enabled || busy} aria-describedby={stopHint} onClick={stop}>Stop run</Action>
       </div>
     </div>
-    <p id={stopHint} className="text-sm text-muted-foreground">{controls.stop.enabled ? 'Stop fences the run at once; nothing more happens, and the verified teardown receipt is collected.' : `Stop is not available: ${controls.stop.reason}`}</p>
+    <p id={stopHint} className="text-sm text-muted-foreground">{!controls.stop.enabled ? `Stop is not available: ${controls.stop.reason}`
+      : controls.stop.retry ? 'The run is fenced and stopping. Stop again retries collecting the verified teardown receipt; the run never resumes.'
+        : 'Stop fences the run at once; nothing more happens, and the verified teardown receipt is collected.'}</p>
     <header className="space-y-1 min-w-0">
       <h3 className="text-lg font-semibold break-words">{run.profile_name ?? 'Agent run'} · run {shortId(run.id)} <StateBadge run={run}/>{run.awaiting_approval && <> <Badge tone="warn">Awaiting approval</Badge></>}</h3>
       <p className="text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1"><span>Started by {run.started_by.username ?? run.started_by.id}</span><span>{when(run.started_at)}</span>

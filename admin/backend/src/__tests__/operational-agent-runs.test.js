@@ -209,6 +209,28 @@ test('stop mid-run: the fence holds, the receipt is verified, and nothing furthe
   assert.deepEqual([late.statusCode, late.body.stopping, late.body.run.state], [200, false, 'cancelled']);
 });
 
+test('a stop whose receipt did not arrive stays fenced and can be retried; the run never resumes', async () => {
+  const w = agentRunsWorld();
+  const { call } = routed(w);
+  w.supervisor.scenario.holds.add('open_login');
+  const runId = (await call(w.users.operator, 'POST', `/${w.p.id}/agent-runs`, { profile_id: w.profile.id,
+    credential_binding_id: w.binding.binding_id })).body.run.id;
+  await until(() => statusOf(w, runId).steps.length === 2, 'step reserved');
+  w.supervisor.scenario.stopError = 'SUPERVISOR_UNREACHABLE';
+  const first = await call(w.users.operator, 'POST', `/${w.p.id}/agent-runs/${runId}/stop`);
+  assert.deepEqual([first.statusCode, first.body.code], [503, 'SUPERVISOR_UNREACHABLE']);
+  assert.match(first.body.error, /Stop again retries/);
+  await until(() => statusOf(w, runId).run.state === 'cancelling', 'fenced');
+  const stuck = statusOf(w, runId);
+  assert.deepEqual(stuck.controls.stop, { enabled: true, reason: null, retry: true });
+  assert.equal(stuck.result, null);
+  const again = await call(w.users.operator, 'POST', `/${w.p.id}/agent-runs/${runId}/stop`);
+  assert.equal(again.statusCode, 200);
+  const done = await finished(w, runId);
+  assert.deepEqual([done.run.state, done.result.result_class, done.result.receipt.verified], ['cancelled', 'cancelled', true]);
+  assert.equal(w.supervisor.calls.filter(c => c.params?.action === 'submit_bound_fixture').length, 0);
+});
+
 test('approval racing a stop: stop then approve is refused; approve then stop never submits', async () => {
   for (const order of ['stop_first', 'approve_first']) {
     const w = agentRunsWorld();

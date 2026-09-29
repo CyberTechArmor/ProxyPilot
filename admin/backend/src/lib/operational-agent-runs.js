@@ -48,6 +48,10 @@ const CODES = Object.freeze({
   APPROVAL_NOT_PENDING: [409, 'This approval is closed: it was already decided, used, expired or made stale.'],
   APPROVAL_DIGEST_MISMATCH: [409, 'The digest you were shown is not this approval\'s digest. Reload the approval.'],
   APPROVAL_STALE: [409, 'The approval is stale: the run, its binding, the guide or the policy changed after it was requested. The run does not submit.'],
+  SUPERVISOR_UNREACHABLE: [503, 'The worker supervisor did not answer. A fenced run stays stopped; Stop again retries collecting its verified receipt.'],
+  SUPERVISOR_TIMEOUT: [503, 'The worker supervisor did not answer in time. A fenced run stays stopped; Stop again retries collecting its verified receipt.'],
+  SUPERVISOR_PROTOCOL: [503, 'The worker supervisor gave an answer that was refused. A fenced run stays stopped; Stop again retries.'],
+  TEARDOWN_UNVERIFIED: [502, 'The teardown receipt did not verify, so the run stays fenced until a verified receipt arrives.'],
 });
 const toRunError = (error) => {
   if (error instanceof OperationsError) return error;
@@ -166,7 +170,7 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
     return { result_class: HELP_CLASSES.has(result.result_class) ? result.result_class : 'uncertain_step',
       uncertain_steps: result.uncertain_steps };
   }
-  const resultView = (row) => row && ({ final_state: row.final_state, result_class: row.result_class,
+  const resultView = (row) => !row ? null : ({ final_state: row.final_state, result_class: row.result_class,
     verified_account: row.verified_account === 1, needs_human: row.needs_human === 1, steps: row.steps,
     rule_steps: row.rule_steps, model_steps: row.model_steps, model_calls: row.model_calls,
     uncertain_steps: row.uncertain_steps, binding_id: row.binding_id, binding_revision: row.binding_revision,
@@ -186,12 +190,12 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
     const profile = one('SELECT display_name FROM ops_agent_profiles WHERE id=?', r.profile_id);
     return { id: r.id, project_id: r.project_id, profile_id: r.profile_id, profile_name: profile?.display_name ?? null,
       state: r.state, started_at: r.started_at, updated_at: r.updated_at, action_count: r.action_count,
-      started_by: { id: pin.started_by, username: username(pin.started_by) },
+      started_by: { id: pin?.started_by ?? null, username: username(pin?.started_by) },
       result_class: result?.result_class ?? null, final_state: result?.final_state ?? null,
       needs_human: result?.needs_human === 1, awaiting_approval: !!open && r.state === 'running',
       help: help(result) };
   }
-  function detail(r, actor) {
+  function detail(r) {
     const v = one('SELECT version_number FROM ops_guide_versions WHERE project_id=? AND id=?', r.project_id, r.guide_version_id);
     const result = one('SELECT * FROM ops_agent_run_results WHERE run_id=?', r.id);
     const running = r.state === 'running';
@@ -211,9 +215,11 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       events: all('SELECT id,kind,created_at FROM ops_agent_worker_events WHERE run_id=? ORDER BY id', r.id),
       result: resultView(result),
       controls: {
-        stop: execution.available && ACTIVE.includes(r.state) && r.state !== 'cancelling' ? { enabled: true, reason: null }
-          : { enabled: false, reason: !execution.available ? execution.message
-            : r.state === 'cancelling' ? 'The run is already stopping.' : 'The run has ended.' },
+        // A fenced run whose receipt has not arrived (the supervisor was
+        // unreachable) may be stopped again: the coordinator retries the
+        // teardown and never resumes the run.
+        stop: execution.available && ACTIVE.includes(r.state) ? { enabled: true, reason: null, retry: r.state === 'cancelling' }
+          : { enabled: false, reason: !execution.available ? execution.message : 'The run has ended.' },
         view: execution.available && running ? { enabled: true, reason: null }
           : { enabled: false, reason: !execution.available ? execution.message
             : r.state === 'prepared' || r.state === 'starting' ? 'The browser is starting.' : 'The browser is gone: the run is not running.' },
@@ -248,7 +254,7 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
     },
     status(actor, projectId, runId) {
       access(actor, projectId, 'run');
-      return detail(runIn(projectId, runId), actor);
+      return detail(runIn(projectId, runId));
     },
     async start(actor, projectId, input) {
       const v = parse(schemas.start, input, 'INVALID_RUN', CODES.INVALID_RUN[1]);
@@ -269,20 +275,20 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       }
       note({ event: 'agent_run_started', run_id: started.run_id, by: actor.id });
       background(started.run_id);
-      return detail(runIn(projectId, started.run_id), actor);
+      return detail(runIn(projectId, started.run_id));
     },
     async stop(actor, projectId, runId) {
       access(actor, projectId, 'run');
       const r = runIn(projectId, runId);
       if (!execution.available) unavailable();
-      if (!ACTIVE.includes(r.state)) return { ...detail(r, actor), stopping: false };
+      if (!ACTIVE.includes(r.state)) return { ...detail(r), stopping: false };
       // The fence is synchronous; collecting the verified receipt may take the
       // supervisor a while, so the answer does not wait for more than a moment.
       const outcome = coordinator.stop({ id: actor.id }, runId).then(() => ({ done: true }), error => ({ error }));
       outcome.then(({ error }) => { if (error) note({ event: 'agent_run_stop_error', run_id: runId, code: toRunError(error).code }); });
       const first = await Promise.race([outcome, new Promise(done => { setTimeout(done, stopWaitMs, null).unref?.(); })]);
       if (first?.error) throw toRunError(first.error);
-      return { ...detail(runIn(projectId, runId), actor), stopping: !first };
+      return { ...detail(runIn(projectId, runId)), stopping: !first };
     },
     approve(actor, approvalId, input, { elevated = false } = {}) {
       const v = parse(schemas.approve, input, 'INVALID_APPROVAL', CODES.INVALID_APPROVAL[1]);

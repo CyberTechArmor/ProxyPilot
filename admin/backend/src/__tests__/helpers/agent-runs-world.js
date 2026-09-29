@@ -68,7 +68,7 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
   const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
   const keyId = createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex');
   const scenario = { outcome: 'signed_in', choices: [], modelError: null, actionErrors: {}, delayMs: 0, holds: new Set(),
-    viewMinMs: 0, takeover: null };
+    viewMinMs: 0, takeover: null, stopError: null };
   const calls = [], waiting = new Map(), attempts = new Map();
   let active = null;
   const release = (action) => { scenario.holds.delete(action); waiting.get(action)?.(); waiting.delete(action); };
@@ -149,6 +149,7 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
         } finally { a.viewing = false; a.lastView = now; }
       }
       if (method === 'stop') {
+        if (scenario.stopError) { const code = scenario.stopError; scenario.stopError = null; throw coded(code); }
         const a = attempts.get(params.attempt_id);
         if (a) a.state = 'stopped';
         if (active?.attempt_id === params.attempt_id) active = null;

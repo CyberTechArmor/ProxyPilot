@@ -100,10 +100,20 @@ func pickURL(urls []string, transportName string) (string, error) {
 	return "", fmt.Errorf("no %s TURN URL in %v", transportName, urls)
 }
 
-// hostOf is the TURN URL's host name ("turn:host:3478?transport=udp").
+// hostOf is the TURN URL's host name ("turn:host:3479?transport=udp").
 func hostOf(turnURL string) string {
 	rest := turnURL[strings.Index(turnURL, ":")+1:]
 	if i := strings.IndexAny(rest, ":?"); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
+}
+
+// portOf is the TURN URL's port ("turn:host:3479?transport=udp" -> "3479").
+func portOf(turnURL string) string {
+	rest := turnURL[strings.Index(turnURL, ":")+1:]
+	rest = rest[strings.Index(rest, ":")+1:]
+	if i := strings.Index(rest, "?"); i >= 0 {
 		rest = rest[:i]
 	}
 	return rest
@@ -160,15 +170,13 @@ func scroll(dy int16) []byte {
 // peer: the relay must allow only the VM's Neko address (coturn answers 403
 // Forbidden IP for every other peer).
 //
-// Over "tcp" or "tls" the control connection is a stream (TLS on 5349, the
-// certificate verified for the TURN host name against the system roots, or
-// against caFile when given); the allocation itself is UDP either way.
+// Over "tcp" or "tls" the control connection is a stream (TLS on the turns:
+// URL's port, the certificate verified for the TURN host name against the
+// system roots, or against caFile when given); the allocation itself is UDP
+// either way.
 func checkRelay(turnURL, username, credential, address, transportName, caFile string, peers []string) {
 	name := hostOf(turnURL)
-	port := "3478"
-	if transportName == "tls" {
-		port = "5349"
-	}
+	port := portOf(turnURL)
 	server := net.JoinHostPort(name, port)
 	dial := server
 	if address != "" {

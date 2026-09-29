@@ -191,7 +191,9 @@ off. The unit's limits, the origin policy, the one-shot credential FIFO and
 the signed receipt are unchanged.
 **Network:** coturn on the host (`proxypilot-a7-turn.service`, installed by
 `scripts/a7-install-live.py`, its own user, a hardened unit), listening on
-the host's LAN address on 3478 UDP/TCP and TURN over TLS on 5349 with the
+the host's LAN address on 3479 UDP/TCP and TURN over TLS on 5350 (not the
+usual 3478/5349, which another TURN server on the proof host owns; the installer
+refuses ports anything else listens on) with the
 certificate Caddy keeps for the TURN name. It relays from the proof bridge's
 gateway address only to the VM's one Neko UDP port: every other peer is
 denied (`403 Forbidden IP`), with no TCP relay and a per-session rate cap.

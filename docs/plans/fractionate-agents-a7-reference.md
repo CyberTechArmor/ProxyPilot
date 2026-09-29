@@ -15,8 +15,11 @@ evidence's decisions table). The TURN name is **`streamview.fractionate.ai`**:
 the zone's wildcard record already points it at the host's public address
 (96.88.158.118), there is no Cloudflare on this instance, and Caddy obtains
 its certificate. The listen address is this host's default-route address,
-found by the installer. The one thing left outside the code is the router:
-**3478/UDP, 3478/TCP and 5349/TCP forwarded to this host**.
+found by the installer. **The relay uses 3479 UDP/TCP and TLS 5350**, not
+3478/5349: the MEET container's coturn already owns those on this host
+(2026-09-29 finding; `install-turn` now refuses a port anything else listens
+on). The one thing left outside the code is the router: **3479/UDP, 3479/TCP
+and 5350/TCP forwarded to 192.168.88.161**.
 
 ## Read first
 
@@ -34,7 +37,7 @@ found by the installer. The one thing left outside the code is the router:
 | # | Decision |
 |---|---|
 | 1, 1a | Neko, inside the per-attempt worker unit (Xvfb, Neko on a Unix socket, the runner's own Chromium in kiosk mode) |
-| 1b | TURN with a TLS fallback: coturn on the host, 3478 UDP/TCP and 5349 TLS, relaying only to the VM's Neko UDP port |
+| 1b | TURN with a TLS fallback: coturn on the host (3479 UDP/TCP and 5350 TLS on this host, where MEET's coturn owns 3478/5349), relaying only to the VM's Neko UDP port |
 | 1c | Our own React client in the run deck's Browser pane |
 | 2 | Resume = a new linked run with the same pins, a new attempt and fence, its own approval |
 | 3 | An uncertain write gates the profile until a person decides; anyone with run access (the starter too) after the session's verification |
@@ -65,7 +68,7 @@ found by the installer. The one thing left outside the code is the router:
 
 | File | Installed now (A6 host run 2) | A7 |
 |---|---|---|
-| `a3-worker-supervisor.py` | `9d195ea2…` | **`73a89f6173679609…`** (backend `live`/`takeover`/`release`/`summarize`, `WORKER_EXITED`) |
+| `a3-worker-supervisor.py` | `73a89f61…` (installed by H1, 2026-09-29) | **`44904081f46a700f…`** after the port move (the installer's TURN ports); `73a89f61…` at `9e1d66a5` |
 | `a3-worker-guest.py` (runner) | `a631ad9d…` | **`7185ee26675721269…`** (live desktop, give/release, cleared password fields) |
 | `a3-network-fence.py` | A3 bytes | **`e7208d606aec742f…`** (the live-relay line only when live; identical render when not) |
 | `a3-install-fence.py` | A3 bytes | **`bb396c84f85448cd…`** (`live_relay`) |
@@ -75,11 +78,11 @@ found by the installer. The one thing left outside the code is the router:
 | `a3-probe-worker.py` | `b770a4a9…` | **`d1bdda8a95595ceb…`** (backend `takeover` expectations) |
 | `a4-fixture-account.py` | — | `f5551b96fdd583f6…` (mode `slow`) |
 | `a4-canary-scan.py` | — | `95b03fc40248ad04…` (`--a7-dir`) |
-| `a7-install-live.py` | — | `69dda3db2d977b1d…` |
+| `a7-install-live.py` | — | **`de0f93014387657a…`** after the port move (3479/5350, refuses taken ports); `69dda3db…` at `9e1d66a5` |
 | `a7-neko-unix-socket.patch` | — | `a4fedb0f77048c4c…` (pinned in the installer) |
-| `a7-probe.mjs` | — | `b1a33ea69af17685…` |
+| `a7-probe.mjs` | — | `2dd2b259e180d75e…` (a comment); `b1a33ea6…` at `9e1d66a5` |
 | `a7-host-summary.py` | — | `63a1c630bdbf2ad3…` |
-| `cmd/a7-live-probe/main.go` / `go.sum` | — | `2f4859030b1188fb…` / `e8ad1e077c107dc2…` |
+| `cmd/a7-live-probe/main.go` / `go.sum` | — | `c40a04c67ff610f0…` (the port from the URL) / `e8ad1e077c107dc2…` |
 
 **Neko:** `github.com/m1k1o/neko` at `3f4f94087a1fd40b2aaddd5aad00a2e5f4959270`
 plus the reviewed Unix-socket patch, built in `golang:1.25-trixie`.
@@ -149,8 +152,9 @@ attempt_id, fence}` → `{conn, ice_servers, ttl_seconds}`, then `{recv}`,
 `WORKER_EXITED` (never sent; certain) versus `CHANNEL_CLOSED` (in flight;
 uncertain).
 
-**TURN:** `turn:streamview.fractionate.ai:3478?transport=udp`, `…?transport=tcp`,
-`turns:streamview.fractionate.ai:5349?transport=tcp`. REST credentials `<expiry>:<viewer>`
+**TURN:** `turn:streamview.fractionate.ai:3479?transport=udp`, `…?transport=tcp`,
+`turns:streamview.fractionate.ai:5350?transport=tcp` (the supervisor and the
+backend accept the three forms with the installer's ports). REST credentials `<expiry>:<viewer>`
 (HMAC-SHA1, one hour). coturn: `listening-ip=` the host's default-route
 address (or `--listen-ip`),
 `relay-ip=10.185.17.1`, relay ports 49160–49200,
@@ -193,8 +197,9 @@ check after H3 is recommended. **The deploy comes first** (the A7 PR merged,
 its merge commit staged in the candidate, checked and promoted), so the
 candidate already carries the A7 scripts and H1 stages nothing.
 
-**Before H2 (the user, on the router):** forward **3478/UDP, 3478/TCP and
-5349/TCP** to this host, the same machine 80/443 already reach. DNS needs
+**Router (the user; needed for viewers outside the network, not for H1–H6):**
+forward **3479/UDP, 3479/TCP and 5350/TCP** to `192.168.88.161`, the same
+machine 80/443 already reach. Leave MEET's 3478/5349 forwards as they are. DNS needs
 nothing: `*.fractionate.ai` already resolves `streamview.fractionate.ai` to
 96.88.158.118. Caddy obtains the certificate over the existing 80/443. The
 video relay is not HTTP, so Caddy cannot carry it: these three forwards are the
@@ -249,7 +254,7 @@ status`, then `stop` it. `*_failed`: the journal lines after it name the cause.
 **Step H2 (coturn, the host firewall, the Caddy site for the certificate).**
 
 ```
-sudo sh -c 'set -e; N=streamview.fractionate.ai; F=/var/lib/proxypilot/firewall.json; apt-get update -qq; apt-get install -s --no-install-recommends coturn | grep -E "^(Inst|Remv)" | cut -c1-100; if apt-get install -s --no-install-recommends coturn | grep -qiE "^(Inst|Remv) [^ ]*incus"; then echo apt_would_touch_incus; exit 1; fi; systemctl mask coturn.service; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends coturn >/dev/null; echo "coturn $(dpkg-query -W -f="\${Version}" coturn) $(systemctl is-active coturn.service || true) $(systemctl is-enabled coturn.service || true)"; for r in 3478:udp 3478:tcp 5349:tcp; do p=${r%:*}; t=${r#*:}; grep -q "\"manual-host-operator-$p-$t\"" $F || proxypilot firewall add-manual --port $p --proto $t --scope public --reason "A7 TURN relay for the live agent view"; done; if nft list chain inet proxypilot input_hook | grep -q "iifname \"incusbr0\" accept"; then echo relay_ports_admitted_by_bridge_rule; else grep -q "\"manual-host-operator-49160-49200-udp\"" $F || proxypilot firewall add-manual --port 49160 --port-end 49200 --proto udp --scope lan-only --source-cidr 10.185.17.179/32 --reason "A7 TURN relay ports, from the proof VM only"; fi; nft list ruleset | grep -E "dport (3478|5349|49160-49200)"; cd /var/lib/proxypilot/self/candidate/scripts; python3 a7-install-live.py install-turn --hostname "$N" --caddy-site'
+sudo sh -c 'set -e; N=streamview.fractionate.ai; F=/var/lib/proxypilot/firewall.json; apt-get update -qq; apt-get install -s --no-install-recommends coturn | grep -E "^(Inst|Remv)" | cut -c1-100; if apt-get install -s --no-install-recommends coturn | grep -qiE "^(Inst|Remv) [^ ]*incus"; then echo apt_would_touch_incus; exit 1; fi; systemctl mask coturn.service; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends coturn >/dev/null; echo "coturn $(dpkg-query -W -f="\${Version}" coturn) $(systemctl is-active coturn.service || true) $(systemctl is-enabled coturn.service || true)"; for r in 3479:udp 3479:tcp 5350:tcp; do p=${r%:*}; t=${r#*:}; grep -q "\"manual-host-operator-$p-$t\"" $F || proxypilot firewall add-manual --port $p --proto $t --scope public --reason "A7 TURN relay for the live agent view"; done; if nft list chain inet proxypilot input_hook | grep -q "iifname \"incusbr0\" accept"; then echo relay_ports_admitted_by_bridge_rule; else grep -q "\"manual-host-operator-49160-49200-udp\"" $F || proxypilot firewall add-manual --port 49160 --port-end 49200 --proto udp --scope lan-only --source-cidr 10.185.17.179/32 --reason "A7 TURN relay ports, from the proof VM only"; fi; nft list ruleset | grep -E "dport (3479|5350|49160-49200)"; cd /var/lib/proxypilot/self/candidate/scripts; python3 a7-install-live.py install-turn --hostname "$N" --caddy-site'
 ```
 
 Expected output:
@@ -258,8 +263,9 @@ Expected output:
 2. `coturn <version> inactive masked` (the distribution unit never runs).
 3. The firewall's own output for each new rule; `relay_ports_admitted_by_bridge_rule`
    **or** the relay-port rule for `10.185.17.179/32` only.
-4. The rendered rules: `udp dport 3478 accept`, `tcp dport 3478 accept`,
-   `tcp dport 5349 accept` (and the relay-port rule when added).
+4. The rendered rules: `udp dport 3479 accept`, `tcp dport 3479 accept`,
+   `tcp dport 5350 accept` (and the relay-port rule when added); MEET's own
+   `service-l4-…` rules for 3478/udp and 5349/tcp are listed too and stay.
 5. `{"caddy_site": "/etc/caddy/custom/pp-a7-turn.caddy", "next": "Wait for
    Caddy to obtain the certificate, …"}`.
 
@@ -267,6 +273,31 @@ Wait a minute or two, then check that Caddy has the certificate:
 `sudo ls /var/lib/caddy/.local/share/caddy/certificates/*/streamview.fractionate.ai/`
 shows `streamview.fractionate.ai.crt` and `.key`. If not, Caddy's log says why
 (`journalctl -u caddy --since -10min | grep -i streamview`).
+
+**Step H2b (this host only: H2 ran here with the old ports on 2026-09-29).**
+After the port move is deployed (the candidate carries it), reinstall the
+supervisor (it accepts the installer's ports now), move the three firewall rules
+from 3478/5349 to 3479/5350 (MEET's own `service-l4-…` rules are not touched),
+and confirm the Caddy site and its certificate.
+
+```
+sudo sh -c 'set -e; N=streamview.fractionate.ai; F=/var/lib/proxypilot/firewall.json; cd /var/lib/proxypilot/self/candidate/scripts; git -C .. rev-parse HEAD; sha256sum a3-worker-supervisor.py a7-install-live.py; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; for id in manual-host-operator-3478-udp manual-host-operator-3478-tcp manual-host-operator-5349-tcp; do if grep -q "\"$id\"" $F; then proxypilot firewall remove-manual $id; fi; done; for r in 3479:udp 3479:tcp 5350:tcp; do p=${r%:*}; t=${r#*:}; if ! grep -q "\"manual-host-operator-$p-$t\"" $F; then proxypilot firewall add-manual --port $p --proto $t --scope public --reason "A7 TURN relay for the live agent view"; fi; done; nft list ruleset | grep -E "dport (3478|3479|5349|5350)"; python3 a7-install-live.py install-turn --hostname "$N" --caddy-site; ls /var/lib/caddy/.local/share/caddy/certificates/*/streamview.fractionate.ai/ 2>&1 || true'
+```
+
+Expected output, in order:
+1. The deployed candidate HEAD; the new supervisor and installer digests.
+2. The supervisor JSON: `"accepting_launch": true`, `"blockers": []`, a new
+   `key_id` (`60e70fc9…` archived), runner `7185ee26…` unchanged.
+3. Three `remove-manual … → reconciled` lines, then three `add-manual
+   manual-host-operator-3479-udp / -3479-tcp / -5350-tcp → reconciled`.
+4. The rendered rules: ours on `3479` udp/tcp and `5350` tcp, and MEET's
+   `service-l4-…` on `3478` udp and `5349` tcp, unchanged.
+5. `{"caddy_site": "/etc/caddy/custom/pp-a7-turn.caddy", "next": …}`. The
+   installer refuses first if anything listens on 3479 or 5350
+   (`Something else already listens on the relay ports …`).
+6. The certificate files, or `No such file or directory` if Caddy has not
+   obtained it yet: check again after a minute (Caddy's log:
+   `journalctl -u caddy --since -10min | grep -i streamview`).
 
 **Step H3 (TURN, Neko, the probe, the VM, enable; detached, ~15–25 min).**
 It snapshots the proof VM first (`pp-a7-pre-live-<stamp>`; the pre-network
@@ -283,7 +314,7 @@ Read it (repeat until `h3_end`):
 sudo grep -E '"(sha256|active|ports|certificate|cert_timer|live_marker|fence_live_relay|missing_libraries|snapshot|accepting_launch)"|_failed|refused|h3_end' /var/lib/proxypilot-a7-proof/h3.log
 ```
 
-Expected: the TURN status (`"active": "active"`, ports `3478` and `5349`
+Expected: the TURN status (`"active": "active"`, ports `3479` and `5350`
 `true`, `"certificate": true`, `"cert_timer": "active"`); Neko's `sha256`
 (record it); the probe's `sha256`; the VM files with the snapshot name,
 `"missing_libraries": []` and the Neko/policy digests; after `enable`,
@@ -292,7 +323,7 @@ Expected: the TURN status (`"active": "active"`, ports `3478` and `5349`
 
 **Recommended, from a machine outside your network** (a phone hotspot is
 enough):
-`openssl s_client -connect streamview.fractionate.ai:5349 -servername streamview.fractionate.ai -brief </dev/null 2>&1 | head -4`
+`openssl s_client -connect streamview.fractionate.ai:5350 -servername streamview.fractionate.ai -brief </dev/null 2>&1 | head -4`
 → `Verification: OK` (the router forward and the certificate as a viewer sees
 them).
 
@@ -387,8 +418,9 @@ python3 scripts/host-boundary-inventory.py
    headless again.
 2. `systemctl disable --now proxypilot-a7-turn-cert.timer`;
    `rm /etc/caddy/custom/pp-a7-turn.caddy && systemctl reload caddy`;
-   `proxypilot firewall remove-manual manual-host-operator-3478-udp` (and
-   `-3478-tcp`, `-5349-tcp`, and the relay-port rule if H2 added it). coturn may
+   `proxypilot firewall remove-manual manual-host-operator-3479-udp` (and
+   `-3479-tcp`, `-5350-tcp`, and the relay-port rule if H2 added it; never
+   MEET's `service-l4-…` rules). coturn may
    stay installed with its distribution unit masked.
 3. The VM: `incus snapshot restore pp-agents-a3-debian13-proof-20260927 pp-a7-pre-live-<stamp>`
    (removes Neko and the packages; never the pre-network snapshot).

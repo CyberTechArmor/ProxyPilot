@@ -119,14 +119,18 @@ const validRef = ref => fields(ref, ['run_id','attempt_id','fence']) &&
 // forbidden. Nothing in the routes constructs a client: A3 activation is off.
 // A7 live relay: the supervisor's viewer id and each viewer's TURN REST
 // credential (username "<expiry>:<viewer>", HMAC-SHA1 base64), for the three
-// reviewed TURN URL forms only.
+// reviewed TURN URL forms only (the ports are the host installer's).
 const LIVE_CONN = /^[0-9a-f]{16}$/;
-const TURN_URL = /^(turn:[a-z0-9.-]{1,253}:3478\?transport=(udp|tcp)|turns:[a-z0-9.-]{1,253}:5349\?transport=tcp)$/;
+const TURN_URL = /^(?:turn:[a-z0-9.-]{1,253}:([1-9][0-9]{0,4})\?transport=(?:udp|tcp)|turns:[a-z0-9.-]{1,253}:([1-9][0-9]{0,4})\?transport=tcp)$/;
+const validTurnUrl = (url) => {
+  const match = typeof url === 'string' && TURN_URL.exec(url);
+  return !!match && Number(match[1] ?? match[2]) <= 65535;
+};
 const SUMMARY_TEXT_CHARS = 800;
 function validIceServers(list, viewer) {
   return Array.isArray(list) && list.length === 1 && list.every(server => fields(server, ['urls','username','credential']) &&
     Array.isArray(server.urls) && server.urls.length >= 1 && server.urls.length <= 3 &&
-    server.urls.every(url => typeof url === 'string' && TURN_URL.test(url)) &&
+    server.urls.every(validTurnUrl) &&
     typeof server.username === 'string' && new RegExp(`^[0-9]{10}:${viewer}$`).test(server.username) &&
     typeof server.credential === 'string' && /^[A-Za-z0-9+/]{27}=$/.test(server.credential));
 }

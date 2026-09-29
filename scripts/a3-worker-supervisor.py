@@ -196,7 +196,15 @@ LIVE_MARKER = installer.CONFIG / 'live.json'
 # never leaves the host, like the receipt key.
 TURN_SECRET = Path('/etc/proxypilot-a7/turn-secret')
 TURN_TTL_SECONDS = 3600
-TURN_URL = re.compile(r'(turn:[a-z0-9.-]{1,253}:3478\?transport=(udp|tcp)|turns:[a-z0-9.-]{1,253}:5349\?transport=tcp)\Z')
+# The three reviewed forms; the ports are the installer's (live.json), since a
+# host may already run another TURN server on the usual 3478/5349.
+TURN_URL = re.compile(r'(turn:[a-z0-9.-]{1,253}:([1-9][0-9]{0,4})\?transport=(udp|tcp)'
+                      r'|turns:[a-z0-9.-]{1,253}:([1-9][0-9]{0,4})\?transport=tcp)\Z')
+
+
+def valid_turn_url(url):
+    match = isinstance(url, str) and TURN_URL.fullmatch(url)
+    return bool(match) and int(match.group(2) or match.group(4)) <= 65535
 LIVE_MAX_VIEWERS = 6
 LIVE_IDLE_SECONDS = 60
 LIVE_MAX_LINE = 256 * 1024
@@ -1739,7 +1747,7 @@ class Supervisor:
         """Short-lived TURN credentials for one viewer, from live.json and the secret."""
         marker = self.live_available() or {}
         urls = (marker.get('turn') or {}).get('urls')
-        if not isinstance(urls, list) or not urls or not all(isinstance(u, str) and TURN_URL.fullmatch(u) for u in urls):
+        if not isinstance(urls, list) or not urls or not all(valid_turn_url(u) for u in urls):
             raise Refused('LIVE_UNAVAILABLE', 'turn')
         try:
             installer.secure(TURN_SECRET)

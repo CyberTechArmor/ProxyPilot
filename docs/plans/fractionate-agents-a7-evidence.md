@@ -418,3 +418,82 @@ for)"; "for this instance I don't use cloudflare, just use caddy".
   applied.
 - **Next:** the router's forwards of 3478/UDP, 3478/TCP and 5349/TCP to this
   host, then the host run H0–H7 (reference).
+
+## 2026-09-29 host run: H0, H1, H2, and the TURN port conflict
+
+**H0 (user, read-only).** Every value matched:
+- the candidate `9341dd93`;
+- supervisor `9d195ea2…`, runner `a631ad9d…`, key `f68c8aaf…`,
+  `accepting_launch: true`;
+- broker `790a1957…`, `approle_login: ok`; `active: null`;
+- demo `496846cd…`;
+- `iifname "incusbr0" accept` in the input hook;
+- `incusbr0` `10.185.17.1/24`;
+- the default route via `enp10s0`, `src 192.168.88.161`;
+- `streamview.fractionate.ai` → `96.88.158.118`;
+- coturn absent, Docker 29.4.2, 1.2 TB free, the Caddyfile importing
+  `/etc/caddy/custom/*.caddy`, no A7 directories.
+
+**H1 (user).** It matched the expected output:
+- The eight candidate digests.
+- The supervisor:
+  - supervisor **`73a89f61…`** and runner **`7185ee26…`** installed;
+  - fence `e7208d60…` / `bb396c84…`; proxy `6c86bc36…` and `59ae252e…`
+    unchanged;
+  - **new receipt key `60e70fc99269524cc695e6540a5aefab695c3eb113257c44c099060afd67781e`**
+    (`f68c8aaf…` archived);
+  - boot `c70bdf71…`, SPKI `V7Qx86Hf…`.
+- The broker **`10aa2a73…`**, `approle_login: ok`,
+  `approle_config_removed: false`. The generic "Issue a new OpenBao secret
+  ID" notice does not apply to a reinstall that kept the config. Every
+  earlier binding is revoked.
+- The demo `496846cd…` → **`d4693668…`**, active.
+- `proxy_checks: passed`, 21 codes.
+
+**H2 (user).**
+- The simulated install listed coturn 4.6.1-2 and its libraries only,
+  nothing Incus.
+- `coturn 4.6.1-2 inactive masked`.
+- Three manual firewall rules were added (3478/udp, 3478/tcp, 5349/tcp);
+  the output printed `relay_ports_admitted_by_bridge_rule`.
+- The pasted output ends there. The Caddy site step's result was not shown;
+  H2b repeats it.
+
+**Finding (stopped before H3).** The rendered rules also showed two existing
+rules: `service-l4-…: coturn TURN/STUN (UDP)` on 3478/udp and
+`service-l4-…: coturn TURN-over-TLS (cellular fallback)` on 5349/tcp.
+`set_port_forward list` for the **MEET** container shows its forwards:
+- 5349/tcp;
+- 7881/tcp (LiveKit);
+- 3478/udp;
+- the 30000–32000/udp relay range;
+- 50000–60000/udp WebRTC media.
+
+So **MEET's coturn already owns 3478 and 5349 on this host**, and the A7
+relay must not bind them: a relay on `192.168.88.161:3478` could take that
+address's traffic from MEET's.
+- Nothing was harmed. The A7 relay never started: `install-turn` without
+  `--caddy-site` (H3) had not run, and the distribution unit is masked.
+- The duplicate manual rules for 3478/udp and 5349/tcp only repeat MEET's
+  rules. The new 3478/tcp rule opens a port nothing listens on.
+- H2b removes the three manual rules and adds the new ports.
+
+**The fix (the port move).**
+- The A7 relay uses **3479 UDP/TCP and TLS 5350**.
+- `install-turn` refuses to install while anything else listens on those
+  ports (`Something else already listens on the relay ports …`, from `ss`).
+  This is the machine check that would have caught the conflict.
+- The supervisor and the backend accept the three reviewed URL forms with
+  the installer's ports (1–65535), not only 3478/5349.
+- The Go probe takes the TCP/TLS port from the URL.
+- Tests:
+  - the installer tests run with MEET's listeners in the fake `ss`, and
+    cover the refusal;
+  - a supervisor test and backend cases cover other ports and invalid ones
+    (0, 65536, `turns` over UDP).
+- The live end-to-end test passed with the real coturn on 3479/5350: A3–A7
+  scripts 213 OK, and all 242 script tests as a non-root user. Operations
+  suites 159/159.
+- The router forwards needed are **3479/UDP, 3479/TCP, 5350/TCP →
+  192.168.88.161**. Only viewers outside the network need them; H1–H6 reach
+  the relay on the LAN address.

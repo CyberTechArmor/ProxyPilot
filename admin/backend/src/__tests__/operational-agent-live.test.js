@@ -350,8 +350,16 @@ test('launcher: a live answer, a takeover, a release or a summary of the wrong s
     username: '1790000000:0123456789abcdef', credential: `${'A'.repeat(27)}=` }] };
   answer = good;
   assert.equal((await launcher.live(ref)).viewer, '0123456789abcdef');
+  // The ports are the host installer's (A7 moved off 3478/5349, which a meeting
+  // service's TURN server owned on the proof host).
+  answer = { ...good, ice_servers: [{ ...good.ice_servers[0], urls: ['turn:turn.example.com:3479?transport=udp',
+    'turn:turn.example.com:3479?transport=tcp', 'turns:turn.example.com:5350?transport=tcp'] }] };
+  assert.equal((await launcher.live(ref)).viewer, '0123456789abcdef');
   for (const bad of [{ ...good, conn: 'XYZ' },
     { ...good, ice_servers: [{ ...good.ice_servers[0], urls: ['turn:evil.example.com:80'] }] },
+    { ...good, ice_servers: [{ ...good.ice_servers[0], urls: ['turns:turn.example.com:65536?transport=tcp'] }] },
+    { ...good, ice_servers: [{ ...good.ice_servers[0], urls: ['turns:turn.example.com:0?transport=tcp'] }] },
+    { ...good, ice_servers: [{ ...good.ice_servers[0], urls: ['turns:turn.example.com:5350?transport=udp'] }] },
     { ...good, ice_servers: [{ ...good.ice_servers[0], urls: ['stun:turn.example.com:3478'] }] },
     { ...good, ice_servers: [{ ...good.ice_servers[0], username: '1790000000:ffffffffffffffff' }] },
     { ...good, ice_servers: [{ ...good.ice_servers[0], extra: 1 }] },
@@ -360,7 +368,7 @@ test('launcher: a live answer, a takeover, a release or a summary of the wrong s
     answer = bad;
     await assert.rejects(launcher.live(ref), e => e.code === 'SUPERVISOR_PROTOCOL');
   }
-  assert.equal(closed, 7);
+  assert.equal(closed, 10);
   const zero = { key: 0, click: 0, scroll: 0 };
   answer = { state: 'human', controlling: true, uncontrolled_inputs: zero, password_fields_empty: true };
   assert.deepEqual(await launcher.takeover(ref, '0123456789abcdef'),

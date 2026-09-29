@@ -306,7 +306,7 @@ export const CASES = {
     const checker = viewer(world, scope.file, ['-relay-check', peers.join(',')]);
     const relayCheck = await expectEvent(checker, 'relay_check', 60_000);
     found.relay_peers = relayCheck.peers;
-    // The fallback listeners (3478/TCP, 5349/TLS): the same credential, the
+    // The fallback listeners (TCP and TLS): the same credential, the
     // certificate verified for the TURN name, the same scope.
     found.fallback = {};
     for (const transport of ['tcp', 'tls']) {

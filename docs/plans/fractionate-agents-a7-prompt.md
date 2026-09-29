@@ -19,8 +19,16 @@ decisions below before writing any code.
    - Host run 1 on live `08293733`: A3 20/20 with `backend_view`, A4 6/6,
      A5 17/17 with one real approval, both canaries clean, `all_passed:
      true`.
-   - Installed supervisor `9d195ea2…`, receipt key `900607c0…`, VM boot
-     `680ebdf3…`.
+   - Then the follow-ups (#705, `24cfadbd`) were deployed (live
+     `776045d7`) and **host run 2** passed on the reinstalled origin proxy
+     (2026-09-29): proxy 21/21, A3 20/20, A4 6/6, A5 17/17, canaries clean,
+     `all_passed: true`.
+   - The host state to expect now: live and candidate `776045d7`;
+     supervisor `9d195ea2…`, runner `a631ad9d…`, broker `790a1957…`, both
+     proxy copies `6c86bc36…`; receipt key `f68c8aaf…`; proxy SPKI
+     `V7Qx86Hf…`; proof VM boot `c70bdf71…`. The
+     [A6 reference](fractionate-agents-a6-reference.md) carries the full
+     values.
 
    Its open items carry the user's dispositions. Read them first. If the
    gate does not hold, stop and name it.
@@ -226,8 +234,11 @@ decision 1 ("where takeover is driven").
   - the locally proven classes are A7 decision 6;
   - the origin proxy's resend-after-timeout, the `open_landing` timeout, a
     reboot test, the `nodemailer` advisory, Lighthouse and the Neko research
-    were taken up right after A6's acceptance. Check the A6 evidence for
-    their state before starting;
+    were taken up right after A6's acceptance. The resend and timeout fixes
+    and nodemailer 10.0.12 are deployed and passed host run 2; Lighthouse
+    scored 100; the Neko research is written. **The reboot test
+    (`scripts/a6-reboot-check.py`) has not been run**: the reboot is the
+    user's decision. Check the A6 evidence for their state before starting;
   - S6/SEC/INF go to a later security audit (the register in
     `docs/plans/`).
 

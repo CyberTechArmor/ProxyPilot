@@ -881,7 +881,7 @@ steps are listed where one is needed.
     401) and passes now.
   - Python suites 161 OK.
   - **Host proof pending:** reinstall the proxy and the supervisor's copy,
-    then the proxy, A3, A4 and A5 proofs, as host run 2.
+    then the proxy, A3, A4 and A5 proofs, as host run 2. Done 2026-09-29, all passed: see "host run 2" below.
 - **Lighthouse (mobile, accessibility): 100 on six pages.** The script is
   `admin/frontend/tests/agent-runs-lighthouse.mjs`. It uses Playwright's
   Chromium as a persistent context with a debugging port, because
@@ -898,3 +898,124 @@ steps are listed where one is needed.
   Adopting it replaces the A3 browser layer (kiosk lock-down, WebRTC through
   the fence, a teardown proof). The runner screencast stays inside the
   accepted boundary. This is A7 decision 1.
+
+## 2026-09-29 merge and deploy of the follow-ups (#705); host run 2
+
+The user: "If all good, please merge and deploy" (after the second resolver
+check).
+
+### Merge and deploy
+
+- **PR #705 merged** as `24cfadbd4d2c7e1ff096b167b56046f816a4cf67` (a merge
+  commit). CI on its head `c8202629`: all 7 checks green.
+- **Staging (user, root paste).** The pinned stager with
+  `C=24cfadbd…`:
+  - `staged 776045d741e2126ae8a38bba83a620551f2b34c9 (was 082937337ca8…)
+    from 24cfadbd…; 149 paths match exactly` (141 at host run 1, plus the 8
+    paths #705 added);
+  - candidate digests: `a3-worker-supervisor.py` `9d195ea2…` (unchanged),
+    `a3-origin-proxy.py` `6c86bc369abbf3b9…` (new),
+    `a6-reboot-check.py` `90caa35c3cf2b40f…` (new);
+  - `"nodemailer": "^10.0.12"`; `frontend_build_exit=0`.
+- **`run_self_checks`** on `776045d7`: 3378 tests, 3367 pass, 0 fail, 11
+  skipped.
+- **Database backup:**
+  `/data/db/backups/proxypilot-pre-A6-followups-promote-20260929T134039Z.db`
+  (sha256 `f27faa0c…`).
+- **`promote_self`.** The preview listed one commit (the staging of
+  `24cfadbd`), `08293733` → `776045d7`. Promoted with rollback tag
+  `pp-rollback-20260929T134047Z` (at `08293733`), update
+  `36a4c6b0-0b6e-4f86-9c3f-d2431a2e2d45`: `success`, `exit_code` 0,
+  13:40:47Z–13:41:54Z, health check passed.
+  - The update log's `git pull` stops on "divergent branches": the live
+    `main` carries the staged commit, which GitHub's `main` does not. The
+    script continues with the promoted checkout, as at every earlier
+    promote.
+
+### Host run 2 (user pastes; all passed)
+
+- **H1: proxy and supervisor reinstalled, proxy proof.**
+  - Candidate `776045d7`; the running container's nodemailer is
+    **10.0.12**.
+  - Proxy reinstall: the previous proxy removed (fence retained), the new
+    one `active/enabled` with certificate SPKI
+    `V7Qx86Hf+deTelbdyyiz1A+aN6hKY+9cuDxDbeSuU8w=`.
+  - Supervisor reinstall: `accepting_launch: true`, `blockers: []`,
+    `active: null`; supervisor `9d195ea2…`, runner `a631ad9d…`; the new
+    receipt key
+    `f68c8aaf1bb23aa0c6190007717449aeae8f987e70c720aed47f2300dc1174e3`
+    (`900607c0…` archived); the boundary pins the new SPKI; the renewal
+    timer `active/enabled`.
+  - **Both installed copies of the proxy are `6c86bc36…`**
+    (`/etc/proxypilot-a3-proof/origin-proxy.py` and the supervisor's
+    `a3-origin-proxy.py`).
+  - Broker `790a1957…`, `approle_login: ok`.
+  - `a3-probe-proxy.py`: `proxy_checks: passed`, the same 21 codes as
+    before (`200` for the page and the session, `400` for the probe's
+    invalid sign-in that reaches the demo, `403` for every refused request,
+    `200` for the empty logout).
+- **H2 (detached): A3, A4 and the A4 canary.**
+  - New proof binding `87151b55-b007-432a-a3be-483b4888a2d4`,
+    `provisioned: true`.
+  - `worker_proof: passed`, `a3_exit=0`; `a4_proof: passed`, `a4_exit=0`;
+    `canary_scan: passed`, `canary_exit=0`.
+  - A note for later readers: in a detached start the shell prints
+    `[1]+ Done` at once (setsid hands the work to a new process), and a
+    grep for `Error` also matches the passing `escape` case, whose
+    refusals read `refused:TimeoutError`. The check used from then on
+    greps `Traceback|Refused` and counts the case lines.
+- **H3: A5 with one real human approval, and the A5 canary.**
+  - Approval shown for run `8725d16f…`, attempt `c8d9eb96…` / fence 1,
+    binding `44a95fe1…` revision 1, origin `https://demo.fractionate.ai`,
+    guide hash `d151cec9…`, policy digest `96d9075f…`; the user typed the
+    first 12 characters of the approval digest (`371022319abc`).
+  - 17 of 17 cases passed (`supervised_run` 28.1 s, `coordinator_restart`
+    0.8 s); `a5_proof: passed`, `a5_exit=0`; last binding
+    `a71a66b3-da6c-45c0-83f0-c008a7c26258`; `canary_scan: passed`.
+- **H4: `a6-host-summary.py`**, `summary_exit=0`:
+  - `a3`: 20/20 (`worker-proof-20260929T135219Z.json`), including
+    `backend_view`;
+  - `a4`: 6/6 (`a4-proof-20260929T135515Z.json`);
+  - `a5`: 17/17 (`20260929T141129Z/a5-proof-20260929T141129Z.json`);
+  - canaries: A4 13 sinks, A5 16 sinks, `unclean_sinks: []` for both;
+  - **`"all_passed": true`**.
+- **H5 (session, read-only).**
+  - `get_host_services proxypilot-a`: fence, origin proxy, supervisor,
+    broker and agent active; the renewal timer waiting.
+  - `inspect_a3_vm`: running, Debian 13.7, 2 CPUs, 4096 MiB, 12 GiB, swap
+    disabled; boot **`c70bdf71-b77b-4911-9e1f-89c87d149837`** (was
+    `680ebdf3…`; H2's `guest_crash` reboots the guest).
+  - `get_self_status`: live and candidate `776045d7`, clean; checks green
+    on that commit.
+
+### What host run 2 closes
+
+- **The origin proxy's resend (A5 finding):** the fixed proxy is installed
+  (both copies `6c86bc36…`) and the proxy, A3, A4 and A5 proofs pass on it.
+  The at-most-once rule itself is proven by the local regression test
+  (`test_a_sign_in_that_timed_out_upstream_is_not_sent_again`); a host run
+  cannot stall the demo on purpose.
+- **The timeout fix (DNS cache)** is installed and passed the same proofs.
+  The timeout was rare (once in about 60 launches), so its absence here is
+  not proof on its own; the cause and the fix rest on the measurement.
+- **`nodemailer` 10.0.12** is deployed.
+
+### The second resolver check (user, host)
+
+```
+-rw-r--r-- 1 root root 170 Sep 26 18:25 /etc/resolv.conf
+ipv6_default_routes=0
+A_only slow_lookups=0 of 100
+AAAA_only slow_lookups=0 of 100
+```
+
+- **The host has no IPv6 route**, so an IPv6 answer is of no use to it.
+- No stall in 200 lookups this time (the rate is about 1 in 100), so this
+  run cannot say which question stalls.
+- `/etc/resolv.conf` is a plain file, not a link from systemd-resolved.
+
+### Still open (unchanged)
+
+- The reboot test (`a6-reboot-check.py`), when the user chooses.
+- The locally proven classes (A7 decision 6, to define together).
+- S6 and the security audit register.

@@ -98,11 +98,43 @@ class OriginPolicyTests(unittest.TestCase):
                 p.read_request(io.BytesIO(raw))
 
     def test_dns_rebinding_to_private_or_management_refused(self):
+        p.forget_addresses()
         with patch.object(p.socket, 'getaddrinfo', return_value=[
             (p.socket.AF_INET, p.socket.SOCK_STREAM, 6, '', ('10.185.17.1', 443)),
             (p.socket.AF_INET, p.socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))]):
             with self.assertRaisesRegex(ValueError, 'no public address'):
                 p.public_addresses()
+
+    def test_the_origin_is_looked_up_at_most_once_a_minute_and_failures_are_not_kept(self):
+        # Some DNS lookups on the proof host take 1-2.5 s; one per request could
+        # exceed the runner's 10 s page-load wait.
+        p.forget_addresses()
+        public = [(p.socket.AF_INET, p.socket.SOCK_STREAM, 6, '', ('96.88.158.118', 443))]
+        now = [1000.0]
+        clock = lambda: now[0]
+        with patch.object(p.socket, 'getaddrinfo', return_value=public) as lookup:
+            self.assertEqual(p.public_addresses(clock), [(p.socket.AF_INET, '96.88.158.118')])
+            now[0] += 59
+            p.public_addresses(clock)
+            self.assertEqual(lookup.call_count, 1)
+            now[0] += 2
+            p.public_addresses(clock)
+            self.assertEqual(lookup.call_count, 2)
+            p.forget_addresses()
+            p.public_addresses(clock)
+            self.assertEqual(lookup.call_count, 3)
+        p.forget_addresses()
+        with patch.object(p.socket, 'getaddrinfo', side_effect=p.socket.gaierror('temporary failure')):
+            with self.assertRaises(OSError):
+                p.public_addresses(clock)
+        with patch.object(p.socket, 'getaddrinfo', return_value=[
+                (p.socket.AF_INET, p.socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))]):
+            with self.assertRaisesRegex(ValueError, 'no public address'):
+                p.public_addresses(clock)
+        with patch.object(p.socket, 'getaddrinfo', return_value=public) as lookup:
+            p.public_addresses(clock)
+            self.assertEqual(lookup.call_count, 1, 'a failed or refused lookup was cached')
+        p.forget_addresses()
 
     def test_installer_does_not_write_when_fence_missing(self):
         with patch.object(i.i, 'status', side_effect=ValueError('missing fence')), \

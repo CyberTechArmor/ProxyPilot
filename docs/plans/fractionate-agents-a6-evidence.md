@@ -836,8 +836,15 @@ steps are listed where one is needed.
     in the origin proxy. Its 8 s timeouts sit against the runner's 10 s
     `load` wait.
   - Most likely a stalled hairpin connection or a slow DNS answer.
-  - A read-only host measurement (400 requests, hairpin versus local Caddy)
-    decides. The fix options wait for its result.
+  - **The host measurement found the cause: DNS.** 5 of 200 requests by name
+    took 1.2–2.5 s, and every one of them was the name lookup; connect, TLS
+    and the reply added under 10 ms. With the lookup skipped, 200 of 200 took
+    under 10 ms.
+  - **Fix:** the proxy looks the origin up at most once a minute (failures
+    never cached; dropped when nothing connects). It ships with the
+    at-most-once fix in the same proxy reinstall.
+- **Revocation (user, host):** `active_after=0`. No binding was active: the
+  A4 and A5 proofs revoke their own bindings in their revocation cases.
 - **The locally proven classes: to define together.** A7 decision 6.
 - **Reboot persistence: a test.** `scripts/a6-reboot-check.py`:
   - `record` saves the boot IDs before a reboot;

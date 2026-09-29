@@ -242,9 +242,11 @@ class ProxyAtMostOnceTests(unittest.TestCase):
         with patch.object(p, 'public_addresses', lambda: [(socket.AF_INET, 'dead'), (socket.AF_INET, 'answering')]):
             self.assertEqual(self.post('/api/login', body), 'HTTP/1.1 401 Unauthorized')
         self.assertEqual(Origin.seen, [('POST', '/api/login', body, 'application/json')])
-        with patch.object(p, 'public_addresses', lambda: [(socket.AF_INET, 'dead')]):
+        with patch.object(p, 'public_addresses', lambda: [(socket.AF_INET, 'dead')]), \
+                patch.object(p, 'forget_addresses') as forget:
             self.assertEqual(self.post('/api/login', body), 'HTTP/1.1 502 Bad Gateway')
         self.assertEqual(len(Origin.seen), 1)
+        forget.assert_called_once_with()   # no cached address connects: look the origin up again
 
 
 if __name__ == '__main__':

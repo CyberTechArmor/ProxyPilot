@@ -77,7 +77,44 @@ How to read it:
 | Slow on both paths | Something on the host |
 | None in 400 | Too rare to catch this way. Repeat it, or rely on the fix below |
 
-## Fix options (to choose after the measurement)
+## The measurement (user, host, 2026-09-29)
+
+```
+hairpin_via_router slow: 1.253682 1.254150 1.260301 1.262208 200
+hairpin_via_router slow: 1.240279 1.240611 1.246360 1.247834 200
+hairpin_via_router slow: 2.453276 2.453654 2.459580 2.461033 200
+hairpin_via_router slow: 1.334943 1.335349 1.341306 1.342819 200
+hairpin_via_router slow: 2.442299 2.442826 2.448837 2.450519 200
+hairpin_via_router n=200 slow_over_1s=5 max_s=2.461033 avg_s=0.0802956
+local_caddy n=200 slow_over_1s=0 max_s=0.009859 avg_s=0.00588104
+```
+
+**The cause is DNS.**
+- 5 of 200 requests through the public name took over 1 s, and in each one
+  almost all of the time is the **name lookup** (the first column:
+  1.24–2.45 s).
+- Connecting through the router, TLS and the reply added under 10 ms, so the
+  hairpin itself is fast.
+- With the lookup skipped (`--resolve`, local Caddy) all 200 took under
+  10 ms.
+- About 2.5 % of the host's lookups stall for 1–2.5 s, which suggests
+  resolver retries. The proxy made one lookup per request, several per
+  page, so a rarer, longer stall explains the one 10 s page-load failure.
+
+**The fix (2026-09-29, in the proxy, before its host reinstall):**
+- `public_addresses()` looks the origin up **at most once a minute**. Every
+  request reuses the answer, and the public-address check applies to each
+  answer as before.
+- A failed or refused lookup is never cached.
+- The cache is dropped when no cached address connects.
+- Tests: `test_the_origin_is_looked_up_at_most_once_a_minute_and_failures_are_not_kept`,
+  plus the forget-on-failure assertion in `ProxyAtMostOnceTests`.
+
+**Still worth checking on the host:** why a lookup stalls at all (the
+resolver configuration). That is a host setting, not the proxy's. See the
+optional paste in the session.
+
+## Fix options considered before the measurement
 
 - **Hairpin:** point `demo.fractionate.ai` at the host itself for the proxy
   (a host `/etc/hosts` entry, or a pinned address in the proxy). TLS is

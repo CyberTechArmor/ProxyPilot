@@ -123,6 +123,12 @@ class HostTests(unittest.TestCase):
             patch.object(live.fence_installer, 'status', lambda: {'live_relay': self.relay}),
             patch.object(live, 'vm_readback', self.vm_readback),
         ]
+        if os.geteuid() != 0:
+            # The installer is root-only and hands files to root:turnserver; a
+            # non-root test run (CI) records those ownership changes instead.
+            self.owners = []
+            self.patches += [patch.object(live.os, 'chown', lambda path, uid, gid: self.owners.append((uid, gid))),
+                             patch.object(live.os, 'fchown', lambda fd, uid, gid: self.owners.append((uid, gid)))]
         for item in self.patches:
             item.start()
         self.relay = False

@@ -141,6 +141,26 @@ this adds no reachable backend host call (the mount stays an A8 item). It does
 not close S6: a compromised root-equivalent backend could already drive the
 socket within the pinned project budgets, and now also spend the run's pinned
 model budget choosing among actions the pinned rules offer.
+
+A6 (user decision 4, 2026-09-29) widens the same backend socket by one more
+read-only method, `view`: one PNG frame of the coordinator's running browser
+attempt for the supervision UI. It is narrower than the operator's view:
+refused during a takeover (`TAKEN_OVER`) and outside the lease or deadline,
+it never renews the lease, at most one frame is in flight per attempt and one
+per second, and the reply is only `{png_base64, width, height}` (PNG magic,
+≤ 3 MiB, the runner's page URL dropped, nothing journaled). Input, observe,
+takeover, the journal and the proof workloads stay on the operator socket;
+the socket stays unmounted from the backend container (A8). The backend adds
+Operations routes behind the false-default `OPERATIONS_AGENT_RUNS_ENABLED`
+(`/:id/agent-runs`, stop, `view`, `/agent-approvals` behind `requireSudo`,
+model-guide consent, parsed rules) that call the unchanged A5 coordinator;
+with no supervisor configured they build no launcher and every execution
+control answers `EXECUTION_UNAVAILABLE`, so this adds no reachable backend
+host call. Frames are page pixels by the user's choice: they are kept in
+backend memory for a moment and never written to the database, a log or a
+report; the runner types a bound value only into a password input, so a
+frame shows it masked. It does not close S6: a compromised backend that
+reaches the socket could now also read frames of a running attempt.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

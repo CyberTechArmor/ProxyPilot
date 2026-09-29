@@ -66,9 +66,13 @@ test('supervisor client speaks one typed line per call and maps refusals to code
     await assert.rejects(client.request('launch', spec()), {code:'ACTIVE_ATTEMPT'});
     await assert.rejects(client.request('renew', {}), {code:'SUPERVISOR_PROTOCOL'});
     await assert.rejects(client.request('stop', {}), {code:'SUPERVISOR_PROTOCOL'});
-    await assert.rejects(client.request('takeover', {}), {code:'METHOD_NOT_ALLOWED'});
+    // A7: the dashboard takeover is a backend method; operator input and the
+    // live relay (a stream, never a one-line request) are not.
+    await assert.rejects(client.request('takeover', {}), {code:'ACTIVE_ATTEMPT'});
     await assert.rejects(client.request('input', {}), {code:'METHOD_NOT_ALLOWED'});
-    assert.deepEqual(fake.seen.map(r => r.method), ['status','launch','renew','stop']);
+    await assert.rejects(client.request('live', {}), {code:'METHOD_NOT_ALLOWED'});
+    await assert.rejects(client.stream('launch', {}), {code:'METHOD_NOT_ALLOWED'});
+    assert.deepEqual(fake.seen.map(r => r.method), ['status','launch','renew','stop','takeover']);
   } finally { await fake.close(); }
   await assert.rejects(createSupervisorClient('/nonexistent/a3.sock').request('status', {}),
     {code:'SUPERVISOR_UNREACHABLE'});

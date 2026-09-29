@@ -5,13 +5,20 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 // (scripts/a3-worker-supervisor.py). The backend reaches only its narrow
 // backend socket: status, launch, renew, one typed browser action, one A5
 // model_step (one action name from an allowed set, or a refusal), one A6 view
-// (a bounded PNG frame of the model's live attempt, pixels only), stop. It
-// never holds the receipt signing key; it verifies each teardown receipt with
-// the host public key and the proof VM identity it was configured with.
+// (a bounded PNG frame of the model's live attempt, pixels only), stop. A7 adds
+// the live relay (one viewer's Neko signalling, streamed on its own connection),
+// the dashboard takeover and its release, and one model summary of a finished
+// run from typed facts. It never holds the receipt signing key; it verifies
+// each teardown receipt with the host public key and the proof VM identity it
+// was configured with.
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const METHODS = new Set(['status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop']);
+const METHODS = new Set(['status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop',
+  'takeover', 'release', 'summarize']);
+const STREAM_METHODS = new Set(['live']);
 const MAX_REPLY = 4 * 1024 * 1024;
+// One relayed signalling line (an SDP offer is the largest, a few kB).
+const MAX_STREAM_LINE = 256 * 1024;
 const coded = (code) => { const error = new Error(code); error.code = code; return error; };
 
 export function createSupervisorClient(socketPath, { timeoutMs = 120_000 } = {}) {
@@ -43,6 +50,66 @@ export function createSupervisorClient(socketPath, { timeoutMs = 120_000 } = {})
           try { reply = JSON.parse(buffer.slice(0, end)); } catch { return done(coded('SUPERVISOR_PROTOCOL')); }
           if (reply?.ok === true) return done(null, reply.result);
           return done(coded(typeof reply?.error === 'string' && CODE.test(reply.error) ? reply.error : 'SUPERVISOR_PROTOCOL'));
+        });
+      });
+    },
+    // A7: a long-lived relay. The first line is the supervisor's answer; after
+    // it, each line is {"recv": msg}, {"dropped": true} or finally {"closed":
+    // reason}. `onMessage(msg)` gets each relayed message, `onClose(reason)`
+    // exactly once. Resolves with the first answer's result plus send/close.
+    stream(method, params, { onMessage = () => {}, onClose = () => {}, openTimeoutMs = 30_000 } = {}) {
+      if (!STREAM_METHODS.has(method)) return Promise.reject(coded('METHOD_NOT_ALLOWED'));
+      return new Promise((resolve, reject) => {
+        const socket = net.createConnection(socketPath);
+        let buffer = '';
+        let opened = false, closed = false;
+        const finish = (reason) => {
+          if (closed) return;
+          closed = true;
+          socket.destroy();
+          if (opened) { try { onClose(reason); } catch { /* a handler never breaks the relay */ } }
+          else reject(coded(CODE.test(reason) ? reason : 'SUPERVISOR_PROTOCOL'));
+        };
+        const handle = {
+          send(message) {
+            if (closed) return false;
+            const line = JSON.stringify({ send: message });
+            if (line.length > MAX_STREAM_LINE) return false;
+            return socket.write(`${line}\n`);
+          },
+          close() {
+            if (closed) return;
+            try { socket.write(`${JSON.stringify({ close: true })}\n`); } catch { /* closing anyway */ }
+            setTimeout(() => finish('viewer_closed'), 2000).unref?.();
+          },
+        };
+        socket.setEncoding('utf8');
+        socket.setTimeout(openTimeoutMs, () => { if (!opened) finish('SUPERVISOR_TIMEOUT'); });
+        socket.on('error', () => finish(opened ? 'closed' : 'SUPERVISOR_UNREACHABLE'));
+        socket.on('connect', () => socket.write(`${JSON.stringify({ method, params })}\n`));
+        socket.on('end', () => finish(opened ? 'closed' : 'SUPERVISOR_PROTOCOL'));
+        socket.on('data', (chunk) => {
+          buffer += chunk;
+          if (buffer.length > MAX_STREAM_LINE * 2) return finish(opened ? 'too_large' : 'SUPERVISOR_PROTOCOL');
+          for (let end = buffer.indexOf('\n'); end >= 0 && !closed; end = buffer.indexOf('\n')) {
+            const line = buffer.slice(0, end);
+            buffer = buffer.slice(end + 1);
+            let value;
+            try { value = JSON.parse(line); } catch { return finish(opened ? 'closed' : 'SUPERVISOR_PROTOCOL'); }
+            if (!opened) {
+              if (value?.ok !== true) return finish(typeof value?.error === 'string' ? value.error : 'SUPERVISOR_PROTOCOL');
+              opened = true;
+              socket.setTimeout(0);
+              resolve({ ...value.result, send: handle.send, close: handle.close });
+            } else if (value && typeof value === 'object' && 'recv' in value) {
+              try { onMessage(value.recv); } catch { /* ignored */ }
+            } else if (value?.dropped === true) {
+              try { onMessage(null); } catch { /* ignored */ }
+            } else if (value && typeof value.closed === 'string') {
+              return finish(value.closed.slice(0, 32));
+            } else return finish('closed');
+          }
+          return undefined;
         });
       });
     },

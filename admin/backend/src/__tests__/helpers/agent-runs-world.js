@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { deflateSync, crc32 } from 'node:zlib';
 import { operationsFixture } from './operations-fixture.js';
 import { createOperationalCredentialStore } from '../../lib/operational-credential-bindings.js';
@@ -68,8 +68,19 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
   const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
   const keyId = createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex');
   const scenario = { outcome: 'signed_in', choices: [], modelError: null, actionErrors: {}, delayMs: 0, holds: new Set(),
-    viewMinMs: 0, takeover: null, stopError: null };
+    viewMinMs: 0, takeover: null, stopError: null,
+    // A7: the live relay, the dashboard takeover, its release and the summary.
+    liveError: null, takeoverError: null, inputs: { key: 3, click: 1, scroll: 2 }, summaryError: null,
+    summaryText: 'The run opened the demo, signed in the synthetic account after approval, read its files and signed out.' };
   const calls = [], waiting = new Map(), attempts = new Map();
+  // A7: open viewers (conn -> {attempt, onMessage, onClose, received}); what the
+  // scripted Neko sends each viewer, including fields the relay must remove.
+  const viewers = new Map();
+  const turnSecret = randomBytes(32);
+  const neko = (conn, event, payload) => viewers.get(conn)?.onMessage({ event, payload });
+  const closeViewers = (attemptId, reason) => {
+    for (const [conn, v] of viewers) if (v.attempt === attemptId) { viewers.delete(conn); v.onClose(reason); }
+  };
   let active = null;
   const release = (action) => { scenario.holds.delete(action); waiting.get(action)?.(); waiting.delete(action); };
   const hold = async (action) => {
@@ -106,7 +117,35 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
         return { run_id: params.run_id, attempt_id: params.attempt_id, fence: params.fence, vm_uuid: vmUuid, boot_id: BOOT,
           lease_expires_at: new Date(Date.now() + 30000).toISOString(), deadline_at: null };
       }
-      if (method === 'renew') { live(params); return { lease_expires_at: new Date(Date.now() + 30000).toISOString() }; }
+      if (method === 'renew') {
+        const a = attempts.get(params.attempt_id);
+        if (!a || a.fence !== params.fence || !['running', 'human'].includes(a.state)) throw coded('ATTEMPT_NOT_ACTIVE');
+        return { lease_expires_at: new Date(Date.now() + 30000).toISOString() };
+      }
+      if (method === 'takeover') {
+        const a = live(params);
+        if (!viewers.has(params.conn)) throw coded('LIVE_CONN_UNKNOWN');
+        a.state = 'human';
+        a.dashboard = 'giving';
+        for (const [code, done] of waiting) { done(); waiting.delete(code); }
+        if (scenario.takeoverError) { a.dashboard = 'failed'; throw coded(scenario.takeoverError); }
+        a.dashboard = 'holding';
+        for (const conn of viewers.keys()) neko(conn, 'control/host', { has_host: true, host_id: params.conn, id: 'x' });
+        return { state: 'human', controlling: true };
+      }
+      if (method === 'release') {
+        const a = attempts.get(params.attempt_id);
+        if (!a || a.state !== 'human' || a.dashboard !== 'holding') throw coded('NOT_TAKEN_OVER');
+        a.dashboard = 'released';
+        return { inputs: { ...scenario.inputs } };
+      }
+      if (method === 'summarize') {
+        if ([...attempts.values()].some(a => a.run_id === params.run_id && ['running', 'human'].includes(a.state)))
+          throw coded('RUN_ACTIVE');
+        if (scenario.summaryError) throw coded(scenario.summaryError);
+        return { call_id: params.call_id, text: scenario.summaryText, replayed: false,
+          usage: { prompt_tokens: 310, completion_tokens: 42 }, settled_usd: '0.000011250', price_table_revision: 1 };
+      }
       if (method === 'action') {
         const a = live(params);
         if (scenario.takeover === params.action) {
@@ -151,8 +190,11 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
       if (method === 'stop') {
         if (scenario.stopError) { const code = scenario.stopError; scenario.stopError = null; throw coded(code); }
         const a = attempts.get(params.attempt_id);
+        if (params.reason === 'taken_over' && a?.dashboard !== 'holding' && a?.dashboard !== 'released' && a?.dashboard !== 'giving')
+          throw coded('INVALID_REQUEST');
         if (a) a.state = 'stopped';
         if (active?.attempt_id === params.attempt_id) active = null;
+        closeViewers(params.attempt_id, 'attempt_ended');
         for (const [action, done] of waiting) { done(); waiting.delete(action); }
         const payload = { v: 1, kind: 'a3-teardown', key_id: keyId, vm_uuid: vmUuid, run_id: params.run_id,
           attempt_id: params.attempt_id, fence: params.fence, workspace_id: a?.workspace_id ?? null, bound_boot_id: BOOT,
@@ -165,8 +207,37 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
       }
       throw coded('METHOD_NOT_ALLOWED');
     },
+    // A7: the live relay, as the supervisor's backend socket streams it.
+    async stream(method, params, { onMessage = () => {}, onClose = () => {} } = {}) {
+      calls.push({ method, params: structuredClone(params) });
+      if (method !== 'live') throw coded('METHOD_NOT_ALLOWED');
+      const a = attempts.get(params.attempt_id);
+      if (!a || a.fence !== params.fence || !['running', 'human'].includes(a.state)) throw coded('ATTEMPT_NOT_ACTIVE');
+      if (scenario.liveError) throw coded(scenario.liveError);
+      const conn = randomBytes(8).toString('hex');
+      const viewer = { attempt: params.attempt_id, onMessage, onClose, received: [] };
+      viewers.set(conn, viewer);
+      const username = `${Math.floor(Date.now() / 1000) + 3600}:${conn}`;
+      setImmediate(() => neko(conn, 'system/init', { session_id: conn, control_host: { has_host: false },
+        screen_size: { width: 1280, height: 720, rate: 25 }, webrtc: { videos: ['main'] },
+        sessions: { other: { profile: { name: 'someone' } } }, settings: { private_mode: false } }));
+      return { conn, ttl_seconds: 3600,
+        ice_servers: [{ urls: ['turn:turn.example.com:3478?transport=udp', 'turn:turn.example.com:3478?transport=tcp',
+          'turns:turn.example.com:5349?transport=tcp'], username,
+        credential: createHmac('sha1', turnSecret).update(username).digest('base64') }],
+        send(message) {
+          if (!viewers.has(conn)) return false;
+          viewer.received.push(structuredClone(message));
+          if (message.event === 'signal/request')
+            setImmediate(() => neko(conn, 'signal/provide', { sdp: 'v=0\r\no=- 1 1 IN IP4 10.185.17.179\r\n',
+              iceservers: [{ urls: ['stun:neko.internal'] }], video: { id: 'main' }, audio: { disabled: true } }));
+          return true;
+        },
+        close() { if (viewers.delete(conn)) setImmediate(() => onClose('viewer_closed')); },
+      };
+    },
   };
-  return { calls, client, scenario, release, keyId, publicKeyPem,
+  return { calls, client, scenario, release, keyId, publicKeyPem, viewers, neko,
     launcher: createWorkerLauncher({ client, vmUuid }),
     verifyTeardown: createTeardownVerifier({ publicKeyPem, vmUuid }) };
 }

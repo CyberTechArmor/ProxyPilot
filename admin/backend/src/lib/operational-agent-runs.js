@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { OperationsError, assertEligible, assertOperation, resolveOperationsRole, validId } from './operational-projects-logic.js';
 import { SUBMIT, guideRules } from './operational-run-policy.js';
 import { workerInstallResources } from './operational-worker-boundary.js';
-import { DECISIONS, EXPECTED_RESULT, FIXTURE_MODES, critique, profileGate, runSubjects } from './operational-recovery.js';
+import { DECISIONS, EXPECTED_RESULT, FIXTURE_MODES, critique, profileGate, runSubjects, summaryFacts } from './operational-recovery.js';
+import { fromViewer, toViewer } from './operational-live-relay.js';
 
 // A6 supervision service: what the Operations routes expose of A5 runs. It reads
 // durable state through typed projections only (never a raw row, a receipt body,
@@ -19,7 +20,12 @@ import { DECISIONS, EXPECTED_RESULT, FIXTURE_MODES, critique, profileGate, runSu
 // (a new run linked to one that needs a person, pinned to the same policy),
 // reconciliation (a person's typed decision about each uncertain step or model
 // call; an undecided uncertain write gates the profile), the rule-based critique
-// and the run's model summary, read from durable state.
+// and the run's model summary, read from durable state. It also relays the live
+// view (Neko signalling only, filtered here and in the VM; the video and the
+// input go over WebRTC through the TURN relay, never through the backend or its
+// database) and hands a running attempt to one person (takeover), after the
+// session's own agent-control verification. With the owner's consent, a
+// finished run gets one model summary written from typed facts.
 export class AgentRunError extends OperationsError {
   constructor(status, code, message, extra = {}) { super(status, message); this.code = code; this.extra = extra; }
 }
@@ -75,6 +81,12 @@ const CODES = Object.freeze({
   TAKEOVER_NOT_RUNNING: [409, 'Only a running agent run can be taken over.'],
   TAKEOVER_HELD: [409, 'Someone already holds this run. There is one controller at a time.'],
   TAKEOVER_NOT_YOURS: [403, 'Only the person who took over can end the takeover; Stop ends the run for anyone with run access.'],
+  TAKEOVER_NONE: [409, 'Nobody holds this run.'],
+  TAKEOVER_STARTING: [409, 'Control is still being handed over. Try again in a moment.'],
+  TAKEOVER_VIEWER_UNKNOWN: [409, 'Open the live view of this run first: control is handed to the view you are watching.'],
+  TAKEOVER_FAILED: [502, 'The browser could not be handed to you. The agent\'s run was stopped and can be resumed.'],
+  LIVE_UNAVAILABLE: [409, 'The live view is not available for this run; the still frames are shown instead.'],
+  LIVE_BUSY: [409, 'Too many people are watching this run live. Try again when someone closes their view.'],
   RECONCILE_SUBJECT_UNKNOWN: [404, 'That step or model call has no decision to make.'],
   RECONCILE_DECISION_INVALID: [400, 'Choose one of the decisions offered for this item.'],
 });
@@ -91,6 +103,7 @@ const schemas = {
   reconcile: z.object({ subject: z.string().regex(/^(step:[1-9][0-9]{0,2}|call:[0-9a-f-]{36}|run)$/),
     decision: z.enum([...DECISIONS, 'acknowledged']) }).strict(),
   approve: z.object({ digest: z.string().regex(/^[0-9a-f]{64}$/), confirmation: z.string().max(200) }).strict(),
+  takeover: z.object({ viewer: z.string().regex(/^[0-9a-f]{16}$/) }).strict(),
   list: z.object({ before: z.string().datetime().optional() }).strict(),
 };
 const parse = (schema, input, code, message) => {
@@ -114,15 +127,22 @@ function receiptKeyId(attestation) {
 // `fixtures` (A7) sets the demo's fixture mode for practice runs:
 // { apply(mode) -> Promise }. Without it, practice runs are unavailable.
 // `audit(actor, action, details)` records the human decisions A7 adds.
+// Supervisor codes that leave it unknown whether a model summary call reached
+// the provider: the reserved summary becomes `uncertain`, never retried.
+const SUMMARY_UNCERTAIN = new Set(['SUPERVISOR_TIMEOUT', 'SUPERVISOR_UNREACHABLE', 'SUPERVISOR_PROTOCOL', 'INTERNAL',
+  'CREDENTIAL_BROKER_UNAVAILABLE', 'CHANNEL_CLOSED']);
 export function createAgentRunService({ db, coordinator = null, launcher = null, unavailableReason = 'not_configured',
   clock = () => new Date(), log = () => {}, frameMs = 1500, stopWaitMs = 1500, fixtures = null,
-  audit = () => {} } = {}) {
+  audit = () => {}, renewMs = 10_000 } = {}) {
   const one = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const available = !!(coordinator && launcher);
   const reason = available ? null : (UNAVAILABLE[unavailableReason] ? unavailableReason : 'not_configured');
   const execution = Object.freeze({ available, reason, message: available ? null : UNAVAILABLE[reason] });
   const executing = new Map(), frames = new Map(), viewing = new Map();
+  // A7: open live viewers (viewer id -> who, which run, the relay handle) and
+  // the lease renewal of a held takeover (run id -> timer). Memory only.
+  const lives = new Map(), renewals = new Map();
   let practicePending = false;
   const note = (entry) => { try { log({ at: clock().toISOString(), ...entry }); } catch { /* never changes a run */ } };
   const unavailable = () => refuse(503, 'EXECUTION_UNAVAILABLE', execution.message, { reason: execution.reason });
@@ -303,9 +323,20 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         resume: resumeReason ? { enabled: false, reason: resumeReason } : { enabled: true, reason: null },
         reconcile: reconciliation?.items.length ? { enabled: true, reason: null }
           : { enabled: false, reason: result ? 'Nothing in this run needs a decision.' : 'The run has not ended.' },
+        live: execution.available && running ? { enabled: true, reason: null }
+          : { enabled: false, reason: !execution.available ? execution.message : 'The browser is not running.' },
+        takeover: takeoverControl(r, takeovers),
       },
       execution,
     };
+  }
+  function takeoverControl(r, takeovers) {
+    if (!execution.available) return { enabled: false, reason: execution.message, holder: null };
+    const held = takeovers.find(t => t.state === 'taking' || t.state === 'holding');
+    if (held) return { enabled: false, reason: `${held.user} has control.`, holder: { user_id: held.user_id, user: held.user,
+      state: held.state, since: held.control_at ?? held.started_at } };
+    return r.state === 'running' ? { enabled: true, reason: null, holder: null }
+      : { enabled: false, reason: 'Only a running agent run can be taken over.', holder: null };
   }
   // The execute loop runs in the background; its failures are already durable
   // results, so here they are only logged (codes, never messages from a page).
@@ -333,10 +364,108 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       .then(result => note({ event: 'agent_run_finished', run_id: runId, result_class: result?.result_class ?? null }))
       .catch(error => note({ event: 'agent_run_error', run_id: runId, code: toRunError(error).code }))
       .then(() => (practice ? fixtureReset() : null))
-      .finally(() => { executing.delete(runId); frames.delete(runId); });
+      .then(() => summarize(runId))
+      .catch(error => note({ event: 'agent_run_summary_error', run_id: runId, code: toRunError(error).code }))
+      .finally(() => { executing.delete(runId); frames.delete(runId); stopRenewal(runId); });
     executing.set(runId, work);
     return work;
   }
+  // A7 decision 5: with the profile owner's consent, one model summary of the
+  // finished run from typed facts only. Reserved first (one per run, immutable
+  // once decided); a transport failure leaves it `uncertain` and it is never
+  // sent again.
+  async function summarize(runId) {
+    if (!execution.available || typeof launcher.summarize !== 'function') return null;
+    const r = one('SELECT * FROM ops_agent_runs WHERE id=?', runId);
+    const consent = r && one('SELECT model_summary_consent FROM ops_agent_profiles WHERE id=?', r.profile_id);
+    if (consent?.model_summary_consent !== 1) return null;
+    if (one('SELECT 1 FROM ops_agent_run_summaries WHERE run_id=?', runId)) return null;
+    const view = detail(runIn(r.project_id, runId));
+    if (!view.result) return null;
+    const facts = summaryFacts(view);
+    const callId = randomUUID();
+    try {
+      db.prepare(`INSERT INTO ops_agent_run_summaries(run_id,call_id,state,created_at) VALUES(?,?,'reserved',?)`)
+        .run(runId, callId, clock().toISOString());
+    } catch { return null; }
+    try {
+      const out = await launcher.summarize({ run_id: runId, call_id: callId, facts });
+      db.prepare(`UPDATE ops_agent_run_summaries SET state='written',summary_text=?,prompt_tokens=?,completion_tokens=?,
+        settled_usd=?,price_table_revision=?,finished_at=? WHERE run_id=? AND state='reserved'`)
+        .run(out.text, out.prompt_tokens, out.completion_tokens, out.settled_usd, out.price_table_revision,
+          clock().toISOString(), runId);
+      note({ event: 'agent_run_summary', run_id: runId, state: 'written' });
+      return 'written';
+    } catch (error) {
+      const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'INTERNAL';
+      const state = SUMMARY_UNCERTAIN.has(code) ? 'uncertain' : 'refused';
+      db.prepare(`UPDATE ops_agent_run_summaries SET state=?,refusal_code=?,finished_at=? WHERE run_id=? AND state='reserved'`)
+        .run(state, code, clock().toISOString(), runId);
+      note({ event: 'agent_run_summary', run_id: runId, state, code });
+      return state;
+    }
+  }
+
+  // A7 takeover lease: while a person holds the attempt, the backend renews its
+  // lease (the agent's heartbeat stopped when it saw the takeover). It stops as
+  // soon as the takeover is no longer held or the supervisor refuses.
+  function startRenewal(runId, ref) {
+    stopRenewal(runId);
+    const timer = setInterval(() => {
+      const held = one("SELECT 1 FROM ops_agent_takeovers WHERE run_id=? AND fence=? AND state='holding'", runId, ref.fence);
+      if (!held) return stopRenewal(runId);
+      launcher.renew(ref).catch((error) => {
+        note({ event: 'takeover_renew_failed', run_id: runId, code: toRunError(error).code });
+        stopRenewal(runId);
+      });
+      return undefined;
+    }, renewMs);
+    timer.unref?.();
+    renewals.set(runId, timer);
+  }
+  function stopRenewal(runId) {
+    const timer = renewals.get(runId);
+    if (timer) clearInterval(timer);
+    renewals.delete(runId);
+  }
+  // A viewer went away (closed tab, lost network, revoked access, the attempt
+  // ended). Whoever held control through that view gives it up: the takeover
+  // ends and the run ends taken_over, needing a person (it can be resumed).
+  function viewerGone(entry, reason) {
+    if (!entry || entry.gone) return;
+    entry.gone = true;
+    lives.delete(entry.viewer);
+    note({ event: 'live_closed', run_id: entry.runId, reason: String(reason).slice(0, 32) });
+    if (!entry.holding) return;
+    finishTakeover({ id: entry.actorId }, entry.runId, 'viewer_left', { system: true })
+      .catch(error => note({ event: 'takeover_end_error', run_id: entry.runId, code: toRunError(error).code }));
+  }
+  async function finishTakeover(actor, runId, reason, { system = false } = {}) {
+    const t = one("SELECT * FROM ops_agent_takeovers WHERE run_id=? AND state IN ('taking','holding')", runId);
+    if (!t) return null;
+    if (!system && t.user_id !== actor.id) refuse(403, 'TAKEOVER_NOT_YOURS', CODES.TAKEOVER_NOT_YOURS[1]);
+    if (!system && t.state === 'taking') refuse(409, 'TAKEOVER_STARTING', CODES.TAKEOVER_STARTING[1]);
+    stopRenewal(runId);
+    for (const entry of lives.values()) if (entry.runId === runId) entry.holding = false;
+    let inputs = null;
+    if (t.state === 'holding') {
+      try { inputs = (await launcher.release({ run_id: runId, attempt_id: t.attempt_id, fence: t.fence })).inputs; }
+      catch (error) { note({ event: 'takeover_release_failed', run_id: runId, code: toRunError(error).code }); }
+    }
+    const ending = system ? coordinator.dropTakeover(t.id, { reason, inputs }) : coordinator.endTakeover(actor, runId, { reason, inputs });
+    const outcome = ending.then(() => ({ done: true }), error => ({ error }));
+    outcome.then(({ error }) => { if (error) note({ event: 'takeover_end_error', run_id: runId, code: toRunError(error).code }); });
+    audit(actor, 'AGENT_RUN_TAKEOVER_ENDED', { run_id: runId, reason, inputs });
+    const first = await Promise.race([outcome, new Promise(done => { setTimeout(done, stopWaitMs, null).unref?.(); })]);
+    if (first?.error) throw toRunError(first.error);
+    return !first;
+  }
+  function runningRef(r) {
+    if (r.state !== 'running') return null;
+    const attempt = one("SELECT id,fence FROM ops_agent_worker_attempts WHERE run_id=? AND state='running'", r.id);
+    return attempt && attempt.fence === r.fence ? { run_id: r.id, attempt_id: attempt.id, fence: r.fence } : null;
+  }
+
   // Start, practice start and resume share one path. A practice mode is set on
   // the demo before the run is pinned (and the run is refused if it cannot be);
   // any other start first makes sure no practice mode is left behind.
@@ -552,6 +681,116 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         refuse(503, 'VIEW_FAILED', 'The browser frame could not be read from the supervisor.', { cause: toRunError(error).code });
       }
     },
+    // A7 live view. Checked before the WebSocket upgrade and again every few
+    // seconds while it is open, so a removed grant stops the view.
+    assertLive(actor, projectId, runId) {
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      if (!runningRef(r)) refuse(409, 'LIVE_UNAVAILABLE', 'The browser is not running.', { run_state: r.state });
+      return true;
+    },
+    // One viewer's relay: the service filters every message both ways; the
+    // WebSocket route owns the browser side. Resolves with the viewer id and
+    // that viewer's own TURN credentials.
+    async openLive(actor, projectId, runId, { sessionId, onMessage = () => {}, onClose = () => {} } = {}) {
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      const ref = runningRef(r);
+      if (!ref || typeof launcher.live !== 'function') refuse(409, 'LIVE_UNAVAILABLE', CODES.LIVE_UNAVAILABLE[1]);
+      let entry = null, early = null;
+      const closed = (reason) => {
+        if (!entry) { early = reason; return; }
+        viewerGone(entry, reason);
+        try { onClose(reason); } catch { /* the route's socket may be gone */ }
+      };
+      let handle;
+      try {
+        handle = await launcher.live(ref, {
+          onMessage: (message) => {
+            if (message === null) return onMessage(null);
+            const allowed = toViewer(message);
+            return allowed ? onMessage(allowed) : undefined;
+          },
+          onClose: closed,
+        });
+      } catch (error) {
+        const code = error?.code;
+        if (code === 'LIVE_UNAVAILABLE' || code === 'LIVE_BUSY')
+          refuse(409, code, CODES[code][1]);
+        if (['ATTEMPT_NOT_ACTIVE', 'STALE_FENCE', 'UNKNOWN_ATTEMPT', 'LEASE_EXPIRED', 'DEADLINE', 'CHANNEL_CLOSED'].includes(code))
+          refuse(409, 'LIVE_UNAVAILABLE', 'The browser is not running.');
+        throw toRunError(error);
+      }
+      entry = { viewer: handle.viewer, actorId: actor.id, sessionId, runId, projectId, handle, holding: false, gone: false };
+      lives.set(handle.viewer, entry);
+      note({ event: 'live_opened', run_id: runId, by: actor.id });
+      if (early) closed(early);
+      return { viewer: handle.viewer, ice_servers: handle.ice_servers, ttl_seconds: handle.ttl_seconds };
+    },
+    // From the viewer's browser: signalling only, the rest is dropped here.
+    sendLive(viewer, actorId, message) {
+      const entry = lives.get(viewer);
+      if (!entry || entry.actorId !== actorId || entry.gone) return false;
+      const allowed = fromViewer(message);
+      return allowed ? entry.handle.send(allowed) !== false : false;
+    },
+    closeLive(viewer, reason = 'viewer_closed') {
+      const entry = lives.get(viewer);
+      if (!entry) return;
+      try { entry.handle.close(); } catch { /* already closed */ }
+      viewerGone(entry, reason);
+    },
+    // A7 takeover: anyone with run access (the starter too), after this
+    // session's agent-control verification; never sudo, never a host privilege.
+    // The claim (one controller) is durable first; then the supervisor fences
+    // the model and Neko gives control to the caller's own live view.
+    async takeover(actor, projectId, runId, input, { verified = false, sessionId = null } = {}) {
+      const v = parse(schemas.takeover, input, 'TAKEOVER_VIEWER_UNKNOWN', CODES.TAKEOVER_VIEWER_UNKNOWN[1]);
+      access(actor, projectId, 'run');
+      const r = runIn(projectId, runId);
+      if (!verified) refuse(401, 'CONTROL_VERIFICATION_REQUIRED',
+        'Confirm it is you (password and authenticator code, or a passkey) once in this session to take over agent runs.',
+        { control_verification_required: true });
+      if (!execution.available) unavailable();
+      const entry = lives.get(v.viewer);
+      if (!entry || entry.gone || entry.actorId !== actor.id || entry.sessionId !== sessionId || entry.runId !== r.id)
+        refuse(409, 'TAKEOVER_VIEWER_UNKNOWN', CODES.TAKEOVER_VIEWER_UNKNOWN[1]);
+      let begun;
+      try { begun = coordinator.beginTakeover({ id: actor.id }, runId); }
+      catch (error) { throw toRunError(error); }
+      try {
+        await launcher.takeover(begun.ref, v.viewer);
+      } catch (error) {
+        const cause = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'INTERNAL';
+        note({ event: 'takeover_failed', run_id: runId, code: cause });
+        coordinator.abandonTakeover(begun.takeover_id, cause)
+          .catch(err => note({ event: 'takeover_abandon_error', run_id: runId, code: toRunError(err).code }));
+        audit(actor, 'AGENT_RUN_TAKEOVER_FAILED', { project_id: projectId, run_id: runId, code: cause });
+        refuse(502, 'TAKEOVER_FAILED', CODES.TAKEOVER_FAILED[1], { cause });
+      }
+      coordinator.holdTakeover(begun.takeover_id);
+      entry.holding = true;
+      startRenewal(runId, begun.ref);
+      audit(actor, 'AGENT_RUN_TAKEN_OVER', { project_id: projectId, run_id: runId });
+      note({ event: 'takeover_holding', run_id: runId, by: actor.id });
+      // The view may have closed while control was being handed over.
+      if (entry.gone) { entry.gone = false; viewerGone(entry, 'viewer_left'); }
+      return detail(runIn(projectId, runId));
+    },
+    // The person who took over gives the browser back. The attempt is torn down
+    // (stop reason taken_over, verified receipt); the run ends taken_over and
+    // needs a person: they decide what happened and may resume it.
+    async endTakeover(actor, projectId, runId) {
+      access(actor, projectId, 'run');
+      runIn(projectId, runId);
+      if (!execution.available) unavailable();
+      if (!one("SELECT 1 FROM ops_agent_takeovers WHERE run_id=? AND state IN ('taking','holding')", runId))
+        refuse(409, 'TAKEOVER_NONE', CODES.TAKEOVER_NONE[1]);
+      const stopping = await finishTakeover({ id: actor.id }, runId, 'ended_by_person');
+      return { ...detail(runIn(projectId, runId)), stopping: stopping === true };
+    },
     // At boot, with a coordinator: fence every run a previous process left
     // active and collect its verified receipt. Nothing is resumed.
     async recover() {
@@ -561,5 +800,6 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       return results;
     },
     settled: runId => executing.get(runId) ?? Promise.resolve(),
+    summarize,
   };
 }

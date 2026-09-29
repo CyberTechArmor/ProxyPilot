@@ -118,6 +118,13 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
     201,'agent_run_resume'));
   router.post('/:id/agent-runs/:runId/reconcile', agentRunsOnly, agentHandle((r,a)=>agentRuns.reconcile(a,r.params.id,r.params.runId,r.body,
     { verified: controlVerified(r) === true }),200,'agent_run_reconcile'));
+  // A7 takeover: control goes to the caller's own open live view (the live
+  // WebSocket, routes/agent-live-ws.js); needs the session's agent-control
+  // verification. Ending it gives the browser back and ends the run.
+  router.post('/:id/agent-runs/:runId/takeover', agentRunsOnly, agentHandle((r,a)=>agentRuns.takeover(a,r.params.id,r.params.runId,r.body,
+    { verified: controlVerified(r) === true, sessionId: r.user?.jti ?? null }),200,'agent_run_takeover'));
+  router.post('/:id/agent-runs/:runId/takeover/end', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.endTakeover(a,r.params.id,r.params.runId);},
+    data=>data.stopping?202:200,'agent_run_takeover_end'));
   router.delete('/:id/agent-profiles/:profileId', agentsOnly,
     handle((r,a)=>{empty(r);return store.deleteProfile(a,r.params.id,r.params.profileId,expected(r));},200,'profile_delete'));
   router.get('/:id/draft', handle((r, a) => ({ draft: store.draft(a, r.params.id) })));

@@ -128,3 +128,37 @@ export function critique({ run, steps, model_calls: calls, approvals, result, or
   else if (reconciliation?.open) add(check, 'reconcile_open', { subjects: reconciliation.items.filter(i => i.open).map(i => i.subject) });
   return { final: true, good, bad, check };
 }
+
+// A7 decision 5: the typed facts a finished run's model summary is written
+// from. Codes, enums, counts and seconds only; the supervisor refuses any other
+// shape (scripts/a3-worker-supervisor.py validate_facts), so what reaches the
+// model provider is exactly this.
+const WORD = /^[a-z][a-z0-9_]{0,63}$/;
+const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const OUTCOMES = ['signed_in', 'rejected', 'rate_limited', 'challenge_required', 'unexpected_origin', 'timeout', 'unknown'];
+const word = v => (typeof v === 'string' && WORD.test(v) ? v : null);
+const code = v => (typeof v === 'string' && CODE.test(v) ? v : null);
+const bounded = (v, top) => (v == null ? null : Math.min(top, Math.max(0, v)));
+const count = v => (Number.isSafeInteger(v) && v >= 0 ? Math.min(v, 100000) : 0);
+export function summaryFacts({ steps, model_calls: calls, approvals, result, origin = null, takeovers = [],
+  critique: c }) {
+  const codes = list => (list ?? []).map(i => i.code).filter(x => WORD.test(x)).slice(0, 20);
+  return {
+    result_class: word(result.result_class) ?? 'unknown',
+    final_state: result.final_state,
+    verified_account: result.verified_account === true,
+    practice: origin?.practice === true,
+    fixture_mode: origin?.practice ? origin.fixture_mode ?? null : null,
+    expected_result: origin?.practice ? word(origin.expected_result) : null,
+    steps: steps.slice(0, 20).map(s => ({ ordinal: s.ordinal, action: s.action, decided_by: s.decided_by,
+      state: s.state, error_code: code(s.error_code), seconds: bounded(seconds(s.created_at, s.finished_at), 3600),
+      outcome: OUTCOMES.includes(s.claims?.outcome) ? s.claims.outcome : null })),
+    model_calls: calls.slice(0, 10).map(m => ({ state: m.state, choice: m.choice ?? null, refusal_code: code(m.refusal_code) })),
+    approvals: approvals.slice(0, 5).map(a => ({ state: a.state, stale_reason: word(a.stale_reason) })),
+    takeovers: takeovers.slice(0, 3).map(t => ({ seconds: bounded(seconds(t.started_at, t.ended_at), 86400),
+      inputs: { key: count(t.inputs?.key), click: count(t.inputs?.click), scroll: count(t.inputs?.scroll) } })),
+    critique: { good: codes(c?.good), bad: codes(c?.bad), check: codes(c?.check) },
+    logout: ['done', 'failed', 'not_run'].includes(result.logout) ? result.logout : null,
+    receipt_verified: result.receipt?.verified === true,
+  };
+}

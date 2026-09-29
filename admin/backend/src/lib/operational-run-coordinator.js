@@ -499,6 +499,20 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
     if (!ACTIVE.has(r.state) && r.state !== 'cancelling') return resultOf(runId);
     return terminate(runId, 'blocked', 'taken_over', { stopReason: 'taken_over' });
   }
+  // The holder's live view is gone (closed, lost, or their run access was
+  // removed): the service ends the takeover on their behalf, with the same
+  // teardown as endTakeover. No actor: it is never a person's new decision.
+  async function dropTakeover(takeoverId, { reason = 'viewer_left', inputs = null } = {}) {
+    const t = takeoverRow(takeoverId);
+    if (!t) return null;
+    if (t.state === 'ended') return resultOf(t.run_id);
+    closeTakeover(t.id, reason, inputs);
+    event(t.run_id, t.attempt_id, 'a7:takeover_ended');
+    note({ event: 'takeover_ended', run_id: t.run_id, reason });
+    const r = runOf(t.run_id);
+    if (!ACTIVE.has(r.state) && r.state !== 'cancelling') return resultOf(t.run_id);
+    return terminate(t.run_id, 'blocked', 'taken_over', { stopReason: 'taken_over' });
+  }
   // A takeover the supervisor refused before handing anything over: the claim
   // is closed and the agent's run ends as a normal stop would (the agent is
   // never resumed after a takeover was asked for).
@@ -678,5 +692,6 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
   }
 
   return { start, execute, approve, stop, recover, status, beginTakeover, holdTakeover, endTakeover, abandonTakeover,
+    dropTakeover,
     workers };
 }

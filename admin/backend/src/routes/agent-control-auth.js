@@ -32,7 +32,9 @@ async function reprove(req, res, user, factor, check) {
   if (!outcome.ok) {
     if (outcome.counts !== false) recordLoginFailure(db, user, req);
     logAudit(user.id, 'AGENT_CONTROL_DENIED', 'session', req.user.jti, { reason: outcome.reason, factor }, req.ip);
-    return res.status(outcome.status ?? 401).json({ error: outcome.error, ...(outcome.extra ?? {}) });
+    // Marked, so the dashboard shows it in the prompt instead of treating a
+    // 401 as an expired session.
+    return res.status(outcome.status ?? 401).json({ error: outcome.error, agent_control_failed: true, ...(outcome.extra ?? {}) });
   }
   resetLoginFailures(db, user.id);
   recordControlGrant(db, { sessionId: req.user.jti, userId: user.id, factor });

@@ -3,6 +3,8 @@
   "contracts": "docs/core/security-host-boundary.md",
   "files": {
     "admin/backend/src/index.js": {
+      "host_command: fixtures: agentRunsConfig.execution ? createDemoFixtureWriter({ runHostCapture }) : null,": 1,
+      "host_command: import { runHostCapture } from './lib/lxc-zip.js';": 1,
       "host_files: // by /var/lib/proxypilot not being bind-mounted into the admin": 1,
       "host_files: // runs in a container without /var/lib/proxypilot bind-mounted": 1,
       "host_files: `Likely cause: /var/lib/proxypilot not bind-mounted into the admin container, ` +": 1,
@@ -151,6 +153,13 @@
       "host_command: if (typeof runHostCapture !== 'function') throw new Error('createMigrationService needs runHostCapture');": 1,
       "host_files: export const AGENT_DIR = process.env.PROXYPILOT_MIGRATION_AGENT_DIR || '/var/lib/proxypilot/agent';": 1,
       "host_files: export const WORK_DIR = process.env.PROXYPILOT_MIGRATION_WORK_DIR || '/var/lib/proxypilot/migration';": 1
+    },
+    "admin/backend/src/lib/operational-demo-fixtures.js": {
+      "host_command: // `runHostCapture(bin, args, { input, timeoutMs })` is lib/lxc-zip.js's (host": 1,
+      "host_command: const read = await runHostCapture('incus', ['exec', instance, '--', 'sha256sum', DEMO_FIXTURE], { timeoutMs });": 1,
+      "host_command: const write = await runHostCapture('incus', ['exec', instance, '--', 'sh', '-c', WRITE], { input: document, timeoutMs });": 1,
+      "host_command: export function createDemoFixtureWriter({ runHostCapture, instance = DEMO_INSTANCE, timeoutMs = 30_000 } = {}) {": 1,
+      "host_command: if (typeof runHostCapture !== 'function' || instance !== DEMO_INSTANCE) throw coded('FIXTURE_WRITER_INVALID');": 1
     },
     "admin/backend/src/lib/operational-evidence-decoder.js": {
       "process_api: import { spawn } from 'node:child_process';": 1

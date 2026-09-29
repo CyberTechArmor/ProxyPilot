@@ -308,6 +308,10 @@ test('dashboard takeover claim: one controller, the loop stops, the run ends tak
   // The open approval is closed: approving it now changes nothing.
   const stale = statusOf(w, runId).approvals.find(a => a.id === approval.id);
   assert.deepEqual([stale.state, stale.stale_reason], ['stale', 'taken_over']);
+  // The supervisor hands the browser to the claimant's live view (the service
+  // does this in production; here directly), then the claim is held.
+  const view = await w.supervisor.launcher.live(claim.ref);
+  await w.supervisor.launcher.takeover(claim.ref, view.viewer);
   w.coordinator.holdTakeover(claim.takeover_id);
   await assert.rejects(w.coordinator.endTakeover(w.users.operator, runId), /TAKEOVER_NOT_YOURS/);
   const result = await w.coordinator.endTakeover(w.users.editor, runId,
@@ -372,7 +376,7 @@ test('model summary consent: owner only, typed statement, not part of the run po
   assert.deepEqual([ok.body.profile.model_summary_consent, ok.body.profile.revision], [true, before.revision]);
 });
 
-test('ratchet: no MCP tool, catalog entry or policy file reaches resume, reconciliation, takeover, practice or agent control', () => {
+test('ratchet: no MCP tool, catalog entry or policy file reaches resume, reconciliation, takeover, the live view, practice, the summary or agent control', () => {
   const root = path.join(HERE, '..');
   const files = [];
   const walk = (dir) => { for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -384,7 +388,9 @@ test('ratchet: no MCP tool, catalog entry or policy file reaches resume, reconci
   for (const file of files) {
     const text = readFileSync(file, 'utf8');
     for (const needle of ['agent-runs', 'agentRuns', '/reconcile', 'resumed_from', 'beginTakeover', 'endTakeover', 'agent-control',
-      'ops_agent_takeovers', 'ops_agent_reconciliations', 'ops_agent_control_grants', 'fixture_mode', 'model-summary-consent'])
+      'ops_agent_takeovers', 'ops_agent_reconciliations', 'ops_agent_control_grants', 'fixture_mode', 'model-summary-consent',
+      'agent-live', 'openLive', '/takeover', 'dropTakeover', 'operational-live-relay', 'operational-demo-fixtures', 'a5-fixture',
+      'ops_agent_run_summaries'])
       assert.equal(text.includes(needle), false, `${path.relative(root, file)} mentions ${needle}`);
   }
 });

@@ -345,6 +345,34 @@ Expected: the candidate HEAD and the installer's digest; `"snapshot":
 (`… Depends: <package> … but it is not installable`): paste
 `sudo tail -40 /var/lib/proxypilot-a7-proof/h3b.log`.
 
+**Step H3c (this host only: H4 stopped at every launch on 2026-09-29; the
+live policy refused the runner's own DevTools pipe).** After the fix is
+staged and H4 has ended (`h4_end`; the supervisor must be idle): reinstall
+the supervisor (the new runner copy, a new receipt key), push the new policy
+(`provision-vm`: a new `pp-a7-pre-live-…` snapshot first; the packages are
+already in, so nothing is downloaded), then `enable` (the marker takes the
+new policy digest).
+
+```
+setsid nohup sudo sh -c 'trap "echo h3c_end" EXIT; set -e; cd /var/lib/proxypilot/self/candidate/scripts; git -C .. rev-parse HEAD; sha256sum a3-worker-guest.py a3-worker-supervisor.py a7-install-live.py; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a7-install-live.py provision-vm || { echo provision_failed; exit 1; }; python3 a7-install-live.py enable || { echo enable_failed; exit 1; }; python3 a3-install-supervisor.py status | grep -E "a3-worker-guest|key_id|accepting_launch|blockers"' > /var/lib/proxypilot-a7-proof/h3c.log 2>&1 < /dev/null &
+```
+
+Read it (repeat until `h3c_end`):
+
+```
+sudo sh -c 'head -4 /var/lib/proxypilot-a7-proof/h3c.log; grep -E "\"(snapshot|debs|policy_sha256|missing_libraries|live_marker|fence_live_relay|key_id|accepting_launch|blockers)\"|a3-worker-guest|_failed|refused|h3c_end" /var/lib/proxypilot-a7-proof/h3c.log'
+```
+
+Expected: the candidate HEAD and the three digests (the runner's is the
+fixed one); a new `"key_id"`; `"snapshot": "pp-a7-pre-live-…"`, `"debs": []` (a few
+names only if Debian published newer versions since H3b; they install the
+same way),
+`"policy_sha256": "b515d84c…"` (twice, from `provision-vm` and `enable`),
+`"missing_libraries": []`; `"fence_live_relay": true`, `"live_marker":
+true`; the installed `a3-worker-guest.py` digest equal to the one printed
+first; `"accepting_launch": true`, `"blockers": []`; `h3c_end`. Then run H4
+again, unchanged.
+
 **Recommended, from a machine outside your network** (a phone hotspot is
 enough):
 `openssl s_client -connect streamview.fractionate.ai:5350 -servername streamview.fractionate.ai -brief </dev/null 2>&1 | head -4`
@@ -430,6 +458,8 @@ build and the probe, `A7_TEST_NEKO`, `A7_TEST_PROBE`):
 
 ```
 python3 -m unittest discover -s scripts/tests -p 'test_a[34567]*py'
+# The managed policy as the VM's Chromium reads it (root; writes under /etc/chromium and restores it):
+sudo A7_TEST_POLICY=1 python3 -m unittest scripts/tests/test_a7_live_policy.py
 (cd admin/backend && node --test src/__tests__/agent-*.test.js src/__tests__/operational-*.test.js src/__tests__/operations-toggles.test.js)
 python3 scripts/host-boundary-inventory.py
 (cd admin/frontend && npm run build && node tests/agent-runs.browser.mjs && node tests/agent-runs-a7.browser.mjs)

@@ -283,11 +283,18 @@ LIVE_MAX_MESSAGE = 256 * 1024
 LIVE_SILENCE = ('audiotestsrc wave=silence is-live=true ! audio/x-raw,channels=2,rate=48000 ! audioconvert '
                 '! opusenc bitrate=16000 ! appsink name=appsink')
 # The managed Chromium policy the A7 installer writes, byte for byte.
+# No DeveloperToolsAvailability: set to 2 it also refuses the DevTools protocol
+# on --remote-debugging-pipe, the runner's only way to drive the browser (the
+# host run's H4, 2026-09-29: every launch ended BROWSER_START_FAILED). DevTools
+# stays out of a person's reach at takeover by two layers instead, each proven
+# on its own with real Chromium (test_a7_live_policy.py): kiosk mode, where the
+# DevTools keys open nothing, and the devtools://* block below, which blocks the
+# DevTools front end itself, so it opens by no path, in a normal window too.
 LIVE_POLICY = {
     'AllowFileSelectionDialogs': False, 'AudioCaptureAllowed': False, 'AutofillAddressEnabled': False,
     'AutofillCreditCardEnabled': False, 'BookmarkBarEnabled': False, 'BrowserAddPersonEnabled': False,
     'BrowserGuestModeEnabled': False, 'BrowserSignin': 0, 'DefaultClipboardSetting': 2,
-    'DefaultNotificationsSetting': 2, 'DefaultPopupsSetting': 2, 'DeveloperToolsAvailability': 2,
+    'DefaultNotificationsSetting': 2, 'DefaultPopupsSetting': 2,
     'DownloadRestrictions': 3, 'EditBookmarksEnabled': False, 'ExtensionInstallBlocklist': ['*'],
     'IncognitoModeAvailability': 1, 'PasswordManagerEnabled': False, 'PrintingEnabled': False,
     'PromptForDownloadLocation': False, 'SavingBrowserHistoryDisabled': True, 'ScreenCaptureAllowed': False,
@@ -777,7 +784,12 @@ class Cdp:
                 self.pending.pop(ident, None)
             raise Refused('BROWSER_TIMEOUT')
         if 'error' in box:
-            raise Refused('BROWSER_PROTOCOL')
+            refusal = Refused('BROWSER_PROTOCOL')
+            # For the launch diagnostic only (never sent on the channel): the call
+            # Chromium refused and its own words, e.g. a policy refusing the pipe.
+            error = box['error'] if isinstance(box['error'], dict) else {}
+            refusal.at = '%s: %s' % (method, str(error.get('message', ''))[:120])
+            raise refusal
         return box.get('result', {})
 
     def notify(self, method, params=None, session=None):
@@ -1046,8 +1058,10 @@ class Browser:
                 self.cdp.call(method, params, self.session)
             for page in pages[1:]:
                 self.cdp.notify('Target.closeTarget', {'targetId': page['targetId']})
-        except Refused:
-            diagnostic = self.diagnostics()
+        except Refused as error:
+            # The cause first: the supervisor keeps 1500 characters.
+            cause = error.code + (' at ' + error.at if getattr(error, 'at', None) else '')
+            diagnostic = cause + '\n' + self.diagnostics(1500 - len(cause) - 1)
             self.close()
             failure = Refused('BROWSER_START_FAILED')
             failure.diagnostic = diagnostic
@@ -1348,14 +1362,18 @@ class Browser:
         return {'page_attempts': result, 'navigation_attempts': navigations,
                 'browser_layer_refusals': self.blocked[before:]}
 
-    def diagnostics(self):
+    def diagnostics(self, limit=1500):
+        # Chromium's D-Bus complaints (no bus in the unit) are noise; they filled
+        # the whole tail in the host run's H4 and hid nothing useful.
         try:
             with open(self.log_path, 'rb') as stream:
                 stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, stream.tell() - 1500))
-                return stream.read().decode('utf-8', 'replace')
+                stream.seek(max(0, stream.tell() - 16384))
+                text = stream.read().decode('utf-8', 'replace')
         except OSError:
             return ''
+        kept = '\n'.join(line for line in text.splitlines() if 'dbus/' not in line)
+        return kept[-limit:] if limit > 0 else ''
 
     def close(self):
         try:

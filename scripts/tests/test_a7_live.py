@@ -9,6 +9,7 @@ xinput and real Chromium, when those are present (A7_TEST_NEKO names the built
 binary). Every X event they inject goes through XTest, the path Neko uses.
 """
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -105,7 +106,10 @@ class LivePureTests(unittest.TestCase):
 
     def test_policy_bytes_and_the_x_cookie(self):
         policy = json.loads(g.live_policy_bytes())
-        self.assertEqual(policy['DeveloperToolsAvailability'], 2)
+        # Set to 2 it refuses the runner's own DevTools pipe (test_a7_live_policy.py
+        # shows both that and the two layers that keep DevTools closed instead).
+        self.assertNotIn('DeveloperToolsAvailability', policy)
+        self.assertIn("'--kiosk'", inspect.getsource(g.Browser.__init__))
         self.assertEqual(policy['DownloadRestrictions'], 3)
         self.assertFalse(policy['PasswordManagerEnabled'])
         for blocked in ('file://*', 'chrome://*', 'devtools://*', 'view-source:*', 'javascript://*'):
@@ -115,6 +119,19 @@ class LivePureTests(unittest.TestCase):
         self.assertEqual(entry[:2], b'\xff\xff')
         self.assertIn(b'MIT-MAGIC-COOKIE-1', entry)
         self.assertTrue(entry.endswith(b'\x00\x10' + b'\x01' * 16))
+
+    def test_the_start_diagnostic_drops_dbus_noise_and_keeps_its_limit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            browser = object.__new__(g.Browser)
+            browser.log_path = os.path.join(folder, 'chromium.log')
+            lines = ['[1:2:0929/1.2:ERROR:dbus/bus.cc:408] Failed to connect to the bus'] * 200
+            lines[50] = '[1:1:0929/1.1:ERROR:gpu_init.cc:1] the line that matters'
+            Path(browser.log_path).write_text('\n'.join(lines) + '\n')
+            self.assertEqual(browser.diagnostics(), '[1:1:0929/1.1:ERROR:gpu_init.cc:1] the line that matters')
+            self.assertEqual(len(browser.diagnostics(10)), 10)
+            self.assertEqual(browser.diagnostics(0), '')
+            browser.log_path = os.path.join(folder, 'missing.log')
+            self.assertEqual(browser.diagnostics(), '')
 
     def test_config_accepts_live_for_a_browser_only(self):
         base = {'attempt_id': helpers.ATTEMPT, 'workload': 'browser', 'spki': SPKI}

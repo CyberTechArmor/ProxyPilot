@@ -110,9 +110,41 @@ local_caddy n=200 slow_over_1s=0 max_s=0.009859 avg_s=0.00588104
 - Tests: `test_the_origin_is_looked_up_at_most_once_a_minute_and_failures_are_not_kept`,
   plus the forget-on-failure assertion in `ProxyAtMostOnceTests`.
 
-**Still worth checking on the host:** why a lookup stalls at all (the
-resolver configuration). That is a host setting, not the proxy's. See the
-optional paste in the session.
+## The resolver check (user, host, 2026-09-29)
+
+```
+nameserver 1.1.1.1
+nameserver 9.9.9.9
+ahosts slow lookup 3872 ms
+ahosts slow_lookups=1 of 100
+ahostsv4 slow_lookups=0 of 100
+```
+
+- **The host asks public resolvers directly.** Nothing else is in
+  `/etc/resolv.conf` (no `options` line), and `resolvectl` printed nothing,
+  so there is no local caching resolver (systemd-resolved is not in use).
+- **Only the A+AAAA lookup stalled.** That is the way the proxy (and curl)
+  ask. A-only lookups never stalled.
+- **The stall is a slow answer, not a lost packet.** With no `options` line,
+  glibc waits 5 s for a lost reply before asking the second server. Every
+  stall seen (1.2–3.9 s) is shorter than that.
+- **The likely reason (not proven):**
+  - `demo.fractionate.ai` has no IPv6 address, so the AAAA question gets a
+    "no such record" answer;
+  - a public resolver keeps that negative answer only briefly, and
+    1.1.1.1 is served by many separate caches;
+  - so now and then the AAAA question is a cache miss, and the resolver has
+    to ask the domain's own name servers, which takes seconds.
+- **What this means for the proxy:** the once-a-minute cache is enough. The
+  worst stall seen (3.9 s) is far inside the runner's 10 s page wait, and a
+  page now makes at most one lookup a minute.
+- **Not changed, as options:**
+  - the proxy could ask for IPv4 only (the demo has no IPv6 address). That
+    changes what the proxy accepts, so it is a decision, with the proxy's
+    host proof;
+  - a local caching resolver on the host, or `options timeout:1` in
+    `/etc/resolv.conf`, would help every program on the host. That is a
+    host change outside the agent work.
 
 ## Fix options considered before the measurement
 

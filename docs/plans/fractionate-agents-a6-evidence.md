@@ -843,6 +843,13 @@ steps are listed where one is needed.
   - **Fix:** the proxy looks the origin up at most once a minute (failures
     never cached; dropped when nothing connects). It ships with the
     at-most-once fix in the same proxy reinstall.
+  - **Resolver check (user, host):** the host asks 1.1.1.1 and 9.9.9.9
+    directly, with no local cache. A+AAAA lookups (the way the proxy asks):
+    1 of 100 stalled, 3.9 s. A-only: 0 of 100. Every stall is under glibc's
+    5 s lost-reply wait, so it is a slow answer, most likely to the AAAA
+    question (the demo has no IPv6 address). The proxy's cache is enough;
+    IPv4-only in the proxy and a host caching resolver are recorded as
+    options, not done.
 - **Revocation (user, host):** `active_after=0`. No binding was active: the
   A4 and A5 proofs revoke their own bindings in their revocation cases.
 - **The locally proven classes: to define together.** A7 decision 6.

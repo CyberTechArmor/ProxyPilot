@@ -13,9 +13,10 @@ Root only. Each subcommand is one reviewed step (user decisions 1, 1a and 1b,
   provision-vm    Snapshot the proof VM, then push the built Neko, the managed
                   Chromium policy and the Debian packages the live desktop needs
                   (never while a worker attempt runs); read every file back.
-  install-turn    coturn under its own unit and config: TURN on 3478 UDP/TCP and
-                  TURN over TLS on 5349 for viewers (on this host's default-route
-                  address unless --listen-ip), relaying only to the VM's one
+  install-turn    coturn under its own unit and config: TURN on 3479 UDP/TCP and
+                  TURN over TLS on 5350 for viewers (on this host's default-route
+                  address unless --listen-ip; not 3478/5349, which another TURN
+                  server on the host may own), relaying only to the VM's one
                   Neko port from the gateway address. A new shared secret (root
                   0600; never printed). Optionally a Caddy site for the hostname
                   so Caddy obtains its certificate.
@@ -100,7 +101,9 @@ VM_PACKAGES = ('xvfb', 'xinput', 'xdotool', 'libgstreamer1.0-0', 'gstreamer1.0-p
                'gstreamer1.0-plugins-good', 'libxtst6', 'libxrandr2', 'libxcvt0', 'libgtk-3-0t64', 'libx11-6')
 VM_NEKO = runner.NEKO_BINARY
 VM_POLICY = runner.LIVE_POLICY_PATH
-TURN_PORT, TURN_TLS_PORT = 3478, 5349
+# Not the usual 3478/5349: another TURN server on the host (a meeting service's)
+# may own those, and install-turn refuses a port anything else listens on.
+TURN_PORT, TURN_TLS_PORT = 3479, 5350
 HOSTNAME = re.compile(r'(?=.{4,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\Z')
 
 
@@ -320,7 +323,7 @@ def vm_readback():
 # ------------------------------------------------------------------- TURN
 
 def render_turn(hostname, listen_ip, secret):
-    """The relay: viewers on listen_ip (the router forwards 3478 and 5349 to it);
+    """The relay: viewers on listen_ip (the router forwards TURN_PORT and TURN_TLS_PORT to it);
     relays from the gateway to the VM's one Neko port and nowhere else."""
     return '\n'.join([
         '# ProxyPilot A7 TURN relay; owned by a7-install-live.py. Do not edit.',
@@ -497,6 +500,26 @@ def turn_group():
         raise ValueError('coturn is not installed (no %s group); install it first' % TURN_USER) from error
 
 
+def listening_ports():
+    """Local TCP and UDP ports something listens on, with their addresses (ss)."""
+    found = {}
+    for line in execute(['ss', '-Hltun'], check=False).splitlines():
+        fields = line.split()
+        port = fields[4].rsplit(':', 1)[-1] if len(fields) > 4 else ''
+        if port.isdigit():
+            found.setdefault(int(port), []).append('%s %s' % (fields[0], fields[4]))
+    return found
+
+
+def foreign_listeners():
+    """Anything but this relay listening on the relay's ports: another TURN server
+    (a meeting service's coturn forwarded to the host) must never share them."""
+    if execute(['systemctl', 'is-active', TURN_UNIT.name], check=False).strip() == 'active':
+        return []
+    ports = listening_ports()
+    return sorted(entry for port in (TURN_PORT, TURN_TLS_PORT) for entry in ports.get(port, []))
+
+
 def install_turn(hostname, listen_ip=None, write_caddy_site=False):
     hostname = valid_hostname(hostname)
     listen_ip = valid_listen_ip(listen_ip or default_listen_ip())
@@ -504,6 +527,10 @@ def install_turn(hostname, listen_ip=None, write_caddy_site=False):
         raise ValueError('coturn is not installed (apt-get install coturn)')
     if execute(['systemctl', 'is-active', 'coturn.service'], check=False).strip() == 'active':
         raise ValueError('The distribution coturn.service is active; stop and mask it so only the A7 relay runs')
+    taken = foreign_listeners()
+    if taken:
+        raise ValueError('Something else already listens on the relay ports %d/%d: %s'
+                         % (TURN_PORT, TURN_TLS_PORT, ', '.join(taken)))
     group = turn_group()
     for path in (CONFIG, TURN_UNIT, CERT_SERVICE, CERT_TIMER):
         secure(path)
@@ -559,11 +586,9 @@ def status_turn():
     if not turn:
         return {'turn': 'not installed'}
     try:
-        rows = execute(['ss', '-Hltun'], check=False).splitlines()
+        listening = listening_ports()
     except OSError:
-        rows = []
-    listening = {int(line.split()[4].rsplit(':', 1)[1]) for line in rows
-                 if len(line.split()) > 4 and line.split()[4].rsplit(':', 1)[-1].isdigit()}
+        listening = {}
     return {'turn': {'hostname': turn['hostname'], 'listen_ip': turn['listen_ip'],
                      'active': execute(['systemctl', 'is-active', TURN_UNIT.name], check=False).strip(),
                      'conf_matches': TURN_CONF.exists() and sha256_file(TURN_CONF) == turn['conf_sha256'],

@@ -270,7 +270,7 @@ class LiveEndToEnd(unittest.TestCase):
             self.assertIn('403', check['peers'][peer], (peer, check))
 
     def test_the_tcp_and_tls_listeners_allocate_with_the_same_scope(self):
-        # What the host proof checks on 3478/TCP and 5349/TLS: the viewer's
+        # What the host proof checks on the TCP and TLS listeners: the viewer's
         # credential allocates, the certificate verifies for the TURN name, and
         # the relay still reaches only the VM's Neko port.
         peers = ['%s:%d' % (self.address, g.LIVE_UDP_PORT), '8.8.8.8:53']

@@ -246,6 +246,19 @@ class SupervisorA7Tests(unittest.TestCase):
         self.assertRefused('LIVE_UNAVAILABLE', self.sup.dispatch, 'live', {'run_id': RUN, 'attempt_id': st.ATTEMPT2,
                                                                            'fence': 2})
 
+    def test_turn_urls_take_the_installer_s_ports_in_the_reviewed_forms_only(self):
+        for url in ('turn:streamview.example.test:3479?transport=udp', 'turn:streamview.example.test:3479?transport=tcp',
+                    'turns:streamview.example.test:5350?transport=tcp', 'turn:t.example.test:3478?transport=udp'):
+            self.assertTrue(s.valid_turn_url(url), url)
+        for url in ('turns:t.example.test:5350?transport=udp', 'turn:t.example.test:0?transport=udp',
+                    'turn:t.example.test:65536?transport=udp', 'stun:t.example.test:3479', 'turn:T.example:3479?transport=udp',
+                    'turn:t.example.test:3479', None):
+            self.assertFalse(s.valid_turn_url(url), url)
+        self.marker.write_text(json.dumps({'version': 1, 'turn': {'urls': ['turn:t.example.test:99999?transport=udp']}}))
+        with self.assertRaises(s.Refused) as caught:
+            self.sup.turn_credentials('0123456789abcdef')
+        self.assertEqual(caught.exception.code, 'LIVE_UNAVAILABLE')
+
     def test_the_relay_streams_both_ways_and_closes_with_the_viewer(self):
         self.sup.launch(st.launch_spec())
         path = self.serve()

@@ -369,3 +369,131 @@ for)"; "for this instance I don't use cloudflare, just use caddy".
     one network step the code cannot do.
 - **The deploy path** is in the reference: the PR and merge, D1 (the pinned
   stager, a user paste), and D2 (checks, backup, promote over MCP).
+
+## 2026-09-29 merge and deploy (user: "commit, merge, deploy")
+
+- **PR [CyberTechArmor/ProxyPilot#707](https://github.com/CyberTechArmor/ProxyPilot/pull/707)** merged as
+  **`9e1d66a58d2ca048991d390036a13e1fc7e46be5`** (a merge commit). Its tree
+  is identical to the tested head `316364ee`.
+  - The first CI run (head `ec7e972e`) failed in `backend`: the new
+    installer tests called `os.chown` to uid 0, which a non-root runner
+    cannot do.
+  - Fixed in `316364ee`: a non-root run records the ownership changes
+    instead. Reproduced locally as `nobody` first.
+  - On `316364ee` all 7 checks were green: `backend`, `frontend`, `agent`
+    and four `audit` jobs.
+- **Staging (user, root, the pinned stager, 2026-09-29):**
+  `staged 9341dd93267de145b4abd636645c3b187b8847e8 (was 776045d741e2…) from
+  9e1d66a58d2c…; 189 paths match exactly`. The candidate digests are
+  `73a89f61…` (supervisor), `69dda3db…` (`a7-install-live.py`) and
+  `d4693668…` (demo `server.mjs`).
+- **Checks** on `9341dd93` (`backend-tests`, `backend-syntax`, with the
+  install step): 3,408 tests, 3,397 pass, **0 fail**, 11 skipped.
+- **Backup:** `/data/db/backups/proxypilot-pre-A7-promote-20260929T200120Z.db`,
+  8,998,912 bytes, sha256 `7bd71de83c99a2a2…`. `update.sh` also kept
+  `proxypilot.db.pre-update-20260929-160131`.
+- **Promote:**
+  - the preview showed `776045d7` → `9341dd93`, one commit (the staging of
+    `9e1d66a5`);
+  - rollback tag `pp-rollback-20260929T200130Z` (at `776045d7`);
+  - update `a5049c12-2f01-44bf-bd9a-b8e5409960cc`: `success`, exit 0,
+    20:01:30–20:02:31Z;
+  - `Applied schema migration 1112: operational_practice_recovery`, the
+    health check passed, and all 33 routes match their declared settings;
+  - the `git pull` "divergent branches" message is the known one: the live
+    `main` carries the staged commit;
+  - `get_self_status`: live `9341dd93`, clean; candidate the same, 0 ahead.
+- **Seen in the update log, for the host run:** the host firewall's managed
+  bridge is `incusbr0`, the proof VM's bridge. It is admitted by the input
+  hook, so H2 will print `relay_ports_admitted_by_bridge_rule` and adds no
+  relay-port rule.
+- **Not changed by the deploy:**
+  - the installed supervisor, runner, broker and demo server (still the A6
+    bytes until H1);
+  - no TURN relay, no Neko (H2–H3);
+  - execution on the live dashboard stays unavailable (A8);
+  - the toggles.
+- **Rollback, if needed:** `rollback_self` to `pp-rollback-20260929T200130Z`
+  (`776045d7`) **and** restore the backup above, because migration 1112 has
+  applied.
+- **Next:** the router's forwards of 3478/UDP, 3478/TCP and 5349/TCP to this
+  host, then the host run H0–H7 (reference).
+
+## 2026-09-29 host run: H0, H1, H2, and the TURN port conflict
+
+**H0 (user, read-only).** Every value matched:
+- the candidate `9341dd93`;
+- supervisor `9d195ea2…`, runner `a631ad9d…`, key `f68c8aaf…`,
+  `accepting_launch: true`;
+- broker `790a1957…`, `approle_login: ok`; `active: null`;
+- demo `496846cd…`;
+- `iifname "incusbr0" accept` in the input hook;
+- `incusbr0` `10.185.17.1/24`;
+- the default route via `enp10s0`, `src 192.168.88.161`;
+- `streamview.fractionate.ai` → `96.88.158.118`;
+- coturn absent, Docker 29.4.2, 1.2 TB free, the Caddyfile importing
+  `/etc/caddy/custom/*.caddy`, no A7 directories.
+
+**H1 (user).** It matched the expected output:
+- The eight candidate digests.
+- The supervisor:
+  - supervisor **`73a89f61…`** and runner **`7185ee26…`** installed;
+  - fence `e7208d60…` / `bb396c84…`; proxy `6c86bc36…` and `59ae252e…`
+    unchanged;
+  - **new receipt key `60e70fc99269524cc695e6540a5aefab695c3eb113257c44c099060afd67781e`**
+    (`f68c8aaf…` archived);
+  - boot `c70bdf71…`, SPKI `V7Qx86Hf…`.
+- The broker **`10aa2a73…`**, `approle_login: ok`,
+  `approle_config_removed: false`. The generic "Issue a new OpenBao secret
+  ID" notice does not apply to a reinstall that kept the config. Every
+  earlier binding is revoked.
+- The demo `496846cd…` → **`d4693668…`**, active.
+- `proxy_checks: passed`, 21 codes.
+
+**H2 (user).**
+- The simulated install listed coturn 4.6.1-2 and its libraries only,
+  nothing Incus.
+- `coturn 4.6.1-2 inactive masked`.
+- Three manual firewall rules were added (3478/udp, 3478/tcp, 5349/tcp);
+  the output printed `relay_ports_admitted_by_bridge_rule`.
+- The pasted output ends there. The Caddy site step's result was not shown;
+  H2b repeats it.
+
+**Finding (stopped before H3).** The rendered rules also showed two existing
+rules: `service-l4-…: coturn TURN/STUN (UDP)` on 3478/udp and
+`service-l4-…: coturn TURN-over-TLS (cellular fallback)` on 5349/tcp.
+`set_port_forward list` for the **MEET** container shows its forwards:
+- 5349/tcp;
+- 7881/tcp (LiveKit);
+- 3478/udp;
+- the 30000–32000/udp relay range;
+- 50000–60000/udp WebRTC media.
+
+So **MEET's coturn already owns 3478 and 5349 on this host**, and the A7
+relay must not bind them: a relay on `192.168.88.161:3478` could take that
+address's traffic from MEET's.
+- Nothing was harmed. The A7 relay never started: `install-turn` without
+  `--caddy-site` (H3) had not run, and the distribution unit is masked.
+- The duplicate manual rules for 3478/udp and 5349/tcp only repeat MEET's
+  rules. The new 3478/tcp rule opens a port nothing listens on.
+- H2b removes the three manual rules and adds the new ports.
+
+**The fix (the port move).**
+- The A7 relay uses **3479 UDP/TCP and TLS 5350**.
+- `install-turn` refuses to install while anything else listens on those
+  ports (`Something else already listens on the relay ports …`, from `ss`).
+  This is the machine check that would have caught the conflict.
+- The supervisor and the backend accept the three reviewed URL forms with
+  the installer's ports (1–65535), not only 3478/5349.
+- The Go probe takes the TCP/TLS port from the URL.
+- Tests:
+  - the installer tests run with MEET's listeners in the fake `ss`, and
+    cover the refusal;
+  - a supervisor test and backend cases cover other ports and invalid ones
+    (0, 65536, `turns` over UDP).
+- The live end-to-end test passed with the real coturn on 3479/5350: A3–A7
+  scripts 213 OK, and all 242 script tests as a non-root user. Operations
+  suites 159/159.
+- The router forwards needed are **3479/UDP, 3479/TCP, 5350/TCP →
+  192.168.88.161**. Only viewers outside the network need them; H1–H6 reach
+  the relay on the LAN address.

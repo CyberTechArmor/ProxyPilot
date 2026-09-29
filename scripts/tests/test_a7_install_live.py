@@ -37,7 +37,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('denied-peer-ip=0.0.0.0-255.255.255.255', lines)
         self.assertIn('denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', lines)
         for line in ('no-tcp-relay', 'no-cli', 'no-dtls', 'no-tlsv1', 'no-tlsv1_1', 'use-auth-secret',
-                     'no-multicast-peers', 'listening-port=3478', 'tls-listening-port=5349',
+                     'no-multicast-peers', 'listening-port=3479', 'tls-listening-port=5350',
                      'min-port=49160', 'max-port=49200'):
             self.assertIn(line, lines)
         self.assertEqual(sum(1 for line in lines if line.startswith('allowed-peer-ip=')), 1)
@@ -52,7 +52,7 @@ class RenderTests(unittest.TestCase):
         urls = live.turn_urls('turn.example.com')
         self.assertEqual(len(urls), 3)
         self.assertTrue(all(supervisor.TURN_URL.fullmatch(u) for u in urls))
-        self.assertIn('turns:turn.example.com:5349?transport=tcp', urls)
+        self.assertIn('turns:turn.example.com:5350?transport=tcp', urls)
 
     def test_units_are_hardened_and_reference_the_owned_config(self):
         unit = live.turn_unit()
@@ -133,6 +133,7 @@ class HostTests(unittest.TestCase):
             item.start()
         self.relay = False
         self.active = {}
+        self.foreign = ''
         self.server = self.fake_supervisor()
 
     def tearDown(self):
@@ -148,8 +149,12 @@ class HostTests(unittest.TestCase):
         if argv[:2] == ['systemctl', 'is-active']:
             return self.active.get(argv[2], 'inactive') + '\n'
         if argv[:2] == ['ss', '-Hltun']:
-            return ('udp UNCONN 0 0 192.168.1.20:3478 0.0.0.0:*\n'
-                    'tcp LISTEN 0 5 192.168.1.20:3478 0.0.0.0:*\ntcp LISTEN 0 5 192.168.1.20:5349 0.0.0.0:*\n')
+            # A meeting service's coturn on the usual ports, forwarded to the host.
+            rows = 'udp UNCONN 0 0 0.0.0.0:3478 0.0.0.0:*\ntcp LISTEN 0 4096 *:5349 *:*\n' + self.foreign
+            if self.active.get(live.TURN_UNIT.name) == 'active':
+                rows += ('udp UNCONN 0 0 192.168.1.20:3479 0.0.0.0:*\n'
+                         'tcp LISTEN 0 5 192.168.1.20:3479 0.0.0.0:*\ntcp LISTEN 0 5 192.168.1.20:5350 0.0.0.0:*\n')
+            return rows
         if argv[:2] == ['systemctl', 'enable']:
             self.active[live.TURN_UNIT.name] = 'active'
             self.active[live.CERT_TIMER.name] = 'active'
@@ -226,7 +231,8 @@ class HostTests(unittest.TestCase):
         self.assertTrue(all(secret not in ' '.join(map(str, call)) for call in self.calls))
         self.assertEqual(result['turn']['active'], 'active')
         self.assertTrue(result['turn']['conf_matches'] and result['turn']['unit_matches'])
-        self.assertEqual(result['turn']['ports'], {'3478': True, '5349': True})
+        self.assertEqual(result['turn']['ports'], {'3479': True, '5350': True})
+        self.assertIn('listening-port=3479', self.paths['TURN_CONF'].read_text())
         # A rerun keeps the secret.
         live.install_turn('turn.example.com', '192.168.1.20')
         self.assertEqual(self.paths['TURN_SECRET'].read_text().strip(), secret)
@@ -243,6 +249,13 @@ class HostTests(unittest.TestCase):
         self.active.pop('coturn.service')
         with self.assertRaisesRegex(ValueError, 'not an address of this host'):
             live.install_turn('turn.example.com', '192.168.1.99')
+        # Another TURN server on the relay's ports: refused, nothing written.
+        self.foreign = 'udp UNCONN 0 0 0.0.0.0:3479 0.0.0.0:*\n'
+        self.caddy_cert()
+        with self.assertRaisesRegex(ValueError, 'already listens on the relay ports 3479/5350: udp 0.0.0.0:3479'):
+            live.install_turn('turn.example.com', '192.168.1.20')
+        self.assertFalse(self.paths['TURN_UNIT'].exists())
+        self.foreign = ''
         self.paths['TURNSERVER'].unlink()
         with self.assertRaisesRegex(ValueError, 'coturn is not installed'):
             live.install_turn('turn.example.com', '192.168.1.20')

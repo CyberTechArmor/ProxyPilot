@@ -1,4 +1,5 @@
 import { requestSudo } from './sudo.js';
+import { requestAgentControl } from './agent-control.js';
 
 const API_BASE = '/api';
 
@@ -85,6 +86,21 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
         throw new ApiError('Sudo cancelled', 401, data);
       }
       return request(endpoint, options, false);
+    }
+    // A7 agent-control gate (takeover, reconciliation): this session's own
+    // verification, once per session; never sudo. Prompt, then retry once.
+    if (data.control_verification_required && _retryOnSudo) {
+      try {
+        await requestAgentControl();
+      } catch {
+        throw new ApiError('Verification cancelled: nothing was changed.', 401, data);
+      }
+      return request(endpoint, options, false);
+    }
+    // A wrong password, code or passkey in that prompt is shown in the prompt;
+    // it is not an expired session.
+    if (data.control_verification_required || data.agent_control_failed) {
+      throw new ApiError(data.error || data.message || 'Verification failed', 401, data);
     }
     // Don't redirect if this is a login/setup attempt with special flow flags
     if (data.totpRequired || data.totpSetupRequired || data.setupRequired) {
@@ -312,6 +328,18 @@ export const api = {
   sudoPasskeyVerify: ({ response }) => request('/auth/sudo/passkey/verify', {
     method: 'POST',
     body: JSON.stringify({ response }),
+  }, false),
+
+  // A7: the once-per-session agent-control verification (not sudo). The same
+  // factors; the outcome is a grant for this session to take over or decide
+  // agent runs. _retryOnSudo=false: the prompt shows its own errors.
+  agentControlStatus: () => request('/operational-projects/agent-control', { cache: 'no-store' }),
+  agentControl: ({ password, totpCode }) => request('/auth/agent-control', {
+    method: 'POST', body: JSON.stringify({ password, totpCode }),
+  }, false),
+  agentControlPasskeyBegin: () => request('/auth/agent-control/passkey/begin', { method: 'POST' }, false),
+  agentControlPasskeyVerify: ({ response }) => request('/auth/agent-control/passkey/verify', {
+    method: 'POST', body: JSON.stringify({ response }),
   }, false),
 
   // Per-action confirmation challenge (Step 7). Returns a fresh

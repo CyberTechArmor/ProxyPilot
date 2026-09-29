@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { AlertTriangle, AppWindow, Info, Maximize2, MessageSquare, Square } from 'lucide-react';
+import { AlertTriangle, AppWindow, Hand, Info, Maximize2, MessageSquare, RotateCcw, Square } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import MobilePanelBar from '@/components/mock2/MobilePanelBar';
 import { Action } from './shared';
-import { ACTION_TEXT, CLAIM_TEXT, DECK_TEXT, HELP_DECISION, KIND_TEXT, RESULT_TEXT, RULE_TEXT, STALE_TEXT, STATE_TEXT,
-  clock, grouped, resultLabel, shortId, when, whenShort } from './agent-run-text';
+import { ACTION_TEXT, CLAIM_TEXT, DECK_TEXT, HELP_DECISION, KIND_TEXT, LIVE_TEXT, ORIGIN_TEXT, RECONCILE_TEXT, RESULT_TEXT,
+  RULE_TEXT, STALE_TEXT, STATE_TEXT, SUMMARY_TEXT, clock, critiqueText, grouped, resultLabel, shortId, when,
+  whenShort } from './agent-run-text';
 import { callSummary, firstStepFinishedAt } from './run-deck-logic';
+import { LiveBrowser } from './LiveBrowser';
 
 // The run deck: one run's detail laid out like Flightdeck. On a laptop the
 // Browser pane and the Activity column share a fixed-height deck under the run
 // bar and the approval banner, with Details below; on a phone one panel shows
 // at a time behind the shared MobilePanelBar. A layout over the run detail and
 // the view frames the server already returns: frames stay in this page's memory.
+// A7 adds the live video (and takeover) in the Browser pane, the decisions a
+// person records after a run, resume, the origin of a run, and the Review tab.
 
 export function Badge({ children, tone = 'neutral' }) {
   const tones = { neutral: 'border-border', warn: 'border-amber-500/70 text-amber-700 dark:text-amber-300',
@@ -140,8 +144,21 @@ function runMeta(run) {
     binding: run.credential_binding_id ? `${shortId(run.credential_binding_id)} rev ${run.credential_binding_revision}` : 'none' });
 }
 
-function RunBar({ data, busy, message, statusId, onBack, onStop }) {
+function OriginBadges({ origin, onOpenRun }) {
+  if (!origin) return null;
+  const link = (id, text) => <button type="button" onClick={() => onOpenRun?.(id)}
+    className="inline-flex min-h-11 items-center text-sm underline underline-offset-2">{text}</button>;
+  return <>
+    {origin.practice && <Badge tone="warn">{ORIGIN_TEXT.practice(origin.fixture_mode)}</Badge>}
+    {origin.resumed_from_run_id && link(origin.resumed_from_run_id, ORIGIN_TEXT.resumedFrom(origin.resumed_from_run_id))}
+    {origin.resumed_as_run_id && link(origin.resumed_as_run_id, ORIGIN_TEXT.resumedAs(origin.resumed_as_run_id))}
+  </>;
+}
+
+function RunBar({ data, busy, message, statusId, onBack, onStop, onResume, onOpenRun }) {
   const { run, controls } = data;
+  const resumeHint = useId();
+  const needsPerson = !!data.result?.needs_human;
   const stopHint = useId();
   const hint = !controls.stop.enabled ? DECK_TEXT.stopUnavailable(controls.stop.reason)
     : controls.stop.retry ? DECK_TEXT.stopRetry : DECK_TEXT.stopHint;
@@ -152,6 +169,8 @@ function RunBar({ data, busy, message, statusId, onBack, onStop }) {
         <h2 id={`${run.id}-title`} className="text-lg font-semibold flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
           <span className="break-words [overflow-wrap:anywhere]">{run.profile_name ?? 'Agent run'} · run {shortId(run.id)}</span>
           <StateBadge run={run}/>{run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}</h2>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><OriginBadges origin={data.origin} onOpenRun={onOpenRun}/>
+          {data.origin?.practice && data.origin.expected_result && <span className="text-sm text-muted-foreground">{ORIGIN_TEXT.expected(data.origin.expected_result)}</span>}</div>
         <p className="hidden sm:block truncate text-sm text-muted-foreground" title={runMeta(run)}>{runMeta(run)}</p>
         <p id={statusId} role="status" aria-live="polite" className="text-sm">{busy ? 'Working…' : message}</p>
       </div>
@@ -164,6 +183,37 @@ function RunBar({ data, busy, message, statusId, onBack, onStop }) {
       </div>
     </div>
     <p id={stopHint} className={controls.stop.enabled && !controls.stop.retry ? 'sr-only' : 'text-sm text-muted-foreground break-words'}>{hint}</p>
+    {needsPerson && controls.resume && <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+      <Action variant={controls.resume.enabled ? 'default' : 'outline'} className="gap-2 shrink-0"
+        disabled={!controls.resume.enabled || busy} aria-describedby={resumeHint} onClick={onResume}>
+        <RotateCcw aria-hidden="true" className="h-4 w-4"/>{ORIGIN_TEXT.resume}</Action>
+      <p id={resumeHint} className="min-w-0 text-sm text-muted-foreground break-words">
+        {controls.resume.enabled ? ORIGIN_TEXT.resumeHint : ORIGIN_TEXT.resumeUnavailable(controls.resume.reason)}</p>
+    </div>}
+  </section>;
+}
+
+// A7 decision 3: what a person records about each uncertain item of a finished
+// run. The server keeps each decision with who and when; nothing is re-sent.
+export function ReconcilePanel({ data, busy, onDecide }) {
+  const items = data.reconciliation?.items ?? [];
+  const headingId = useId();
+  if (!items.length) return null;
+  const choices = item => item.kind === 'run' ? ['acknowledged'] : ['happened', 'did_not_happen', 'unknown'];
+  return <section aria-labelledby={headingId} className="rounded-lg border-2 border-amber-500/70 p-3 space-y-3 min-w-0" data-testid="reconcile">
+    <h3 id={headingId} className="font-semibold">{RECONCILE_TEXT.heading}</h3>
+    <p className="text-sm break-words">{RECONCILE_TEXT.note}</p>
+    <ul className="space-y-3">{items.map(item => <li key={item.subject} className="rounded-md border p-3 space-y-2 min-w-0"
+      data-testid={`reconcile-${item.subject}`}>
+      <p className="font-medium break-words flex flex-wrap items-center gap-2">{RECONCILE_TEXT.title(item)}
+        {item.gates && <Badge tone="bad">Blocks the next start</Badge>}
+        {!item.open && <Badge tone="good">Decided</Badge>}</p>
+      <p className="text-sm text-muted-foreground break-words">Why: {RECONCILE_TEXT.reason(item.reason)}. {RECONCILE_TEXT.question(item)}</p>
+      {item.decision && <p className="text-sm break-words">{RECONCILE_TEXT.decision[item.decision.decision] ?? item.decision.decision} · {RECONCILE_TEXT.by(item.decision.decided_by, when(item.decision.decided_at))}</p>}
+      {item.open && <div className="grid grid-cols-1 sm:flex sm:flex-wrap gap-2">{choices(item).map(choice =>
+        <Action key={choice} variant="outline" disabled={busy} onClick={() => onDecide(item.subject, choice)}>
+          {choice === 'acknowledged' ? 'Acknowledge' : choice === 'happened' ? 'It happened' : choice === 'did_not_happen' ? 'It did not happen' : 'Not known yet'}</Action>)}</div>}
+    </li>)}</ul>
   </section>;
 }
 
@@ -203,9 +253,39 @@ function WatchSwitch({ checked, onChange }) {
     <span>{DECK_TEXT.watch}</span></button>;
 }
 
-function BrowserPane({ data, active, live, watch, onWatch, onEnlarge, viewNote, className }) {
+function TakeoverBar({ data, live, me, busy, onTakeover, onEndTakeover }) {
+  const t = data.controls.takeover;
+  const hint = useId();
+  if (!t) return null;
+  const mine = live.control.mine || (t.holder && t.holder.user_id === me);
+  if (t.holder) return <div className={`flex flex-col sm:flex-row sm:items-center gap-2 rounded-md border p-2 ${mine ? 'border-emerald-600/70 bg-emerald-500/10' : ''}`}>
+    <p className="min-w-0 flex-1 text-sm font-medium break-words" role="status">{mine ? LIVE_TEXT.holderMe : LIVE_TEXT.holder(t.holder.user, clock(t.holder.since))}</p>
+    {mine && <Action variant="destructive" disabled={busy} onClick={onEndTakeover}>{LIVE_TEXT.giveBack}</Action>}
+  </div>;
+  const ready = live.state === 'live' && !!live.viewer;
+  return <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+    <Action className="gap-2" disabled={!t.enabled || !ready || busy} aria-describedby={hint} onClick={onTakeover}>
+      <Hand aria-hidden="true" className="h-4 w-4"/>{LIVE_TEXT.takeover}</Action>
+    <p id={hint} className="text-sm text-muted-foreground break-words">{!t.enabled ? t.reason : !ready ? LIVE_TEXT.takeoverWait : LIVE_TEXT.takeoverHint}</p>
+  </div>;
+}
+
+function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, viewNote, className, liveView, me, busy,
+  onTakeover, onEndTakeover }) {
   const { controls, steps } = data;
   const headingId = useId();
+  const video = !!liveView && liveView.mode === 'live' && controls.live?.enabled;
+  if (video) return <section aria-labelledby={headingId} className={`${className} flex-col gap-3 rounded-lg border bg-card p-3 min-w-0 lg:min-h-0 lg:overflow-y-auto`}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <h3 id={headingId} className="font-semibold">{DECK_TEXT.browser}</h3>
+      {liveView.state === 'live' && <LivePill state="live"/>}
+    </div>
+    <LiveBrowser base={liveView.base} runId={data.run.id} onState={liveView.onState} onControl={liveView.onControl}
+      onViewer={liveView.onViewer}/>
+    <TakeoverBar data={data} live={liveView} me={me} busy={busy} onTakeover={onTakeover} onEndTakeover={onEndTakeover}/>
+    <p className="text-xs text-muted-foreground">{DECK_TEXT.liveNote}</p>
+  </section>;
+  const live = frame;
   const firstDone = firstStepFinishedAt(steps) !== null;
   const pill = !active ? 'ended' : controls.view.enabled ? (watch ? 'live' : 'paused') : null;
   const at = live?.action_count ?? 0;
@@ -231,8 +311,39 @@ function BrowserPane({ data, active, live, watch, onWatch, onEnlarge, viewNote, 
       ? DECK_TEXT.captionLive(at, ACTION_TEXT[step?.action] ?? step?.action ?? '—', clock(live.captured_at)) : DECK_TEXT.captionEnded(at)}</p>}
     {!controls.view.enabled && <p className="text-sm break-words">{DECK_TEXT.viewUnavailable(controls.view.reason)}</p>}
     {viewNote && controls.view.enabled && <p className="text-sm break-words" role="status">{viewNote}</p>}
+    {liveView?.note && controls.live?.enabled && <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+      <p className="min-w-0 flex-1 text-sm break-words" role="status">{liveView.note}</p>
+      {liveView.retry && <Action variant="outline" onClick={liveView.onRetry}>{LIVE_TEXT.retry}</Action>}</div>}
+    {controls.takeover?.holder && <TakeoverBar data={data} live={liveView ?? { control: {}, state: 'off' }} me={me} busy={busy}
+      onTakeover={onTakeover} onEndTakeover={onEndTakeover}/>}
     <p className="text-xs text-muted-foreground">{DECK_TEXT.viewNote}</p>
   </section>;
+}
+
+// A7 decision 5: the rule-based review and, with the owner's consent, the
+// model's summary written from typed facts. Untrusted model text is shown as
+// plain text, never as markup or a link.
+function ReviewTab({ data }) {
+  const c = data.critique, sum = data.summary;
+  const section = (title, list, tone) => list?.length ? <div className="space-y-1">
+    <h4 className="text-sm font-semibold">{title}</h4>
+    <ul className="space-y-1">{list.map((item, i) => <li key={`${item.code}-${i}`} className="flex gap-2 text-sm break-words">
+      <Badge tone={tone}>{tone === 'good' ? 'Good' : tone === 'bad' ? 'Wrong' : 'Check'}</Badge><span className="min-w-0">{critiqueText(item)}</span></li>)}</ul>
+  </div> : null;
+  return <div className="space-y-4" data-testid="run-review">
+    {!c?.final ? <p className="text-sm">{DECK_TEXT.noResult}</p> : <>
+      {section('What went well', c.good, 'good')}
+      {section('What went wrong', c.bad, 'bad')}
+      {section('What to check', c.check, 'warn')}
+    </>}
+    <div className="rounded-md border p-3 space-y-2" data-testid="run-summary">
+      <h4 className="text-sm font-semibold">{SUMMARY_TEXT.heading}</h4>
+      {!sum ? <p className="text-sm">{SUMMARY_TEXT.none}</p> : sum.state === 'written' ? <>
+        <blockquote className="border-l-4 pl-3 text-sm whitespace-pre-wrap break-words">{sum.text}</blockquote>
+        <p className="text-xs text-muted-foreground">{SUMMARY_TEXT.written} {SUMMARY_TEXT.usage(sum.prompt_tokens, sum.completion_tokens, sum.settled_usd)}</p>
+      </> : <p className="text-sm break-words">{sum.state === 'refused' ? SUMMARY_TEXT.refused(sum.refusal_code) : SUMMARY_TEXT[sum.state]}</p>}
+    </div>
+  </div>;
 }
 
 // What scrolls the feed: the column itself on a laptop (overflow-y-auto at lg),
@@ -310,6 +421,7 @@ function RunDetails({ data, tab, onTab, busy, statusId, onRefresh, className }) 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <TabsList className="grid h-auto grid-cols-2 gap-2 bg-transparent p-0 sm:flex sm:flex-wrap sm:justify-start">
           <TabsTrigger className={trigger} value="result">{DECK_TEXT.result}</TabsTrigger>
+          <TabsTrigger className={trigger} value="review">{DECK_TEXT.reviewTab}</TabsTrigger>
           <TabsTrigger className={trigger} value="calls">{DECK_TEXT.modelCalls(data.model_calls.length)}</TabsTrigger>
           <TabsTrigger className={trigger} value="approvals">{DECK_TEXT.approvals(data.approvals.length)}</TabsTrigger>
           <TabsTrigger className={trigger} value="pins">{DECK_TEXT.pins}</TabsTrigger>
@@ -319,6 +431,7 @@ function RunDetails({ data, tab, onTab, busy, statusId, onRefresh, className }) 
       <TabsContent value="result" className="mt-3">
         {data.result ? <ResultSummary result={data.result}/> : <p className="text-sm">{DECK_TEXT.noResult}</p>}
       </TabsContent>
+      <TabsContent value="review" className="mt-3"><ReviewTab data={data}/></TabsContent>
       <TabsContent value="calls" className="mt-3">
         <ul className="space-y-2">{data.model_calls.map(c => <li key={c.call_id} className="text-sm break-words border-t pt-2">
           <span className="font-medium">{c.state}</span>{c.choice && ` · chose ${ACTION_TEXT[c.choice] ?? c.choice}`}{c.refusal_code && ` · refused ${c.refusal_code}`} · allowed {c.allowed.join(', ')} · {c.prompt_tokens ?? 0}+{c.completion_tokens ?? 0} tokens · ${c.settled_usd ?? '—'}{c.replayed ? ' · replayed' : ''}</li>)}
@@ -342,7 +455,8 @@ function RunDetails({ data, tab, onTab, busy, statusId, onRefresh, className }) 
 
 // `panel` only matters below lg, where one panel shows at a time.
 export function RunDeck({ data, feed, view, active, panel, onPanel, tab, onTab, watch, onWatch, viewNote, busy, message,
-  error, announce, onBack, onStop, onRefresh, onReview, onFrame }) {
+  error, announce, onBack, onStop, onRefresh, onReview, onFrame, liveView = null, me = null, onTakeover, onEndTakeover,
+  onResume, onOpenRun, onDecide }) {
   const statusId = useId();
   const open = data.approvals.find(a => a.open) ?? null;
   const shown = key => `${panel === key ? 'flex' : 'hidden'} lg:flex`;
@@ -353,13 +467,16 @@ export function RunDeck({ data, feed, view, active, panel, onPanel, tab, onTab, 
   ];
   return <div className="flex flex-col gap-3 min-w-0 pb-[calc(4.5rem+env(safe-area-inset-bottom))] md:pb-0">
     <p className="sr-only" role="status" aria-live="polite">{announce}</p>
-    <RunBar data={data} busy={busy} message={message} statusId={statusId} onBack={onBack} onStop={onStop}/>
+    <RunBar data={data} busy={busy} message={message} statusId={statusId} onBack={onBack} onStop={onStop} onResume={onResume}
+      onOpenRun={onOpenRun}/>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
     <HelpBanner help={data.run.help}/>
+    <ReconcilePanel data={data} busy={busy} onDecide={onDecide}/>
     {open && <ApprovalBanner approval={open} compact={panel !== 'browser'} onReview={() => onReview(open.id)}/>}
     <div className="min-w-0 lg:grid lg:h-[calc(100dvh-15rem)] lg:min-h-[30rem] lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-[minmax(0,1fr)] lg:gap-3">
       <BrowserPane className={shown('browser')} data={data} active={active} live={view.live} watch={watch} onWatch={onWatch}
-        onEnlarge={onFrame} viewNote={viewNote}/>
+        onEnlarge={onFrame} viewNote={viewNote} liveView={liveView} me={me} busy={busy} onTakeover={onTakeover}
+        onEndTakeover={onEndTakeover}/>
       <ActivityColumn className={shown('activity')} feed={feed} data={data} thumbs={view.thumbs} visible={panel === 'activity'} onFrame={onFrame}/>
     </div>
     <RunDetails className={`${panel === 'details' ? 'block' : 'hidden'} lg:block`} data={data} tab={tab} onTab={onTab} busy={busy}

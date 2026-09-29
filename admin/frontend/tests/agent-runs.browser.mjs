@@ -366,6 +366,9 @@ try {
       assert.equal(await tab(name).evaluate(e => e === document.activeElement && e.matches(':focus-visible')), true, `${name} focused`);
       await page.getByRole('tabpanel').getByText(text).first().waitFor(WAIT);
     };
+    // A7 adds Review (the rule-based critique and the model summary) after Result.
+    await page.keyboard.press('ArrowRight');
+    await selected('Review', 'Model summary');
     await page.keyboard.press('ArrowRight');
     await selected(/^Model calls/, 'No model call: every step was decided by a rule.');
     await page.keyboard.press('ArrowRight');
@@ -572,7 +575,9 @@ try {
       [{ outcome: 'rate_limited' }, 'Rate limited', false, true],
       [{ outcome: 'challenge_required' }, 'Challenge required', true, true],
       [{ outcome: 'unexpected_origin' }, 'Unexpected origin', false, true],
-      [{ outcome: 'timeout' }, 'Timed out', false, true],
+      // A7 decision 6: a timed-out sign-in may have happened, so it needs a
+      // person, and the profile waits for their decision (below).
+      [{ outcome: 'timeout' }, 'Timed out', true, true],
       [{ outcome: 'unknown' }, 'Account not verified', false, true],
       [{ modelError: 'BUDGET_EXHAUSTED' }, 'Budget exhausted', false, false],
       [{ modelError: 'CALL_UNCERTAIN' }, 'Uncertain model call', true, false],
@@ -590,6 +595,15 @@ try {
       else assert.equal(await page.getByRole('note').filter({ hasText: 'A person needs to decide' }).count(), 0, label);
       report.result_classes.push({ label, help });
       await settleAll();
+      if (label === 'Timed out') {
+        await page.locator('[data-testid^="reconcile-step:"]').getByRole('button', { name: 'It did not happen' }).click();
+        const prompt = page.getByRole('dialog').filter({ hasText: 'Confirm it is you' });
+        await prompt.waitFor(WAIT);
+        await page.locator('#agent-control-password').fill(SUDO_PASSWORD);
+        await page.locator('#agent-control-code').fill(SUDO_TOTP);
+        await prompt.getByRole('button', { name: 'Confirm', exact: true }).click();
+        await page.locator('[data-testid^="reconcile-step:"]').getByText('Decided').waitFor(WAIT);
+      }
     }
     // A restart while a run is active: fenced, never resumed, needs a person.
     resetScenario({ holds: new Set(['open_login']) });

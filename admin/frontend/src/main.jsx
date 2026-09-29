@@ -6,6 +6,7 @@ import { AuthProvider } from './context/AuthContext'
 import { ThemeProvider } from './context/ThemeContext'
 import { Toaster } from './components/ui/toaster'
 import SudoProvider from './components/SudoModal'
+import AgentControlProvider from './components/AgentControlModal'
 import UpdateBanner from './components/UpdateBanner'
 import './index.css'
 import { registerServiceWorker, initInstallPrompt } from './lib/pwa'
@@ -28,9 +29,11 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       <ThemeProvider>
         <AuthProvider>
           <SudoProvider>
-            <App />
-            <Toaster />
-            <UpdateBanner />
+            <AgentControlProvider>
+              <App />
+              <Toaster />
+              <UpdateBanner />
+            </AgentControlProvider>
           </SudoProvider>
         </AuthProvider>
       </ThemeProvider>

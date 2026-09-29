@@ -125,6 +125,29 @@ export async function sudoWithPasskey() {
   }
 }
 
+// A7 agent-control verification via passkey (once per session; not sudo).
+export async function agentControlWithPasskey() {
+  if (!isPasskeySupported()) return fail('UNSUPPORTED', 'Passkeys are not supported on this browser.');
+  let options;
+  try {
+    options = await api.agentControlPasskeyBegin();
+  } catch (err) {
+    return fail('BEGIN_FAILED', err?.message || 'Could not start the passkey check');
+  }
+  let assertion;
+  try {
+    assertion = await startAuthentication({ optionsJSON: options });
+  } catch (err) {
+    if (isCancellation(err)) return fail('CANCELLED', 'Passkey cancelled.');
+    return fail('CEREMONY_FAILED', err?.message || 'Browser could not retrieve credential');
+  }
+  try {
+    return { ok: true, ...(await api.agentControlPasskeyVerify({ response: assertion })) };
+  } catch (err) {
+    return fail('VERIFY_FAILED', err?.message || 'Passkey verification failed');
+  }
+}
+
 // Per-action passkey confirmation. Used inside destructive dialogs
 // that historically asked for a TOTP code. Returns the raw
 // PublicKeyCredential JSON ready to drop into the request body as

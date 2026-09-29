@@ -1,12 +1,12 @@
 # A6 supervision UI — evidence
 
-**A6 is implemented, proven locally, merged and deployed (live `85586aea`);
-it is NOT accepted.** The supervisor's backend socket gained one read-only
-method (`view`, user decision 4), so the A3/A4/A5 target proofs must rerun on
-the proof host with the new A3 case `backend_view`. The host steps are in the
-[A6 reference](fractionate-agents-a6-reference.md) (H0–H5, all required). The
-run deck (the finish prompt's Part A) is built and proven locally on branch
-`ccr-11407794-0pxrze`; it is not merged or deployed.
+**A6 is implemented, merged and deployed with the run deck (live
+`08293733`, PR #703), and host run 1 passed (2026-09-29).** The supervisor's
+backend socket gained one read-only method (`view`, user decision 4), so the
+A3/A4/A5 target proofs were rerun on the proof host with the new A3 case
+`backend_view`: A3 20/20, A4 6/6, A5 17/17 with one real human approval, both
+canaries clean, `all_passed: true`. The acceptance decision is the latest
+dated section once recorded.
 
 The [A6 reference](fractionate-agents-a6-reference.md) is the orientation page.
 This file is the record: later dated sections win.
@@ -612,3 +612,153 @@ Remaining differences from the mockup, all deliberate:
    - host reboot persistence;
    - the container socket mount (A8);
    - Lighthouse.
+
+## 2026-09-29 merge and deploy of the run deck; live check; host run 1
+
+### Merge (user: "please merge A6 and deploy")
+
+- **PR #703** (the run deck and the A7 takeover direction) was merged as
+  `cb576c16b6a73982de7c8c4a7578b0e9be61433c`.
+- **CI on its head `3fa18c83`:** `backend`, `frontend`, `agent` and three
+  audits green. `audit (admin/backend)` red: `nodemailer` 5.0.0–10.0.1,
+  GHSA-6vj9-mwq6-2f5v, moderate.
+  - The same failure was red on `main` at #702 (job 109347244629).
+  - The only fix is a breaking major upgrade, so it was not this PR's to
+    fix; said on the PR.
+
+### Deploy
+
+- **Host state, read-only (H0, user, 11:1x UTC).** Every value matched:
+  - candidate `85586aea…`, with its script digests `9d195ea2…`,
+    `b770a4a9…` and `a1dfa05c…`;
+  - installed supervisor `151f1d24…` and runner `a631ad9d…`;
+  - key `f6304ffb…`, `accepting_launch: true`;
+  - broker `790a1957…` with `approle_login: ok`;
+  - `active: null`.
+- **Staging (user, root, the pinned stager).** It printed
+  `staged 082937337ca835fe7803ef3a86981c9bd93619c1 (was 85586aea…) from cb576c16…; 141 paths match exactly`.
+  - The count is the stager's own, measured from its base `12ad1392`. The
+    same measure gives 105 for the previous staging, which is what it
+    printed.
+  - The script digests are unchanged (`9d195ea2…`, `b770a4a9…`,
+    `a1dfa05c…`).
+  - The frontend build inside `proxypilot-admin` gave
+    `frontend_build_exit=0`.
+- **Checks** (`backend-tests`, `backend-syntax`, with the install step, on
+  `08293733`): 3,378 tests, 3,367 pass, **0 fail**, 11 skipped. That is 4
+  more tests than the previous deploy: the deck's logic tests.
+- **Backup:**
+  `/data/db/backups/proxypilot-pre-A6-deck-promote-20260929T120129Z.db`,
+  8,884,224 bytes, sha256 `9db425d6…`.
+- **Promote.** The preview showed `85586aea` → `08293733`, one commit (the
+  staging of `cb576c16`). Then the promote, with rollback tag
+  `pp-rollback-20260929T120151Z` (`85586aea`).
+  - Update `c8f8134d…` succeeded in 55 s: health check passed, all 33
+    routes match.
+  - `update.sh` kept `proxypilot.db.pre-update-20260929-080151`.
+  - `get_self_status`: live `08293733`, clean; candidate the same, 0 ahead.
+
+### Live dashboard check (Part B, user)
+
+- **The toggles are on.** Operations settings shows Operations, Agent
+  metadata and Agent runs all **On**. The audit log has the three
+  `OPERATIONS_TOGGLE_CHANGED` rows by thomas, from the dashboard, each
+  `previous: false` → `enabled: true`, in order:
+  - Operations at 09:16:28Z;
+  - Agent metadata at 09:16:51Z;
+  - Agent runs at 09:16:59Z.
+
+  They were turned on after the earlier deploy (09:13Z), before this
+  session's promote.
+- **The operation.** "Demo" (owner, no current approved guide) shows the
+  sections Overview, Guide, Versions, Runs, Access, Agents and **Agent
+  runs**.
+
+### Host run 1 (H1–H5)
+
+**H1 (user): supervisor reinstall from the candidate, and the proxy proof.**
+- Candidate `08293733…`; `9d195ea2…  a3-worker-supervisor.py`.
+- The supervisor is installed and active/enabled:
+  - installed supervisor **`9d195ea2…`**, runner `a631ad9d…` (unchanged);
+  - **new receipt key `900607c01d177038374019c411fe8d348a8b73bb385049e3a977cdbc0152205a`**;
+  - `f6304ffb…` archived under `/var/lib/proxypilot-a3-proof/supervisor-keys/`;
+  - `accepting_launch: true`, `blockers: []`, `active: null`.
+- Broker `790a1957…`, `approle_login: ok`.
+- `proxy_checks: passed`, 21 codes.
+
+**H2 (user): the A3 proof, the A4 proof and the A4 canary.**
+- It ran detached (`setsid nohup … > /var/lib/proxypilot-a6-proof/h2.log`),
+  because a dropped dashboard terminal kills what runs in it. The reference
+  H2 body was unchanged, with an end marker added.
+- New binding `d1edf152-efd5-4e08-b8bc-daee7bf8de22`, `provisioned: true`.
+- `worker_proof: passed` and `a3_exit=0`.
+- `a4_proof: passed` and `a4_exit=0`.
+- `canary_exit=0`, `canary_scan: passed`, then `h2_end`.
+- One `escape` case line matched the check's `Error` pattern. It is a
+  passing case's observations: every host endpoint refused.
+
+**H3 (user): the A5 proof with one real human approval, and the A5 canary.**
+- The approval prompt showed:
+  - run `169654f3…`, attempt `1ba88003…`, fence 1;
+  - binding `5f032f0e…` revision 1;
+  - origin `https://demo.fractionate.ai`;
+  - guide hash `d151cec9…`, policy digest `96d9075f…`;
+  - approval digest `6de5bec87efd5f5a…`.
+- The user typed its first 12 characters (`6de5bec87efd`).
+- All 17 cases passed:
+  - `supervised_run` 26 s;
+  - `injection_scan`, `rule_only`, `outcome_classes`, `pins_and_consent`;
+  - `duplicate_start`, `approval_checks`, `approval_race`,
+    `approval_after_revocation`;
+  - `binding_changed_mid_run`, `stale_guide_and_grant`, `operator_stop`,
+    `takeover`;
+  - `provider_error`, `unknown_price`, `budget_exhausted`,
+    `coordinator_restart`.
+- `a5_proof: passed`, report
+  `/var/lib/proxypilot-a5-proof/20260929T121157Z/a5-proof-20260929T121157Z.json`;
+  `a5_exit=0`.
+- `canary_exit=0` and `canary_scan: passed`.
+
+**H4 (user): the summary, whole.**
+
+```
+a3: /var/lib/proxypilot-a3-proof/proof/worker-proof-20260929T120736Z.json  passed 20/20
+    sessions, minimums, human_takeover, origin_refusals, escape, guest_root_egress, cpu, memory,
+    tasks, disk, runtime, actions, descendant, lease_expiry, stale_fence, launch_failure,
+    backend_refusals, backend_view, supervisor_crash, guest_crash
+a4: /var/lib/proxypilot-a4-proof/a4-proof-20260929T121040Z.json  passed 6/6
+    proxy_policy, login, egress, budget, rotation, revocation
+a5: /var/lib/proxypilot-a5-proof/20260929T121157Z/a5-proof-20260929T121157Z.json  passed 17/17
+canary: canary-a4.json passed, 13 sinks, unclean_sinks []
+        canary-a5.json passed, 16 sinks, unclean_sinks []
+"all_passed": true
+summary_exit=0
+```
+
+**H5 (MCP, read-only).**
+- `run_self_checks` on candidate `08293733`: `backend-tests` 3,378 tests,
+  3,367 pass, **0 fail**, 11 skipped. `backend-syntax` was skipped (no
+  backend JS changed since the last check).
+- `get_host_services proxypilot-a`:
+  - fence active/exited;
+  - origin proxy, supervisor and broker active/running;
+  - renewal timer active/waiting;
+  - host agent active.
+- `inspect_a3_vm`: VM `49592202-…`, **boot `680ebdf3-5d00-453d-aec9-52e99f6ec888`**
+  (was `62801e3b…`; changed by the `guest_crash` case). Running, 2 vCPU,
+  4096 MiB, 12 GiB, no swap, Debian 13.7, Incus 7.5.1.
+
+**State after host run 1:**
+
+| What | Value |
+|---|---|
+| Live / candidate | `082937337ca835fe7803ef3a86981c9bd93619c1` / same, 0 ahead |
+| Installed supervisor / runner | `9d195ea2…` (A6, backend `view`) / `a631ad9d…` |
+| Broker / demo | `790a1957…` / `496846cd…` (not reinstalled) |
+| Receipt key | `900607c0…` (`f6304ffb…` archived) |
+| Proof VM boot | `680ebdf3-5d00-453d-aec9-52e99f6ec888` |
+| A4 proof binding | `d1edf152-efd5-4e08-b8bc-daee7bf8de22` (previous one revoked) |
+| Rollback | tag `pp-rollback-20260929T120151Z` (`85586aea`); DB backup above |
+
+Every host proof A6 needs has passed. What remains is the user's acceptance
+decision.

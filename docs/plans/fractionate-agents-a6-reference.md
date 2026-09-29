@@ -1,25 +1,24 @@
 # A6 reference: current state for any conversation
 
-Snapshot: 2026-09-29, after the A6 implementation, its local proof, the merge
-into `main`, the deploy (live `85586aea`) and the run deck built on branch
-`ccr-11407794-0pxrze` (not merged).
+Snapshot: 2026-09-29, after the run deck's merge (#703, `cb576c16`), its
+deploy (live `08293733`) and A6 host run 1 (H0–H5, all passed).
 
 This file is the orientation page. The dated
 [A6 evidence](fractionate-agents-a6-evidence.md) is the record; if the two
 disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, receipt key) before acting.
 
-**Status in one line:** A6 is **implemented, proven locally, merged and
-deployed; it is not accepted.** Acceptance needs the host steps below (the
-supervisor's backend socket gained a read-only `view`, so the A3/A4/A5 target
-proofs rerun, with the new A3 case `backend_view`), then a user decision. The
-dashboard toggles are off until an administrator turns them on, and execution
-is unavailable on the live dashboard until the supervisor socket is mounted
-(A8). What is left is written up in the
-[A6 finish prompt](fractionate-agents-a6-finish-prompt.md), with the as-built
-screens and the target mockups. Its decisions (user, 2026-09-29): build the
-run deck (done on `ccr-11407794-0pxrze`, proven locally, not merged), keep
-execution unavailable until A8, host run first.
+**Status in one line:** A6 is **implemented, merged and deployed, with the
+run deck live (`08293733`). Host run 1 passed: A3 20/20 including
+`backend_view`, A4 6/6, A5 17/17 with one real human approval, both canaries
+clean, `all_passed: true`. A6 was ACCEPTED on 2026-09-29** (the evidence's
+last section carries the open items with the user's dispositions). The dashboard
+toggles are on (turned on by an administrator at 09:16Z). Execution stays
+unavailable on the live dashboard until the supervisor socket is mounted
+(A8, user decision). The finish decisions (user, 2026-09-29) were: build
+the run deck, keep execution unavailable until A8, run the host proof first.
+The takeover direction for A7 is in the
+[A7 prompt](fractionate-agents-a7-prompt.md).
 
 ## Read first
 
@@ -48,13 +47,14 @@ execution unavailable until A8, host run first.
 | A5 head (base) | `5210cfb7af3a840e1a7bbf62feca61c8993f2d68` | branch `claude/beautiful-maxwell-9bldxg` |
 | A6 code | `b8178074` (UI, service, routes, supervisor `view`); `ec986a88` (`a6-host-summary.py`) | The supervisor bytes are final at `b8178074` |
 | **A6 code, host steps** | **`5a8648f5cd4f453278908326cd36258714337f43`** | Stop retry for a fenced run, supervisor codes in words. **Stage this.** Later commits are docs |
-| Live checkout | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | Promoted 2026-09-29 09:13Z from `33528751` (rollback tag `pp-rollback-20260929T091306Z`); the staging of `52f26af1` |
-| Candidate | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | Same as live, 0 ahead. Its scripts carry the A6 bytes below; the INSTALLED supervisor is still the A5 one |
-| Run deck | branch `ccr-11407794-0pxrze` (from `main` `55ffa38d`) | UI only (the finish prompt's Part A); changes no script, route or migration. Not merged, not staged |
+| Run deck | `cb576c16b6a73982de7c8c4a7578b0e9be61433c` | PR #703 merged into `main`. UI only (the finish prompt's Part A) plus the A7 prompt; changes no script, route or migration |
+| Live checkout | `082937337ca835fe7803ef3a86981c9bd93619c1` | The staging of `cb576c16`. Promoted 2026-09-29 12:01Z from `85586aea` (rollback tag `pp-rollback-20260929T120151Z`; DB backup `proxypilot-pre-A6-deck-promote-20260929T120129Z.db`) |
+| Candidate | `082937337ca835fe7803ef3a86981c9bd93619c1` | Same as live, 0 ahead |
+| Previous live | `85586aea843d04dd17f94d5ac4f605e7e15bf66c` | The staging of `52f26af1`, promoted 09:13Z from `33528751` (tag `pp-rollback-20260929T091306Z`) |
 
 **File digests** (sha256; the installers copy byte-exact):
 
-| File | A5 (installed) | A6 (`5a8648f5`; the same bytes at `52f26af1`) |
+| File | A5 (installed until host run 1) | A6 (`5a8648f5`; the same bytes at `52f26af1` and `cb576c16`; **installed by H1, 2026-09-29**) |
 |---|---|---|
 | `a3-worker-supervisor.py` | `151f1d24…` | **`9d195ea2…`** (backend `view`) |
 | `a3-worker-guest.py` (runner) | `a631ad9d…` | `a631ad9d…` (unchanged) |
@@ -64,9 +64,14 @@ execution unavailable until A8, host run first.
 | `a5-probe.mjs` | `fbbda1c9…` | unchanged |
 | `a6-host-summary.py` | — | `a1dfa05c…` |
 
-Receipt key before A6: `f6304ffb…`; the supervisor reinstall archives it and
-makes a new one. Proof VM boot before A6: `62801e3b-8419-40aa-85bf-dffab35788c2`
-(it changes whenever the A3 `guest_crash` case runs).
+**Receipt key:** `900607c01d177038374019c411fe8d348a8b73bb385049e3a977cdbc0152205a`
+since H1. The A5-era `f6304ffb…` is archived under
+`/var/lib/proxypilot-a3-proof/supervisor-keys/`.
+
+**Proof VM boot:** `680ebdf3-5d00-453d-aec9-52e99f6ec888` since H2 (was
+`62801e3b…`). It changes whenever the A3 `guest_crash` case runs.
+
+**A4 proof binding:** `d1edf152-efd5-4e08-b8bc-daee7bf8de22`.
 
 ## Component map
 
@@ -135,7 +140,17 @@ result class when it is one a person decides (`challenge_required`,
 `uncertain_step`; `uncertain_steps` travels with it. The inbox lists the latest
 such run per profile (a newer run of the same profile closes it).
 
-## Host commands (A6 host run 1: required, not yet run)
+## Host commands (A6 host run 1: run and passed 2026-09-29; kept for a rerun)
+
+H2 ran detached in host run 1:
+
+```
+setsid nohup sudo sh -c 'trap "echo h2_end" EXIT; <the H2 body below>' > /var/lib/proxypilot-a6-proof/h2.log 2>&1 < /dev/null &
+```
+
+This is because a dropped dashboard terminal kills what runs in it. Read it
+with a `grep` of the result lines until `h2_end` appears. For a rerun, H0's
+expected values are the state above, not the A5-era ones below.
 
 Every step runs as root on the proof host, as one paste, in a terminal where
 you can type. Review each output before the next. No step prints a secret.
@@ -268,5 +283,5 @@ python3 scripts/host-boundary-inventory.py
   takeover and every other operator control stay on the operator socket.
 - Frames are pixels only, memory only: never written to the database, a log,
   a report or the journal.
-- A6 is not accepted. After the host run is recorded, acceptance is a user
-  decision; A7 (`fractionate-agents-a7-prompt.md`) waits for it.
+- A6 is accepted (2026-09-29). A7 (`fractionate-agents-a7-prompt.md`) is
+  eligible.

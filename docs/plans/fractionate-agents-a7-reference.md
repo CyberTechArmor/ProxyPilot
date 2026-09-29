@@ -8,12 +8,15 @@ This file is the orientation page. The dated
 disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, receipt key) before acting.
 
-**Status in one line:** A7 is **implemented on
-`claude/intelligent-heisenberg-bwnuiv` and proven locally; the host run
-(H0–H7 below) has not run.** The user decided every A7 question on
-2026-09-29 (the evidence's decisions table). Two values are still needed from
-the user before the host pastes are final: the **TURN host name** and the
-host's **LAN address** that the router forwards to.
+**Status in one line:** A7 is **implemented and proven locally; the user
+asked for it to be merged and deployed (2026-09-29); the host run (H0–H7
+below) has not run.** The user decided every A7 question on 2026-09-29 (the
+evidence's decisions table). The TURN name is **`streamview.fractionate.ai`**:
+the zone's wildcard record already points it at the host's public address
+(96.88.158.118), there is no Cloudflare on this instance, and Caddy obtains
+its certificate. The listen address is this host's default-route address,
+found by the installer. The one thing left outside the code is the router:
+**3478/UDP, 3478/TCP and 5349/TCP forwarded to this host**.
 
 ## Read first
 
@@ -53,10 +56,12 @@ host's **LAN address** that the router forwards to.
 | Backend plumbing | `9776478e` | live WebSocket, takeover routes, automatic summary, practice fixtures |
 | UI | `d5fe6d0e` | Browser pane live view and takeover, reconcile, practice, resume, Review tab |
 | Proofs | `f6491871` | the Go live probe, the live end-to-end tests, the host harness |
-| **Code for the host steps** | **`91a25b62e091bf620c0949f589284e97fdc8faff`** | kill cases, account/key loss, `WORKER_EXITED`, `a7-host-summary.py`. **Stage this.** Later commits are docs |
-| Live checkout / candidate | `776045d741e2126ae8a38bba83a620551f2b34c9` | unchanged by A7 until H1 stages the candidate (never promoted by A7) |
+| Kill cases | `91a25b62` | kill cases, account/key loss, `WORKER_EXITED`, `a7-host-summary.py` |
+| Listen address | `805f4565a1bd397970660f1684caea528de03ae6` | the TURN listen address found from the default route; the last code commit |
+| **What is deployed** | **the merge commit of the A7 PR into `main`** | staged in the candidate by the pinned stager (D1), checked and promoted (D2); the host steps use that candidate |
+| Live checkout / candidate before the deploy | `776045d741e2126ae8a38bba83a620551f2b34c9` | rollback point for the deploy |
 
-**File digests** (sha256 at `91a25b62`; the installers copy byte-exact):
+**File digests** (sha256 at `805f4565`; the installers copy byte-exact):
 
 | File | Installed now (A6 host run 2) | A7 |
 |---|---|---|
@@ -70,9 +75,9 @@ host's **LAN address** that the router forwards to.
 | `a3-probe-worker.py` | `b770a4a9…` | **`d1bdda8a95595ceb…`** (backend `takeover` expectations) |
 | `a4-fixture-account.py` | — | `f5551b96fdd583f6…` (mode `slow`) |
 | `a4-canary-scan.py` | — | `95b03fc40248ad04…` (`--a7-dir`) |
-| `a7-install-live.py` | — | `74b9d3c86ea21bd5…` |
+| `a7-install-live.py` | — | `69dda3db2d977b1d…` |
 | `a7-neko-unix-socket.patch` | — | `a4fedb0f77048c4c…` (pinned in the installer) |
-| `a7-probe.mjs` | — | `b6c1f2b81e77dee8…` |
+| `a7-probe.mjs` | — | `b1a33ea69af17685…` |
 | `a7-host-summary.py` | — | `63a1c630bdbf2ad3…` |
 | `cmd/a7-live-probe/main.go` / `go.sum` | — | `2f4859030b1188fb…` / `e8ad1e077c107dc2…` |
 
@@ -144,61 +149,89 @@ attempt_id, fence}` → `{conn, ice_servers, ttl_seconds}`, then `{recv}`,
 `WORKER_EXITED` (never sent; certain) versus `CHANNEL_CLOSED` (in flight;
 uncertain).
 
-**TURN:** `turn:<TURN_NAME>:3478?transport=udp`, `…?transport=tcp`,
-`turns:<TURN_NAME>:5349?transport=tcp`. REST credentials `<expiry>:<viewer>`
-(HMAC-SHA1, one hour). coturn: `listening-ip=<LAN_IP>`,
+**TURN:** `turn:streamview.fractionate.ai:3478?transport=udp`, `…?transport=tcp`,
+`turns:streamview.fractionate.ai:5349?transport=tcp`. REST credentials `<expiry>:<viewer>`
+(HMAC-SHA1, one hour). coturn: `listening-ip=` the host's default-route
+address (or `--listen-ip`),
 `relay-ip=10.185.17.1`, relay ports 49160–49200,
 `allowed-peer-ip=10.185.17.179` with every other peer denied,
 `no-tcp-relay`, `no-dtls`, TLS 1.2+, `max-bps=1250000` (10 Mbit/s per
 session), `user-quota=6`, `total-quota=24`.
+
+## Deploy (user request, 2026-09-29: "commit, merge, deploy")
+
+The dashboard deploy follows the A6 path:
+1. **PR and merge.** Open the A7 PR into `main` (no template). Merge it as a
+   merge commit once CI on its head is green.
+2. **D1 (user, root paste): stage the merge commit** in the candidate with
+   the pinned stager, exactly as for `24cfadbd`:
+   `sudo sh -c 'set -e; C=<merge sha>; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git main; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD'`.
+   Expected: `staged <sha> (was 776045d7…) from <merge sha>; N paths match
+   exactly`.
+3. **D2 (session, MCP):**
+   - `run_self_checks` (`backend-tests`, `backend-syntax`) on the staged head;
+   - `backup_proxypilot_db`;
+   - `promote_self`: show the preview, then confirm;
+   - `get_proxypilot_update_status` until `success`.
+
+   Migration 1112 applies on start.
+
+What the deploy changes on the live dashboard:
+- the A7 UI and routes appear behind the Agent runs toggle (on);
+- execution stays **unavailable**, because no supervisor is configured in the
+  container (A8): Start, the live view, takeover and practice say so;
+- the host daemons (supervisor, broker, demo, TURN, Neko) change only through
+  H1–H4. The deploy does not install host daemons: they are root-owned and
+  outside the backend by design (S6).
 
 ## Host commands (the A7 host run; not run yet)
 
 Every step runs as root on the proof host, as one paste, in a terminal where
 you can type. Review each output before the next. No step prints a secret.
 **All steps H0–H7 are required** (H6 prints every verdict); the external TLS
-check after H3 is recommended. `<TURN_NAME>` and `<LAN_IP>` are the two values
-still to be chosen; the pastes are handed over with them filled in.
+check after H3 is recommended. **The deploy comes first** (the A7 PR merged,
+its merge commit staged in the candidate, checked and promoted), so the
+candidate already carries the A7 scripts and H1 stages nothing.
 
-**Before H2 (the user, not root):**
-1. A DNS A record `<TURN_NAME>` → this host's public IPv4 address (the one
-   `demo.fractionate.ai` points at). It can be created from the session with
-   `set_dns_record` if you say so.
-2. Router forwards to `<LAN_IP>`: **3478/UDP, 3478/TCP, 5349/TCP**. Ports
-   80/443 already reach Caddy, which obtains the certificate.
+**Before H2 (the user, on the router):** forward **3478/UDP, 3478/TCP and
+5349/TCP** to this host, the same machine 80/443 already reach. DNS needs
+nothing: `*.fractionate.ai` already resolves `streamview.fractionate.ai` to
+96.88.158.118. Caddy obtains the certificate over the existing 80/443. The
+video relay is not HTTP, so Caddy cannot carry it: these three forwards are the
+one step the code cannot do.
 
 **Step H0 (read-only).**
 
 ```
-sudo sh -c 'N=<TURN_NAME>; cd /var/lib/proxypilot/self/candidate; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py status | grep -E "a3-worker-(supervisor|guest)|accepting_launch|key_id"; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-worker-operator.py status | grep -E "\"active\":"; incus exec pp-fractionate-demo -- sha256sum /opt/app/demo/server.mjs; nft list chain inet proxypilot input_hook | grep -E "iifname \"[a-z0-9*-]+\""; incus network get incusbr0 ipv4.address; ip -4 -br addr show scope global; getent ahostsv4 "$N" >/dev/null && getent ahostsv4 "$N" | head -1 || echo turn_name_unresolved; dpkg-query -W -f="\${Status}\n" coturn 2>/dev/null || echo coturn_absent; docker version --format "docker {{.Server.Version}}"; df -h --output=avail /var/lib | tail -1; grep -n "custom" /etc/caddy/Caddyfile; ls -d /etc/proxypilot-a7 /var/lib/proxypilot-a7 2>&1'
+sudo sh -c 'N=streamview.fractionate.ai; cd /var/lib/proxypilot/self/candidate; git rev-parse HEAD; cd scripts; python3 a3-install-supervisor.py status | grep -E "a3-worker-(supervisor|guest)|accepting_launch|key_id"; python3 a4-install-broker.py status | grep -E "a4-credential-broker|approle_login"; python3 a3-worker-operator.py status | grep -E "\"active\":"; incus exec pp-fractionate-demo -- sha256sum /opt/app/demo/server.mjs; nft list chain inet proxypilot input_hook | grep -E "iifname \"[a-z0-9*-]+\""; incus network get incusbr0 ipv4.address; ip -4 -br addr show scope global; ip -4 route get 1.1.1.1; getent ahostsv4 "$N" >/dev/null && getent ahostsv4 "$N" | head -1 || echo turn_name_unresolved; dpkg-query -W -f="\${Status}\n" coturn 2>/dev/null || echo coturn_absent; docker version --format "docker {{.Server.Version}}"; df -h --output=avail /var/lib | tail -1; grep -n "custom" /etc/caddy/Caddyfile; ls -d /etc/proxypilot-a7 /var/lib/proxypilot-a7 2>&1'
 ```
 
 Expected output:
-- `776045d741e2126ae8a38bba83a620551f2b34c9`;
+- the deployed merge commit (live and candidate the same);
 - supervisor `9d195ea2…`, runner `a631ad9d…`, `"accepting_launch": true`,
   key `f68c8aaf…`; broker `790a1957…`, `"approle_login": "ok"`;
   `"active": null`; demo `496846cd…`;
 - the input hook's `iifname` lines (`"pp-br0"` or `"incusbr0"`, `"m2br*"`,
   `"br-*"`): whether `incusbr0` is admitted decides one line of H2;
-- `10.185.17.1/24`; the host's addresses (`<LAN_IP>` must be one of them);
-- `<TURN_NAME>`'s public address (or `turn_name_unresolved`: fix DNS first);
+- `10.185.17.1/24`; the host's addresses and the default route's `src`
+  (the address coturn will listen on, and the router's forwards must reach);
+- `96.88.158.118` for `streamview.fractionate.ai`;
 - `coturn_absent`; a Docker version; at least ~6 GiB free; the Caddyfile's
   `import` of `custom`; both A7 directories absent.
 
 A different value is a question, not a failure: paste it.
 
-**Step H1 (stage `91a25b62`, reinstall the supervisor and the broker, deploy
-the demo server, proxy proof).** Live stays off here.
+**Step H1 (reinstall the supervisor and the broker from the deployed
+candidate, deploy the demo server, proxy proof).** Live stays off here.
 
 ```
-sudo sh -c 'set -e; C=91a25b62e091bf620c0949f589284e97fdc8faff; cd /var/lib/proxypilot/self/candidate; git fetch -q https://github.com/CyberTechArmor/ProxyPilot.git claude/intelligent-heisenberg-bwnuiv; git merge-base --is-ancestor $C FETCH_HEAD; git show $C:scripts/a3-stage-candidate.sh | sh -s -- . $C; git rev-parse HEAD; cd scripts; sha256sum a3-worker-supervisor.py a3-worker-guest.py a4-credential-broker.py a3-probe-worker.py a7-install-live.py a7-probe.mjs a7-host-summary.py ../admin/frontend/demo/server.mjs; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py reinstall || { echo broker_reinstall_failed; journalctl -u proxypilot-a4-broker.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-fixture-account.py deploy-server || { echo demo_deploy_failed; incus exec pp-fractionate-demo -- journalctl -u fractionate-demo.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a3-probe-proxy.py'
+sudo sh -c 'set -e; cd /var/lib/proxypilot/self/candidate; git rev-parse HEAD; cd scripts; sha256sum a3-worker-supervisor.py a3-worker-guest.py a4-credential-broker.py a3-probe-worker.py a7-install-live.py a7-probe.mjs a7-host-summary.py ../admin/frontend/demo/server.mjs; python3 a3-install-supervisor.py reinstall || { echo supervisor_reinstall_failed; journalctl -u proxypilot-a3-supervisor.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-install-broker.py reinstall || { echo broker_reinstall_failed; journalctl -u proxypilot-a4-broker.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a4-fixture-account.py deploy-server || { echo demo_deploy_failed; incus exec pp-fractionate-demo -- journalctl -u fractionate-demo.service --since -10min -o cat --no-pager | tail -40; exit 1; }; python3 a3-probe-proxy.py'
 ```
 
 Expected output, in order:
-1. `staged <sha> (was 776045d7…) from 91a25b62…; 186 paths match exactly`,
-   then the new HEAD.
-2. `73a89f61…`, `7185ee26…`, `10aa2a73…`, `d1bdda8a…`, `74b9d3c8…`,
-   `b6c1f2b8…`, `63a1c630…`, `d4693668…`.
+1. The deployed merge commit.
+2. `73a89f61…`, `7185ee26…`, `10aa2a73…`, `d1bdda8a…`, `69dda3db…`,
+   `b1a33ea6…`, `63a1c630…`, `d4693668…`.
 3. The supervisor JSON: `"accepting_launch": true`, `"blockers": []`, a new
    `key_id` (`f68c8aaf…` archived), supervisor **`73a89f61…`**, runner
    **`7185ee26…`**, fence `e7208d60…`, fence installer `bb396c84…`, proxy
@@ -215,7 +248,7 @@ status`, then `stop` it. `*_failed`: the journal lines after it name the cause.
 **Step H2 (coturn, the host firewall, the Caddy site for the certificate).**
 
 ```
-sudo sh -c 'set -e; N=<TURN_NAME>; L=<LAN_IP>; F=/var/lib/proxypilot/firewall.json; apt-get update -qq; apt-get install -s --no-install-recommends coturn | grep -E "^(Inst|Remv)" | cut -c1-100; if apt-get install -s --no-install-recommends coturn | grep -qiE "^(Inst|Remv) [^ ]*incus"; then echo apt_would_touch_incus; exit 1; fi; systemctl mask coturn.service; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends coturn >/dev/null; echo "coturn $(dpkg-query -W -f="\${Version}" coturn) $(systemctl is-active coturn.service || true) $(systemctl is-enabled coturn.service || true)"; for r in 3478:udp 3478:tcp 5349:tcp; do p=${r%:*}; t=${r#*:}; grep -q "\"manual-host-operator-$p-$t\"" $F || proxypilot firewall add-manual --port $p --proto $t --scope public --reason "A7 TURN relay for the live agent view"; done; if nft list chain inet proxypilot input_hook | grep -q "iifname \"incusbr0\" accept"; then echo relay_ports_admitted_by_bridge_rule; else grep -q "\"manual-host-operator-49160-49200-udp\"" $F || proxypilot firewall add-manual --port 49160 --port-end 49200 --proto udp --scope lan-only --source-cidr 10.185.17.179/32 --reason "A7 TURN relay ports, from the proof VM only"; fi; nft list ruleset | grep -E "dport (3478|5349|49160-49200)"; cd /var/lib/proxypilot/self/candidate/scripts; python3 a7-install-live.py install-turn --hostname "$N" --listen-ip "$L" --caddy-site'
+sudo sh -c 'set -e; N=streamview.fractionate.ai; F=/var/lib/proxypilot/firewall.json; apt-get update -qq; apt-get install -s --no-install-recommends coturn | grep -E "^(Inst|Remv)" | cut -c1-100; if apt-get install -s --no-install-recommends coturn | grep -qiE "^(Inst|Remv) [^ ]*incus"; then echo apt_would_touch_incus; exit 1; fi; systemctl mask coturn.service; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends coturn >/dev/null; echo "coturn $(dpkg-query -W -f="\${Version}" coturn) $(systemctl is-active coturn.service || true) $(systemctl is-enabled coturn.service || true)"; for r in 3478:udp 3478:tcp 5349:tcp; do p=${r%:*}; t=${r#*:}; grep -q "\"manual-host-operator-$p-$t\"" $F || proxypilot firewall add-manual --port $p --proto $t --scope public --reason "A7 TURN relay for the live agent view"; done; if nft list chain inet proxypilot input_hook | grep -q "iifname \"incusbr0\" accept"; then echo relay_ports_admitted_by_bridge_rule; else grep -q "\"manual-host-operator-49160-49200-udp\"" $F || proxypilot firewall add-manual --port 49160 --port-end 49200 --proto udp --scope lan-only --source-cidr 10.185.17.179/32 --reason "A7 TURN relay ports, from the proof VM only"; fi; nft list ruleset | grep -E "dport (3478|5349|49160-49200)"; cd /var/lib/proxypilot/self/candidate/scripts; python3 a7-install-live.py install-turn --hostname "$N" --caddy-site'
 ```
 
 Expected output:
@@ -230,9 +263,9 @@ Expected output:
    Caddy to obtain the certificate, …"}`.
 
 Wait a minute or two, then check that Caddy has the certificate:
-`sudo ls /var/lib/caddy/.local/share/caddy/certificates/*/<TURN_NAME>/` shows
-`<TURN_NAME>.crt` and `.key`. If not, DNS or the 80/443 forward is the cause
-(`journalctl -u caddy --since -10min | grep -i <TURN_NAME>`).
+`sudo ls /var/lib/caddy/.local/share/caddy/certificates/*/streamview.fractionate.ai/`
+shows `streamview.fractionate.ai.crt` and `.key`. If not, Caddy's log says why
+(`journalctl -u caddy --since -10min | grep -i streamview`).
 
 **Step H3 (TURN, Neko, the probe, the VM, enable; detached, ~15–25 min).**
 It snapshots the proof VM first (`pp-a7-pre-live-<stamp>`; the pre-network
@@ -240,7 +273,7 @@ snapshot is not touched) and pushes the packages; the VM never reaches the
 network.
 
 ```
-sudo mkdir -p -m 700 /var/lib/proxypilot-a7-proof; setsid nohup sudo sh -c 'trap "echo h3_end" EXIT; set -e; N=<TURN_NAME>; L=<LAN_IP>; cd /var/lib/proxypilot/self/candidate/scripts; python3 a7-install-live.py install-turn --hostname "$N" --listen-ip "$L" || { echo turn_install_failed; journalctl -u proxypilot-a7-turn.service --since -10min -o cat --no-pager | tail -30; exit 1; }; python3 a7-install-live.py build-neko || { echo neko_build_failed; exit 1; }; python3 a7-install-live.py build-probe || { echo probe_build_failed; exit 1; }; python3 a7-install-live.py provision-vm || { echo provision_failed; exit 1; }; python3 a7-install-live.py enable || { echo enable_failed; exit 1; }; python3 a3-install-supervisor.py status | grep -E "accepting_launch|blockers"' > /var/lib/proxypilot-a7-proof/h3.log 2>&1 < /dev/null &
+sudo mkdir -p -m 700 /var/lib/proxypilot-a7-proof; setsid nohup sudo sh -c 'trap "echo h3_end" EXIT; set -e; N=streamview.fractionate.ai; cd /var/lib/proxypilot/self/candidate/scripts; python3 a7-install-live.py install-turn --hostname "$N" || { echo turn_install_failed; journalctl -u proxypilot-a7-turn.service --since -10min -o cat --no-pager | tail -30; exit 1; }; python3 a7-install-live.py build-neko || { echo neko_build_failed; exit 1; }; python3 a7-install-live.py build-probe || { echo probe_build_failed; exit 1; }; python3 a7-install-live.py provision-vm || { echo provision_failed; exit 1; }; python3 a7-install-live.py enable || { echo enable_failed; exit 1; }; python3 a3-install-supervisor.py status | grep -E "accepting_launch|blockers"' > /var/lib/proxypilot-a7-proof/h3.log 2>&1 < /dev/null &
 ```
 
 Read it (repeat until `h3_end`):
@@ -258,7 +291,7 @@ Expected: the TURN status (`"active": "active"`, ports `3478` and `5349`
 
 **Recommended, from a machine outside your network** (a phone hotspot is
 enough):
-`openssl s_client -connect <TURN_NAME>:5349 -servername <TURN_NAME> -brief </dev/null 2>&1 | head -4`
+`openssl s_client -connect streamview.fractionate.ai:5349 -servername streamview.fractionate.ai -brief </dev/null 2>&1 | head -4`
 → `Verification: OK` (the router forward and the certificate as a viewer sees
 them).
 
@@ -267,7 +300,7 @@ in live mode, the A4 proof, the A7 proof, two canaries.** About 20 real
 provider calls; reboots the proof VM's guest once (`guest_crash`).
 
 ```
-setsid nohup sudo sh -c 'trap "echo h4_end" EXIT; set -e; L=<LAN_IP>; OK=openai-api-key; FK=a4-fixture-password; cd /var/lib/proxypilot/self/candidate/scripts; OLD=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-broker-operator.py revoke --binding "$OLD" || true; mv /var/lib/proxypilot-a4/proof-binding /var/lib/proxypilot-a4/proof-binding.$OLD; python3 a4-broker-operator.py provider --vault-key "$OK"; B=$(cat /proc/sys/kernel/random/uuid); P=$(cat /proc/sys/kernel/random/uuid); Q=$(cat /proc/sys/kernel/random/uuid); python3 a4-broker-operator.py bind --binding $B --project $P --profile $Q --username a4-fixture@demo.fractionate.ai --vault-key "$FK"; umask 077; echo "$B" > /var/lib/proxypilot-a4/proof-binding; echo "binding=$B"; python3 a4-fixture-account.py provision --binding $B; set +e; python3 a3-probe-worker.py; echo "a3_exit=$?"; python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B" > /var/lib/proxypilot-a7-proof/canary-a4.json; echo "canary_a4_exit=$?"; A7_PROBE_TURN_ADDRESS=$L node --no-warnings a7-probe.mjs; echo "a7_exit=$?"; D=$(ls -td /var/lib/proxypilot-a7-proof/*/ | head -1); B7=$(cat "$D/last-binding"); python3 a4-canary-scan.py --binding "$B7" --a7-dir "$D" > /var/lib/proxypilot-a7-proof/canary-a7.json; echo "canary_a7_exit=$?"' > /var/lib/proxypilot-a7-proof/h4.log 2>&1 < /dev/null &
+setsid nohup sudo sh -c 'trap "echo h4_end" EXIT; set -e; OK=openai-api-key; FK=a4-fixture-password; cd /var/lib/proxypilot/self/candidate/scripts; OLD=$(cat /var/lib/proxypilot-a4/proof-binding); python3 a4-broker-operator.py revoke --binding "$OLD" || true; mv /var/lib/proxypilot-a4/proof-binding /var/lib/proxypilot-a4/proof-binding.$OLD; python3 a4-broker-operator.py provider --vault-key "$OK"; B=$(cat /proc/sys/kernel/random/uuid); P=$(cat /proc/sys/kernel/random/uuid); Q=$(cat /proc/sys/kernel/random/uuid); python3 a4-broker-operator.py bind --binding $B --project $P --profile $Q --username a4-fixture@demo.fractionate.ai --vault-key "$FK"; umask 077; echo "$B" > /var/lib/proxypilot-a4/proof-binding; echo "binding=$B"; python3 a4-fixture-account.py provision --binding $B; set +e; python3 a3-probe-worker.py; echo "a3_exit=$?"; python3 a4-probe.py --binding "$B"; echo "a4_exit=$?"; python3 a4-canary-scan.py --binding "$B" > /var/lib/proxypilot-a7-proof/canary-a4.json; echo "canary_a4_exit=$?"; node --no-warnings a7-probe.mjs; echo "a7_exit=$?"; D=$(ls -td /var/lib/proxypilot-a7-proof/*/ | head -1); B7=$(cat "$D/last-binding"); python3 a4-canary-scan.py --binding "$B7" --a7-dir "$D" > /var/lib/proxypilot-a7-proof/canary-a7.json; echo "canary_a7_exit=$?"' > /var/lib/proxypilot-a7-proof/h4.log 2>&1 < /dev/null &
 ```
 
 Read it (repeat until `h4_end`; the shell's `[1]+ Done` right after the start

@@ -1,11 +1,10 @@
 # A7 practice and recovery — evidence
 
-**A7 is implemented and proven locally (2026-09-29); the host run has not
-run.** The gate held and every decision is made (below). The code for the host
-steps is `91a25b62` on `claude/intelligent-heisenberg-bwnuiv`. Nothing is
-merged, deployed or promoted; no host step has run. The host pastes (H0–H7)
-are in the reference and need two values from the user: the TURN host name
-and the host's LAN address.
+**A7 is implemented and proven locally (2026-09-29); the user asked for it to
+be merged and deployed; the host run has not run.** The gate held and every
+decision is made (below). The last code commit is `805f4565` on
+`claude/intelligent-heisenberg-bwnuiv`. The host pastes (H0–H7) are in the
+reference; they need only the router's three forwards.
 
 This file is the record: later dated sections win. The orientation page is
 [`fractionate-agents-a7-reference.md`](fractionate-agents-a7-reference.md).
@@ -343,3 +342,30 @@ The reference's component map lists the files.
   the user chooses.
 - S6/SEC/INF stay with the later security audit
   (`fractionate-agents-security-audit-register.md`).
+
+## 2026-09-29 the user: the TURN name, no Cloudflare, merge and deploy
+
+The user's words: "Set the record: streamview.fractionate.ai"; "Please commit,
+merge, deploy (if the code auto sets this up; otherwise, why is it being asked
+for)"; "for this instance I don't use cloudflare, just use caddy".
+
+- **DNS needs nothing.** The ProxyPilot Cloudflare token covers no
+  `fractionate.ai` zone, and none is needed: the zone has a wildcard record,
+  so `streamview.fractionate.ai` already resolves to `96.88.158.118`, the same
+  address as `demo.fractionate.ai`. Caddy obtains the certificate through the
+  installer's custom site (`/etc/caddy/custom/pp-a7-turn.caddy`) over the
+  existing 80/443, with no DNS provider involved.
+- **The LAN address is no longer asked for.** `install-turn` listens on the
+  host's default-route source address (`ip -j -4 route get 1.1.1.1`, a lookup
+  only), and `--listen-ip` still overrides it. The host proof reads the
+  address from the install journal. This is commit `805f4565`, with a test.
+- **Why the deploy cannot do all of it.**
+  - The deploy updates the dashboard (backend, UI, migration 1112). The TURN
+    relay, Neko in the VM and the reinstalled supervisor and broker are
+    root-owned host daemons that the backend cannot install, by design (S6,
+    host steps as reviewed pastes). That is H1–H4.
+  - The video relay is not HTTP, so Caddy cannot carry it on 443. The
+    router's forwards of 3478/UDP, 3478/TCP and 5349/TCP to this host are the
+    one network step the code cannot do.
+- **The deploy path** is in the reference: the PR and merge, D1 (the pinned
+  stager, a user paste), and D2 (checks, backup, promote over MCP).

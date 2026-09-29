@@ -157,5 +157,95 @@ class ProxyLoginTests(unittest.TestCase):
         self.assertEqual(Origin.seen, [])
 
 
+class Silent(BaseHTTPRequestHandler):
+    """An origin that takes the request and never answers (an upstream timeout)."""
+    seen = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):  # noqa: N802
+        Silent.seen.append(('POST', self.path, self.rfile.read(int(self.headers.get('Content-Length') or 0))))
+        threading.Event().wait(3)
+        self.close_connection = True
+
+
+class ProxyAtMostOnceTests(unittest.TestCase):
+    """A request reaches the origin at most once: only a failed connection moves on
+    to the next public address; a request already sent is never sent again."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        root = Path(cls.temp.name)
+        origin_cert, origin_key = certificate(root, 'origin')
+        proxy_cert, proxy_key = certificate(root, 'proxy')
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(str(origin_cert), str(origin_key))
+        cls.origins = []
+        for handler in (Origin, Silent):
+            server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+            server.socket = server_context.wrap_socket(server.socket, server_side=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            cls.origins.append(server)
+        closed = socket.socket()
+        closed.bind(('127.0.0.1', 0))
+        dead = closed.getsockname()[1]
+        closed.close()
+        ports = {'answering': cls.origins[0].server_address[1], 'silent': cls.origins[1].server_address[1],
+                 'dead': dead}
+        trusted = ssl.create_default_context(cafile=str(origin_cert))
+
+        class AddressConnection(http.client.HTTPSConnection):
+            def __init__(self, address):
+                self.address = address
+                super().__init__(p.ORIGIN, 443, timeout=1, context=trusted)
+
+            def connect(self):
+                self.sock = self._context.wrap_socket(
+                    socket.create_connection(('127.0.0.1', ports[self.address]), timeout=self.timeout),
+                    server_hostname=p.ORIGIN)
+        cls.patches = [patch.object(p, 'PEER', '127.0.0.1'), patch.object(p, 'FixedConnection', AddressConnection)]
+        for item in cls.patches:
+            item.start()
+        cls.proxy = p.Server(('127.0.0.1', 0), p.Handler)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(str(proxy_cert), str(proxy_key))
+        cls.proxy.tls = tls
+        threading.Thread(target=cls.proxy.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proxy.shutdown()
+        cls.proxy.server_close()
+        for server in cls.origins:
+            server.shutdown()
+        for item in cls.patches:
+            item.stop()
+        cls.temp.cleanup()
+
+    request = ProxyLoginTests.request
+    post = ProxyLoginTests.post
+
+    def test_a_sign_in_that_timed_out_upstream_is_not_sent_again(self):
+        Origin.seen.clear()
+        Silent.seen.clear()
+        body = b'{"email":"a4-fixture@demo.fractionate.ai","password":"A4-canary-value"}'
+        with patch.object(p, 'public_addresses', lambda: [(socket.AF_INET, 'silent'), (socket.AF_INET, 'answering')]):
+            self.assertEqual(self.post('/api/login', body), 'HTTP/1.1 502 Bad Gateway')
+        self.assertEqual(Silent.seen, [('POST', '/api/login', body)])
+        self.assertEqual(Origin.seen, [], 'the sign-in was sent again to the next address')
+
+    def test_an_address_that_cannot_connect_still_fails_over_before_anything_is_sent(self):
+        Origin.seen.clear()
+        body = b'{"email":"a4-fixture@demo.fractionate.ai","password":"A4-canary-value"}'
+        with patch.object(p, 'public_addresses', lambda: [(socket.AF_INET, 'dead'), (socket.AF_INET, 'answering')]):
+            self.assertEqual(self.post('/api/login', body), 'HTTP/1.1 401 Unauthorized')
+        self.assertEqual(Origin.seen, [('POST', '/api/login', body, 'application/json')])
+        with patch.object(p, 'public_addresses', lambda: [(socket.AF_INET, 'dead')]):
+            self.assertEqual(self.post('/api/login', body), 'HTTP/1.1 502 Bad Gateway')
+        self.assertEqual(len(Origin.seen), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -11,6 +11,12 @@ Content-Length of 1..1024 bytes, still one request per tunnel. Its body is
 forwarded as-is and never logged, stored or inspected; this proxy logs
 nothing per request at all. Every other POST keeps the A3 rule (only
 POST /api/logout with an empty body).
+
+A request reaches the origin at most once. Only a failure to establish the
+connection (TCP or TLS, before any byte of the request is written) moves on
+to the next public address; once the request is being sent, any failure
+answers 502 and nothing is sent again, so the one sign-in POST is never
+repeated after an upstream timeout.
 """
 import argparse
 import http.client
@@ -178,22 +184,31 @@ class Handler(socketserver.BaseRequestHandler):
                     raise ValueError('Short sign-in body')
             upstream = None
             for _, address in public_addresses():
+                candidate = FixedConnection(address)
                 try:
-                    upstream = FixedConnection(address)
-                    forward = {k: v for k, v in headers.items() if k not in HOP
-                               and k not in ('host', 'content-length', 'accept-encoding')}
-                    forward['Host'] = ORIGIN
-                    forward['Accept-Encoding'] = 'identity'
-                    forward['Connection'] = 'close'
-                    upstream.request(method, target, body=body if method == 'POST' else None,
-                                     headers=forward)
-                    response = upstream.getresponse()
-                    break
+                    # Nothing of the request is written yet, so trying the next
+                    # address cannot repeat it.
+                    candidate.connect()
                 except (OSError, ssl.SSLError):
-                    if upstream:
-                        upstream.close()
-                    upstream = None
+                    candidate.close()
+                    continue
+                upstream = candidate
+                break
             if upstream is None:
+                send_error(writer, 502)
+                return
+            forward = {k: v for k, v in headers.items() if k not in HOP
+                       and k not in ('host', 'content-length', 'accept-encoding')}
+            forward['Host'] = ORIGIN
+            forward['Accept-Encoding'] = 'identity'
+            forward['Connection'] = 'close'
+            try:
+                upstream.request(method, target, body=body if method == 'POST' else None, headers=forward)
+                response = upstream.getresponse()
+            except (OSError, ssl.SSLError, http.client.HTTPException):
+                # The request may already have reached the origin: never send it
+                # again, to this address or another.
+                upstream.close()
                 send_error(writer, 502)
                 return
             try:

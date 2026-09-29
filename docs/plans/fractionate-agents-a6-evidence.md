@@ -815,3 +815,72 @@ unavailable" plus screen 11 prove it.
 | Execution unavailable on the live dashboard | Stays until A8 (decision 2) |
 
 A7 (`fractionate-agents-a7-prompt.md`) is eligible.
+
+## 2026-09-29 follow-ups after acceptance (the user's dispositions)
+
+These are on branch `ccr-11407794-0pxrze` after #704. None is deployed. Host
+steps are listed where one is needed.
+
+- **Takeover authentication: once per session, with TOTP or a passkey.**
+  - Recorded in the A7 prompt's user direction, item 3.
+  - Both factors already exist for the session's re-authentication:
+    `POST /api/auth/sudo` (password plus TOTP) and `/api/auth/sudo/passkey/*`.
+  - Today the grant is a sliding 4 h window per session. A7 decides whether
+    takeover reuses it or holds its own grant for the session.
+- **The `open_landing` timeout: investigated.** See
+  [the note](fractionate-agents-open-landing-timeout.md).
+  - The demo answers in 1–2 ms.
+  - Every proof-browser request reaches Caddy from the LAN router
+    (`192.168.88.1`), so each one is hairpinned through the router's NAT.
+  - Each request makes a fresh DNS lookup and a new TCP and TLS connection
+    in the origin proxy. Its 8 s timeouts sit against the runner's 10 s
+    `load` wait.
+  - Most likely a stalled hairpin connection or a slow DNS answer.
+  - A read-only host measurement (400 requests, hairpin versus local Caddy)
+    decides. The fix options wait for its result.
+- **The locally proven classes: to define together.** A7 decision 6.
+- **Reboot persistence: a test.** `scripts/a6-reboot-check.py`:
+  - `record` saves the boot IDs before a reboot;
+  - `check` proves the host and VM rebooted and that the fence, proxy,
+    supervisor, broker, renewal timer, proxy path and dashboard came back;
+  - 8 tests pass;
+  - the reboot is the user's decision.
+- **Security audit register:**
+  [`fractionate-agents-security-audit-register.md`](fractionate-agents-security-audit-register.md).
+  It lists S6, SEC-01–05, INF-01–04 and the items A3–A6 added, and explains
+  binding revocation.
+- **Revoking a binding** is the immediate stop.
+  - The broker refuses `BINDING_REVOKED` at its next call, and a pinned run
+    ends `binding_changed`.
+  - Replacing the AppRole secret ID is not a stop (tokens live up to 1 h).
+  - The user asked for "revoke the binding". The paste that lists and
+    revokes every active proof binding is in the session's reply. Nothing
+    uses one between host runs.
+- **`nodemailer` upgraded to 10.0.12** (GHSA-6vj9-mwq6-2f5v).
+  - `npm audit`: 0 vulnerabilities.
+  - The one declared break (Node ≥ 20) fits the container's Node 24.
+  - The existing real-SMTP regression passes.
+- **The origin proxy's resend: fixed in code.**
+  - A request reaches the origin at most once; only a failed connection
+    tries the next address.
+  - The new test fails on the old code (the POST was resent and answered
+    401) and passes now.
+  - Python suites 161 OK.
+  - **Host proof pending:** reinstall the proxy and the supervisor's copy,
+    then the proxy, A3, A4 and A5 proofs, as host run 2.
+- **Lighthouse (mobile, accessibility): 100 on six pages.** The script is
+  `admin/frontend/tests/agent-runs-lighthouse.mjs`. It uses Playwright's
+  Chromium as a persistent context with a debugging port, because
+  Lighthouse's own Chrome launch fails in the sandbox.
+- **Neko: researched.**
+  [`fractionate-agents-a7-neko-research.md`](fractionate-agents-a7-neko-research.md),
+  from its v3 documentation at commit `3f4f9408`:
+  - WebRTC with an ephemeral UDP range or one UDP/TCP mux port, or TURN (it
+    cannot go through a reverse proxy);
+  - member profiles (`can_watch`, `can_host`, `can_access_clipboard`);
+  - control take/give/release over HTTP;
+  - file-transfer and chat plugins.
+
+  Adopting it replaces the A3 browser layer (kiosk lock-down, WebRTC through
+  the fence, a teardown proof). The runner screencast stays inside the
+  accepted boundary. This is A7 decision 1.

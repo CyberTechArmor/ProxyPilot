@@ -330,7 +330,7 @@ test('each outcome class, uncertainty and takeover become a durable result; help
     [{ outcome: 'rate_limited' }, 'blocked', 'rate_limited', false],
     [{ outcome: 'challenge_required' }, 'blocked', 'challenge_required', true],
     [{ outcome: 'unexpected_origin' }, 'blocked', 'unexpected_origin', false],
-    [{ outcome: 'timeout' }, 'failed', 'timeout', false],
+    [{ outcome: 'timeout' }, 'failed', 'timeout', true],
     [{ outcome: 'unknown' }, 'blocked', 'unverified_account', false],
     [{ actionErrors: { open_login: 'SUPERVISOR_TIMEOUT' } }, 'failed', 'uncertain_step', true],
     [{ modelError: 'CALL_UNCERTAIN' }, 'failed', 'model_uncertain', true],
@@ -369,9 +369,11 @@ test('restart recovery: an active run is fenced, never resumed, and needs a huma
     coordinator: createRunCoordinator({ db: w.f.db, launcher: w.supervisor.launcher, verifyTeardown: w.supervisor.verifyTeardown }) });
   const [result] = await restarted.recover();
   assert.deepEqual([result.final_state, result.result_class, result.needs_human], ['failed', 'interrupted', 1]);
-  // The help request keeps its own class and counts the uncertain step.
+  // The help request keeps its own class and counts the uncertain step. The
+  // step is a read (open_login), so it closes the help request when decided
+  // but never gates the profile (A7).
   assert.deepEqual(w.service.inbox(w.users.owner).help_requests.map(h => h.help),
-    [{ result_class: 'interrupted', uncertain_steps: 1 }]);
+    [{ result_class: 'interrupted', uncertain_steps: 1, open: true, gating: false, resumed_as: null }]);
   await w.service.settled(run.run.id);
   const done = statusOf(w, run.run.id);
   assert.deepEqual([done.steps[1].state, done.steps[1].error_code], ['uncertain', 'COORDINATOR_RESTART']);

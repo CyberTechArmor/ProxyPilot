@@ -24,6 +24,7 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
       guide_version_id: row.guide_version_id,
       guide_hash: row.guide_hash, guide_version_number: current?.id === row.guide_version_id ? current.version_number : null,
       model_guide_consent: row.model_guide_consent === 1,
+      model_summary_consent: row.model_summary_consent === 1,
       revision: row.revision, site_revision: p.site_revision, assigned_site_revision: row.assigned_site_revision,
       disabled: true, disabled_reasons,
       created_by: row.created_by, created_at: row.created_at, updated_by: row.updated_by, updated_at: row.updated_at };
@@ -189,6 +190,22 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
         if(next!==r.model_guide_consent){
           run('UPDATE ops_agent_profiles SET model_guide_consent=?,revision=revision+1,updated_by=?,updated_at=? WHERE id=?',next,actor.id,now(),profileId);
           event(actor,id,'profile_model_guide_consent',profileId,{model_guide_consent:v.model_guide_consent});bump(id);
+        }
+        return {profile:profile(id,profileRow(id,profileId))};
+      });
+    },
+    // A7: whether a finished run of this profile is summarised by the model
+    // (typed facts only; the text is untrusted and changes nothing). Owner only,
+    // typed confirmation to enable, default off. It is not part of the run
+    // policy, so it does not bump the profile revision (a live run keeps going).
+    modelSummaryConsent(actor,id,profileId,expected,input) {
+      const v=parse(schemas.modelSummaryConsent,input);
+      return tx(()=>{
+        access(actor,id,'access');const r=profileRow(id,profileId);if(!r) fail(404,'Profile not found');assertRevision(expected,r.revision);
+        const next=v.model_summary_consent?1:0;
+        if(next!==r.model_summary_consent){
+          run('UPDATE ops_agent_profiles SET model_summary_consent=?,updated_by=?,updated_at=? WHERE id=?',next,actor.id,now(),profileId);
+          event(actor,id,'profile_model_summary_consent',profileId,{model_summary_consent:v.model_summary_consent});bump(id);
         }
         return {profile:profile(id,profileRow(id,profileId))};
       });

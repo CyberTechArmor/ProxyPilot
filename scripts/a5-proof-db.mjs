@@ -1,6 +1,6 @@
 // A5 proof database: a standalone Operations database (node:sqlite) for the
 // host proof harness. It applies the backend's own Operations migrations
-// (1100-1102, 1106-1111) and only the stub tables they reference, so the
+// (1100-1102, 1106-1112) and only the stub tables they reference, so the
 // coordinator and the Operations store run against the candidate's exact code
 // without the live ProxyPilot database. Proof only; nothing here is imported by
 // the backend.
@@ -12,10 +12,10 @@ const LIB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'ad
 const lib = name => import(pathToFileURL(path.join(LIB, name)).href);
 
 export async function openProofDatabase(file) {
-  const [projects, agents, worker, limits, binding, credentials, runs, store] = await Promise.all([
+  const [projects, agents, worker, limits, binding, credentials, runs, recovery, store] = await Promise.all([
     lib('operational-projects-schema.js'), lib('operational-agents-schema.js'), lib('operational-worker-schema.js'),
     lib('operational-agent-limits-schema.js'), lib('operational-worker-binding-schema.js'),
-    lib('operational-credential-binding-schema.js'), lib('operational-run-schema.js'),
+    lib('operational-credential-binding-schema.js'), lib('operational-run-schema.js'), lib('operational-recovery-schema.js'),
     lib('operational-projects-store.js')]);
   const db = new DatabaseSync(file);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; PRAGMA foreign_keys=ON;
@@ -40,7 +40,8 @@ export async function openProofDatabase(file) {
     [1102, projects.operationalProjectsMigration1102], [1106, agents.operationalAgentsMigration1106],
     [1107, worker.operationalWorkerMigration1107], [1108, limits.operationalAgentLimitsMigration1108],
     [1109, binding.operationalWorkerBindingMigration1109],
-    [1110, credentials.operationalCredentialBindingMigration1110], [1111, runs.operationalRunMigration1111]];
+    [1110, credentials.operationalCredentialBindingMigration1110], [1111, runs.operationalRunMigration1111],
+    [1112, recovery.operationalRecoveryMigration1112]];
   for (const [version, migrate] of steps) {
     if (db.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(version)) continue;
     if (version === 1108) db.exec('PRAGMA foreign_keys=OFF');

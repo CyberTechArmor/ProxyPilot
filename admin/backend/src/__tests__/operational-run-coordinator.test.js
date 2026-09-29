@@ -301,7 +301,8 @@ test('every sign-in outcome class is a distinct durable result', async () => {
       const result = await holder.c.execute(holder.c.start(s.operator, startInput(s)).run_id);
       assert.deepEqual([result.final_state, result.result_class, result.submit_outcome, result.verified_account],
         [state, cls, outcome, 0], outcome);
-      assert.equal(result.needs_human, outcome === 'challenge_required' ? 1 : 0);
+      // A7 decision 6: a timed-out submit may have signed in, so a person decides.
+      assert.equal(result.needs_human, ['challenge_required', 'timeout'].includes(outcome) ? 1 : 0);
     } finally { s.f.close(); }
   }
 });

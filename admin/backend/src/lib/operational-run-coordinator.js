@@ -3,6 +3,7 @@ import { assertOperation, resolveOperationsRole } from './operational-projects-l
 import { REQUIRED_ACTION, createOperationalWorkerStore } from './operational-worker-boundary.js';
 import { SUBMIT, approvalDigest, guideDocument, guideRules, nextStep, policyDocument, reduceClaims }
   from './operational-run-policy.js';
+import { FIXTURE_MODES, profileGate } from './operational-recovery.js';
 
 // A5 coordinator: one bounded, supervised run of the synthetic sign-in workflow.
 // It drives the installed A3 supervisor's backend socket (through an injected
@@ -17,9 +18,17 @@ import { SUBMIT, approvalDigest, guideDocument, guideRules, nextStep, policyDocu
 // validated, reserved durably (authorizeAction) and only then performed. Page
 // results are untrusted and reduced to typed claims. An uncertain step or model
 // call is never retried; it becomes a human decision.
+//
+// A7 adds: a submit that timed out is a human decision (the site may have
+// signed in); Start is refused while the profile has an uncertain write nobody
+// has decided; each run records how it came to be (practice with a demo fixture
+// mode, or a resume of an earlier run pinned to the same policy); and a
+// dashboard takeover (begin, hold, end) hands the live attempt to one person,
+// after which the run ends taken_over and never resumes in that attempt.
 const ACTIVE = new Set(['prepared', 'starting', 'running']);
 const TRANSPORT = new Set(['SUPERVISOR_TIMEOUT', 'SUPERVISOR_UNREACHABLE', 'SUPERVISOR_PROTOCOL', 'CHANNEL_CLOSED']);
-const NEEDS_HUMAN = new Set(['challenge_required', 'interrupted', 'uncertain_step', 'model_uncertain', 'taken_over']);
+const NEEDS_HUMAN = new Set(['challenge_required', 'interrupted', 'uncertain_step', 'model_uncertain', 'taken_over',
+  'timeout']);
 const MODEL_REFUSAL = Object.freeze({
   MODEL_CHOICE_INVALID: ['blocked', 'model_choice_invalid'],
   BUDGET_EXHAUSTED: ['blocked', 'budget_exhausted'],
@@ -59,8 +68,8 @@ const ACTION_STOP = Object.freeze({
   CREDENTIAL_NOT_BOUND: ['blocked', 'binding_changed'],
   CREDENTIAL_BROKER_UNAVAILABLE: ['failed', 'broker_unavailable'],
 });
-const coded = (code) => { const e = new Error(code); e.code = code; return e; };
-const fail = (code) => { throw coded(code); };
+const coded = (code, detail) => { const e = new Error(code); e.code = code; if (detail !== undefined) e.detail = detail; return e; };
+const fail = (code, detail) => { throw coded(code, detail); };
 const codeOf = (error) => (typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
   ? error.code : 'INTERNAL');
 
@@ -115,9 +124,32 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
 
   // --------------------------------------------------------------- start
 
-  function start(actor, input) {
+  // `origin` (A7) is how the run came to be: {practice, fixture_mode} for a
+  // practice run, {resumed_from} for a resume. A resume copies the practice
+  // flag and mode of the run it resumes and must pin exactly its policy.
+  function validOrigin(origin) {
+    if (origin == null) return { practice: false, fixture_mode: null, resumed_from: null };
+    const names = Object.keys(origin).sort().join(',');
+    if (names === 'fixture_mode,practice' && origin.practice === true && FIXTURE_MODES.includes(origin.fixture_mode))
+      return { practice: true, fixture_mode: origin.fixture_mode, resumed_from: null };
+    if (names === 'resumed_from' && typeof origin.resumed_from === 'string')
+      return { practice: false, fixture_mode: null, resumed_from: origin.resumed_from };
+    fail('INVALID_RUN');
+  }
+  function resumable(from, projectId, profileId) {
+    const r = runOf(from);
+    if (!r || r.project_id !== projectId || r.profile_id !== profileId) fail('RESUME_UNKNOWN');
+    const result = resultOf(from);
+    if (!result || result.needs_human !== 1) fail('RESUME_NOT_ALLOWED');
+    if (one('SELECT 1 FROM ops_agent_run_origins WHERE resumed_from_run_id=?', from)) fail('RESUME_ALREADY_STARTED');
+    const origin = one('SELECT practice,fixture_mode FROM ops_agent_run_origins WHERE run_id=?', from);
+    return { r, practice: origin?.practice === 1, fixture_mode: origin?.fixture_mode ?? null };
+  }
+
+  function start(actor, input, origin = null) {
     const names = Object.keys(input ?? {}).sort().join(',');
     if (!['profile_id,project_id', 'credential_binding_id,profile_id,project_id'].includes(names)) fail('INVALID_RUN');
+    const how = validOrigin(origin);
     const starter = assertRunAccess(actor, input.project_id);
     const project = one('SELECT * FROM ops_projects WHERE id=?', input.project_id);
     const profile = one('SELECT * FROM ops_agent_profiles WHERE project_id=? AND id=? AND deleted_at IS NULL',
@@ -128,6 +160,25 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
     const rules = guideRules(guide.instructions);
     const policy = policyDocument({ guideHash: profile.guide_hash, rules, origin: project.site_origin,
       modelGuideConsent: profile.model_guide_consent === 1 });
+    // An uncertain write (a sign-in or sign-out that may or may not have
+    // happened) waits for a person's decision before this profile runs again.
+    const gate = profileGate(db, profile.id);
+    if (gate) fail('RECONCILIATION_REQUIRED', gate.run_id);
+    let resumeOf = null;
+    if (how.resumed_from) {
+      resumeOf = resumable(how.resumed_from, input.project_id, input.profile_id);
+      const was = resumeOf.r;
+      const binding = input.credential_binding_id ?? null;
+      const current = binding && one('SELECT revision FROM ops_agent_credential_bindings WHERE id=? AND state=\'active\'', binding);
+      const changed = was.profile_revision !== profile.revision ? 'profile_changed'
+        : was.guide_version_id !== profile.guide_version_id || was.guide_hash !== profile.guide_hash ? 'guide_changed'
+          : (was.credential_binding_id ?? null) !== binding ||
+            (binding && current?.revision !== was.credential_binding_revision) ? 'binding_changed'
+            : was.policy_digest !== policy.digest ? 'policy_changed' : null;
+      if (changed) fail('RESUME_STALE', changed);
+    }
+    const practice = resumeOf ? resumeOf.practice : how.practice;
+    const fixtureMode = resumeOf ? resumeOf.fixture_mode : how.fixture_mode;
     let prepared;
     try {
       // One transaction pins the guide, profile, site, limits, binding revision
@@ -139,15 +190,23 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
       (runId) => {
         run(`INSERT INTO ops_agent_run_pins(run_id,started_by,policy_json,policy_digest,rules_version,model_guide_consent,created_at)
           VALUES(?,?,?,?,?,?,?)`, runId, starter.id, policy.text, policy.digest, rules.v, profile.model_guide_consent, stamp());
+        run(`INSERT INTO ops_agent_run_origins(run_id,practice,fixture_mode,resumed_from_run_id,created_at)
+          VALUES(?,?,?,?,?)`, runId, practice ? 1 : 0, practice ? fixtureMode : null, resumeOf?.r.id ?? null, stamp());
         event(runId, null, 'a5:started');
+        if (practice) event(runId, null, `a7:practice:${fixtureMode}`);
+        if (resumeOf) event(runId, null, 'a7:resumed');
       });
     } catch (error) {
+      if (/ops_agent_run_origins\.resumed_from_run_id|ops_agent_one_resume/.test(String(error?.message)))
+        fail('RESUME_ALREADY_STARTED');
       if (/UNIQUE/.test(String(error?.message))) fail('RUN_ALREADY_ACTIVE');
       throw error;
     }
-    note({ event: 'run_started', run_id: prepared.run_id, policy_digest: policy.digest });
+    note({ event: 'run_started', run_id: prepared.run_id, policy_digest: policy.digest, practice,
+      resumed_from: resumeOf?.r.id ?? null });
     return { run_id: prepared.run_id, policy_digest: policy.digest, deadline_at: prepared.deadline_at,
-      credential_binding_revision: prepared.credential_binding_revision };
+      credential_binding_revision: prepared.credential_binding_revision, practice, fixture_mode: practice ? fixtureMode : null,
+      resumed_from: resumeOf?.r.id ?? null };
   }
 
   // ------------------------------------------------------------- results
@@ -176,18 +235,23 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
   // Fence, stop at the supervisor, verify the signed receipt, and write the
   // durable result in the same transaction as the terminal state. Serialized
   // per run: an operator stop and the loop's own stop share one teardown.
-  function terminate(runId, state, resultClass, { needsHuman = false } = {}) {
+  function terminate(runId, state, resultClass, { needsHuman = false, stopReason = null } = {}) {
     if (terminating.has(runId)) return terminating.get(runId);
     const work = (async () => {
       const r = runOf(runId);
       if (!r) fail('RUN_UNKNOWN');
-      if (ACTIVE.has(r.state)) workers.fence(runId, state, () => closeApprovals(runId, 'run_stopping'));
+      if (ACTIVE.has(r.state)) workers.fence(runId, state, () => {
+        closeApprovals(runId, 'run_stopping');
+        run(`UPDATE ops_agent_takeovers SET state='ended',ended_at=?,end_reason='run_stopping'
+          WHERE run_id=? AND state!='ended'`, stamp(), runId);
+      });
       else if (r.state !== 'cancelling') return resultOf(runId);
       const attempt = one('SELECT id,fence FROM ops_agent_worker_attempts WHERE run_id=? ORDER BY attempt_no DESC LIMIT 1', runId);
       if (!attempt) {
         workers.abandonUnlaunched(runId, state, (row) => writeResult(row, state, resultClass, null, needsHuman));
       } else {
-        const receipt = await launcher.stop({ run_id: runId, attempt_id: attempt.id, fence: attempt.fence }, state);
+        const receipt = await launcher.stop({ run_id: runId, attempt_id: attempt.id, fence: attempt.fence },
+          stopReason ?? state);
         workers.finishStop(runId, state, receipt, (row) => writeResult(row, state, resultClass, receipt, needsHuman));
       }
       const result = resultOf(runId);
@@ -280,6 +344,7 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
     for (;;) {
       const row = one('SELECT state FROM ops_agent_run_approvals WHERE id=?', request.approval_id);
       if (row.state === 'approved') return { approval_id: request.approval_id };
+      if (takenOver(ref.run_id)) return { takeover: true };
       if (row.state !== 'requested') return { stop: ['blocked', 'approval_stale'] };
       if (runOf(ref.run_id).state !== 'running') return { stop: null };
       if (Date.now() >= until) {
@@ -356,17 +421,95 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
     return () => clearInterval(timer);
   }
 
+  const takenOver = runId => !!one("SELECT 1 FROM ops_agent_takeovers WHERE run_id=? AND state IN ('taking','holding')", runId);
+
   async function awaitTakeover(ref) {
     event(ref.run_id, ref.attempt_id, 'a5:taken_over');
     note({ event: 'taken_over', run_id: ref.run_id });
     const until = Date.now() + takeoverWaitMs;
     while (Date.now() < until) {
+      if (terminating.has(ref.run_id) || !ACTIVE.has(runOf(ref.run_id).state)) break;
       let status = null;
       try { status = await launcher.status(); } catch { /* keep waiting */ }
       if (status && status.active?.attempt_id !== ref.attempt_id) break;
       await sleep(Math.max(pollMs, 1000));
     }
-    return terminate(ref.run_id, 'blocked', 'taken_over');
+    const dashboard = one('SELECT id FROM ops_agent_takeovers WHERE run_id=? ORDER BY started_at DESC LIMIT 1', ref.run_id);
+    if (dashboard) closeTakeover(dashboard.id, 'run_ended', null);
+    return terminate(ref.run_id, 'blocked', 'taken_over', dashboard ? { stopReason: 'taken_over' } : {});
+  }
+
+  // ------------------------------------------------- dashboard takeover (A7)
+
+  const takeoverRow = id => one('SELECT * FROM ops_agent_takeovers WHERE id=?', id);
+  function closeTakeover(id, reason, inputs) {
+    run(`UPDATE ops_agent_takeovers SET state='ended',ended_at=?,end_reason=?,inputs_json=? WHERE id=? AND state!='ended'`,
+      stamp(), reason, JSON.stringify(inputs ?? {}), id);
+  }
+
+  // One person takes the live attempt: the durable claim (one controller per
+  // run) comes first and closes any open approval, so the agent's loop stops
+  // before its next step. The service then asks the supervisor to hand the
+  // browser to that person (after any in-flight submit) and calls holdTakeover.
+  function beginTakeover(actor, runId) {
+    const r = runOf(runId);
+    if (!r) fail('RUN_UNKNOWN');
+    const user = assertRunAccess(actor, r.project_id);
+    return tx(() => {
+      const now = runOf(runId);
+      if (now.state !== 'running') fail('TAKEOVER_NOT_RUNNING');
+      const attempt = one("SELECT id,fence FROM ops_agent_worker_attempts WHERE run_id=? AND state='running'", runId);
+      if (!attempt || attempt.fence !== now.fence) fail('TAKEOVER_NOT_RUNNING');
+      const id = uuid();
+      try {
+        run(`INSERT INTO ops_agent_takeovers(id,run_id,attempt_id,fence,user_id,state,started_at) VALUES(?,?,?,?,?,'taking',?)`,
+          id, runId, attempt.id, now.fence, user.id, stamp());
+      } catch (error) {
+        if (/UNIQUE|ops_agent_one_controller/.test(String(error?.message))) fail('TAKEOVER_HELD');
+        throw error;
+      }
+      closeApprovals(runId, 'taken_over');
+      event(runId, attempt.id, 'a7:takeover_requested');
+      return { takeover_id: id, ref: { run_id: runId, attempt_id: attempt.id, fence: now.fence } };
+    });
+  }
+  function holdTakeover(takeoverId) {
+    tx(() => {
+      const t = takeoverRow(takeoverId);
+      if (!t || t.state !== 'taking') fail('TAKEOVER_UNKNOWN');
+      run("UPDATE ops_agent_takeovers SET state='holding',control_at=? WHERE id=?", stamp(), takeoverId);
+      event(t.run_id, t.attempt_id, 'a7:takeover_holding');
+    });
+    note({ event: 'takeover_holding', takeover_id: takeoverId });
+  }
+  // The person ends it (or it failed to start): the attempt is stopped with the
+  // supervisor stop reason taken_over, and the run ends blocked / taken_over
+  // with its verified receipt. The count and kind of inputs are kept, never
+  // what was typed.
+  async function endTakeover(actor, runId, { reason = 'ended_by_person', inputs = null } = {}) {
+    const r = runOf(runId);
+    if (!r) fail('RUN_UNKNOWN');
+    assertRunAccess(actor, r.project_id);
+    const t = one("SELECT * FROM ops_agent_takeovers WHERE run_id=? AND state IN ('taking','holding')", runId);
+    if (!t) return resultOf(runId);
+    if (t.user_id !== actor.id) fail('TAKEOVER_NOT_YOURS');
+    closeTakeover(t.id, reason, inputs);
+    event(runId, t.attempt_id, 'a7:takeover_ended');
+    note({ event: 'takeover_ended', run_id: runId, reason });
+    if (!ACTIVE.has(r.state) && r.state !== 'cancelling') return resultOf(runId);
+    return terminate(runId, 'blocked', 'taken_over', { stopReason: 'taken_over' });
+  }
+  // A takeover the supervisor refused before handing anything over: the claim
+  // is closed and the agent's run ends as a normal stop would (the agent is
+  // never resumed after a takeover was asked for).
+  async function abandonTakeover(takeoverId, code) {
+    const t = takeoverRow(takeoverId);
+    if (!t || t.state === 'ended') return null;
+    closeTakeover(t.id, `refused:${String(code).slice(0, 55)}`, null);
+    event(t.run_id, t.attempt_id, 'a7:takeover_refused');
+    const r = runOf(t.run_id);
+    if (!ACTIVE.has(r.state) && r.state !== 'cancelling') return resultOf(t.run_id);
+    return terminate(t.run_id, 'blocked', 'taken_over', { needsHuman: true });
   }
 
   async function execute(runId) {
@@ -401,6 +544,7 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
     for (;;) {
       const r = runOf(runId);
       if (r.state !== 'running') return stopped();
+      if (takenOver(runId)) { stopHeartbeat(); return awaitTakeover(ref); }
       if (state.stale) return terminate(runId, ...(ACTION_STOP[state.stale] ?? ['blocked', 'stale_configuration']));
       const profile = one('SELECT proposed_actions_json FROM ops_agent_profiles WHERE id=?', r.profile_id);
       const kinds = JSON.parse(profile.proposed_actions_json);
@@ -419,10 +563,14 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
       let approvalId = null;
       if (rules.approval_required.includes(decision.action)) {
         const approval = await checkpoint(ref, decision.action);
+        if (approval.takeover) { stopHeartbeat(); return awaitTakeover(ref); }
         if (approval.stop === null) return stopped();
         if (approval.stop) return terminate(runId, ...approval.stop);
         approvalId = approval.approval_id;
       }
+      // A person may have taken over while the model or the approval was
+      // pending: never reserve another step for the agent then.
+      if (takenOver(runId)) { stopHeartbeat(); return awaitTakeover(ref); }
       const request = { ...ref, action: decision.action,
         ...(decision.action === SUBMIT ? { binding_id: r.credential_binding_id } : {}) };
       let ordinal;
@@ -489,6 +637,8 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
       run(`UPDATE ops_agent_model_calls SET state='uncertain',refusal_code='COORDINATOR_RESTART',finished_at=?
         WHERE run_id=? AND state='reserved'`, stamp(), runId);
       closeApprovals(runId, 'coordinator_restart');
+      run(`UPDATE ops_agent_takeovers SET state='ended',ended_at=?,end_reason='coordinator_restart'
+        WHERE run_id=? AND state!='ended'`, stamp(), runId);
     });
     const pending = all("SELECT id FROM ops_agent_runs WHERE state='cancelling'").map(row => row.id);
     const results = [];
@@ -527,5 +677,6 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
     };
   }
 
-  return { start, execute, approve, stop, recover, status, workers };
+  return { start, execute, approve, stop, recover, status, beginTakeover, holdTakeover, endTakeover, abandonTakeover,
+    workers };
 }

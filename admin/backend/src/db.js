@@ -35,6 +35,7 @@ import { operationalAgentLimitsMigration1108 } from './lib/operational-agent-lim
 import { operationalWorkerBindingMigration1109 } from './lib/operational-worker-binding-schema.js';
 import { operationalCredentialBindingMigration1110 } from './lib/operational-credential-binding-schema.js';
 import { operationalRunMigration1111 } from './lib/operational-run-schema.js';
+import { operationalRecoveryMigration1112 } from './lib/operational-recovery-schema.js';
 
 const __dbFilename = fileURLToPath(import.meta.url);
 const __dbDirname = dirname(__dbFilename);
@@ -160,6 +161,7 @@ export function getDb() {
 //   1109 Operations — bind A3 worker attempts to the supervisor's VM and guest boot.
 //   1110 Operations — A4 credential binding metadata (vault path/version, never a value) and run pins.
 //   1111 Operations — A5 run policy pins, typed steps, model calls, approvals and results.
+//   1112 Operations — A7 practice/resume origins, reconciliations, control grants, takeovers, fixture state, summaries.
 //   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
@@ -2045,6 +2047,7 @@ export function initDatabase() {
   runMigration(db, 1109, 'operational_worker_vm_binding', operationalWorkerBindingMigration1109);
   runMigration(db, 1110, 'operational_credential_bindings', operationalCredentialBindingMigration1110);
   runMigration(db, 1111, 'operational_supervised_runs', operationalRunMigration1111);
+  runMigration(db, 1112, 'operational_practice_recovery', operationalRecoveryMigration1112);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

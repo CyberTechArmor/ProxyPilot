@@ -99,7 +99,8 @@ test('launcher fails closed without the supervisor and checks its readback when 
   assert.equal((await launcher.action({...ref,action:'open_landing'})).untrusted, true);
   await assert.rejects(launcher.action({...ref,action:'open_landing',url:'https://x'}), {code:'INVALID_BROWSER_ACTION'});
   await assert.rejects(launcher.action({...ref,action:'run_shell'}), {code:'INVALID_BROWSER_ACTION'});
-  await assert.rejects(launcher.stop(ref, 'taken_over'), {code:'INVALID_STOP'});
+  // `taken_over` is a backend stop reason since A7 (dashboard takeover); `proof` stays operator-only.
+  await assert.rejects(launcher.stop(ref, 'proof'), {code:'INVALID_STOP'});
   assert.equal((await launcher.stop(ref)).attestation, 'a3r1.x.y');
   assert.deepEqual(calls.at(-1), ['stop', {...ref,reason:'cancelled'}]);
   await assert.rejects(createWorkerLauncher({client:{request:async()=>({...good,vm_uuid:randomUUID()})},vmUuid:VM})

@@ -25,6 +25,8 @@ import { executorPolicy } from './lib/setup-engine/logic.js';
 import { setupInputsDir, sweepSetupInputs } from './lib/setup-engine/setup-inputs.js';
 import { setupRouter } from './routes/setup.js';
 import { authRouter } from './routes/auth.js';
+import { agentControlRouter } from './routes/agent-control-auth.js';
+import { hasControlGrant } from './lib/operational-control-grants.js';
 import { servicesRouter } from './routes/services.js';
 import { userRouter } from './routes/user.js';
 import { lxcRouter } from './routes/lxc.js';
@@ -599,6 +601,8 @@ app.get('/api/health', (req, res) => {
 // see nothing else until an admin assigns them a role.
 app.use(recoveryBoundary(getDb()));
 app.use('/api/auth/sso', ssoRouter);
+// A7: the once-per-session agent-control verification (never sudo).
+app.use('/api/auth/agent-control', authLimiter, agentControlRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/services', authenticateToken, blockPendingRole, servicesRouter);
 app.use('/api/user', authenticateToken, userRouter);
@@ -609,7 +613,8 @@ const evidenceRuntime = createEvidenceRuntime(evidenceConfig);
 const operationsStore = createOperationsStore(getDb(), { evidenceFactory: evidenceRuntime?.factory });
 // A6: without a configured supervisor every execution control answers EXECUTION_UNAVAILABLE.
 const agentRuns = createAgentRunRuntime(agentRunsConfiguration(), { db: getDb(),
-  log: entry => console.log('[agent-runs]', JSON.stringify(entry)) });
+  log: entry => console.log('[agent-runs]', JSON.stringify(entry)),
+  audit: (actor, action, details) => logAudit(actor?.id ?? null, action, 'operational_agent_run', details?.run_id ?? null, details, null) });
 const operationsToggle = name => () => effectiveToggles(getDb())[name];
 app.use('/api/operations-settings', authenticateToken, blockPendingRole, createOperationsSettingsRouter({
   Router: express.Router, db: getDb, requireAdmin, requireSudo }));
@@ -621,6 +626,7 @@ app.use('/api/operational-projects', authenticateToken, blockPendingRole, create
   store: operationsStore,
   agentRuns,
   requireSudo,
+  controlVerified: req => hasControlGrant(getDb(), { sessionId: req.user?.jti, userId: req.user?.id }),
   evidenceEnabled: evidenceConfig.enabled,
   evidenceRouter: createEvidenceRouter({ Router: express.Router, enabled: evidenceConfig.enabled,
     store: operationsStore?.evidence, service: evidenceRuntime?.service(operationsStore.evidence), csrf: csrfProtection }),

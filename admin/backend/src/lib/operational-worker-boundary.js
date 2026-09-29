@@ -24,6 +24,10 @@ export const SUBMIT_OUTCOMES = Object.freeze(['signed_in','rejected','rate_limit
 // Stop reasons the backend may give the supervisor. `completed` (A5) is a label
 // on a normal teardown; it grants nothing a cancel does not.
 export const STOP_REASONS = Object.freeze(['cancelled','blocked','failed','completed']);
+// A7: the supervisor also takes `taken_over` from the backend, only for an
+// attempt a dashboard takeover handed to a person. It is a receipt label, never
+// a run state.
+export const SUPERVISOR_STOP_REASONS = Object.freeze([...STOP_REASONS, 'taken_over']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/i;
 const ACTIVE = new Set(['prepared', 'starting', 'running']);
@@ -172,7 +176,7 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       return Object.freeze({png_base64:result.png_base64,width:result.width,height:result.height});
     },
     async stop(ref, reason='cancelled') {
-      if (!validRef(ref) || !STOP_REASONS.includes(reason)) fail('INVALID_STOP');
+      if (!validRef(ref) || !SUPERVISOR_STOP_REASONS.includes(reason)) fail('INVALID_STOP');
       const result=await connected().request('stop', {run_id:ref.run_id,attempt_id:ref.attempt_id,
         fence:ref.fence,reason});
       const receipt=result?.receipt;

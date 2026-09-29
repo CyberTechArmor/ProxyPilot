@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -337,6 +338,37 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'attempt is live'):
             live.provision_vm()
         self.assertFalse(any(call[0] == 'execute' and call[1][:2] == ['incus', 'snapshot'] for call in self.calls))
+
+    def test_packages_go_in_by_name_as_one_stream_and_read_back(self):
+        # Debian epochs put %3a in .deb names (xvfb_2%3a21...); `incus file push`
+        # lost two such files on the proof host, and apt then reached for its
+        # own lists. The stream keeps the names; the read-back catches a loss.
+        debs, vm = Path(self.tmp.name) / 'debs', Path(self.tmp.name) / 'vm-debs'
+        debs.mkdir()
+        names = ['xvfb_2%3a21.1.16-1.3_amd64.deb', 'xserver-common_2%3a21.1.16-1.3_all.deb', 'libxcvt0_0.1.3-1_amd64.deb']
+        for name in names:
+            (debs / name).write_bytes(name.encode() * 50)
+        local = lambda argv, timeout=120, input=None: subprocess.run(argv, input=input, check=True, capture_output=True,
+                                                                     text=not isinstance(input, bytes)).stdout
+        with patch.object(live, 'DEBS', debs), patch.object(live, 'VM_DEBS', str(vm)), patch.object(live, 'guest', local):
+            live.push_debs(names)
+            self.assertEqual(sorted(p.name for p in vm.iterdir()), sorted(names))
+            # A file that does not arrive as pushed is refused by name.
+            def lossy(argv, timeout=120, input=None):
+                out = local(argv, timeout, input)
+                if argv[0] == 'tar':
+                    (vm / names[0]).unlink()
+                return out
+            with patch.object(live, 'guest', lossy), self.assertRaisesRegex(ValueError, 'xvfb_2%3a21'):
+                live.push_debs(names)
+
+    def test_the_vm_install_sees_only_the_installed_packages_and_the_pushed_files(self):
+        command = live.OFFLINE_INSTALL
+        for option in ('-o Dir::Etc::SourceList=/dev/null', '-o Dir::State::Lists="$d/lists"',
+                       '-o Dir::Etc::SourceParts="$d/parts"', '--no-install-recommends', live.VM_DEBS + '/*.deb'):
+            self.assertIn(option, command)
+        # Not --no-download: it is what made apt refuse on the proof host.
+        self.assertNotIn('--no-download', command)
 
     def test_build_refuses_a_changed_patch(self):
         with patch.object(live, 'PATCH_SHA256', '0' * 64):

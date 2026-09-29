@@ -497,3 +497,72 @@ address's traffic from MEET's.
 - The router forwards needed are **3479/UDP, 3479/TCP, 5350/TCP →
   192.168.88.161**. Only viewers outside the network need them; H1–H6 reach
   the relay on the LAN address.
+
+## 2026-09-29 host run: the port move deployed, H2b, H3 and the VM packages
+
+**Deploy of #708** (merge `4aad6807`):
+- Staging (user, pinned stager): `staged ce36ad54… (was 9341dd93…) from
+  4aad6807…; 189 paths match exactly`.
+- Checks on `ce36ad54`: 3,408 tests, 0 fail.
+- Backup: `proxypilot-pre-A7-ports-promote-20260929T210450Z.db` (sha256
+  `eac36f99…`).
+- Promote `9341dd93` → `ce36ad54`, rollback tag
+  `pp-rollback-20260929T210456Z`.
+- Update `2cd3367e…`: success in 64 s, health check passed, 33 routes match.
+  MEET's five forwards were reapplied at boot.
+
+**H2b (user):**
+- Supervisor **`44904081…`** (runner `7185ee26…` unchanged).
+- New receipt key **`e65f5af5a3c2e8e08a4b4f15acdcbcc5067e9e0b05c71cc5d03767339fc859d0`**;
+  `60e70fc9…` archived.
+- The three manual rules moved from 3478/5349 to 3479/udp, 3479/tcp and
+  5350/tcp. MEET's `service-l4-…` rules for 3478/udp and 5349/tcp are
+  unchanged.
+- The pasted output again ended before the Caddy-site step's result.
+  `get_cert` shows the certificate: Let's Encrypt, issued 19:39Z (during
+  H2), valid until 2026-12-28, at
+  `/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/streamview.fractionate.ai/`.
+
+**H3 (user, detached):**
+- `install-turn` succeeded: `proxypilot-a7-turn.service` is active, the
+  certificate is copied, and the certificate timer is active. H3 read the
+  ports in the same second the relay started, so it printed
+  `3479/5350: false`. A later read-only check shows coturn listening on
+  `192.168.88.161:3479` (UDP and TCP) and `:5350`, with a normal start in
+  its log.
+- `build-neko` and `build-probe` succeeded (`/var/lib/proxypilot-a7/neko`,
+  `a7-live-probe`).
+- `provision-vm` failed inside the VM: `E: Unable to fetch some archives`.
+  The snapshot `pp-a7-pre-live-20260929-211249` had been taken first.
+- `enable` did not run, so no fence line and no live marker were written.
+
+**Finding: the VM packages.**
+- The container downloaded 52 packages, but the VM held only 50.
+- The two with a Debian epoch have `%3a` in their file names (the Xorg
+  packages, e.g. `xvfb_2%3a21…`). They did not land as named through
+  `incus file push`.
+- apt in the VM then wanted versions from its own package lists and, with
+  `--no-download`, refused. A read-only simulation in the VM showed the
+  same refusal with no package listed.
+- Reproduced locally with epoch-named test packages: apt with only the
+  installed packages and the given files installs, and names a gap as an
+  unmet dependency.
+
+**The fix** (`a7-install-live.py` `2a8ee479…`):
+- The packages go in as one tar stream (`tar -x` in the VM) and are read
+  back by sha256; a file that does not arrive is refused by name.
+- apt installs them with no package lists and no sources (`SourceList` is
+  `/dev/null`, an empty lists directory), so nothing can be fetched and a
+  gap is named.
+- A failed command's error now keeps the end of stdout too, where apt
+  names what it could not do.
+- `provision-vm` refuses to finish when Xvfb, xinput or xdotool is missing
+  in the VM.
+- Tested locally for real:
+  - the tar push with `%3a` names;
+  - the offline install and its refusal naming the missing dependency;
+  - unit tests for the stream, the read-back and the install options;
+  - 52 A7 script tests with the real live stack.
+
+**Next:** stage the fix, then H3b (`provision-vm` and `enable` only; the
+relay, Neko and the probe stay).

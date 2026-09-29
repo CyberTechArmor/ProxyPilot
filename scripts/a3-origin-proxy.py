@@ -5,6 +5,12 @@ The VM may reach this listener only through the installed bridge fence.
 CONNECT terminates TLS on the host, then every decrypted HTTP request and
 redirect is checked against the A3 synthetic read-only path policy. The
 guest browser must pin the displayed self-signed certificate's SPKI hash.
+
+A4 adds exactly one write: POST /api/login with a JSON content type and a
+Content-Length of 1..1024 bytes, still one request per tunnel. Its body is
+forwarded as-is and never logged, stored or inspected; this proxy logs
+nothing per request at all. Every other POST keeps the A3 rule (only
+POST /api/logout with an empty body).
 """
 import argparse
 import http.client
@@ -25,6 +31,9 @@ KEY = Path('/etc/proxypilot-a3-proof/proxy-key.pem')
 PATHS = frozenset(('/', '/workspace', '/api/config', '/api/session', '/api/files'))
 ASSET = re.compile(r'/assets/[a-zA-Z0-9_.-]+\Z')
 MAX_REQUEST = 16 * 1024
+LOGIN = '/api/login'
+MAX_LOGIN_BODY = 1024
+LOGIN_TYPES = frozenset(('application/json', 'application/json; charset=utf-8'))
 MAX_RESPONSE = 5 * 1024 * 1024
 HOP = frozenset(('connection', 'proxy-connection', 'keep-alive',
                  'transfer-encoding', 'te', 'trailer', 'upgrade',
@@ -35,21 +44,34 @@ def permitted(method, target, headers):
     if method not in ('GET', 'POST') or not target.startswith('/') or target.startswith('//'):
         return False
     parts = urlsplit(target)
-    if parts.scheme or parts.netloc or parts.query or parts.fragment or '%' in target or '\\' in target:
+    if (parts.scheme or parts.netloc or parts.query or parts.fragment or '%' in target or '\\' in target
+            or '?' in target or '#' in target):
         return False
     if method == 'GET' and parts.path not in PATHS and not ASSET.fullmatch(parts.path):
         return False
-    if method == 'POST' and parts.path != '/api/logout':
+    if method == 'POST' and target not in ('/api/logout', LOGIN):
         return False
     if headers.get('host') != ORIGIN or headers.get('upgrade') or headers.get('connection', '').lower().find('upgrade') >= 0:
         return False
     if headers.get('transfer-encoding') or headers.get('expect') or headers.get('proxy-authorization'):
         return False
+    if method == 'POST' and target == LOGIN:
+        return login_length(headers) is not None
     if method == 'POST' and headers.get('content-length') != '0':
         return False
     if method == 'GET' and headers.get('content-length') not in (None, '0'):
         return False
     return True
+
+
+def login_length(headers):
+    """The only request body this proxy forwards: 1..1024 bytes of JSON."""
+    value = headers.get('content-length') or ''
+    if not re.fullmatch(r'[1-9][0-9]{0,3}', value) or int(value) > MAX_LOGIN_BODY:
+        return None
+    if (headers.get('content-type') or '').strip().lower() not in LOGIN_TYPES:
+        return None
+    return int(value)
 
 
 def valid_location(value):
@@ -148,6 +170,12 @@ class Handler(socketserver.BaseRequestHandler):
             if not permitted(method, target, headers):
                 send_error(writer, 403)
                 return
+            body = b''
+            if method == 'POST' and target == LOGIN:
+                length = login_length(headers)
+                body = reader.read(length)
+                if len(body) != length:
+                    raise ValueError('Short sign-in body')
             upstream = None
             for _, address in public_addresses():
                 try:
@@ -157,7 +185,7 @@ class Handler(socketserver.BaseRequestHandler):
                     forward['Host'] = ORIGIN
                     forward['Accept-Encoding'] = 'identity'
                     forward['Connection'] = 'close'
-                    upstream.request(method, target, body=b'' if method == 'POST' else None,
+                    upstream.request(method, target, body=body if method == 'POST' else None,
                                      headers=forward)
                     response = upstream.getresponse()
                     break

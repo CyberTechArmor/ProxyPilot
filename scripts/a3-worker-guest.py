@@ -9,6 +9,13 @@ debugging socket exists in the guest or on the host. Every browser request is
 checked against the fixed synthetic origin policy before it leaves the
 browser; the host origin proxy and bridge fence enforce the same boundary
 again. Page content is untrusted data and never selects an operation.
+
+A4 adds one credential path. `submit_bound_fixture` carries only a binding ID
+on the control channel. The host credential broker writes the bound value
+into a one-shot FIFO on this unit's private tmpfs (never stdin, argv, the
+environment or a file); the runner types it into the login form found by
+typed lookup, permits exactly one POST /api/login, clears the fields and
+drops the bytes. Replies and events carry the binding ID and outcome only.
 """
 import base64
 import fcntl
@@ -16,6 +23,7 @@ import json
 import os
 import queue
 import re
+import select
 import signal
 import socket
 import sys
@@ -41,6 +49,14 @@ VIEWPORT = (1280, 800)
 WATCHDOG_SECONDS = 20
 STEP_SECONDS = 10
 WORKSPACE = '/tmp'
+LOGIN_PATH = '/api/login'
+CREDENTIAL_FIFO = 'pp-a4-credential'
+DELIVERY_SECONDS = 20
+FRAME_MAGIC = b'PPA4'
+MAX_FIELD = 256
+# A5: a pending second factor or consent the origin's session reports after a
+# sign-in (typed names only). Any of them needs a human takeover.
+CHALLENGES = frozenset(('mfa', 'passkey', 'captcha', 'consent'))
 
 
 class Refused(Exception):
@@ -64,10 +80,107 @@ def permits(url, method):
         return False
     if method == 'GET':
         return parts.path in PATHS or bool(ASSET.fullmatch(parts.path))
-    # Sign-in submission remains A4-only: A3 has no credential broker.
+    # POST /api/login is never in the standing policy: only an armed, one-shot
+    # submit_bound_fixture lets exactly one through (Browser._paused).
     if method == 'POST':
         return parts.path == '/api/logout'
     return False
+
+
+def classify_login(status, as_bound, challenge, off_origin):
+    """The typed A5 outcome of one bound submit. Only the runner's own session read
+    naming the bound account is `signed_in`; a status or a vanished form is not."""
+    if off_origin or (isinstance(status, int) and 300 <= status < 400):
+        return 'unexpected_origin'
+    if status == 200 and as_bound:
+        return 'signed_in'
+    if status == 429:
+        return 'rate_limited'
+    if challenge in CHALLENGES:
+        return 'challenge_required'
+    if status in (400, 401, 403):
+        return 'rejected'
+    if status is None or status in (502, 504):
+        return 'timeout'
+    return 'unknown'
+
+
+def printable_field(value):
+    return 0 < len(value) <= MAX_FIELD and all(0x20 <= b <= 0x7e for b in value)
+
+
+def parse_frame(data):
+    """PPA4 | u16 username | u16 password, printable ASCII, exact length."""
+    if len(data) < 8 or bytes(data[:4]) != FRAME_MAGIC:
+        raise Refused('CREDENTIAL_FRAME_INVALID')
+    ulen = int.from_bytes(data[4:6], 'big')
+    if len(data) < 8 + ulen:
+        raise Refused('CREDENTIAL_FRAME_INVALID')
+    plen = int.from_bytes(data[6 + ulen:8 + ulen], 'big')
+    if len(data) != 8 + ulen + plen:
+        raise Refused('CREDENTIAL_FRAME_INVALID')
+    username, password = bytearray(data[6:6 + ulen]), bytearray(data[8 + ulen:])
+    if not printable_field(username) or not printable_field(password):
+        wipe(username)
+        wipe(password)
+        raise Refused('CREDENTIAL_FRAME_INVALID')
+    return username, password
+
+
+def wipe(buffer):
+    """Best effort: overwrite a bytearray the runner owned. Python str copies
+    made for the CDP call cannot be zeroed; they die with this process."""
+    if isinstance(buffer, bytearray):
+        buffer[:] = b'\0' * len(buffer)
+
+
+def receive_credential(path, seconds=None, on_open=None):
+    """Read one framed value from a fresh FIFO on the private tmpfs, then remove it.
+
+    Only guest root can open the FIFO from outside this unit's mount namespace
+    (the host broker, through /proc/<runner>/root). Nothing else is waited on.
+    """
+    try:
+        os.mkfifo(path, 0o600)
+    except FileExistsError as error:
+        raise Refused('CREDENTIAL_CHANNEL_BUSY') from error
+    seconds = DELIVERY_SECONDS if seconds is None else seconds
+    fd = None
+    data = bytearray()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        if on_open is not None:
+            on_open()   # Tells the host the reader is waiting; carries no value.
+        poller = select.poll()
+        poller.register(fd, select.POLLIN | select.POLLHUP)
+        deadline = time.monotonic() + seconds
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise Refused('CREDENTIAL_NOT_DELIVERED')
+            if not poller.poll(int(left * 1000) + 1):
+                continue
+            try:
+                chunk = os.read(fd, 1024)
+            except BlockingIOError:
+                continue
+            if chunk:
+                data += chunk
+                if len(data) > 8 + 2 * MAX_FIELD:
+                    raise Refused('CREDENTIAL_FRAME_INVALID')
+                continue
+            if data:
+                break
+            time.sleep(0.05)   # A writer closed without data: keep waiting to the deadline.
+        return parse_frame(data)
+    finally:
+        wipe(data)
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def validate_config(value):
@@ -299,6 +412,48 @@ FIXED_JSON = '''(async () => {
       !(r.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) return {ok: false};
   return {ok: true, data: await r.json()};
 })()'''
+# Typed lookup of the approved origin's login form: the dialog by its accessible
+# name, then exactly one username field, one password field and one submit
+# button, all in the same form. Returns booleans only, never a field value.
+LOGIN_FORM = '''(() => {
+  const want = 'Sign in to your workspace';
+  const label = d => (d.getAttribute('aria-label') || '').trim() ||
+    (d.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean)
+      .map(id => (document.getElementById(id)?.textContent || '').trim()).join(' ').trim();
+  const dialogs = [...document.querySelectorAll('[role="dialog"],dialog')]
+    .filter(d => label(d) === want && (d.tagName !== 'DIALOG' || d.open) && d.getClientRects().length > 0);
+  if (dialogs.length !== 1) return null;
+  const users = [...dialogs[0].querySelectorAll('input[autocomplete="username"]')];
+  const passwords = [...dialogs[0].querySelectorAll('input[type="password"]')];
+  const submits = [...dialogs[0].querySelectorAll('button[type="submit"]')];
+  if (users.length !== 1 || passwords.length !== 1 || submits.length !== 1) return null;
+  const [user, password, submit] = [users[0], passwords[0], submits[0]];
+  if (!user.form || user.form !== password.form || submit.form !== user.form ||
+      !['email', 'text'].includes(user.type)) return null;
+  const clear = el => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '');
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+  };
+  const op = %s;
+  if (op === 'check') return true;
+  if (op === 'username' || op === 'password') {
+    const el = op === 'username' ? user : password;
+    el.focus();
+    clear(el);
+    return document.activeElement === el && el.value === '';
+  }
+  if (op === 'filled') return user.value.length === %d && password.value.length === %d;
+  if (op === 'submit') { submit.click(); return true; }
+  if (op === 'clear') { clear(user); clear(password); return user.value === '' && password.value === ''; }
+  return null;
+})()'''
+LOGOUT = '''(async () => {
+  try {
+    const r = await fetch('/api/logout', {method: 'POST', credentials: 'same-origin', redirect: 'manual',
+      cache: 'no-store', signal: AbortSignal.timeout(8000)});
+    return r.ok;
+  } catch (e) { return false; }
+})()'''
 EGRESS_PROBE = '''(async () => {
   const out = {};
   const limit = ms => AbortSignal.timeout(ms);
@@ -331,8 +486,18 @@ class Browser:
         self.channel = channel
         self.statuses = {}
         self.blocked = []
+        # A5: set when the armed sign-in request itself was redirected.
+        self.login_redirected = False
         self.allowed = 0
         self.main_target = None
+        # One-shot sign-in gate: only submit_bound_fixture arms it, for one POST.
+        self.login_armed = 0
+        self.login_posts = 0
+        self.login_status = None
+        self.submitted = False
+        # The bound account's user name (not secret; the broker's binding names it),
+        # kept after a submit so a later session read can name it too.
+        self.bound_email = None
         home = os.path.join(WORKSPACE, 'home')
         profile = os.path.join(WORKSPACE, 'profile')
         for path in (home, profile):
@@ -373,6 +538,7 @@ class Browser:
         self.cdp = Cdp(to_w, from_r)
         self.cdp.on('Fetch.requestPaused', self._paused)
         self.cdp.on('Network.responseReceived', self._response)
+        self.cdp.on('Network.requestWillBeSent', self._request)
         self.cdp.on('Target.targetCreated', self._created)
         self.cdp.on('Target.attachedToTarget', self._attached)
         try:
@@ -415,6 +581,13 @@ class Browser:
     def _paused(self, params, session):
         request = params.get('request', {})
         url, method = request.get('url'), request.get('method')
+        if method == 'POST' and url == ORIGIN + LOGIN_PATH and self.login_armed > 0:
+            # The armed submit's own request; its body is never read or logged here.
+            self.login_armed -= 1
+            self.login_posts += 1
+            self.allowed += 1
+            self.cdp.notify('Fetch.continueRequest', {'requestId': params.get('requestId')}, session)
+            return
         if permits(url, method):
             self.allowed += 1
             self.cdp.notify('Fetch.continueRequest', {'requestId': params.get('requestId')}, session)
@@ -430,7 +603,19 @@ class Browser:
         self.cdp.notify('Fetch.failRequest', {'requestId': params.get('requestId'),
                                                'errorReason': 'BlockedByClient'}, session)
 
+    def _request(self, params, session):
+        # A redirect of the sign-in request arrives as a new request carrying the
+        # login's redirect response. Other page loads after a sign-in (fonts,
+        # images) are refused by the policy too, but they are not the sign-in.
+        redirect = params.get('redirectResponse')
+        if (isinstance(redirect, dict) and redirect.get('url') == ORIGIN + LOGIN_PATH
+                and self.login_posts and not self.login_redirected):
+            self.login_redirected = True
+
     def _response(self, params, session):
+        response = params.get('response', {})
+        if response.get('url') == ORIGIN + LOGIN_PATH and self.login_posts:
+            self.login_status = response.get('status')
         if session == getattr(self, 'session', None) and params.get('type') == 'Document':
             self.statuses[params.get('loaderId')] = (params.get('response', {}).get('status'),
                                                      params.get('response', {}).get('url'))
@@ -499,9 +684,67 @@ class Browser:
     def dialog_open(self):
         return self.isolated(DIALOG_OPEN) is True
 
-    def action(self, name):
+    def login_form(self, op, filled=(0, 0)):
+        return self.isolated(LOGIN_FORM % (json.dumps(op), filled[0], filled[1]))
+
+    def submit_bound_fixture(self, binding_id):
+        """Type the broker-delivered value into the typed login form; report the outcome only."""
+        if not self.dialog_open() or self.login_form('check') is not True:
+            raise Refused('LOGIN_FORM_MISSING')
+        username, password = receive_credential(
+            os.path.join(WORKSPACE, CREDENTIAL_FIFO),
+            on_open=lambda: self.channel.emit({'event': 'credential_channel', 'binding_id': binding_id}))
+        try:
+            for op, value in (('username', username), ('password', password)):
+                if self.login_form(op) is not True:
+                    raise Refused('LOGIN_FORM_MISSING')
+                self.cdp.call('Input.insertText', {'text': value.decode('ascii')}, self.session)
+            if self.login_form('filled', (len(username), len(password))) is not True:
+                raise Refused('CREDENTIAL_ENTRY_FAILED')
+            self.login_status, self.login_posts, self.login_armed = None, 0, 1
+            self.submitted = True
+            self.bound_email = username.decode('ascii').lower()
+            self.login_redirected = False
+            self.login_form('submit')
+            deadline = time.monotonic() + STEP_SECONDS
+            while self.login_status is None and not self.login_redirected and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.login_armed = 0
+            status = self.login_status
+            try:
+                session = self.fixed_json('/api/session')
+            except Refused:
+                session = None
+            as_bound = (isinstance(session, dict) and session.get('authenticated') is True and
+                        session.get('email') == username.decode('ascii').lower())
+            challenge = session.get('challenge') if isinstance(session, dict) else None
+            # The sign-in itself was redirected (a 3xx status is also caught below).
+            off_origin = self.login_redirected
+        finally:
+            self.login_armed = 0
+            wipe(username)
+            wipe(password)
+            try:
+                # A rejected sign-in leaves the dialog open: never leave the value in it.
+                self.login_form('clear')
+            except Refused:
+                pass
+        outcome = classify_login(status, as_bound, challenge, off_origin)
+        return {'binding_id': binding_id, 'outcome': outcome, 'login_requests': self.login_posts,
+                'untrusted_page_claim_authenticated_as_bound_account': as_bound}
+
+    def logout(self):
+        """POST /api/logout before teardown when this attempt submitted a credential."""
+        try:
+            return 'done' if self.isolated(LOGOUT, await_promise=True, timeout=10) is True else 'failed'
+        except Refused:
+            return 'failed'
+
+    def action(self, name, binding_id=None):
         if name == 'submit_bound_fixture':
-            raise Refused('CREDENTIAL_BROKER_UNAVAILABLE')
+            if not isinstance(binding_id, str) or not UUID.fullmatch(binding_id):
+                raise Refused('INVALID_COMMAND')
+            return self.submit_bound_fixture(binding_id)
         if name == 'open_landing':
             self.navigate('/')
             return {'at': 'landing'}
@@ -519,8 +762,14 @@ class Browser:
             return {'at': 'workspace'}
         if name == 'read_session':
             data = self.fixed_json('/api/session')
-            return {'untrusted_page_claim_authenticated': isinstance(data, dict) and
-                    data.get('authenticated') is True and data.get('email') == 'demo@fractionate.ai'}
+            out = {'untrusted_page_claim_authenticated': isinstance(data, dict) and
+                   data.get('authenticated') is True and data.get('email') == 'demo@fractionate.ai'}
+            if self.bound_email is not None:
+                # A5: after a submit, whether the session names the bound account.
+                out['untrusted_page_claim_authenticated_as_bound_account'] = (
+                    isinstance(data, dict) and data.get('authenticated') is True and
+                    data.get('email') == self.bound_email)
+            return out
         if name == 'read_files':
             data = self.fixed_json('/api/files')
             files = data.get('files') if isinstance(data, dict) else None
@@ -882,12 +1131,17 @@ def serve(config, channel, stream=None):
                          'observe': {'id', 'op'}, 'egress_probe': {'id', 'op'}, 'proof': {'id', 'op'},
                          'action': {'id', 'op', 'action'}, 'input': {'id', 'op', 'input'},
                          'locate': {'id', 'op', 'target'}}.get(op)
+                if op == 'action' and command.get('action') == 'submit_bound_fixture':
+                    shape = {'id', 'op', 'action', 'binding_id'}
                 if shape is None or set(command) != shape:
                     raise Refused('INVALID_COMMAND')
                 if op == 'ping':
                     result = {'pong': True}
                 elif op == 'stop':
-                    channel.emit({'id': ident, 'ok': True, 'result': {'stopping': True}})
+                    result = {'stopping': True}
+                    if browser is not None and browser.submitted and not browser.exited.is_set():
+                        result['logout'] = browser.logout()
+                    channel.emit({'id': ident, 'ok': True, 'result': result})
                     return 0
                 elif op == 'proof':
                     if workload not in PROOF_RUN:
@@ -901,7 +1155,7 @@ def serve(config, channel, stream=None):
                 elif op == 'action':
                     if command['action'] not in ACTIONS:
                         raise Refused('INVALID_BROWSER_ACTION')
-                    result = browser.action(command['action'])
+                    result = browser.action(command['action'], command.get('binding_id'))
                 elif op == 'view':
                     result = browser.view()
                 elif op == 'input':

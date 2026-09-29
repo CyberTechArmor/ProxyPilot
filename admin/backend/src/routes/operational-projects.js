@@ -1,12 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { OperationsError, parse, revision, schemas } from '../lib/operational-projects-logic.js';
 
+// Sudo is injected (middleware/auth.js requireSudo in the server). Without it
+// no approval can pass: the default answers the same sudo_required envelope.
+const noSudo = (_req, res) => res.status(401).json({ error: 'sudo_required', sudo_required: true,
+  message: 'This action requires sudo re-authentication.' });
+
 // Router and limiter come from the server; never imports the production DB.
-export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false }) {
+// `agentRuns` (A6) is the supervision service, present only when its flag is on.
+export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false,
+  agentRuns = null, requireSudo = noSudo }) {
   const router = Router();
+  const runsEnabled = enabled && agentsEnabled && !!agentRuns;
   router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   router.get('/capabilities', (_req, res) => res.json({ enabled, stage: 'human-workflow', ui_available: enabled,
-    evidence_enabled: enabled && evidenceEnabled, agents_metadata_enabled: enabled && agentsEnabled }));
+    evidence_enabled: enabled && evidenceEnabled, agents_metadata_enabled: enabled && agentsEnabled,
+    agent_runs_enabled: runsEnabled, ...(runsEnabled ? { agent_execution_available: agentRuns.execution.available,
+      agent_execution_message: agentRuns.execution.message } : {}) }));
   router.use((_req, res, next) => enabled ? next() : res.status(404).json({ error: 'Not found' }));
   router.use((req, res, next) => {
     try {
@@ -30,11 +40,34 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
       });
     }
   };
+  // A6 agent runs: async, and a refusal carries its typed code (and a few typed
+  // fields such as the active run or the stale reason) next to the words. Access
+  // denials are audited like the other agent routes.
+  const agentHandle = (fn, status = 200, denialAction = null) => async (req, res) => {
+    try {
+      const data = await fn(req, req.operationsActor);
+      return res.status(typeof status === 'function' ? status(data) : status).json(data);
+    } catch (err) {
+      const known = err instanceof OperationsError;
+      if (denialAction && known && [401, 403, 404].includes(err.status)) {
+        try { store.auditDenied(req.operationsActor, req.params?.id, denialAction, err.status); } catch { /* preserve refusal */ }
+      }
+      return res.status(known ? err.status : 500).json({
+        error: known ? err.message : 'Unable to complete operational request',
+        ...(known && err.code ? { code: err.code, ...(err.extra ?? {}) } : {}),
+      });
+    }
+  };
+  const agentRunsOnly = (_req, res, next) => runsEnabled ? next() : res.status(404).json({ error: 'Not found' });
   const expected = req => revision(req.get('If-Match'));
   if (evidenceRouter) router.use('/:id/demonstrations', evidenceRouter);
   const empty = req => parse(schemas.empty, req.body ?? {});
   const agentsOnly = (_req,res,next) => agentsEnabled ? next() : res.status(404).json({error:'Not found'});
   router.get('/directory', agentsOnly, handle((r,a)=>store.directory(a,r.query),200,'directory_read'));
+  // Human-only: approving needs the session's sudo elevation plus the typed digest.
+  router.get('/agent-approvals', agentRunsOnly, agentHandle((_r,a)=>agentRuns.inbox(a),200,'agent_inbox_read'));
+  router.post('/agent-approvals/:approvalId', agentRunsOnly, requireSudo,
+    agentHandle((r,a)=>agentRuns.approve(a,r.params.approvalId,r.body,{elevated:true}),200,'agent_approval'));
   router.get('/', handle((r, a) => store.list(a, r.query)));
   router.post('/', handle((r, a) => ({ project: store.create(a, r.body) }), 201));
   router.get('/:id', handle((r, a) => ({ project: store.get(a, r.params.id) })));
@@ -53,6 +86,16 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
     handle((r,a)=>store.updateProfile(a,r.params.id,r.params.profileId,expected(r),r.body),200,'profile_update'));
   router.put('/:id/agent-profiles/:profileId/guide', agentsOnly,
     handle((r,a)=>store.assignProfile(a,r.params.id,r.params.profileId,expected(r),r.body),200,'profile_guide_assignment'));
+  router.put('/:id/agent-profiles/:profileId/model-guide-consent', agentRunsOnly,
+    handle((r,a)=>store.modelGuideConsent(a,r.params.id,r.params.profileId,expected(r),r.body),200,'profile_model_guide_consent'));
+  router.get('/:id/agent-profiles/:profileId/rules', agentRunsOnly,
+    agentHandle((r,a)=>agentRuns.rules(a,r.params.id,r.params.profileId),200,'profile_rules_read'));
+  router.get('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.list(a,r.params.id,r.query),200,'agent_runs_read'));
+  router.post('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.start(a,r.params.id,r.body),201,'agent_run_start'));
+  router.get('/:id/agent-runs/:runId', agentRunsOnly, agentHandle((r,a)=>agentRuns.status(a,r.params.id,r.params.runId),200,'agent_run_read'));
+  router.post('/:id/agent-runs/:runId/stop', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.stop(a,r.params.id,r.params.runId);},
+    data=>data.stopping?202:200,'agent_run_stop'));
+  router.get('/:id/agent-runs/:runId/view', agentRunsOnly, agentHandle((r,a)=>agentRuns.view(a,r.params.id,r.params.runId),200,'agent_run_view'));
   router.delete('/:id/agent-profiles/:profileId', agentsOnly,
     handle((r,a)=>{empty(r);return store.deleteProfile(a,r.params.id,r.params.profileId,expected(r));},200,'profile_delete'));
   router.get('/:id/draft', handle((r, a) => ({ draft: store.draft(a, r.params.id) })));

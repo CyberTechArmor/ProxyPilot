@@ -3,12 +3,14 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 
 // Client and receipt verifier for the host-owned A3 worker supervisor
 // (scripts/a3-worker-supervisor.py). The backend reaches only its narrow
-// backend socket: status, launch, renew, one typed browser action, stop. It
+// backend socket: status, launch, renew, one typed browser action, one A5
+// model_step (one action name from an allowed set, or a refusal), one A6 view
+// (a bounded PNG frame of the model's live attempt, pixels only), stop. It
 // never holds the receipt signing key; it verifies each teardown receipt with
 // the host public key and the proof VM identity it was configured with.
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const METHODS = new Set(['status', 'launch', 'renew', 'action', 'stop']);
+const METHODS = new Set(['status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop']);
 const MAX_REPLY = 4 * 1024 * 1024;
 const coded = (code) => { const error = new Error(code); error.code = code; return error; };
 

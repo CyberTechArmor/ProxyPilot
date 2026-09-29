@@ -293,8 +293,12 @@ class LocalBrowserTests(unittest.TestCase):
             self.assertEqual(send('action', action='read_session')['result'],
                              {'untrusted_page_claim_authenticated': False})
             self.assertEqual(send('action', action='read_files')['error'], 'BROWSER_READBACK_FAILED')
-            self.assertEqual(send('action', action='submit_bound_fixture')['error'],
-                             'CREDENTIAL_BROKER_UNAVAILABLE')
+            # A4: the binding ID is required on the channel, and a page without the
+            # typed login form refuses before any credential channel is opened.
+            self.assertEqual(send('action', action='submit_bound_fixture')['error'], 'INVALID_COMMAND')
+            self.assertEqual(send('action', action='submit_bound_fixture', binding_id=ATTEMPT)['error'],
+                             'LOGIN_FORM_MISSING')
+            self.assertFalse((self.workspace / g.CREDENTIAL_FIFO).exists())
             self.assertEqual(send('action', action='shell')['error'], 'INVALID_BROWSER_ACTION')
             self.assertEqual(send('input', input={'kind': 'eval'})['error'], 'INVALID_INPUT')
             self.assertEqual(send('action', action='open_landing', url='https://x')['error'], 'INVALID_COMMAND')

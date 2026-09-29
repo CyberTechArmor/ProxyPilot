@@ -7,8 +7,13 @@ next work. Recheck every mutable value below (SHAs, services, VM boot) before
 acting. If this page and a later dated evidence entry disagree, the evidence
 wins.
 
-**Status in one line:** every automated A3 criterion has passed on the VM, but
-A3 is **not accepted** yet.
+**Status (updated after acceptance):** A3 was **accepted on 2026-09-28** (last
+section of the [A3 evidence](fractionate-agents-a3-evidence.md)); A4 now builds
+on it, see the [A4 reference](fractionate-agents-a4-reference.md). The status
+notes below are the pre-acceptance snapshot.
+
+**Pre-acceptance status:** every automated A3 criterion has passed on the VM, but
+A3 was **not accepted** yet.
 
 - The supervisor and runner are installed from code commit `0572dcff`. The
   second target run passed all 18 cases.
@@ -72,7 +77,7 @@ A3 is **not accepted** yet.
 | Network | `incusbr0`, TAP `ppa3proof0`, guest `10.185.17.179` on NIC `enp5s0`, MAC `10:66:6a:55:f6:3f`, gateway `10.185.17.1` |
 | Host units | `proxypilot-a3-fence.service` (active/exited), `proxypilot-a3-origin-proxy.service` (active/running on `10.185.17.1:18083`), `proxypilot-a3-supervisor.service` (active/running; key ID `d6817618265ac253ea341b9f3f69dfe102ba9f1077e597f9accda4e113d0d517`, the old `c31fecee…` archived) |
 | Rollback snapshot | `pp-mcp-pre-network-20260927-222658`. Keep it; the fence installer also requires it. |
-| Proxy certificate | Self-signed, 7 days from install. Proxy `status` refuses with under 24 h left, so launches fail closed from about **2026-10-03** until the proxy is reinstalled and re-probed. |
+| Proxy certificate | Self-signed (CN `demo.fractionate.ai`), pinned by SPKI in the guest browser; not Caddy or Let's Encrypt. It lives 7 days, and proxy `status` refuses it with under 24 h left. Since `d932ecd2`, `proxypilot-a3-proxy-renew.timer` (installed with the supervisor) re-issues it every ~4 days via `a3-install-proxy.py renew`; see the [A4 evidence](fractionate-agents-a4-evidence.md) section "proxy certificate: automatic renewal". Before that, only a proxy reinstall re-issued it. Proven on the host on 2026-09-28 (the timer's service ran, then 21 proxy cases and three sessions passed on the renewed pin `ASpAFpze…`). |
 
 ## Component map
 

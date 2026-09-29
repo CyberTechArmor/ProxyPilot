@@ -5,6 +5,7 @@ import { createOperationsRouter } from './routes/operational-projects.js';
 import { createOperationsStore } from './lib/operational-projects-store.js';
 import { operationsEnabled } from './lib/operational-projects-logic.js';
 import { evidenceConfiguration, createEvidenceRuntime } from './lib/operational-evidence-runtime.js';
+import { agentRunsConfiguration, createAgentRunRuntime } from './lib/operational-agent-runtime.js';
 import { createEvidenceRouter, evidenceHeaders } from './routes/operational-evidence.js';
 import http from 'http';
 import cors from 'cors';
@@ -40,7 +41,7 @@ import { createMcpRouter, createMcpAdminRouter } from './routes/mcp.js';
 import { createEditorMcpRouter, createEditorAdminRouter } from './routes/mcp-editor.js';
 import { tlsCertsRouter } from './routes/tls-certs.js';
 import { brandingRouter } from './routes/branding.js';
-import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole } from './middleware/auth.js';
+import { authenticateToken, assertJwtSecret, sweepStaleSessions, blockPendingRole, requireSudo } from './middleware/auth.js';
 import { reconcileAllServiceL4Forwards } from './lib/l4-startup.js';
 import { cacheControlFor, NO_CACHE } from './lib/static-cache-logic.js';
 import { brandedManifest, publicBranding, withInstalledAppHint } from './lib/branding-logic.js';
@@ -603,11 +604,17 @@ app.use('/api/user', authenticateToken, userRouter);
 const evidenceConfig = evidenceConfiguration();
 const evidenceRuntime = createEvidenceRuntime(evidenceConfig);
 const operationsStore = operationsEnabled() ? createOperationsStore(getDb(), { evidenceFactory: evidenceRuntime?.factory }) : null;
+// A6: null unless OPERATIONS_AGENT_RUNS_ENABLED (and Operations + agent metadata)
+// are on; without a configured supervisor it answers EXECUTION_UNAVAILABLE.
+const agentRuns = createAgentRunRuntime(agentRunsConfiguration(), { db: getDb(),
+  log: entry => console.log('[agent-runs]', JSON.stringify(entry)) });
 app.use('/api/operational-projects', authenticateToken, blockPendingRole, createOperationsRouter({
   Router: express.Router,
   enabled: operationsEnabled(),
   agentsEnabled: process.env.OPERATIONS_AGENTS_METADATA_ENABLED === 'true',
   store: operationsStore,
+  agentRuns,
+  requireSudo,
   evidenceEnabled: evidenceConfig.enabled,
   evidenceRouter: createEvidenceRouter({ Router: express.Router, enabled: evidenceConfig.enabled,
     store: operationsStore?.evidence, service: evidenceRuntime?.service(operationsStore.evidence), csrf: csrfProtection }),
@@ -935,6 +942,12 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
+
+  // A6: a run a previous process left active is fenced and its verified receipt
+  // collected; nothing is resumed. Only when a supervisor is configured.
+  if (agentRuns?.execution.available) {
+    agentRuns.recover().catch((err) => console.error('[agent-runs] recovery failed:', err?.code || err?.message || err));
+  }
 
   // Self-update bookkeeping (docs/features/self-update.md): the backend that
   // asked for an update died in the container rebuild, so the NEW one records

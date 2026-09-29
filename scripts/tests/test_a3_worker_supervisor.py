@@ -46,7 +46,9 @@ for line in sys.stdin:
             time.sleep(60)
         reply['result'] = {'at': command['action']}
     elif op == 'view':
-        reply['result'] = {'png_base64': 'iVBORw0KGgo=', 'width': 1280, 'height': 800}
+        # The real runner also reports the page URL; the backend view must drop it.
+        reply['result'] = {'png_base64': 'iVBORw0KGgo=', 'width': 1280, 'height': 800,
+                           'untrusted_page_url': 'https://demo.fractionate.ai/?token=fixture'}
     elif op == 'stop':
         print(json.dumps(reply), flush=True); sys.exit(0)
     elif op == 'proof':
@@ -152,6 +154,19 @@ class FakeHost:
 
     def worker_units(self):
         return [u for u in self.units if self.alive(u)]
+
+    def broker_available(self):
+        return getattr(self, 'broker_object', None) is not None
+
+    def broker(self, method, params, timeout=30):
+        if not self.broker_available():
+            raise s.Refused('CREDENTIAL_BROKER_UNAVAILABLE')
+        # Through JSON, as over the socket: nothing but the typed fields and a code cross.
+        try:
+            result = self.broker_object.dispatch(method, json.loads(json.dumps(params)))
+        except Exception as error:  # noqa: BLE001 - the broker's own Refused class
+            raise s.Refused(getattr(error, 'code', 'INTERNAL')) from None
+        return json.loads(json.dumps(result))
 
     def sign(self, payload):
         message = self.root / 'message'
@@ -265,7 +280,10 @@ class SupervisorTests(unittest.TestCase):
                          (s.VM_UUID, BOOT, s.UNIT_PREFIX + ATTEMPT))
         self.assertEqual(result['workspace']['kind'], 'unit-private-tmpfs')
         self.assertEqual(self.sup.action(self.ref(action='open_landing'))['ordinal'], 1)
-        self.assertRefused('CREDENTIAL_BROKER_UNAVAILABLE', self.sup.action, self.ref(action='submit_bound_fixture'))
+        # A4: the binding ID is required, and a run launched without a binding has none.
+        self.assertRefused('INVALID_REQUEST', self.sup.action, self.ref(action='submit_bound_fixture'))
+        self.assertRefused('CREDENTIAL_NOT_BOUND', self.sup.action,
+                           self.ref(action='submit_bound_fixture', binding_id=WORKSPACE))
         self.assertRefused('INVALID_BROWSER_ACTION', self.sup.action, self.ref(action='run_shell'))
         self.assertRefused('INVALID_REQUEST', self.sup.action, self.ref(action='open_landing', url='https://x'))
         self.assertRefused('STALE_FENCE', self.sup.action, self.ref(fence=2, action='open_landing'))
@@ -325,7 +343,13 @@ class SupervisorTests(unittest.TestCase):
     def test_takeover_fences_model_and_operator_only_controls(self):
         self.sup.launch(launch_spec())
         self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'takeover', self.ref())
-        self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'view', self.ref())
+        self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'input',
+                           self.ref(input={'kind': 'key', 'key': 'Tab'}))
+        self.assertRefused('METHOD_NOT_ALLOWED', self.sup.dispatch, 'observe', self.ref())
+        # A6: the backend view is pixels only; a later frame waits a second.
+        self.assertEqual(self.sup.dispatch('view', self.ref()),
+                         {'png_base64': 'iVBORw0KGgo=', 'width': 1280, 'height': 800})
+        self.assertRefused('VIEW_BUSY', self.sup.dispatch, 'view', self.ref())
         # The backend socket cannot select a proof workload or any other field.
         self.assertRefused('INVALID_LAUNCH', self.sup.dispatch, 'launch', {**launch_spec(ATTEMPT2, 2), 'workload': 'proof:cpu'})
         self.assertEqual(self.host.spawns, 1)
@@ -334,6 +358,10 @@ class SupervisorTests(unittest.TestCase):
                            self.ref(input={'kind': 'click', 'x': 1, 'y': 1}), operator=True)
         self.assertEqual(self.sup.dispatch('takeover', self.ref(), operator=True)['state'], 'human')
         self.assertRefused('TAKEN_OVER', self.sup.action, self.ref(action='read_session'))
+        # A takeover is the host operator's: the backend cannot watch it.
+        self.sup.views.clear()
+        self.assertRefused('TAKEN_OVER', self.sup.dispatch, 'view', self.ref())
+        self.assertIn('untrusted_page_url', self.sup.dispatch('view', self.ref(), operator=True))
         self.assertRefused('INVALID_INPUT', self.sup.dispatch, 'input', self.ref(input={'kind': 'eval'}), operator=True)
         self.sup.dispatch('input', self.ref(input={'kind': 'key', 'key': 'Escape'}), operator=True)
         receipt = self.sup.dispatch('stop', self.ref(reason='taken_over'), operator=True)['receipt']
@@ -425,6 +453,30 @@ class SupervisorTests(unittest.TestCase):
         self.sup.recover()
         time.sleep(0.2)
         self.assertFalse(self.host.alive(s.UNIT_PREFIX + ATTEMPT2))
+
+    def test_backend_view_is_bounded_pixels_that_never_renew_the_lease(self):
+        self.sup.launch(launch_spec())
+        lease = self.sup.state['attempts'][ATTEMPT]['lease']
+        self.clock.value += 5
+        frame = self.sup.dispatch('view', self.ref())
+        self.assertEqual(set(frame), {'png_base64', 'width', 'height'})
+        # Watching never keeps an attempt alive; only the coordinator's renew does.
+        self.assertEqual(self.sup.state['attempts'][ATTEMPT]['lease'], lease)
+        self.assertRefused('VIEW_BUSY', self.sup.dispatch, 'view', self.ref())
+        with patch.object(s.time, 'monotonic', lambda: 10 ** 9):
+            self.assertEqual(self.sup.dispatch('view', self.ref())['width'], 1280)
+        self.assertRefused('STALE_FENCE', self.sup.dispatch, 'view', self.ref(fence=2))
+        self.assertRefused('INVALID_REQUEST', self.sup.dispatch, 'view', self.ref(url='https://example.com'))
+        self.assertRefused('UNKNOWN_ATTEMPT', self.sup.dispatch, 'view', self.ref(attempt=ATTEMPT2))
+        for bad in ({'png_base64': 'aGVsbG8=', 'width': 1280, 'height': 800},
+                    {'png_base64': 'not base64!', 'width': 1280, 'height': 800},
+                    {'png_base64': 'iVBORw0KGgo=', 'width': 0, 'height': 800},
+                    {'png_base64': 'iVBORw0KGgo=' + 'A' * s.MAX_VIEW_BASE64, 'width': 1280, 'height': 800},
+                    {'width': 1280, 'height': 800}, None):
+            self.assertRefused('VIEW_INVALID', s.frame_only, bad)
+        self.clock.value = self.sup.state['attempts'][ATTEMPT]['lease'] + 1
+        self.sup.views.clear()
+        self.assertRefused('LEASE_EXPIRED', self.sup.dispatch, 'view', self.ref())
 
     def test_socket_methods_are_separated_and_root_only(self):
         backend = self.root / 'b.sock'
@@ -542,8 +594,8 @@ class SupervisorBrowserTests(unittest.TestCase):
         self.assertEqual(self.sup.action(dict(ref, action='read_session'))['result'],
                          {'untrusted_page_claim_authenticated': False})
         with self.assertRaises(s.Refused) as caught:
-            self.sup.action(dict(ref, action='submit_bound_fixture'))
-        self.assertEqual(caught.exception.code, 'CREDENTIAL_BROKER_UNAVAILABLE')
+            self.sup.action(dict(ref, action='submit_bound_fixture', binding_id=WORKSPACE))
+        self.assertEqual(caught.exception.code, 'CREDENTIAL_NOT_BOUND')
         probe = self.sup.dispatch('egress_probe', ref, operator=True)
         self.assertEqual(set(probe['page_attempts'].values()), {'refused'})
         self.assertTrue(base64.b64decode(self.sup.dispatch('view', ref, operator=True)['png_base64']).startswith(b'\x89PNG'))

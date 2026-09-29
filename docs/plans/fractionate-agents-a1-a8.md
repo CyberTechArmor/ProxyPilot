@@ -1,18 +1,29 @@
 # Official bounded plan: first usable supervised agent
 
 > **Status (2026-09-28):** A2 merged as PR #677; migration 1106 is additive and
-> its metadata gate defaults off. A3 is **in progress, not accepted**: the host
-> fence, fixed-origin proxy, disposable Chromium and fixed cgroup probes pass on
-> the proof VM, and the host-owned worker supervisor, guest runner, typed
-> backend client and signed teardown receipts are implemented. The supervisor is
-> installed on the proof VM, and every automated target case has passed (18/18
-> lifecycle, negative and overrun cases, plus the confirmed worker minimums).
-> Acceptance still needs a real person on the human page and the candidate
-> frontend build; see the
-> dated [A3 evidence](fractionate-agents-a3-evidence.md), the orientation page
-> [A3 reference](fractionate-agents-a3-reference.md) and the next bounded
-> [A3 acceptance prompt](fractionate-agents-a3-acceptance-prompt.md). A4 stays
-> gated on A3.
+> its metadata gate defaults off. A3 is **accepted** (PR #698; see the last
+> section of the [A3 evidence](fractionate-agents-a3-evidence.md)), with the host
+> reboot proof, the backend socket mount and coordinator (A5) and
+> S6/SEC-01/SEC-04 open by name. A4 was **accepted on 2026-09-28** (last
+> section of the [A4 evidence](fractionate-agents-a4-evidence.md)): the host
+> credential/provider broker, the bound sign-in path through the A3 supervisor,
+> the one bounded `POST /api/login` in the origin proxy, the `gpt-6-luna` route
+> with reservation and settlement, the proof harness and the canary scan pass
+> every local suite; on the host the proxy proof (21), the full A3 proof
+> (19/19), all six A4 cases (bound sign-in, rotation, revocation, egress,
+> budget with one real `gpt-6-luna` call, proxy policy) and the canary scan
+> (13 sinks, 0 matches) passed on the host; see the
+> [A4 evidence](fractionate-agents-a4-evidence.md) and the orientation page
+> [A4 reference](fractionate-agents-a4-reference.md). A5 was **accepted on
+> 2026-09-29** on the proof host (branch `claude/beautiful-maxwell-9bldxg`, code
+> `9b9a15ed`, coordinator in a host proof harness, decision 1 option A;
+> [A5 reference](fractionate-agents-a5-reference.md),
+> [A5 evidence](fractionate-agents-a5-evidence.md)). A6 is **implemented and
+> proven locally, not accepted** (branch `ccr-4216e4d3-jsij65`; the host run for
+> its one widening, a read-only backend-socket `view`, is pending;
+> [A6 reference](fractionate-agents-a6-reference.md),
+> [A6 evidence](fractionate-agents-a6-evidence.md)). A7 waits for A6's
+> acceptance ([A7 prompt](fractionate-agents-a7-prompt.md)).
 
 Approved sequence by user direction, 2026-09-25. This plan supersedes the earlier
 suggested next step of D5 and the unbounded future-agent sequence. It establishes
@@ -43,10 +54,10 @@ new blocking dependency and place it under the affected section for review.
 |---|---|---|---|
 | A1 — Scope and architecture | Select one useful workflow/application; define success, permitted actions, human approvals, trust boundaries, identity/state model, reuse and dependencies. Refine A2–A8 contracts without implementing runtime. | Source-grounded architecture, acceptance matrix, security dependency map, selected synthetic pilot, and executable A2 prompt. | **Design complete:** live demo verified; site/project/guide/human bindings and live authority remain later gates |
 | A2 — Project access and agent profiles | Optional owner-managed project site origin, hidden/read-only/collaborative discovery with explicit member roles; stable project/profile/run/worker/binding identities; profile CRUD and optional scoped guide assignment; current-user authority, no privilege inheritance from names or broad management roles. | Hidden-project non-disclosure, site validation/change, native authorization, cross-project, stale grant/account and audit tests; accessible access/profile UI; no compute from profile creation. | **Merged** (PR #677); metadata gate off |
-| A3 — Isolated execution environment | One selected worker/browser environment; typed launch/stop contracts, private run workspace, egress/tool limits, hard resource budgets and cleanup. Resolve relevant host-boundary blockers. | Escape/unauthorized-operation refusals, cancellation/cleanup and target isolation checks; no host-root execution available to the model. | **In progress:** supervisor installed; 18/18 target cases and minimums pass; real-person human page and candidate frontend build open |
-| A4 — Credentials and provider connection | One initial provider; contributor-specific project credential intake into OpenBao, separately granted Infisical/Vaultwarden destination feasibility, scoped agent binding, brokered access, rotation/revocation and bounded provider spending. Retain administrator re-authentication/MFA boundaries. | Positive/negative credential access, destination consistency and real cancellation/revocation tests in the authorized environment; no secrets in model context, logs or browser output where non-disclosure is claimed. | Pending A3; vault cascade requires reviewed feasibility |
-| A5 — Core execution loop | Explicit run start, pin approved guide version, bounded tool/action loop, durable state/progress/results, approval checkpoints and refusal outside permitted actions. | One synthetic workflow completes; tool errors, stale authority, prompt injection/untrusted page content, budgets and stop requests fail safely; no implicit authority from guide/evidence content. | Pending A4 |
-| A6 — Supervision UI | Minimal Agents/Flightdeck views for the selected workflow: start/stop, view-only observation, progress, help/approval requests and result inspection. | Real role-based browser journeys, keyboard/accessibility, 375px form completion and existing six-width/two-theme checks; no dead controls or redesign of Dev Studio. | Pending A5 |
+| A3 — Isolated execution environment | One selected worker/browser environment; typed launch/stop contracts, private run workspace, egress/tool limits, hard resource budgets and cleanup. Resolve relevant host-boundary blockers. | Escape/unauthorized-operation refusals, cancellation/cleanup and target isolation checks; no host-root execution available to the model. | **Accepted 2026-09-28** (PR #698); host reboot proof, backend socket mount/coordinator (A5) and S6/SEC-01/SEC-04 open by name |
+| A4 — Credentials and provider connection | One initial provider; contributor-specific project credential intake into OpenBao, separately granted Infisical/Vaultwarden destination feasibility, scoped agent binding, brokered access, rotation/revocation and bounded provider spending. Retain administrator re-authentication/MFA boundaries. | Positive/negative credential access, destination consistency and real cancellation/revocation tests in the authorized environment; no secrets in model context, logs or browser output where non-disclosure is claimed. | **Accepted (2026-09-28):** one OpenBao-backed binding delivered by a host broker into the A3 runner's one-shot FIFO (never the model, runner channel, logs, receipts or DB); bounded JSON `POST /api/login` in the proxy; rotation, revocation, logout and cookie-jar disposal; one `gpt-6-luna` route with pinned budgets, worst-case reservation and fail-closed settlement; migration 1110. Security CI passed; on the host the proxy proof, the A3 regression, all six A4 cases and the canary scan passed ([A4 evidence](fractionate-agents-a4-evidence.md)). Infisical/Vaultwarden destinations deferred |
+| A5 — Core execution loop | Explicit run start, pin approved guide version, bounded tool/action loop, durable state/progress/results, approval checkpoints and refusal outside permitted actions. | One synthetic workflow completes; tool errors, stale authority, prompt injection/untrusted page content, budgets and stop requests fail safely; no implicit authority from guide/evidence content. | **Accepted (2026-09-29):** backend coordinator (proof harness, option A; no route), hybrid loop (guide hard rules decide; `gpt-6-luna` only inside the rule-filtered set via the one new supervisor method `model_step`), human approval digest, durable pins/steps/model calls/approvals/results (migration 1111), stop/takeover/restart recovery, runner outcome classes, demo fixtures. Host: A3 19/19, A4 6/6, A5 17/17 with one real human approval, canary 0 ([A5 evidence](fractionate-agents-a5-evidence.md)). Out-of-set model reply, unknown usage and the timeout class proven locally; container mount/routes are A8 |
+| A6 — Supervision UI | Minimal Agents/Flightdeck views for the selected workflow: start/stop, view-only observation, progress, help/approval requests and result inspection. | Real role-based browser journeys, keyboard/accessibility, 375px form completion and existing six-width/two-theme checks; no dead controls or redesign of Dev Studio. | **Implemented, proven locally, not accepted (2026-09-29):** Operations "Agent runs" section, run detail (typed activity feed + live browser frames, Flightdeck-style), approval dialog (sudo + ≥12 digest characters), agent inbox, consent and read-only rules; behind false-default `OPERATIONS_AGENT_RUNS_ENABLED`, `EXECUTION_UNAVAILABLE` without a supervisor (option A). One boundary widening by user decision: a read-only backend-socket `view` (pixels only). Local: backend 110/110 Operations, Python 151, 13 browser journeys, 60 layout checks. Host run (A3 20 with `backend_view`, A4, A5, canary) pending ([A6 reference](fractionate-agents-a6-reference.md), [A6 evidence](fractionate-agents-a6-evidence.md)) |
 | A7 — Practice and recovery | Isolated rehearsal, interruptions, crash/retry policy, side-effect reconciliation, basic critique of success/failure and explicit human takeover/resume. | No blind replay of uncertain side effects; safe restart, account/grant loss, takeover ownership and bounded recovery verified end to end. | Pending A6 |
 | A8 — Deployment and supervised pilot | Resolve applicable release blockers; exact-change CI/review; backup/restore/migration checks; authorized deployment/configuration and one real supervised workflow. | Target isolation/authentication/storage checks, pilot acceptance and audit, demonstrated stop/recovery/rollback, operator runbook and explicit limitations. | Pending A7 and deployment authorization |
 

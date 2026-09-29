@@ -23,6 +23,7 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
       proposed_actions: JSON.parse(row.proposed_actions_json), proposed_origins,
       guide_version_id: row.guide_version_id,
       guide_hash: row.guide_hash, guide_version_number: current?.id === row.guide_version_id ? current.version_number : null,
+      model_guide_consent: row.model_guide_consent === 1,
       revision: row.revision, site_revision: p.site_revision, assigned_site_revision: row.assigned_site_revision,
       disabled: true, disabled_reasons,
       created_by: row.created_by, created_at: row.created_at, updated_by: row.updated_by, updated_at: row.updated_at };
@@ -174,6 +175,21 @@ export function createOperationalAgentsStore({ one, all, run, tx, access, eligib
         run('UPDATE ops_agent_profiles SET guide_version_id=?,guide_hash=?,assigned_site_revision=?,revision=revision+1,updated_by=?,updated_at=? WHERE id=?',
           v.guide_version_id,v.guide_version_id?current.content_hash:null,v.guide_version_id?p.site_revision:null,actor.id,now(),profileId);
         event(actor,id,'profile_guide_assigned',profileId,{guide_version_id:v.guide_version_id,guide_hash:v.guide_version_id?current.content_hash:null});bump(id);
+        return {profile:profile(id,profileRow(id,profileId))};
+      });
+    },
+    // A5: whether this profile's approved guide may be sent to the model
+    // provider. Owner only, typed confirmation to enable, default off; the change
+    // bumps the profile revision, so a run pinned before it refuses its next use.
+    modelGuideConsent(actor,id,profileId,expected,input) {
+      const v=parse(schemas.modelGuideConsent,input);
+      return tx(()=>{
+        access(actor,id,'access');const r=profileRow(id,profileId);if(!r) fail(404,'Profile not found');assertRevision(expected,r.revision);
+        const next=v.model_guide_consent?1:0;
+        if(next!==r.model_guide_consent){
+          run('UPDATE ops_agent_profiles SET model_guide_consent=?,revision=revision+1,updated_by=?,updated_at=? WHERE id=?',next,actor.id,now(),profileId);
+          event(actor,id,'profile_model_guide_consent',profileId,{model_guide_consent:v.model_guide_consent});bump(id);
+        }
         return {profile:profile(id,profileRow(id,profileId))};
       });
     },

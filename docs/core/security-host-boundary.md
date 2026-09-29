@@ -100,6 +100,67 @@ backend host call while A3 activation is off. It narrows the future worker path;
 it does not close S6, because the backend keeps its other root-equivalent
 interfaces and a compromised backend could still request launches within the
 pinned project budgets.
+
+The A4 credential and provider broker (`scripts/a4-credential-broker.py`,
+installed by `scripts/a4-install-broker.py`) is a second host-owned, root-only
+daemon, installed and digest-checked the same way under `/etc/proxypilot-a4`.
+Its socket (`/run/proxypilot-a4/broker.sock`, uid 0 peers only) is for the
+supervisor and the root operator tools and is **not** mounted into the backend
+container. It holds operator-authorized bindings (project, profile and binding
+UUIDs, revision, OpenBao path and version; never a value), reads a value with
+its own OpenBao AppRole only at delivery time, and writes it through `incus
+exec` standard input into the worker's one-shot FIFO; the supervisor, the
+runner's command channel, receipts, journals, logs and the database never carry
+it. The model route calls one allowlisted provider/model from the host with a
+provider key read from the vault per call, under per-run pinned budgets with a
+durable worst-case reservation. This keeps the value away from the model and the
+guest command channel; it does not hide it from the AppRole, from host root, or
+from the root-equivalent backend while S6 is open (the AppRole file is on the
+host), and it adds no reachable backend host call while activation is off. The
+origin proxy's only A4 widening is one bounded JSON `POST /api/login` per tunnel.
+The immediate stop is revoking a binding at the broker (observed on the host:
+refused at the broker in 0 ms and at the next submit in 4 ms). Replacing the
+AppRole secret ID in the dashboard is not one: tokens already issued stay valid
+for their TTL (1 h, max 4 h), and the running broker kept reading on its cached
+token until it was restarted.
+
+A5 widens the supervisor's backend socket by exactly one method, `model_step`
+(no mount, no other method, proxy path, fence rule or unit property changes).
+It is bound to the live attempt, its fence and its pinned run: the caller sends
+the run's policy document and the approved guide as exact bytes, and the
+supervisor refuses unless their sha256 match the pinned `policy_digest` and the
+policy's `guide_hash`, the profile consented to sending its guide to the
+provider, and the offered actions lie within the pinned rules. It then sends one
+fixed prompt to the broker's existing `model_call` under the run's pinned
+budget and returns one action name or a refusal, never model text. The
+broker's only change is a larger prompt cap (16000 bytes; the reservation
+arithmetic is unchanged). The A5 coordinator that calls it is a backend library
+that no route constructs; the proof runs it in a root host harness against a
+proof database, so the backend container still has no supervisor socket and
+this adds no reachable backend host call (the mount stays an A8 item). It does
+not close S6: a compromised root-equivalent backend could already drive the
+socket within the pinned project budgets, and now also spend the run's pinned
+model budget choosing among actions the pinned rules offer.
+
+A6 (user decision 4, 2026-09-29) widens the same backend socket by one more
+read-only method, `view`: one PNG frame of the coordinator's running browser
+attempt for the supervision UI. It is narrower than the operator's view:
+refused during a takeover (`TAKEN_OVER`) and outside the lease or deadline,
+it never renews the lease, at most one frame is in flight per attempt and one
+per second, and the reply is only `{png_base64, width, height}` (PNG magic,
+≤ 3 MiB, the runner's page URL dropped, nothing journaled). Input, observe,
+takeover, the journal and the proof workloads stay on the operator socket;
+the socket stays unmounted from the backend container (A8). The backend adds
+Operations routes behind the false-default `OPERATIONS_AGENT_RUNS_ENABLED`
+(`/:id/agent-runs`, stop, `view`, `/agent-approvals` behind `requireSudo`,
+model-guide consent, parsed rules) that call the unchanged A5 coordinator;
+with no supervisor configured they build no launcher and every execution
+control answers `EXECUTION_UNAVAILABLE`, so this adds no reachable backend
+host call. Frames are page pixels by the user's choice: they are kept in
+backend memory for a moment and never written to the database, a log or a
+report; the runner types a bound value only into a password input, so a
+frame shows it masked. It does not close S6: a compromised backend that
+reaches the socket could now also read frames of a running attempt.
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |

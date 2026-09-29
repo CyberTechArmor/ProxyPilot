@@ -15,15 +15,15 @@ decisions below before writing any code.
    - `a6-host-summary.py` printing `"all_passed": true`;
    - the candidate `backend-tests` 0 fail.
 
-   As of 2026-09-29 it does **not**: A6 is implemented, proven locally
-   (14 browser journeys, 72 layout checks), merged and deployed (live
-   `85586aea`), and its host steps H0–H5 are pending
-   ([A6 finish prompt](fractionate-agents-a6-finish-prompt.md)). The finish
-   decisions were: build the run deck, keep execution unavailable until A8,
-   and run the host proof first. The run deck (`RunDeck.jsx`,
-   `run-deck-logic.js`; 19 journeys, 96 layout checks) is built on branch
-   `ccr-11407794-0pxrze` and is not merged. If the gate does not hold, stop
-   and name it.
+   It does: **"Acceptance decision: A6 is ACCEPTED (2026-09-29)"**.
+   - Host run 1 on live `08293733`: A3 20/20 with `backend_view`, A4 6/6,
+     A5 17/17 with one real approval, both canaries clean, `all_passed:
+     true`.
+   - Installed supervisor `9d195ea2…`, receipt key `900607c0…`, VM boot
+     `680ebdf3…`.
+
+   Its open items carry the user's dispositions. Read them first. If the
+   gate does not hold, stop and name it.
 2. **Where the code lives.**
    - A4–A6 are in `main`: PR #700 merged as `469e98a9` and the toggles
      (PR #701) as `52f26af1`. Start from `main` at the A6 acceptance commit
@@ -99,11 +99,16 @@ decision 1 ("where takeover is driven").
    - A regular user gets no host sudo or root and no new dashboard role.
      Taking over from the dashboard grants control of that one attempt's
      browser, through the backend, and nothing else.
-3. **The gesture: re-enter one's own password and TOTP at Take over.**
-   - This is the dashboard's `requireSudo` re-authentication, as for
-     approval. It proves who is acting and grants no privilege; any user
-     with TOTP can do it for their own session.
-   - It is asked because takeover hands a person a signed-in session.
+3. **The gesture: authenticate once per session, with TOTP or a passkey**
+   (user refinement, 2026-09-29).
+   - The first Take over in a dashboard session asks for re-authentication.
+     Later takeovers in the same session do not ask again.
+   - The existing factors apply: password plus TOTP (`POST
+     /api/auth/sudo`) or a passkey (`/api/auth/sudo/passkey/*`). It proves
+     who is acting and grants no privilege.
+   - Today's sudo window is 4 h, sliding, per session. A7 decides whether
+     takeover reuses that window or holds its own grant for the session's
+     life. Either way, a lapsed or revoked session asks again.
 4. **Real time.**
    - One frame every 2 s is too slow to click on. While a person watches
      and while they hold control, the view must be near real time and
@@ -184,6 +189,12 @@ decision 1 ("where takeover is driven").
    are selected.
 5. **The critique.** Rule-based from typed state only (recommended), or a
    model summary (a new model use: consent, budget and prompt boundary).
+6. **The classes proven only locally** (A5/A6 open item; the user: "will
+   have to define together").
+   - They are: a model reply outside the allowed set, a provider reply with
+     unknown usage, and the sign-in `timeout` class.
+   - Settle with the user what each should do and what proves it on the
+     host, without tripping the live demo's shared sign-in limit.
 
 ## Preserve
 
@@ -210,9 +221,15 @@ decision 1 ("where takeover is driven").
 
 - A8: deployment, the container socket mount, a real target, release gates.
 - Every F item; more origins or workflows.
-- The carried A5/A6 open items (the origin proxy's resend-after-timeout, the
-  one `open_landing` timeout, the locally proven classes) unless the user
-  moves one into A7.
+- The carried A5/A6 open items, except where the user placed them
+  (2026-09-29):
+  - the locally proven classes are A7 decision 6;
+  - the origin proxy's resend-after-timeout, the `open_landing` timeout, a
+    reboot test, the `nodemailer` advisory, Lighthouse and the Neko research
+    were taken up right after A6's acceptance. Check the A6 evidence for
+    their state before starting;
+  - S6/SEC/INF go to a later security audit (the register in
+    `docs/plans/`).
 
 ## Lessons carried forward
 

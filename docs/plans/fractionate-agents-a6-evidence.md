@@ -762,3 +762,56 @@ summary_exit=0
 
 Every host proof A6 needs has passed. What remains is the user's acceptance
 decision.
+
+## Acceptance decision: A6 is ACCEPTED (2026-09-29)
+
+The user accepted A6 on 2026-09-29 ("Accept", "Merge"), after host run 1 on
+the deployed run deck.
+
+**What was accepted:**
+- **The supervision UI**, as deployed at live `08293733` (#700, #701,
+  #703):
+  - the Operations "Agent runs" section and the run deck;
+  - the approval dialog (sudo plus at least 12 digest characters);
+  - the Agent inbox, consent and the read-only rules;
+  - the administrators' toggles.
+- **The one A6 widening:** the supervisor's read-only backend `view`,
+  installed as `9d195ea2…`.
+- **Host run 1:**
+  - A3 20/20 including `backend_view`;
+  - A4 6/6;
+  - A5 17/17 with one real human approval;
+  - both canary scans clean (13 and 16 sinks, `unclean_sinks: []`);
+  - `a6-host-summary.py` `all_passed: true`;
+  - candidate `backend-tests` 0 fail.
+- **Local proof:** 19 browser journeys, 96 layout checks, and backend 118/118
+  for Operations, toggles and the deck.
+
+**The toggles stay on** (user). The user's direction for later: they should
+be on as soon as the setup before them is complete. The goal after the
+platform works is fewer setup and operation steps, by building the pipeline
+correctly and taking input only where needed. It is recorded in the plan; no
+default was changed here.
+
+**The live check.** The user saw the toggles on and the Agent runs section
+present. The "Start is disabled: execution unavailable" screen was not
+separately photographed: the user saw no need, and journey "execution
+unavailable" plus screen 11 prove it.
+
+**Open items, with the user's disposition (2026-09-29):**
+
+| Item | Disposition |
+|---|---|
+| Takeover authentication (A7) | The user refined the A7 direction: a person authenticates **once per session** (TOTP or passkey), not at every takeover. Recorded in the A7 prompt |
+| One `open_landing` `BROWSER_TIMEOUT` in about 60 launches | **Investigate** (follow-up in this session) |
+| Classes proven locally only (out-of-set model reply, unknown usage, `timeout`) | **To be defined together** with the user; recorded as an A7 decision |
+| Host reboot persistence | **Make a test** (follow-up in this session) |
+| S6, SEC-01, SEC-04 and the other SEC/INF findings | **Recorded for a later security audit** (a register in `docs/plans/`) |
+| Replacing the broker's AppRole secret ID is not an immediate stop | **Revoke the binding** is the stop. How it works is explained in the follow-up |
+| The `nodemailer` audit advisory (red `audit (admin/backend)`) | **Address** (follow-up in this session) |
+| The origin proxy can resend the admitted sign-in POST after an upstream timeout | **Address** (follow-up in this session) |
+| Lighthouse accessibility not run | **Address** (follow-up in this session) |
+| The streaming technology for the real-time view | **Research Neko** (follow-up), for A7 decision 1 |
+| Execution unavailable on the live dashboard | Stays until A8 (decision 2) |
+
+A7 (`fractionate-agents-a7-prompt.md`) is eligible.

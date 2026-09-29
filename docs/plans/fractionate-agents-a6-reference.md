@@ -11,7 +11,8 @@ boot, receipt key) before acting.
 **Status in one line:** A6 is **implemented, merged and deployed, with the
 run deck live (`08293733`). Host run 1 passed: A3 20/20 including
 `backend_view`, A4 6/6, A5 17/17 with one real human approval, both canaries
-clean, `all_passed: true`.** Acceptance is the user's decision. The dashboard
+clean, `all_passed: true`. A6 was ACCEPTED on 2026-09-29** (the evidence's
+last section carries the open items with the user's dispositions). The dashboard
 toggles are on (turned on by an administrator at 09:16Z). Execution stays
 unavailable on the live dashboard until the supervisor socket is mounted
 (A8, user decision). The finish decisions (user, 2026-09-29) were: build
@@ -282,5 +283,5 @@ python3 scripts/host-boundary-inventory.py
   takeover and every other operator control stay on the operator socket.
 - Frames are pixels only, memory only: never written to the database, a log,
   a report or the journal.
-- A6 is not accepted. After the host run is recorded, acceptance is a user
-  decision; A7 (`fractionate-agents-a7-prompt.md`) waits for it.
+- A6 is accepted (2026-09-29). A7 (`fractionate-agents-a7-prompt.md`) is
+  eligible.

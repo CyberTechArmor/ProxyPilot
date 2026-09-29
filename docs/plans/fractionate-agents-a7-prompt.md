@@ -146,19 +146,24 @@ decision 1 ("where takeover is driven").
 ## Decisions to ask the user before writing code
 
 1. **The real-time view: which technology.**
-   - **Neko** (`m1k1o/neko`, the user's expectation): a self-hosted
-     browser in a container, streamed over WebRTC, with built-in control
-     handover (one person controls, others watch). It gives smooth video and
-     a native "take control". But it replaces the browser layer A3
-     accepted:
+   - **Neko** (`m1k1o/neko`, v3, Apache-2.0; the user's expectation).
+     Confirmed from its repository: a self-hosted virtual browser in Docker,
+     on an X server, streamed over WebRTC, with multi-participant control.
+     It gives smooth video and a native "take control". But it replaces the
+     browser layer A3 accepted:
      - Its browser runs under its own X server, not the runner's hardened
        Chromium over `--remote-debugging-pipe`.
-     - Its default input is the full keyboard and mouse, plus clipboard and
-       file transfer, not the bounded input vocabulary.
-     - WebRTC media needs UDP ports or a TURN relay through the default-deny
-       fence and the origin proxy.
+     - Its input is the full keyboard and mouse, not the bounded input
+       vocabulary.
+     - WebRTC media must cross the default-deny fence and the origin proxy.
      - It adds a new image and daemon inside the proof VM, and a stream
        that must be authenticated to the dashboard.
+
+     To verify against the v3 documentation (its docs site was unreachable
+     from the A6 sandbox): the WebRTC port settings (a UDP range, a single
+     mux port, TURN), whether clipboard and file transfer can be switched
+     off, and how control handover and its API map onto "one controller,
+     run-access users only".
 
      Choosing it reopens A3-class proofs: the fence, the unit, the input
      limits, the canary and teardown.

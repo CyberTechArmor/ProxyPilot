@@ -200,6 +200,14 @@ lock. No route or MCP tool imports this operator enrollment module.
    canary scans and `a7-host-summary.py` with `all_passed: true`. Reuse the A7
    H4–H7 reviewed commands, with the A8 candidate SHA and fresh proof outputs.
    Long commands run detached with end markers; no marker or value on argv.
+   The 2026-09-30 rerun completed submit before the default 300 ms worker-kill
+   delay. Its focused diagnostic passed the unchanged uncertain-submit,
+   exactly-once, reconciliation and receipt assertions at
+   `A7_PROBE_SUBMIT_IN_FLIGHT_MS=100`. Use that documented timing setting for
+   the next full A7 proof and record it; a focused three-case report does not
+   replace all 18 cases. The dashboard and host proof queue early filtered
+   signalling until their opening reply is sent (40 messages/256 KiB maximum),
+   preserve its order, and discard it on close, refusal or overflow.
 8. **One dashboard pilot over the internet.** Enroll the real approved profile;
    Thomas starts explicitly, watches live video through relay-only TURN, verifies
    the session to take over, returns control, approves the exact submit digest

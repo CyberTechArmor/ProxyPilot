@@ -8,14 +8,17 @@ This file is the orientation page. The dated
 disagree, the evidence wins. Recheck every mutable value (SHAs, services, VM
 boot, receipt key) before acting.
 
-**Status in one line:** A7 is **implemented and proven locally; the user
-asked for it to be merged and deployed (2026-09-29); the host run (H0–H7
-below) has not run.** The user decided every A7 question on 2026-09-29 (the
-evidence's decisions table). The TURN name is **`streamview.fractionate.ai`**:
-the zone's wildcard record already points it at the host's public address
-(96.88.158.118), there is no Cloudflare on this instance, and Caddy obtains
-its certificate. The listen address is this host's default-route address,
-found by the installer. **The relay uses 3479 UDP/TCP and TLS 5350**, not
+**Status in one line:** A7 is **merged, deployed (live `0627d437`, `main`
+`02398ef9`) and its host run passed on 2026-09-30** (A3 20/20 in live mode,
+A4 6/6, A5 17/17 with one real human approval, A7 18/18, canaries clean,
+`"all_passed": true`); **A7 was ACCEPTED on 2026-09-30** (the evidence's last section:
+the open items and the user's dispositions). A8 is eligible. The
+user decided every A7 question on 2026-09-29 (the evidence's decisions
+table). The TURN name is **`streamview.fractionate.ai`**: the zone's wildcard
+record already points it at the host's public address (96.88.158.118), there
+is no Cloudflare on this instance, and Caddy obtains its certificate. The
+listen address is this host's default-route address, found by the installer.
+**The relay uses 3479 UDP/TCP and TLS 5350**, not
 3478/5349: the MEET container's coturn already owns those on this host
 (2026-09-29 finding; `install-turn` now refuses a port anything else listens
 on). The one thing left outside the code is the router: **3479/UDP, 3479/TCP
@@ -188,7 +191,7 @@ What the deploy changes on the live dashboard:
   H1–H4. The deploy does not install host daemons: they are root-owned and
   outside the backend by design (S6).
 
-## Host commands (the A7 host run; not run yet)
+## Host commands (the A7 host run; passed 2026-09-30, H3b and H3c were this host's reruns)
 
 Every step runs as root on the proof host, as one paste, in a terminal where
 you can type. Review each output before the next. No step prints a secret.

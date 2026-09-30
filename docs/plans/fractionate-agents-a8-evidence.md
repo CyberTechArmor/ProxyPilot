@@ -101,13 +101,12 @@ snapshots and OpenBao's separate storage are outside this release backup.
 
 ## Release and acceptance gates still open
 
-- Final review and exact-head draft PR CI; local
+- Review and exact-head CI for any follow-up release correction; local
   baseline-only failures remain named above and are not called green.
-- User's concrete merge/deployment decision and written S6/SEC-01 single-user
-  pilot limitation; manually approved guide with the scoped pilot exception,
-  fresh binding and owner consents.
-- Fresh host backup plus isolated restore, off-host copy/digest, migration check,
-  actual container refusals/restart and A3/A4/A5/A7 regressions/canary summary.
+- Manually approved guide with the scoped pilot exception, fresh binding and
+  owner consents.
+- Off-host copy/digest, actual container refusals/restart and A3/A4/A5/A7
+  regressions/canary summary.
 - Dashboard pilot over the internet, live/takeover/approval/stop/reconcile/resume,
   receipt/audit/cost/result; rollback rehearsal and disk growth.
 - User's explicit A8 acceptance decision after those records.
@@ -115,3 +114,45 @@ snapshots and OpenBao's separate storage are outside this release backup.
 Broader Infisical/OpenBao agent vault and general broker work is deferred until
 after live agents are seen. A4 already has the scoped OpenBao-backed broker.
 The reboot test is deferred; snapshots/router/Incus/nodus remain protected.
+
+## 2026-09-30 — release preparation and supervisor preflight refusal
+
+PR #712 was reviewed at `1250b19df9e52463b76374e09fb81e61bd962a71` and merged
+as `14301df83df27f82d8d4b4550ac51414bf40ff1c` after all seven exact-head CI
+checks passed. The user approved release and the written S6/SEC-01 Thomas-only
+synthetic pilot limitation. Candidate `1f65659781e53e2ca7cfc77aaf3628b7bfd03222`
+is clean, based on live `0627d437fa6bfe6d1761f25a4fd19f5feaae9109`. Its
+backend tests and syntax check passed; its optional frontend check failed
+because Vite is absent from the production container, and ShellCheck is absent.
+
+The operator created the consistent private four-file release backup at
+`/opt/proxypilot/.a8-release/20260930T132155Z-tb4ohc95`: DB, `.env`, Compose
+and manifest total **9,313,738 bytes / 8.88 MiB**. Independent digests and a
+second isolated SQLite restore passed; integrity, foreign keys and migrations
+1100–1112 were verified. Manifest SHA-256:
+`4de3babb6494557cd1b190d44768d8f1dbf99090c3fd59a283d99ad4eaa1bcf8`.
+The authenticated encrypted download was packaged and checked on-host:
+backup `6851168e-9798-4e98-9b8b-1276aa9ccb60`, **3,114,428 bytes / 2.97 MiB**,
+SHA-256 `ebaa4397125617ea2e2a7524b481b4ed705f5602fd3e13ce832fa11bf2de96aa`.
+The Windows extraction attempts stopped at a missing download path. The user
+said to move on; the off-host copy remains **unverified/open**, and SEC-03 is
+not closed.
+
+The first detached supervisor update stopped during **preflight**, before the
+reinstall command, with `A8_SUPERVISOR_FAILED`: the supplied paste invoked
+`/etc/proxypilot-a3-proof/supervisor/a3-install-supervisor.py`, which does not
+exist because the installer is not in the runtime file inventory. This attempt
+made no supervisor, receipt-key or dashboard changes. Its journal tail includes
+earlier A7 kill/restart proof entries, not a restart by this update.
+
+The dashboard wiring helper had the same path assumption. The correction loads
+the reviewed adjacent checkout installer; its real `status()` still verifies
+the installed journal, every recorded runtime file, the loaded unit and the
+serving receipt key. New tests use the actual installer inventory with no
+installed installer and retain source-tamper and active-attempt refusals.
+Local checks: **17/17 A8 tests**, **7/7 installer/timer tests**, and the
+unsuppressed **97-file** backend inventory pass; S6 remains open. The operator
+paste now also reads status through the reviewed candidate installer.
+
+The supervisor reinstall, dashboard wiring/rebuild, fresh host proofs, dashboard
+pilot, rollback/growth proof and explicit A8 acceptance remain outstanding.

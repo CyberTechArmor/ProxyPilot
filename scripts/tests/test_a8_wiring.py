@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import test_a3_install_supervisor as supervisor_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('a8_wiring', ROOT / 'a8-wire-dashboard.py')
@@ -28,6 +29,43 @@ networks:
   proxypilot-net:
     driver: bridge
 '''
+
+
+class InstalledChecksTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = supervisor_tests.InstallerTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.installed = supervisor_tests.inst.install()
+        # Keep the real install layout: the installer is absent from the runtime.
+        self.assertFalse((supervisor_tests.inst.TARGET / 'a3-install-supervisor.py').exists())
+        with patch.object(a8, 'secure', lambda path: None):
+            self.reader = a8.supervisor_installer()
+        patches = [patch.object(self.reader, name, path) for name, path in self.fixture.paths.items()]
+        patches += [patch.object(self.reader.i, 'secure', lambda path: None),
+                    patch.object(self.reader.i, 'execute', self.fixture.execute),
+                    patch.object(self.reader, 'call', self.fixture.call),
+                    patch.object(a8, 'secure', lambda path: None),
+                    patch.object(a8, 'supervisor_installer', return_value=self.reader),
+                    patch.object(a8, 'SOURCE_KEY', supervisor_tests.inst.PUBLIC_KEY)]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_reads_actual_installed_journal_without_an_installed_installer(self):
+        result = a8.installed_checks()
+        self.assertTrue(result['installed'])
+        self.assertEqual(result['key_id'], self.installed['key_id'])
+        self.assertEqual(result['files'], json.loads(supervisor_tests.inst.JOURNAL.read_text())['files'])
+
+    def test_changed_installed_source_and_busy_supervisor_refuse(self):
+        self.fixture.status_active = {'attempt_id': 'held'}
+        with self.assertRaisesRegex(ValueError, 'idle, ready'):
+            a8.installed_checks()
+        self.fixture.status_active = None
+        (supervisor_tests.inst.TARGET / 'a3-worker-guest.py').write_text('#!/usr/bin/env python3\nprint(1)\n')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            a8.installed_checks()
 
 
 class WiringTests(unittest.TestCase):

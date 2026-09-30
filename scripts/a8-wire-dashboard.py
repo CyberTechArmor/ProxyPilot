@@ -22,7 +22,9 @@ SOCKET = Path('/run/proxypilot-a3-backend/supervisor.sock')
 KEY_DIR = Path('/etc/proxypilot-a8')
 KEY = KEY_DIR / 'supervisor-pub.pem'
 SOURCE_KEY = Path('/etc/proxypilot-a3-proof/supervisor-pub.pem')
-INSTALLED = Path('/etc/proxypilot-a3-proof/supervisor/a3-install-supervisor.py')
+# The installer is a checkout tool, not one of the installed runtime files.
+# Its status() verifies the installed journal, files, unit and serving key.
+INSTALLER = Path(__file__).with_name('a3-install-supervisor.py')
 VM = '49592202-a8b0-45af-9ac6-5439761d73e4'
 SETTINGS = {'OPERATIONS_AGENT_SUPERVISOR_SOCKET': str(SOCKET),
             'OPERATIONS_AGENT_SUPERVISOR_PUBLIC_KEY': str(KEY),
@@ -141,11 +143,16 @@ def wiring_checks():
     return key_id
 
 
-def installed_checks():
-    secure(INSTALLED)
-    spec = importlib.util.spec_from_file_location('a8_installed_supervisor', INSTALLED)
+def supervisor_installer():
+    secure(INSTALLER)
+    spec = importlib.util.spec_from_file_location('a8_supervisor_installer', INSTALLER)
     installer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installer)
+    return installer
+
+
+def installed_checks():
+    installer = supervisor_installer()
     result = installer.status()  # Recorded sources, loaded unit, pins, dependencies.
     if result['vm_uuid'] != VM or result['active'] is not None or not result['accepting_launch']:
         raise ValueError('Expected the idle, ready proof supervisor')

@@ -6,13 +6,21 @@ import { createOperationalCredentialStore, CREDENTIAL_ORIGIN } from './operation
 const uuid = z.string().uuid();
 const bindingSchema = z.object({ binding_id: uuid, project_id: uuid, profile_id: uuid,
   origin: z.literal(CREDENTIAL_ORIGIN), username: z.string(), revision: z.literal(1), state: z.literal('active'),
-  vault: z.object({ mount: z.string(), path: z.string(), version: z.number().int().positive() }).strict() }).strict();
+  vault: z.object({ mount: z.string(), path: z.string(), version: z.number().int().positive(),
+    key: z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/)
+      .refine(value => value.trim() === value).optional() }).strict() }).strict();
 const fail = code => { const error = new Error(code); error.code = code; throw error; };
 
 export function importPilotBinding(db, actorId, expected, binding) {
   const parsed = bindingSchema.safeParse(binding);
   if (!parsed.success || !expected || parsed.data.project_id !== expected.project_id ||
       parsed.data.profile_id !== expected.profile_id || parsed.data.binding_id !== expected.binding_id) fail('BINDING_MISMATCH');
+  // A4's public registry includes the non-secret key name. Check it against the
+  // path, then keep only the mount/path/version reference the dashboard stores.
+  // Values and every other extra field remain forbidden by the strict schema.
+  const { mount, path, version, key } = parsed.data.vault;
+  if (key !== undefined && !path.endsWith(`/${key}`)) fail('BINDING_MISMATCH');
+  binding = { ...parsed.data, vault: { mount, path, version } };
   function authorized() {
     const actor = db.prepare('SELECT id,role FROM users WHERE id=?').get(actorId);
     assertEligible(actor, actor);

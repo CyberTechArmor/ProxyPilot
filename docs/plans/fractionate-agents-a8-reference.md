@@ -1,6 +1,6 @@
 # A8: dashboard deployment and one supervised pilot
 
-Status: implementation in progress, **not deployed or accepted**. A7 was accepted
+Status: dashboard deployed 2026-09-30; **pilot and acceptance pending**. A7 was accepted
 2026-09-30. The user authorized this chat to take over all A8 development on
 2026-09-30. Work is isolated on `codex/agents-a8-dashboard`, based on `f6d26cc8`.
 The evidence file records actual checks; this reference describes the contract
@@ -141,7 +141,10 @@ node scripts/a8-import-pilot-binding.mjs --owner <owner-uuid> --project <project
 This root-only CLI reads the broker's `bindings` through its fixed root-only
 socket, verifies a fresh active revision-1 reference for the exact IDs/origin,
 and uses the existing credential store to mirror only metadata into the live
-dashboard database. It requires the active project owner and an eligible idle
+dashboard database. The A4 public reference includes a non-secret `vault.key`
+name; enrollment validates that name against the final path segment and keeps
+only mount, path and version in the dashboard. Unknown fields and values remain
+refused. It requires the active project owner and an eligible idle
 profile; creates the existing binding audit event; refuses a second active
 binding, an extra value field, revoked/rotated/mismatched references; and is
 idempotent for identical metadata. It grants no run, approval or consent. Account,

@@ -156,3 +156,51 @@ paste now also reads status through the reviewed candidate installer.
 
 The supervisor reinstall, dashboard wiring/rebuild, fresh host proofs, dashboard
 pilot, rollback/growth proof and explicit A8 acceptance remain outstanding.
+
+## 2026-09-30 — dashboard deployed, guide published, enrollment correction
+
+After the user approved PR #713, its installer-path correction was merged as
+`2a483d783b66982402cacde7f3af70f478558225`. All seven checks passed on the
+reviewed head `f6a555d9d9b8014e28c2a24c678bdd382e087631`. The operator's
+supervisor reinstall and wiring succeeded, and the normal update promoted the
+clean checkout from `0627d437` to `b4ba8cdb`; rollback tag
+`pp-rollback-20260930T184337Z`. Update
+`44d13223-d93f-408e-9900-6b4cbaaaa637` completed successfully at
+2026-09-30T18:44:38Z, including the actual frontend build and container health.
+
+The user-pasted `A8_DASHBOARD_CHECK_DONE` verifies the two read-only directory
+mounts, runtime UID 0, backend status, serving receipt key
+`bffb86e3f9384478ee2890384491af93ce0e68f28b30daae57e56faa966c65f1`,
+supervisor `0f0978be…`, runner `d0724e5f…`, expected VM UUID/boot, idle/ready
+state, live mode and available broker. Migrations 1100–1112 are present.
+This is the positive container check; the negative/restart proof and fresh
+host regressions are still required.
+
+The initial submitted guide lacked hard rules. A replacement first retained
+pieces of the old instructions; the exact-content guard refused it before
+writing an authorization. The corrected guide's hash is
+`23f2a315571809f10dd125cf9672281ff6dd32d90133a0df9899e4c660ea3048`.
+The operator authorized exact submission `aa8fa499-66a3-4de6-b9e0-946c0f6a6946`
+in event 18, expiring at 2026-09-30T20:13:47.707Z. Subsequent user screenshots
+show manual publication as guide v1 `10aae72a-b006-4b6f-b58c-320c79564253`,
+assignment to Demo Agent `89a3b494-c484-48ee-a9d2-97e556b3607a` at profile
+revision 3, and both model consents. The operator guard verified only Thomas
+has run access and all seven limits: CPU 2, memory 3072 MiB, temporary disk
+256 MiB, 3600 seconds, 20 actions, 20000 tokens and USD 0.01.
+
+The run panel now reports one setup blocker: no active credential binding.
+While preparing enrollment, source review found the A4 public registry includes
+`vault.key` alongside mount/path/version, but the A8 importer rejected that
+metadata. A new test uses the actual Python broker's `bind` and `bindings`
+projection without reading a value; it reproduced `BINDING_MISMATCH` before
+the correction. The importer now checks the bounded key name against the path
+and projects only mount/path/version into the existing audited store. Extra
+fields/values, mismatched key names, stale revisions and nonowners remain
+refused. Local focused checks pass **28/28 with no skips**, including the
+real broker projection and existing readiness/security cases. This follow-up
+correction is not yet merged or installed; exact-head CI and the user's merge
+decision remain pending. No pilot binding or agent run has been created.
+
+The live pilot, negative/restart proof, fresh A3/A4/A5/A7 regressions, canaries,
+rollback/growth proof and explicit acceptance remain open. The Windows off-host
+backup is still unverified; S6/SEC-01 remain the accepted limited-pilot finding.

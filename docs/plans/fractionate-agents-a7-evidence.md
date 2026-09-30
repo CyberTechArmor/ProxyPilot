@@ -3,7 +3,7 @@
 **A7 is implemented, merged and deployed, and its host run passed
 (2026-09-30): A3 20/20 in live mode, A4 6/6, A5 17/17 with one real human
 approval, A7 18/18, three clean canaries, `a7-host-summary.py`
-`"all_passed": true`. The user's acceptance decision is pending.** The code is
+`"all_passed": true`. **A7 was ACCEPTED on 2026-09-30** (last section).** The code is
 in `main` (#707–#710, `02398ef9`); the live dashboard runs `0627d437`. The
 host run and its two findings (the VM packages, the live policy) are in the
 dated sections at the end.
@@ -781,7 +781,45 @@ every browser launch failed within about a second:
 - **The reboot test** (`a6-reboot-check.py`) has not run; it runs only when
   the user chooses.
 - **S6/SEC/INF** stay with the later security audit.
-- **Three `pp-a7-pre-live-…` snapshots are kept**; one is deleted only on
-  the user's word.
+- **The `pp-a7-pre-live-…` snapshots are kept** (four, see the acceptance
+  section); one is deleted only on the user's word.
 
-**Next:** the user's acceptance decision.
+**Next:** the user's acceptance decision (given below).
+
+## Acceptance decision: A7 is ACCEPTED (2026-09-30)
+
+The user accepted A7 on 2026-09-30 ("Please accept A7, write the prompt for
+A8") on the host run above (H0–H7 with the reruns H2b, H3b and H3c):
+- A3 20/20 in live mode, A4 6/6, A5 17/17 with one real human approval, A7
+  18/18 including the six kill cases, account and key loss.
+- Three clean canaries; `a7-host-summary.py` `"all_passed": true`.
+- The candidate's backend tests with no failure (3,397 pass, 11 skipped).
+
+**The open items and the user's dispositions:**
+
+| Item | Disposition |
+| --- | --- |
+| Router forwards and the external TLS check | **Done.** The router maps the public address 1:1 to the host (BINAT `96.88.158.118` ↔ `192.168.88.161`, with an allow rule to the host). The user's external check from their own machine gave TLS 1.2 (ECDHE-ECDSA-AES256-GCM-SHA384), `CN = streamview.fractionate.ai` and `Verification: OK`. |
+| The live dashboard cannot run agents before A8 | **Accepted** ("Ok"). A8 connects the backend to the supervisor. |
+| Show the supervisor's own record of an uncertain step beside the reconcile buttons | **Include in A8** ("Please include"). Decided; the A8 prompt carries it as a deliverable, not a question. |
+| The reboot test (`a6-reboot-check.py`) | **Ignore for now.** Not part of A8 unless the user brings it back. It also does not yet check A7's parts (the TURN relay, the fence's live line, the live marker). |
+| The `pp-a7-pre-live-…` snapshots | **Kept for now.** |
+| S6/SEC/INF | With the later security audit, unchanged. |
+
+**The snapshots, read on 2026-09-30:**
+- There are **four**, not three. `pp-a7-pre-live-20260929-214056` came from
+  an H3b start that was superseded 47 s later by the one recorded
+  (`-214143`); like H4, H3b was started twice.
+- They are ZFS snapshots. The Incus pool `Storage` is the ZFS pool
+  `Fractionate-ZFS`, and each Incus snapshot is a copy-on-write snapshot of
+  the VM's disk volume (`…/pp-agents-a3-debian13-proof-20260927.block`,
+  zstd, 12 GiB volume) plus its small config dataset.
+- Each holds only the blocks that have changed since it was taken:
+  1.4 MB (`-211249`), 6.5 MB (`-214056`), 16 MB (`-214143`) and 2.2 MB
+  (`-20260930-120121`), about 26 MB together. The pool has about 1.8 TB
+  free. They grow slowly as the VM's disk diverges.
+- The pre-network snapshot (`pp-mcp-pre-network-20260927-222658`) stays in
+  any case.
+
+**A8 is eligible** ([A8 prompt](fractionate-agents-a8-prompt.md), updated
+with these decisions).

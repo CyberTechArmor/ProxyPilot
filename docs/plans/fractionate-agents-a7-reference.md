@@ -11,7 +11,8 @@ boot, receipt key) before acting.
 **Status in one line:** A7 is **merged, deployed (live `0627d437`, `main`
 `02398ef9`) and its host run passed on 2026-09-30** (A3 20/20 in live mode,
 A4 6/6, A5 17/17 with one real human approval, A7 18/18, canaries clean,
-`"all_passed": true`); **the user's acceptance decision is pending**. The
+`"all_passed": true`); **A7 was ACCEPTED on 2026-09-30** (the evidence's last section:
+the open items and the user's dispositions). A8 is eligible. The
 user decided every A7 question on 2026-09-29 (the evidence's decisions
 table). The TURN name is **`streamview.fractionate.ai`**: the zone's wildcard
 record already points it at the host's public address (96.88.158.118), there

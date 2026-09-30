@@ -96,6 +96,11 @@ testing what the Builder asked for.
 6. **Development can never touch production.** Builds happen in sealed, disposable
    containers; production servers *pull* signed, approved releases. No inbound
    path exists from the build platform to production.
+7. **Designed for the device and the mode it is used in.** Every scaffolded app
+   is installable, so every screen is designed for the phone's edges and for the
+   installed view as well as the browser tab, from the first mockup: bottom-anchored
+   controls clear the system navigation bar (§15; the site's constitution §13 and
+   `rules/mock2-mobile-web.md`, CPR current §O).
 
 ## 2. The stack (the only stack)
 
@@ -520,7 +525,9 @@ that bind every project:
 - **Rollback**: the previous known-good state is identified and reachable without
   rebuilding (CPR §15) — the release before this one, by commit and deploy stamp.
 
-## 15. Phones and installed apps (mock2-core 1.7.1, CPR current §O)
+## 15. Phones and installed apps (mock2-core 1.8.0, CPR current §O)
+
+The build pattern for design principle 7 (§1).
 
 Every scaffolded application ships `public/manifest.webmanifest` with
 `display: standalone`, so it can be installed to a phone's home screen. Installed,

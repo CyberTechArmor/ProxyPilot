@@ -48,7 +48,9 @@ executable check scripts, and skill templates — not a set of files for
 Constitution §15, phones and installed apps: the safe-area inset variable, the
 fallback for Android that reports too little, and proof of the installed view. 1.7.1
 dropped 1.7.0's measured conditions on the fallback (one of them failed on the
-defect's phone on a later launch) and made a cold start part of every device check. It is the site's `rules/mock2-mobile-web.md` and CPR
+defect's phone on a later launch) and made a cold start part of every device check.
+1.8.0 (the same day) made it a design principle in the site's constitution (§13); the
+seed carries it as design principle 7 in §1, pointing at §15. It is the site's `rules/mock2-mobile-web.md` and CPR
 current §O, from Nodus R-041. It was folded in on its own because every scaffolded
 application ships an installable manifest (`scaffold.js` `pwaManifest`,
 `display: standalone`). Site versions 1.0.0–1.6.0 are still not folded, so

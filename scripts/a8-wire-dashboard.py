@@ -5,6 +5,7 @@ Only the backend runtime directory and a copy of the PUBLIC receipt key are
 mounted. No service is restarted and no toggle, account or run is changed.
 """
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -118,6 +119,9 @@ def public_key_id(path):
                          capture_output=True, check=True, timeout=10).stdout
     if len(der) != 44 or der[:12] != bytes.fromhex('302a300506032b6570032100'):
         raise ValueError('Expected an Ed25519 public key')
+    canonical = b'-----BEGIN PUBLIC KEY-----\n' + base64.b64encode(der) + b'\n-----END PUBLIC KEY-----\n'
+    if data != canonical:
+        raise ValueError('Expected one canonical public key with no appended content')
     return hashlib.sha256(der).hexdigest()
 
 

@@ -112,6 +112,21 @@ class WiringTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             a8.run('patch', self.install)
 
+    def test_public_key_bundles_refuse_before_configuration_writes(self):
+        public = self.source.read_bytes()
+        private = (self.root / 'private.pem').read_bytes()
+        before = self.env.read_bytes(), self.compose.read_bytes()
+        try:
+            for appended in (private, public, b'ignored trailing content\n'):
+                with self.subTest(appended=appended[:24]):
+                    self.source.write_bytes(public + appended)
+                    with self.assertRaises(ValueError):
+                        a8.run('configure', self.install)
+                    self.assertEqual((self.env.read_bytes(), self.compose.read_bytes()), before)
+                    self.assertFalse(self.keydir.exists())
+        finally:
+            self.source.write_bytes(public)
+
     def test_ambiguous_custom_and_conflicting_compose_refuse_before_writes(self):
         for text in (COMPOSE.replace('    privileged: true', '    privileged: false'),
                      COMPOSE.replace('    pid: host', '    pid: host\n    user: 1000'),

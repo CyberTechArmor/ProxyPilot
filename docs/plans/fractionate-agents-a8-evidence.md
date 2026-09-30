@@ -29,7 +29,7 @@ Completed checks:
 
 - `node --test src/__tests__/operational-*.test.js src/__tests__/agent-run*.test.js
   src/__tests__/operations-toggles.test.js`: **157 passed, zero failures/skips**.
-- `python3 -m unittest discover -s scripts/tests -p 'test_a8*.py'`: **14 passed**,
+- `python3 -m unittest discover -s scripts/tests -p 'test_a8*.py'`: **15 passed**,
   including durable ordinal/refusal/overflow, root peer, directory/socket
   recreation, wiring/default/idempotence/write and verification rollback,
   committed-WAL backup, isolated restore and tamper/migration refusals.
@@ -56,8 +56,15 @@ Completed checks:
   a built demo; after `npm run demo:build`, separate `test_a4_tooling.py` and
   `test_a5_fixture_modes.py` discovery passes **9/9 and 4/4**, including both
   formerly skipped checks. No assertion was suppressed.
-- Final operator CLI syntax checks pass; the 14 A8 Python checks pass again
+- Final operator CLI syntax checks pass; the 15 A8 Python checks pass again
   against the final install-directory defaults and rollback validation.
+
+Final source review found that OpenSSL accepts an initial public key while
+ignoring appended PEM/text. The wiring helper now requires the exact canonical
+Ed25519 public-key PEM, refusing a public/private bundle, multiple public keys
+and trailing content before any configuration write. The new regression fails
+all three cases before the fix and passes after it; the public-only mount
+contract is preserved.
 
 The real-browser checks use the pinned A7 Neko commit plus the existing Unix
 socket patch and Chrome for Testing 149. Its verified native managed-policy
@@ -81,8 +88,14 @@ has been issued on the host. Only Thomas retains pilot run access.
 
 Backup destination decision: **Thomas's Windows computer**. The user reviewed
 the scope (consistent ProxyPilot SQLite DB, private `.env`, Compose and checksum
-manifest), confirmed it should fit, and asked to continue/finish. Exact live
-bytes remain unmeasured; the dry-run backup tool gives no size. No backup or
+manifest), confirmed it should fit, and asked to continue/finish. The user's
+read-only host check measured DB **9,297,920 bytes**, `.env` **6,281 bytes** and
+Compose **3,532 bytes**. The SQLite page estimate matches the DB size: total
+**9,307,733 bytes / 8.88 MiB before the manifest**. Actual backup bytes will be
+measured again; the live database can grow. Migrations **1100–1112** are present.
+The empty Windows destination is `C:\Users\thoma\Backups\ProxyPilot\A8-20260930`,
+owned by `DUO\thoma`, with inheritance disabled and only Thomas/SYSTEM access.
+No backup or
 off-host transfer has yet occurred. VM/container disks, website files, ZFS
 snapshots and OpenBao's separate storage are outside this release backup.
 

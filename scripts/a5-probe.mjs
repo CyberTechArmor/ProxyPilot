@@ -36,7 +36,7 @@ const MARKER = 'PPA5-INJECT-5b7e1d93';
 // Resolved at call time (never a default argument), so tests can point the
 // harness at their own sockets and paths.
 export const settings = () => ({
-  backendSocket: process.env.A5_PROBE_BACKEND_SOCKET || '/run/proxypilot-a3/supervisor.sock',
+  backendSocket: process.env.A5_PROBE_BACKEND_SOCKET || '/run/proxypilot-a3-backend/supervisor.sock',
   operatorSocket: process.env.A5_PROBE_OPERATOR_SOCKET || '/run/proxypilot-a3/operator.sock',
   brokerSocket: process.env.A5_PROBE_BROKER_SOCKET || '/run/proxypilot-a4/broker.sock',
   publicKey: process.env.A5_PROBE_PUBLIC_KEY || '/etc/proxypilot-a3-proof/supervisor-pub.pem',

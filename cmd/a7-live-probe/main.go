@@ -269,7 +269,7 @@ func checkRelay(turnURL, username, credential, address, transportName, caFile st
 }
 
 func main() {
-	socket := flag.String("socket", "/run/proxypilot-a3/supervisor.sock", "the supervisor's backend socket")
+	socket := flag.String("socket", "/run/proxypilot-a3-backend/supervisor.sock", "the supervisor's backend socket")
 	runID := flag.String("run", "", "run id of the running attempt")
 	attemptID := flag.String("attempt", "", "attempt id")
 	fence := flag.Int("fence", 1, "attempt fence")

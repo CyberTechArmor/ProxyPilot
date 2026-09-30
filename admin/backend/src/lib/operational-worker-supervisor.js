@@ -13,7 +13,7 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 // was configured with.
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const METHODS = new Set(['status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop',
+const METHODS = new Set(['status', 'launch', 'renew', 'action', 'step_record', 'model_step', 'view', 'stop',
   'takeover', 'release', 'summarize']);
 const STREAM_METHODS = new Set(['live']);
 const MAX_REPLY = 4 * 1024 * 1024;
@@ -30,20 +30,24 @@ export function createSupervisorClient(socketPath, { timeoutMs = 120_000 } = {})
         const socket = net.createConnection(socketPath);
         let buffer = '';
         let settled = false;
+        let deadline;
+        const readTimeout = method === 'step_record' ? Math.min(timeoutMs, 2000) : timeoutMs;
         const done = (error, value) => {
           if (settled) return;
           settled = true;
+          clearTimeout(deadline);
           socket.destroy();
           if (error) reject(error); else resolve(value);
         };
         socket.setEncoding('utf8');
-        socket.setTimeout(timeoutMs, () => done(coded('SUPERVISOR_TIMEOUT')));
+        socket.setTimeout(readTimeout, () => done(coded('SUPERVISOR_TIMEOUT')));
+        if (method === 'step_record') deadline = setTimeout(() => done(coded('SUPERVISOR_TIMEOUT')), readTimeout);
         socket.on('error', () => done(coded('SUPERVISOR_UNREACHABLE')));
         socket.on('connect', () => socket.write(`${JSON.stringify({ method, params })}\n`));
         socket.on('end', () => done(coded('SUPERVISOR_PROTOCOL')));
         socket.on('data', (chunk) => {
           buffer += chunk;
-          if (buffer.length > MAX_REPLY) return done(coded('SUPERVISOR_PROTOCOL'));
+          if (Buffer.byteLength(buffer) > (method === 'step_record' ? 2048 : MAX_REPLY)) return done(coded('SUPERVISOR_PROTOCOL'));
           const end = buffer.indexOf('\n');
           if (end < 0) return undefined;
           let reply;

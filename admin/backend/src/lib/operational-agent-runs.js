@@ -519,6 +519,31 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
       access(actor, projectId, 'run');
       return detail(runIn(projectId, runId));
     },
+    // A8: the existing run-detail HTTP projection alone reads host records.
+    // Internal status remains synchronous; controls never depend on this read.
+    async statusWithRecords(actor, projectId, runId) {
+      access(actor, projectId, 'run');
+      const view = detail(runIn(projectId, runId));
+      const items = view.reconciliation?.items ?? [];
+      const steps = items.filter(i => i.subject.startsWith('step:'));
+      // Four bounded reads at a time; no lease renewal, journal write or replay.
+      for (let offset = 0; offset < steps.length; offset += 4) {
+        await Promise.all(steps.slice(offset, offset + 4).map(async item => {
+          item.supervisor_record = { status: 'unavailable', record: null };
+          if (!execution.available || typeof launcher.stepRecord !== 'function') return;
+          const step = one(`SELECT attempt_id,fence,ordinal,action FROM ops_agent_run_steps
+            WHERE run_id=? AND ordinal=?`, runId, item.ordinal);
+          if (!step || step.action !== item.action) return;
+          try {
+            const record = await launcher.stepRecord({ run_id: runId, ...step });
+            item.supervisor_record = { status: record === null ? 'missing' : 'recorded', record };
+          } catch { /* No error content or partial host reply reaches the page. */ }
+        }));
+      }
+      // A grant or account can be revoked while a socket read is pending.
+      access(actor, projectId, 'run');
+      return view;
+    },
     async start(actor, projectId, input) {
       const v = parse(schemas.start, input, 'INVALID_RUN', CODES.INVALID_RUN[1]);
       access(actor, projectId, 'run');

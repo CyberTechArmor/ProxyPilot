@@ -469,6 +469,9 @@ print(json.dumps(out, sort_keys=True))'''
         ref, _, _ = self.launch(ids=(run, attempt, workspace), backend=True)
         call('action', dict(ref, action='open_landing'), backend=True)
         found.update({
+            # A8 read is exact and never renews or changes an attempt.
+            'record_extra_field': refused('step_record', dict(ref, ordinal=1, action='open_landing', page=True), True),
+            'record_wrong_fence': refused('step_record', dict(ref, fence=2, ordinal=1, action='open_landing'), True),
             # A4: submit needs the binding ID field, and this run pinned no binding.
             'credential_action': refused('action', dict(ref, action='submit_bound_fixture', binding_id=workspace), True),
             'credential_action_without_binding': refused('action', dict(ref, action='submit_bound_fixture'), True),
@@ -487,6 +490,10 @@ print(json.dumps(out, sort_keys=True))'''
         live = call('status', {}, backend=True).get('live') is True
         receipt = call('stop', dict(ref, reason='cancelled'), backend=True)['receipt']
         receipt_ok(receipt)
+        record = call('step_record', dict(ref, ordinal=1, action='open_landing'), backend=True)['record']
+        assert set(record) <= {'ordinal', 'action', 'state', 'at', 'latency_ms', 'error'}
+        assert (record['ordinal'], record['action'], record['state']) == (1, 'open_landing', 'done')
+        assert call('step_record', dict(ref, ordinal=2, action='open_landing'), backend=True) == {'record': None}
         # A7 made `takeover` a backend method (the dashboard's, which needs a
         # viewer connection); the operator's takeover and input stay operator-only.
         expected = {'journal': 'METHOD_NOT_ALLOWED', 'takeover': 'INVALID_REQUEST', 'input': 'METHOD_NOT_ALLOWED',
@@ -497,6 +504,7 @@ print(json.dumps(out, sort_keys=True))'''
                     'url_field': 'INVALID_REQUEST', 'operator_stop_reason': 'INVALID_REQUEST',
                     'model_step_foreign_policy': 'RUN_POLICY_MISMATCH', 'model_step_proof_flag': 'INVALID_REQUEST',
                     'takeover_unknown_viewer': 'LIVE_CONN_UNKNOWN' if live else 'LIVE_UNAVAILABLE'}
+        expected.update(record_extra_field='INVALID_REQUEST', record_wrong_fence='STALE_FENCE')
         assert found == expected, found
         return found
 

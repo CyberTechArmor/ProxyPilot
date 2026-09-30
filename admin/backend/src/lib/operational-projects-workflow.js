@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { assertRevision, fail, parse, schemas, validId } from './operational-projects-logic.js';
 import { createGuideEvidence } from './operational-evidence-guide.js';
+import { pilotSelfReviewAuthorization, PILOT_REVIEW_USED } from './operational-pilot-review.js';
 
 export const guideHash = (title, instructions) => createHash('sha256').update(JSON.stringify({format:1,title,instructions}), 'utf8').digest('hex');
 
@@ -21,7 +22,8 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
   function submission(id,sid) {
     const s=validId(sid) && one('SELECT * FROM ops_guide_submissions WHERE project_id=? AND id=?',id,sid);
     if(!s) fail(404,'Submission not found');
-    return {...s,contributors:JSON.parse(s.contributors_json),evidence:guideEvidence.submission(id,s.id)};
+    return {...s,contributors:JSON.parse(s.contributors_json),evidence:guideEvidence.submission(id,s.id),
+      pilot_self_review:pilotSelfReviewAuthorization({one,all,now},s)};
   }
   function version(id,vid) {
     const v=validId(vid) && one(`SELECT v.*,s.title,s.instructions,s.contributors_json,s.submitted_by,s.submitted_at,s.base_version_id,
@@ -99,10 +101,12 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
         const v=parse(schemas.review,input);
         return tx(()=>{
           access(actor,id,'review'); const s=pendingChecked(id,sid,expected);
-          if(v.decision==='approve' && (s.submitted_by===actor.id || s.contributors.includes(actor.id))) fail(403,'Approval requires an independent reviewer');
+          const selfReview=v.decision==='approve' && (s.submitted_by===actor.id || s.contributors.includes(actor.id));
+          if(selfReview && s.pilot_self_review?.owner_id!==actor.id) fail(403,'Approval requires an independent reviewer');
           if(s.content_hash!==guideHash(s.title,s.instructions)) fail(409,'Submitted content failed integrity validation');
           let published=null;
           if(v.decision==='approve') {
+            if(selfReview) event(actor,id,PILOT_REVIEW_USED,sid,{authorization_event_id:s.pilot_self_review.authorization_event_id,content_hash:s.content_hash});
             guideEvidence.approve(id,s,actor);
             const vid=uuid(), number=one('SELECT COALESCE(MAX(version_number),0)+1 AS n FROM ops_guide_versions WHERE project_id=?',id).n;
             run('INSERT INTO ops_guide_versions VALUES(?,?,?,?,?,?,?,?)',vid,id,number,s.id,actor.id,now(),s.content_hash,latest(id)||null);

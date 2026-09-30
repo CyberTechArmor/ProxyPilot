@@ -112,7 +112,7 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
       if (method === 'status') return { active };
       if (method === 'launch') {
         attempts.set(params.attempt_id, { run_id: params.run_id, fence: params.fence, workspace_id: params.workspace_id,
-          state: 'running', page: 'none', submitted: false, ordinal: 0, lastView: 0, viewing: false });
+          state: 'running', page: 'none', submitted: false, ordinal: 0, records: [], lastView: 0, viewing: false });
         active = { attempt_id: params.attempt_id };
         return { run_id: params.run_id, attempt_id: params.attempt_id, fence: params.fence, vm_uuid: vmUuid, boot_id: BOOT,
           lease_expires_at: new Date(Date.now() + 30000).toISOString(), deadline_at: null };
@@ -154,12 +154,21 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
           active = null;
           throw coded('TAKEN_OVER');
         }
+        a.ordinal = params.ordinal ?? a.ordinal + 1;
+        const record = { ordinal: a.ordinal, action: params.action, state: 'started',
+          at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z') };
+        a.records.push(record);
         await hold(params.action);
         if (scenario.delayMs) await wait(scenario.delayMs);
         if (a.state !== 'running') throw coded(a.state === 'human' ? 'TAKEN_OVER' : 'ATTEMPT_NOT_ACTIVE');
         const error = scenario.actionErrors[params.action];
-        if (error) throw coded(error);
-        a.ordinal += 1;
+        if (error) {
+          record.state = error === 'SUPERVISOR_TIMEOUT' ? 'uncertain' : 'failed';
+          record.error = error;
+          throw coded(error);
+        }
+        record.state = 'done';
+        record.latency_ms = 1;
         a.page = params.action;
         if (params.action === 'submit_bound_fixture') {
           a.submitted = true;
@@ -168,6 +177,13 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
             untrusted_page_claim_authenticated_as_bound_account: scenario.outcome === 'signed_in' } };
         }
         return { ordinal: a.ordinal, untrusted: true, result: results(a)[params.action]() };
+      }
+      if (method === 'step_record') {
+        const a = attempts.get(params.attempt_id);
+        if (!a || a.run_id !== params.run_id) throw coded('UNKNOWN_ATTEMPT');
+        if (a.fence !== params.fence) throw coded('STALE_FENCE');
+        const record = a.records.find(r => r.ordinal === params.ordinal && r.action === params.action);
+        return { record: record ? { ...record } : null };
       }
       if (method === 'model_step') {
         live(params);
@@ -193,7 +209,10 @@ export function scriptedSupervisor({ vmUuid = VM, frameSize = [640, 400] } = {})
         const a = attempts.get(params.attempt_id);
         if (params.reason === 'taken_over' && a?.dashboard !== 'holding' && a?.dashboard !== 'released' && a?.dashboard !== 'giving')
           throw coded('INVALID_REQUEST');
-        if (a) a.state = 'stopped';
+        if (a) {
+          a.state = 'stopped';
+          for (const record of a.records) if (record.state === 'started') record.state = 'uncertain';
+        }
         if (active?.attempt_id === params.attempt_id) active = null;
         closeViewers(params.attempt_id, 'attempt_ended');
         for (const [action, done] of waiting) { done(); waiting.delete(action); }

@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs';
+import { authorizePilotSelfReview } from '../../backend/src/lib/operational-pilot-review.js';
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
@@ -159,6 +160,31 @@ async function layoutCheck(page, label, { dialog = false } = {}) {
 const SIGNALLING = new Set(['client/heartbeat', 'signal/request', 'signal/answer', 'signal/candidate', 'signal/restart', 'signal/video']);
 
 try {
+  await journey('A8 demo guide: same-person approval stays disabled until the exact operator exception, then manual publication is audited', async () => {
+    const { f, users } = h.world, owner = users.owner;
+    const p = f.store.create(owner, { name: 'Same-person demo guide' });
+    f.store.site(owner, p.id, f.store.get(owner, p.id).revision, { site_origin: 'https://demo.fractionate.ai' });
+    f.store.saveDraft(owner, p.id, 1, { title: 'Pilot guide', instructions: 'Open the demo sign-in dialog.' });
+    const submission = f.store.submit(owner, p.id, 2, {}).submission;
+    const page = await as('owner', { width: 375, height: 800, live: false });
+    const url = `${h.origin}/operational-projects/${p.id}?section=Guide`;
+    await page.goto(url);
+    const approve = page.getByRole('button', { name: 'Approve and publish' });
+    await approve.waitFor(WAIT);
+    assert.equal(await approve.isEnabled(), false);
+    authorizePilotSelfReview(f.db, { owner_id: owner.id, project_id: p.id, submission_id: submission.id,
+      content_hash: submission.content_hash }, { now: () => submission.submitted_at });
+    await page.getByRole('button', { name: 'Refresh server state' }).click();
+    await page.getByText(/Pilot exception: you may manually approve this exact submitted guide once/).waitFor(WAIT);
+    assert.equal(f.store.versions(owner, p.id).versions.length, 0);
+    await layoutCheck(page, 'pilot-guide-exception');
+    await page.setViewportSize({ width: 375, height: 800 });
+    await approve.click();
+    await page.getByText('Guide approved and published.', { exact: true }).waitFor(WAIT);
+    assert.equal(f.store.get(owner, p.id).current_version.approved_by, owner.id);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM ops_project_events WHERE project_id=? AND action='a8_pilot_self_review_used'").get(p.id).n, 1);
+    assert.deepEqual(page.errors, []);
+  });
   await journey('live view and takeover: confirm it is you once, control the browser, give it back, decide, resume', async () => {
     resetScenario();
     const page = await as('operator');
@@ -229,6 +255,13 @@ try {
     await approveInUi(page);
     await page.getByTestId('reconcile').waitFor(WAIT);
     await page.getByText('Blocks the next start').waitFor(WAIT);
+    // A8: command completion is useful evidence, never an automatic decision.
+    const record = page.getByTestId('supervisor-record');
+    await record.getByText(/Supervisor recorded: done\. Reserved at/).waitFor(WAIT);
+    await record.getByText(/uncertain site outcome/).waitFor(WAIT);
+    const step = h.world.supervisor.calls.filter(c => c.method === 'step_record').at(-1);
+    assert.equal(step.params.action, 'submit_bound_fixture');
+    assert.equal(step.params.ordinal, 3);
     await layoutCheck(page, 'reconcile');
     await page.goto(runsUrl());
     await page.getByText(/may or may not have happened/).first().waitFor(WAIT);

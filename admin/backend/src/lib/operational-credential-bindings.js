@@ -33,7 +33,7 @@ export const publicBinding = (row) => row && ({ binding_id: row.id, project_id: 
   revision: row.revision, state: row.state, created_at: row.created_at, updated_at: row.updated_at,
   revoked_at: row.revoked_at });
 
-export function createOperationalCredentialStore(db, clock = () => new Date()) {
+export function createOperationalCredentialStore(db, clock = () => new Date(), { authorizeBind = () => {} } = {}) {
   const one = (sql, ...args) => db.prepare(sql).get(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const stamp = () => clock().toISOString();
@@ -57,6 +57,7 @@ export function createOperationalCredentialStore(db, clock = () => new Date()) {
     bind(actor, input) {
       const v = parse(schemas.bind, input);
       return tx(() => {
+        authorizeBind(v); // A8 host enrollment rechecks eligibility under this write lock.
         const p = owned(actor, v.project_id);
         const profile = one('SELECT * FROM ops_agent_profiles WHERE project_id=? AND id=? AND deleted_at IS NULL',
           v.project_id, v.profile_id);

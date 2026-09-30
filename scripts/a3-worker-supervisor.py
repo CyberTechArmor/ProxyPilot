@@ -119,7 +119,7 @@ KEY = installer.CONFIG / 'supervisor-key.pem'
 PUBLIC_KEY = installer.CONFIG / 'supervisor-pub.pem'
 UNIT = Path('/etc/systemd/system/proxypilot-a3-supervisor.service')
 RUN_DIR = Path('/run/proxypilot-a3')
-BACKEND_SOCKET = RUN_DIR / 'supervisor.sock'
+BACKEND_SOCKET = Path('/run/proxypilot-a3-backend/supervisor.sock')
 OPERATOR_SOCKET = RUN_DIR / 'operator.sock'
 BROKER_SOCKET = Path('/run/proxypilot-a4/broker.sock')
 CREDENTIAL_FIELDS = ('project_id', 'profile_id', 'profile_revision', 'binding_id', 'binding_revision')
@@ -147,7 +147,7 @@ LIMIT_KEYS = frozenset(('cpu', 'memory_mib', 'temporary_disk_mib', 'max_seconds'
 MAX_SAFE = 2 ** 53 - 1
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
-BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'model_step', 'view', 'stop',
+BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'step_record', 'model_step', 'view', 'stop',
                              'live', 'takeover', 'release', 'summarize'))
 OPERATOR_METHODS = BACKEND_METHODS | frozenset(('takeover', 'input', 'observe', 'locate',
                                                 'egress_probe', 'proof', 'unit_stats', 'journal',
@@ -1373,8 +1373,13 @@ class Supervisor:
 
     def action(self, params):
         submit = isinstance(params, dict) and params.get('action') == 'submit_bound_fixture'
-        ref = validate_ref(params, ('action', 'binding_id') if submit else ('action',))
-        if ref['action'] not in runner.ACTIONS:
+        extra = ('action', 'binding_id') if submit else ('action',)
+        if isinstance(params, dict) and 'ordinal' in params:
+            extra += ('ordinal',)
+        ref = validate_ref(params, extra)
+        if 'ordinal' in ref and not safe_int(ref['ordinal'], 1):
+            raise Refused('INVALID_REQUEST', 'ordinal')
+        if not isinstance(ref['action'], str) or ref['action'] not in runner.ACTIONS:
             raise Refused('INVALID_BROWSER_ACTION')
         if submit:
             return self._submit(ref)
@@ -1385,8 +1390,9 @@ class Supervisor:
             run = self._usable(attempt)
             if run['max_actions'] is not None and run['action_count'] >= run['max_actions']:
                 raise Refused('ACTION_LIMIT')
+            ordinal = self._action_ordinal(ref, run)
             run['action_count'] += 1
-            record = {'ordinal': run['action_count'], 'action': ref['action'], 'state': 'started',
+            record = {'ordinal': ordinal, 'action': ref['action'], 'state': 'started',
                       'at': stamp(self.clock())}
             attempt['actions'].append(record)
             # The reservation is durable before the browser can act on it.
@@ -1463,8 +1469,9 @@ class Supervisor:
             attempt, run, credential = self._submit_target(ref)
             if run['max_actions'] is not None and run['action_count'] >= run['max_actions']:
                 raise Refused('ACTION_LIMIT')
+            ordinal = self._action_ordinal(ref, run)
             run['action_count'] += 1
-            record = {'ordinal': run['action_count'], 'action': 'submit_bound_fixture',
+            record = {'ordinal': ordinal, 'action': 'submit_bound_fixture',
                       'binding_id': credential['binding_id'], 'binding_revision': credential['binding_revision'],
                       'state': 'started', 'at': stamp(self.clock())}
             attempt['actions'].append(record)
@@ -1526,6 +1533,53 @@ class Supervisor:
                            'outcome': record['outcome'], 'login_requests': result.get('login_requests'),
                            'untrusted_page_claim_authenticated_as_bound_account':
                                result.get('untrusted_page_claim_authenticated_as_bound_account') is True}}
+
+    def _action_ordinal(self, ref, run):
+        """A8: correlate a durable backend reservation, including skipped refusals.
+
+        Action limits count commands, independently of their step IDs. Legacy
+        operator/proof callers omit the ID and receive the next unused ordinal.
+        A repeated or backwards ID is refused before any browser effect.
+        Called under self.lock, immediately before the durable reservation.
+        """
+        previous = max((a['ordinal'] for attempt_id in run['attempts']
+                        for a in self.state['attempts'][attempt_id].get('actions', [])), default=0)
+        ordinal = ref.get('ordinal', previous + 1)
+        if not safe_int(ordinal, 1):
+            raise Refused('INVALID_REQUEST', 'ordinal')
+        if ordinal <= previous:
+            raise Refused('STEP_ALREADY_RESERVED')
+        return ordinal
+
+    def step_record(self, params):
+        """A8: bounded read of one action, including after stop/recovery.
+
+        The timestamp is the reservation time. Command completion does not
+        establish the site's outcome. Absence is only 'no matching record'.
+        This read never saves, renews a lease, or consumes an action limit.
+        """
+        ref = validate_ref(params, ('ordinal', 'action'))
+        if not safe_int(ref['ordinal'], 1) or not isinstance(ref['action'], str) or ref['action'] not in runner.ACTIONS:
+            raise Refused('INVALID_REQUEST')
+        with self.lock:
+            attempt = self._attempt(ref)
+            found = next((a for a in attempt.get('actions', [])
+                          if a['ordinal'] == ref['ordinal'] and a['action'] == ref['action']), None)
+            if found is None:
+                return {'record': None}
+            if found['state'] not in ('started', 'done', 'failed', 'uncertain'):
+                raise Refused('JOURNAL_INVALID')
+            if not isinstance(found['at'], str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', found['at']):
+                raise Refused('JOURNAL_INVALID')
+            record = {k: found[k] for k in ('ordinal', 'action', 'state', 'at')}
+            if 'latency_ms' in found:
+                if not safe_int(found['latency_ms']):
+                    raise Refused('JOURNAL_INVALID')
+                record['latency_ms'] = found['latency_ms']
+            if 'error' in found:
+                error = found['error']
+                record['error'] = error if isinstance(error, str) and CODE.fullmatch(error) else 'WORKER_ERROR'
+            return {'record': record}
 
     def model_step(self, params, proof=None):
         """One model choice for the live attempt; see the module docstring (A5)."""
@@ -1726,8 +1780,9 @@ class Supervisor:
         with self.lock:
             attempt = self._attempt(ref, ('running',))
             run = self._usable(attempt)
+            ordinal = self._action_ordinal(ref, run)
             run['action_count'] += 1
-            attempt['actions'].append({'ordinal': run['action_count'], 'action': ref['action'],
+            attempt['actions'].append({'ordinal': ordinal, 'action': ref['action'],
                                        'state': 'started', 'at': stamp(self.clock())})
             self._save()
         os.kill(os.getpid(), signal.SIGKILL)
@@ -2004,7 +2059,7 @@ class Supervisor:
             return self.takeover(params) if operator else self.dashboard_takeover(params)
         if method == 'live':
             return self.live_open(params)
-        return {'status': self.status, 'renew': self.renew, 'action': self.action,
+        return {'status': self.status, 'renew': self.renew, 'action': self.action, 'step_record': self.step_record,
                 'takeover': self.takeover, 'input': self.human_input,
                 'observe': self.observe, 'locate': self.locate, 'egress_probe': self.egress_probe,
                 'proof': self.proof, 'unit_stats': self.unit_stats, 'journal': self.journal,
@@ -2172,6 +2227,7 @@ def serve():
     supervisor._save()
     supervisor.recover()
     RUN_DIR.mkdir(mode=0o700, exist_ok=True)
+    BACKEND_SOCKET.parent.mkdir(mode=0o700, exist_ok=True)
     servers = [listen(BACKEND_SOCKET, supervisor, False), listen(OPERATOR_SOCKET, supervisor, True)]
     finished = threading.Event()
 

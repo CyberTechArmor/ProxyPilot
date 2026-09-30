@@ -80,7 +80,10 @@ export function validateWorkerLaunch(value) {
 // submit_bound_fixture names its binding; every other action has no extra field.
 export function validateBrowserAction(value) {
   const submit = value?.action === 'submit_bound_fixture';
-  if (!fields(value, submit ? ['run_id','attempt_id','fence','action','binding_id'] : ['run_id','attempt_id','fence','action']) ||
+  const names = submit ? ['run_id','attempt_id','fence','action','binding_id'] : ['run_id','attempt_id','fence','action'];
+  if (value && typeof value === 'object' && 'ordinal' in value) names.push('ordinal');
+  if (!fields(value, names) ||
+      ('ordinal' in value && (!Number.isSafeInteger(value.ordinal) || value.ordinal < 1)) ||
       (submit && !validUuid(value.binding_id)) || !validUuid(value.run_id) || !validUuid(value.attempt_id) ||
       !Number.isSafeInteger(value.fence) || value.fence < 1 ||
       !BROWSER_ACTIONS.includes(value.action)) fail('INVALID_BROWSER_ACTION');
@@ -160,13 +163,38 @@ export function createWorkerLauncher({client=null, vmUuid=null}={}) {
       validateBrowserAction(request);
       const submit=request.action==='submit_bound_fixture';
       const result=await connected().request('action', {run_id:request.run_id,attempt_id:request.attempt_id,
-        fence:request.fence,action:request.action,...(submit?{binding_id:request.binding_id}:{})});
+        fence:request.fence,action:request.action,...(submit?{binding_id:request.binding_id}:{}),
+        ...('ordinal' in request ? {ordinal:request.ordinal} : {})});
       if (!result || !Number.isSafeInteger(result.ordinal) || result.untrusted!==true) fail('SUPERVISOR_PROTOCOL');
+      if ('ordinal' in request && result.ordinal !== request.ordinal) fail('SUPERVISOR_PROTOCOL');
       // A submit result names the binding, revision and outcome; nothing else is expected back.
       if (submit && (result.result?.binding_id!==request.binding_id ||
           !Number.isSafeInteger(result.result?.binding_revision) ||
           !SUBMIT_OUTCOMES.includes(result.result?.outcome))) fail('SUPERVISOR_PROTOCOL');
       return result;
+    },
+    // A8: one action record, bound to the step's original attempt and fence.
+    // It is evidence for a human decision; absence never establishes non-execution.
+    async stepRecord(ref) {
+      if (!validRef({run_id:ref?.run_id,attempt_id:ref?.attempt_id,fence:ref?.fence}) ||
+          !fields(ref, ['run_id','attempt_id','fence','ordinal','action']) ||
+          !Number.isSafeInteger(ref.ordinal) || ref.ordinal < 1 || !BROWSER_ACTIONS.includes(ref.action))
+        fail('INVALID_REQUEST');
+      const reply = await connected().request('step_record', ref);
+      if (!fields(reply, ['record'])) fail('SUPERVISOR_PROTOCOL');
+      if (reply.record === null) return null;
+      const r = reply.record;
+      const names = ['ordinal','action','state','at'];
+      if (r && typeof r === 'object' && 'latency_ms' in r) names.push('latency_ms');
+      if (r && typeof r === 'object' && 'error' in r) names.push('error');
+      if (!fields(r, names) || r.ordinal !== ref.ordinal || r.action !== ref.action ||
+          !['started','done','failed','uncertain'].includes(r.state) ||
+          typeof r.at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r.at) ||
+          !Number.isFinite(Date.parse(r.at)) || new Date(r.at).toISOString() !== r.at.replace('Z', '.000Z') ||
+          ('latency_ms' in r && (!Number.isSafeInteger(r.latency_ms) || r.latency_ms < 0)) ||
+          ('error' in r && (typeof r.error !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(r.error))))
+        fail('SUPERVISOR_PROTOCOL');
+      return { ...r };
     },
     // A5: one model choice for the live attempt. The supervisor checks the
     // policy bytes against the run's pinned digest and the guide bytes against

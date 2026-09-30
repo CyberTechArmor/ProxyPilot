@@ -23,7 +23,7 @@ import tempfile
 from urllib.parse import urlsplit
 
 OPERATOR_SOCKET = Path('/run/proxypilot-a3/operator.sock')
-BACKEND_SOCKET = Path('/run/proxypilot-a3/supervisor.sock')
+BACKEND_SOCKET = Path('/run/proxypilot-a3-backend/supervisor.sock')
 PUBLIC_KEY = Path('/etc/proxypilot-a3-proof/supervisor-pub.pem')
 
 

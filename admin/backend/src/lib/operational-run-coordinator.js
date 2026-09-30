@@ -614,12 +614,18 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
       runId, ordinal));
       if (code === null) {
         const claims = reduceClaims(decision.action, result.result);
+        if (decision.action === 'sign_out' && claims.signed_out !== true) {
+          finish('uncertain', claims, 'SIGN_OUT_UNCONFIRMED');
+          note({ event: 'step_failed', run_id: runId, ordinal, action: decision.action, code: 'SIGN_OUT_UNCONFIRMED' });
+          if (runOf(runId).state !== 'running') return stopped();
+          return terminate(runId, 'failed', 'uncertain_step', { needsHuman: true });
+        }
         finish('done', claims, null);
         note({ event: 'step_done', run_id: runId, ordinal, action: decision.action, claims });
         continue;
       }
       note({ event: 'step_failed', run_id: runId, ordinal, action: decision.action, code });
-      if (TRANSPORT.has(code)) {
+      if (TRANSPORT.has(code) || (decision.action === 'sign_out' && code === 'SIGN_OUT_UNCONFIRMED')) {
         // The browser may have acted. Record it as uncertain; never replay it.
         finish('uncertain', {}, code);
         if (runOf(runId).state !== 'running') return stopped();

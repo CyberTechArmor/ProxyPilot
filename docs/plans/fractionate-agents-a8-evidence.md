@@ -255,3 +255,135 @@ passed. Those local cases do not establish real host media acceptance. The
 correction still needs exact-head CI, the user's merge/deploy decision and a
 fresh full host A7 proof. A5/H6, enrollment, internet pilot, rollback/growth and
 explicit A8 acceptance remain pending; the off-host backup remains open.
+
+## 2026-09-30 — live-view ordering fix deployed; fresh H4 passed
+
+The user approved "PR #715 and continue deployment" on reviewed head
+`114d6f840561aa99e0d5da098580a21aeb891525`; all seven CI checks passed. PR #715
+merged as `370e0b1ac1197e7c34a3023d99f39fbac67a11e8`. Normal promotion advanced
+clean live/candidate to `8846ab4ee783a8ae725c886db98cb9803fcf9210`. Update
+`0d2e23a1-8631-4daa-9460-887d5fc5c0eb` succeeded at 2026-09-30T20:44:49Z
+(4:44 PM Eastern), with the actual frontend build and container health check
+passed. Rollback tag: `pp-rollback-20260930T204345Z`; the automatic pre-update
+database backup is `proxypilot.db.pre-update-20260930-164345`.
+
+The operator ran the reviewed full H4 helper, SHA-256
+`58d12ca25388eb1446c6b3d2ea69c5710e914219663145ebbaa0eb46e69c0ad9`, in
+`/var/lib/proxypilot/a8-operator-transfer/h4-relay-20260930T204646Z-0a3djwvw`.
+Its pasted summary records **A3 20/20, A4 6/6, A7 18/18**, all child exit
+codes zero, both fresh canaries passed with `unclean_sinks: []`, and
+`A8_H4_DONE` followed by `A8_H4_END`. Reports retained:
+
+- `/var/lib/proxypilot-a3-proof/proof/worker-proof-20260930T204652Z.json`
+- `/var/lib/proxypilot-a4-proof/a4-proof-20260930T205000Z.json`
+- `/var/lib/proxypilot-a7-proof/20260930T205022Z/a7-proof-20260930T205022Z.json`
+
+The line reader counted 43 compact case lines; the complete report counts
+confirm all 44 cases. The A7 proof used the recorded 100 ms submit-kill delay
+with its existing assertions intact. The failed earlier H4 and focused
+diagnostic reports remain preserved; this is a new full passing run.
+
+A3's proof-VM crash case changed boot `8c2511ae…` to
+`92cc40f3-2c38-41ce-929f-00f34aed8e7a`; receipt key remains `bffb86e3…` and
+the pasted result records the supervisor idle/ready. Read-only MCP checks
+independently confirmed this VM boot and both clean checkouts on `8846ab4e`.
+Interactive A5 (17 cases, one real human approval), its fresh canary and H6
+remain pending. No pilot credential binding or dashboard agent run has been
+created. The internet pilot, rollback/growth proof, final evidence and explicit
+A8 acceptance remain open; S6 and the unverified off-host backup retain their
+existing dispositions.
+
+## 2026-09-30 — A5 interrupted; user requests the live-view check first
+
+Interactive H5 job `a5-20260930T211149Z-dvwa6n5_` passed its preflight and
+displayed the approval prompt for isolated proof run
+`67e838de-8bd1-465b-b18b-79ffe08c3ac8`, attempt
+`558c8d23-a91c-4d74-a1b3-b2f6ecbfcd00`, fence 1. The screenshot shows a valid
+digest prefix typed, followed later by Ctrl-C and `KeyboardInterrupt` while
+the wrapper was reading the proof's output. Its end marker confirms wrapper
+exit, not proof success. The pasted read-only reader found neither H5 nor H6
+summary and no case output. This A5 run is unfinished; no cause is yet proven.
+
+The user then requested: "Please, I just want to test the live view". The next
+prepared operator step keeps the approved Demo guide and seven limits,
+requires the passing fresh H4 and reviewed boot/key/source pins, and refuses
+concurrent proof or dashboard work. It collects only the exact interrupted A5
+attempt if still active and verifies its signed teardown, revokes only that
+isolated proof binding, restores the normal synthetic fixture and enrolls the
+existing synthetic reference for Demo Agent. No dashboard run or submit
+approval is automated. The human can start the dashboard run, watch its live
+browser while the submit approval is pending, and stop it from the dashboard.
+The enrollment paste has been prepared and syntax/byte checked, but has not
+yet been run. A5/H6, the full pilot, rollback/growth and A8 acceptance remain
+unfinished; the live-view check does not replace those acceptance proofs.
+
+## 2026-09-30 — Enrollment preflight guard corrected
+
+The operator ran helper `enable-live-view-ca84d0262fc6.py`, SHA-256
+`ca84d0262fc68681470989af35d44e3a7f9a4e67bda037c896c3d4b001c8b734`.
+It refused during its read-only preflight with `Guide is not current`, before
+worker cleanup, binding creation, fixture changes or dashboard import. The
+dashboard still has no active binding and no agent runs. The BrokenPipeError
+printed afterward is an older 16:51:50 service journal entry and is not the
+reported preflight failure.
+
+The helper incorrectly used `ops_guide_state.base_version_id` as the current
+approved version. That field is the draft revision's base; first publication
+leaves it NULL. The actual application finds the latest approved version by
+`ops_guide_versions.version_number` and excludes withdrawals. The corrected
+helper uses that latest version ID and content hash, retaining the withdrawal
+check and all other host, source, boot, access and approval safeguards.
+
+Local verification drove the actual application publication workflow and
+evaluated the corrected helper guards on its SQLite snapshots: first
+publication with NULL draft base and the latest approved assignment pass;
+superseded and withdrawn assignments are refused. All four checks passed.
+Both the complete transfer and shorter correction paste passed Python AST,
+shell syntax and exact source-byte verification. The corrected helper is
+`enable-live-view-8691af4e2986.py`, SHA-256
+`8691af4e29862c2a3db01d01e15821a186da952505ade4e75fcccc3a119f3471`.
+It is prepared for the operator, not yet run on the host. Enrollment, the
+human live-view check and remaining A8 acceptance work remain open.
+
+## 2026-09-30 — First dashboard run completed; session-readback corrections
+
+Thomas supplied screenshot `codex-clipboard-1cf8348c-feca-45d6-a683-08ce00bde675.png`
+showing Demo Agent run `4653926e…`, guide v1, binding `7ef593ac…` revision 1,
+started at 17:39:52 Eastern. Thomas approved at 17:40:24. The displayed submit
+outcome is signed in with one sign-in request; the following session read
+names the bound account, the sample file is present, and step 6 finishes at
+17:40:26 with Completed / Signed in and verified. This confirms the dashboard
+can start a bound run and obtain a human approval. The screenshot displays an
+ended Browser with its last still frame from step 2; it does not establish a
+playing internet WebRTC stream or takeover. Receipt, full cost/summary and
+supervisor evidence for this exact run still need readback.
+
+Two displayed claims require correction before accepting the pilot:
+`authenticated: false` beside `as_bound_account: true`, and `signed_out: false`
+on the completed finish step. Local real-Chromium tests reproduced both. The
+generic session check still compared to the original public demo email; it
+now uses the bound account when present. The sign-out click starts an
+asynchronous SPA request; it now clicks once and performs bounded fixed
+session reads until logout is observed. An unconfirmed or unreadable
+post-click result becomes an uncertain step, preserves teardown, is never
+replayed and gates the next Start for human reconciliation. Existing run
+history is preserved. Teardown also preserves the UI sign-out's confirmation
+state without sending a second POST after a confirmed or uncertain click.
+These changes are local and not yet deployed.
+
+Local validation: 47 coordinator/API/recovery/deck checks passed with no skip;
+13 credential/browser checks passed using real Chromium, including delayed
+logout, the bound-account claim, mismatched-account refusal and no duplicate
+cleanup write. The A3/A7 worker group passed 19 tests with five existing
+live-runtime skips; its scripted A7 harness report records all 18 cases passed
+using the previously reviewed 100 ms submit-kill delay. The initial regressions
+failed against the old runner as expected. A separate pre-existing multi-mode
+fixture failure was traced to an MFA cookie carried through its reused profile;
+the fixture now clears cookies between modes to match fresh production
+workspaces. These are local checks; installed-runner proofs remain required.
+
+The user's immediate live-view check remains the priority: leave the submit
+approval pending while viewing, report the live-video connection state and
+stop from the dashboard when finished. A5/H6, full internet takeover and
+recovery, rollback/growth, final evidence and explicit A8 acceptance remain
+open. This completed sign-in is useful pilot evidence, not A8 acceptance.

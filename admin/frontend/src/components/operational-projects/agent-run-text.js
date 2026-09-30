@@ -127,7 +127,8 @@ export const RECONCILE_TEXT = {
     model_call: 'Was this model call answered and charged? Check the provider spend. It is never re-sent.',
     run: 'Record that you have seen what this run needed.',
   })[item.kind],
-  reason: reason => ({ timeout: 'the sign-in timed out', uncertain: 'the step\'s outcome is unknown' })[reason]
+  reason: reason => ({ timeout: 'the sign-in timed out', uncertain: 'the step\'s outcome is unknown',
+    SIGN_OUT_UNCONFIRMED: 'the sign-out could not be confirmed' })[reason]
     ?? RESULT_TEXT[reason]?.[0] ?? String(reason ?? '').replaceAll('_', ' ').toLowerCase(),
   heading: 'Decisions for a person',
   note: 'Each decision is recorded with your name and time; nothing is re-sent. Deciding needs your own confirmation once in this session.',

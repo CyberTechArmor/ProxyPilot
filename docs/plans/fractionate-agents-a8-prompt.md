@@ -21,15 +21,18 @@ decisions below before writing any code or running any host step.
      set.
 
    If it does not, stop and name what is missing.
-2. **Where the code lives.** A7 is on `claude/intelligent-heisenberg-bwnuiv`
-   (code `91a25b62`, plus any fix the host run needed) and **not in `main`**
-   unless the user has since asked for a PR and merged it. Never merge,
-   un-draft or close a PR yourself. Never rewrite pushed history.
+2. **Where the code lives.** A7 is in `main` (#707 and the host-run fixes
+   #708–#710; `main` `02398ef9` on 2026-09-30) and deployed (live `0627d437`).
+   Never merge, un-draft or close a PR without the user's word in the
+   conversation. Never rewrite pushed history.
 3. **Host state**, read-only, only when a host step is needed: the candidate
    and live SHAs, the installed supervisor/runner/broker/demo digests, the
    receipt key, the proof VM boot, the TURN name, the Neko digest and the live
-   marker, from the A7 acceptance section. A different value is a question,
-   not a failure.
+   marker, from the A7 acceptance section (after the 2026-09-30 host run:
+   supervisor `44904081…`, runner `d0724e5f…`, receipt key `5febe58a…`, VM
+   boot `f55089ba…`, TURN `streamview.fractionate.ai` on `192.168.88.161`,
+   Neko `a19dc462…`, live policy `b515d84c…`, marker `1689bec8…`). A
+   different value is a question, not a failure.
 
 ## Read first, in this order
 
@@ -125,6 +128,13 @@ Release A3–A7 to the live dashboard and run one real supervised workflow:
 
 ## Lessons carried forward
 
+- A test that points a program at a configuration path the program never
+  reads proves nothing about that configuration: A7's live policy was never
+  in force locally, and on the host it refused the runner's own DevTools pipe
+  (`DeveloperToolsAvailability`). Test the real path, as
+  `test_a7_live_policy.py` does.
+- Copying files into a guest can drop names it does not like (Debian epochs,
+  `%3a`): read what arrived back by digest before using it.
 - A proof that encodes an old boundary fails when the boundary is decided to
   widen: A7's A3 `backend_refusals` still expected `takeover` refused.
   Re-read every earlier host proof against the new method set before a host

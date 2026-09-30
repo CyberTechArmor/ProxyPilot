@@ -1,10 +1,12 @@
 # A7 practice and recovery — evidence
 
-**A7 is implemented and proven locally (2026-09-29); the user asked for it to
-be merged and deployed; the host run has not run.** The gate held and every
-decision is made (below). The last code commit is `805f4565` on
-`claude/intelligent-heisenberg-bwnuiv`. The host pastes (H0–H7) are in the
-reference; they need only the router's three forwards.
+**A7 is implemented, merged and deployed, and its host run passed
+(2026-09-30): A3 20/20 in live mode, A4 6/6, A5 17/17 with one real human
+approval, A7 18/18, three clean canaries, `a7-host-summary.py`
+`"all_passed": true`. The user's acceptance decision is pending.** The code is
+in `main` (#707–#710, `02398ef9`); the live dashboard runs `0627d437`. The
+host run and its two findings (the VM packages, the live policy) are in the
+dated sections at the end.
 
 This file is the record: later dated sections win. The orientation page is
 [`fractionate-agents-a7-reference.md`](fractionate-agents-a7-reference.md).
@@ -660,3 +662,126 @@ every browser launch failed within about a second:
    nothing is downloaded), then `enable` (the marker takes the new policy
    digest).
 3. H4 again, unchanged.
+
+## 2026-09-30 host run: #710 deployed, H3c, H4, H5, H6 and H7 passed
+
+**Staging of #710** (merge `02398ef9`, user, pinned stager): `staged
+0627d437… (was 58df8b9a…) from 02398ef9…; 191 paths match exactly`.
+
+**H3c (user, detached):** HEAD `0627d437…`; the candidate's runner
+`d0724e5f…`, supervisor `44904081…`, installer `2a8ee479…`.
+- Supervisor reinstalled; the installed runner reads back as `d0724e5f…`.
+  New receipt key
+  **`5febe58a3edd8b6b5217d8a582cb86670ea5958633a7927301f72b4695908d3d`**;
+  `e65f5af5…` archived.
+- `provision-vm`:
+  - snapshot `pp-a7-pre-live-20260930-120121`;
+  - `debs: []`: the packages were already in, so nothing was downloaded;
+  - policy `b515d84c…` in the VM;
+  - `missing_libraries: []`.
+- `enable`: `fence_live_relay: true`, `live_marker: true` (enabled
+  12:01:24Z).
+- `accepting_launch: true`, `blockers: []`; `h3c_end`.
+
+**Deploy (session, MCP):**
+- Checks on `0627d437`: 3,408 tests, 3,397 pass, 0 fail, 11 skipped.
+- Backup: `proxypilot-pre-A7-policy-promote-20260930T120229Z.db` (sha256
+  `2a2a6df0…`).
+- Promote `58df8b9a` → `0627d437`, rollback tag
+  `pp-rollback-20260930T120233Z`.
+- Update `9a7670a4…`: success in 60 s, health check passed, 33 routes
+  match. MEET's five forwards were reapplied at boot.
+
+**H4 (user, detached):**
+- H4 was started twice: bindings `b3814adb-…` and then `227a1e6c-…`. The
+  second start revoked the first binding, and its log is the record. No
+  probe was running when H6 ran.
+- `"provisioned": true`.
+- A3 worker proof in live mode: **20/20** passed
+  (`worker-proof-20260930T121121Z.json`), `a3_exit=0`.
+- A4 proof: **6/6** passed (`a4-proof-20260930T121423Z.json`),
+  `a4_exit=0`, `canary_a4_exit=0`.
+- A7 proof: **18/18** passed in order, including the six kill cases,
+  account loss and key loss (`20260930T121442Z/a7-proof-20260930T121442Z.json`),
+  `a7_exit=0`, `canary_a7_exit=0`.
+- `case_lines=44`, no failed case; `h4_end`.
+
+**H5 (user, interactive, one real human approval):**
+- The approval prompt showed:
+  - `submit_bound_fixture` for run `51fa6808-…`, attempt `c70628d4-…`,
+    fence 1;
+  - binding `ff0c38e2-…` revision 1, origin `https://demo.fractionate.ai`;
+  - guide hash `d151cec9…`, policy digest `96d9075f…`;
+  - approval digest `97781722b66b…`.
+- The user typed the first 12 characters of the digest.
+- A5 proof: **17/17** passed (`20260930T122122Z`; `supervised_run` 31.3 s),
+  `a5_exit=0`. The A5 canary (`--a5-marker`) passed.
+
+**H6 (user, read-only):** `no_probe_running`; `a7-host-summary.py`:
+- **Proofs:**
+  - `a3` 20/20 with `"after_live_enabled": true`; `a4` 6/6; `a5` 17/17.
+  - `a7` 18/18 with `"live": true` and `"all_cases": true`: supervisor
+    `44904081…`, runner `d0724e5f…`, viewer `c05ee123…`.
+- **Live view:** **25.07 fps**, 300 frames, connected in 2,018 ms. The pair
+  is relay (UDP, `10.185.17.1`) to the VM's Neko on port 18091.
+- **Live install:**
+  - Neko `3f4f9408` plus patch `a4fedb0f…`, binary `a19dc462…`;
+  - probe `c05ee123…`;
+  - VM snapshot `pp-a7-pre-live-20260930-120121`, policy `b515d84c…`, no
+    missing libraries;
+  - TURN `streamview.fractionate.ai` on `192.168.88.161` (conf
+    `3020d133…`);
+  - enabled 12:01:24Z; marker present (`1689bec8…`).
+- **Canaries:** A4 (15 sinks), A5 (18) and A7 (18) all passed, with no
+  unclean sink.
+- **`"all_passed": true`, `summary_exit=0`.**
+
+**H7 (session, read-only):**
+- The candidate checks on `0627d437` (above).
+- `get_host_services proxypilot-a`:
+  - the fence has run (active, exited);
+  - the origin proxy, supervisor, broker and TURN relay are running;
+  - the proxy-renew and TURN-certificate timers are waiting.
+- `inspect_a3_vm`:
+  - Running: Debian 13.7, Incus 7.5.1, 2 CPUs, 4 GiB, a 12 GiB root and
+    swap off;
+  - VM UUID `49592202-…`;
+  - boot `f55089ba-b14e-4188-80e1-b6376ec2a2f2`, changed by H4's
+    `guest_crash` case.
+
+**Host state after the run (for A8):**
+- Dashboard: live `0627d437` (`main` `02398ef9`).
+- Supervisor `44904081…`, runner `d0724e5f…`, receipt key `5febe58a…`.
+- VM boot `f55089ba…`.
+- TURN `streamview.fractionate.ai` on `192.168.88.161`: 3479 UDP/TCP and
+  TLS 5350.
+- Neko `a19dc462…`, live policy `b515d84c…`, live marker `1689bec8…`.
+- Snapshots kept:
+  - `pp-a7-pre-live-20260929-211249`, `-20260929-214143` and
+    `-20260930-120121`;
+  - the pre-network snapshot.
+- The broker and the demo were not changed by this run; their digests are
+  the ones recorded for H1.
+
+**Open items for the acceptance decision** (they replace the list in
+"Open items" above where they differ):
+- **The router forwards and the external TLS check are not done**
+  (3479/UDP, 3479/TCP and 5350/TCP to `192.168.88.161`). They matter only
+  for viewers outside the LAN. The dashboard's own live view over the
+  internet is A8's pilot.
+- **The live dashboard cannot run agents yet.** Until the backend reaches
+  the supervisor (A8), every execution control there answers
+  `EXECUTION_UNAVAILABLE`. A7 proved the live path on the host with the Go
+  viewer through the relay. It proved the dashboard client locally in
+  Chromium over UDP, TCP and TLS.
+- **A person deciding an uncertain write sees the run's own record only**
+  (proposed for A8, as above).
+- **The two mid-write kill cases** passed on the host with the default
+  300 ms window.
+- **The reboot test** (`a6-reboot-check.py`) has not run; it runs only when
+  the user chooses.
+- **S6/SEC/INF** stay with the later security audit.
+- **Three `pp-a7-pre-live-…` snapshots are kept**; one is deleted only on
+  the user's word.
+
+**Next:** the user's acceptance decision.

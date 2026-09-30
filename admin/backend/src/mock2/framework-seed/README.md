@@ -29,15 +29,17 @@ it with the live `manifest.json` to say "site X available — update ProxyPilot 
 pick it up" (`mock2-standards-seed.test.js` checks it stays in step with the
 table above).
 
-**Partial fold, 2026-09-30.** The site is at 1.7.0; this seed still renders 0.3.0,
-with one exception. Constitution §15 carries 1.7.0's rule for phones and installed
+**Partial fold, 2026-09-30.** The site is at 1.7.1; this seed still renders 0.3.0,
+with one exception. Constitution §15 carries 1.7.1's rule for phones and installed
 apps (`rules/mock2-mobile-web.md`, CPR current §O), folded in ahead of a full sync
-because every scaffolded application ships an installable manifest. 1.0.0–1.6.0 are
-not folded, so `standards-version.json` stays at 0.3.0 until they are.
+because every scaffolded application ships an installable manifest. 1.7.1 corrected
+1.7.0 the same day: the Android fallback no longer depends on what the device
+measures, and a device check covers a cold start. 1.0.0–1.6.0 are not folded, so
+`standards-version.json` stays at 0.3.0 until they are.
 
 | File | Field | State |
 |---|---|---|
-| `constitution.md` | `constitution_md` | **v2** — rule 0, the stages, CPR §13, change records + production checklist §14, phones and installed apps §15 (from site 1.7.0), on top of the hardened v1 sections (§4 identity, §5 gated shells, §7 end-to-end done, §7a no silent simulation, §9 deviations, §11–12 acceptance) |
+| `constitution.md` | `constitution_md` | **v2** — rule 0, the stages, CPR §13, change records + production checklist §14, phones and installed apps §15 (from site 1.7.1), on top of the hardened v1 sections (§4 identity, §5 gated shells, §7 end-to-end done, §7a no silent simulation, §9 deviations, §11–12 acceptance) |
 | `skills.json` | `skills_json` | the four stage skills (concept, define, build, review) as prompt templates — v0.2.0 posture: `[draft]` rules, checks between changes, reviewer never blocks, phase-routing@1 contract kept |
 | `gates.json` | `gates_json` | the deterministic check battery (typecheck, constitution-lint, rule-coverage, security-scan, test, ui-interaction, acceptance, component-reuse). The platform still calls them "gates" in report rows; read as production-checklist items. `security-scan`: committed secret = hard stop, dependency audit = recorded WARNING |
 | `design-system.md` | `design_system_md` | **locked** — the design system Stage-1 mockups must obey (unchanged) |

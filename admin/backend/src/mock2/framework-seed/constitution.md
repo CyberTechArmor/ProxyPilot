@@ -520,7 +520,7 @@ that bind every project:
 - **Rollback**: the previous known-good state is identified and reachable without
   rebuilding (CPR §15) — the release before this one, by commit and deploy stamp.
 
-## 15. Phones and installed apps (mock2-core 1.7.0, CPR current §O)
+## 15. Phones and installed apps (mock2-core 1.7.1, CPR current §O)
 
 Every scaffolded application ships `public/manifest.webmanifest` with
 `display: standalone`, so it can be installed to a phone's home screen. Installed,
@@ -547,26 +547,32 @@ reported a safe-area inset of 0, while every check at 375px was green.
   instead (`bottom: calc(16px + var(--bottom-inset))`). Every `env()` has its `, 0px`
   fallback: an unknown name without one makes the whole declaration invalid, and the
   padding drops to 0.
-- **Android that reports 0.** A script sets `--nav-fallback` to 48px (Android's
-  three-button bar) only when all of these hold: the app runs installed
-  (`display-mode: standalone` or `fullscreen`), the user agent is Android, the phone
-  is in portrait, the reported inset is under 1px, and
-  `screen.height - innerHeight < 48`. Otherwise it sets 0. It measures again on
-  resize and on a display-mode change. The reported inset is read from a hidden,
-  fixed, zero-size probe whose `padding-bottom` is `var(--reported-inset)`, never
-  from `--bottom-inset`, which already contains the fallback; without the probe's
-  CSS it reads 0 and the fallback fires where it should not. The conditions live in
-  one pure, unit-tested function. The fallback is an OPEN decision in
-  `state/decisions.md` until a device confirms it.
+- **Android that reports too little.** A script sets `--nav-fallback` to 48px
+  (Android's three-button bar) whenever the app runs installed
+  (`display-mode: standalone` or `fullscreen`), the user agent is Android and the
+  phone is in portrait; otherwise 0. The `max()` above lets a larger reported inset
+  win. It measures again on resize and on a standalone or fullscreen display-mode
+  change. No other condition on a measured size: a first version (1.7.0) also
+  required a reported inset of 0 and `screen.height - innerHeight < 48`, and on the
+  phone that showed the defect one of those did not hold on a later launch, and the
+  bar was under the buttons again. The price is a gap of up to 48px where Android
+  already keeps the installed page above its bar, which may be the usual case: a gap
+  is preferred to a control under the system bar. The conditions live in one pure,
+  unit-tested function. The fallback is an OPEN decision in `state/decisions.md`
+  stating its conditions, the 48px, the price and the revisit trigger (a device still
+  clips, the platform starts reporting the inset, or the developer rejects the gap),
+  until a device observation that includes a cold start confirms it.
 - **Proof (§11).** Where the browser harness supports it, the phone checks render the
   installed view as well as the tab: standalone display mode, an Android user agent,
   `screen.height` overridden, and Chromium's `Emulation.setSafeAreaInsetsOverride`
   for the reported inset. They assert clearance: the window height minus the lowest
   bottom control's bottom edge is at least the inset, with an inset reported and with
-  none, and stays below the inset plus the bar's own padding where nothing should be
-  added. A display-mode stub reaches script only, so CSS display-mode rules are
-  recorded as not verified. Emulation is a substitute measurement. The change record
-  states whether the check on a device was done (who, which device) or not verified.
-  Where the harness cannot render the installed view, the change record says so.
+  none, and stays below the inset (or the fallback) plus the bar's own padding, which
+  catches an inset added to the fallback. A display-mode stub reaches script only, so
+  CSS display-mode rules are recorded as not verified. Emulation is a substitute
+  measurement. The change record states whether the check on a device was done (who,
+  which device) or not verified; a device check covers a cold start, the app closed
+  fully and opened again more than once. Where the harness cannot render the
+  installed view, the change record says so.
 
 Full rule: `rules/mock2-mobile-web.md` on the standards site.

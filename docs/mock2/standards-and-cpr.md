@@ -44,9 +44,11 @@ executable check scripts, and skill templates — not a set of files for
 - **MCP server instructions** now point chat clients at the standards and at the
   project's constitution files.
 
-*2026-09-30, partial fold of site 1.7.0.* Constitution §15, phones and installed
-apps: the safe-area inset variable, the fallback for Android that reports no inset,
-and proof of the installed view. It is the site's `rules/mock2-mobile-web.md` and CPR
+*2026-09-30, partial fold of site 1.7.0, corrected to 1.7.1 the same day.*
+Constitution §15, phones and installed apps: the safe-area inset variable, the
+fallback for Android that reports too little, and proof of the installed view. 1.7.1
+dropped 1.7.0's measured conditions on the fallback (one of them failed on the
+defect's phone on a later launch) and made a cold start part of every device check. It is the site's `rules/mock2-mobile-web.md` and CPR
 current §O, from Nodus R-041. It was folded in on its own because every scaffolded
 application ships an installable manifest (`scaffold.js` `pwaManifest`,
 `display: standalone`). Site versions 1.0.0–1.6.0 are still not folded, so

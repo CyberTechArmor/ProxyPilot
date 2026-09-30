@@ -220,6 +220,7 @@ and the socket stays unmounted from the backend container (A8).
 It does not close S6: a compromised backend that reaches the socket could
 now also watch a running attempt live and hand its control to a viewer it
 opens, within the run's pins.
+
 | Project provisioning and component install / setup engine (A-17.10–11) | `mock2/provision.js`, `mock2/component-install.js`, `lib/project-lifecycle.js`, `mock2/{host,deploy,runner-sdk}.js`; launch, guest scripts, idle sweep | Existing runner job kinds with project lease, immutable approved inputs, guest-only execution and durable recovery; remove backend-allowed execution only after replacements pass |
 | Caddy, domains, TLS / edge controller (A-17.12) | `lib/{caddy-driver,caddy-cert,cert-mount-reconciler,tls-cert-store}.js`, `mock2/caddy.js`, `routes/{services,domains}.js`; writable `/etc/caddy`, adapt/reload | Constrained route/certificate methods and host-owned writes; canonical path/symlink policy, no arbitrary Caddy imports/config authority from a compromised backend. Current optional RPCs still accept broad config and are not isolation |
 | Firewall, L4, VPN, SSH / network controller | `lib/l4-*`, `lib/{platform-vpn-sync,vpn-startup}.js`, `mock2/{firewall,network}.js`, `routes/{firewall,vpn,ssh-access}.js`; host exec, sysctl, network/credential files | Typed validated rules and peer operations, host-owned ranges/ports/path policy, shared firewall lease; root-controlled grants for broader changes |
@@ -234,6 +235,39 @@ The agent service's `disk` group can access raw devices. Its broad writable path
 allowances and Caddy permissions also need a method-by-method review. The
 current service is not a minimal final privilege boundary. Do not widen these
 permissions merely to make a failed method work.
+
+### A8 dashboard wiring and record read (2026-09-30; pending deployment acceptance)
+
+The reviewed opt-in mounts only `/run/proxypilot-a3-backend` and
+`/etc/proxypilot-a8` read-only, with `create_host_path: false`, into the existing
+uid-0 backend. Directory/socket modes are 0700/0600; the key directory contains
+only the pinned Ed25519 public key. The operator socket remains under
+`/run/proxypilot-a3`; the receipt-private-key directory is not an A8 mount.
+The supervisor preserves directory inodes over restart; the container sees the
+recreated socket. Its existing root-peer rule remains. This does **not** remove
+the backend's privileged/host-PID/Docker/writable-host authority: a compromised
+backend remains root-equivalent and could bypass application approvals or reach
+host keys. S6/SEC-01 stay open; limited single-user pilot acceptance is required.
+
+Backend `step_record({run_id,attempt_id,fence,ordinal,action})` validates the
+original attempt/fence, including terminal attempts, and returns only null or
+`{ordinal,action,state,at,latency_ms?,error?}`. It writes nothing, renews no lease
+and exposes no page, claims, value, binding or receipt. The transport caps this
+read at 2 KiB/two seconds. The existing GET run-detail route checks current run
+access before and after awaiting and checks the toggle again; no new route/MCP
+authority. Reconciliation remains an explicit human decision. Explicit action
+ordinals correlate reservations across refused steps without replaying effects.
+
+The user's same-person pilot guide decision uses a root-only CLI, an immutable
+authorization event for the exact pending demo submission/hash/revision, a
+one-hour expiry and one immutable consumption event in the approval transaction.
+Current active owner/origin and unused state are checked again; the owner must
+manually approve. There is no role change, auto-approval, general self-review
+setting or HTTP/MCP grant writer. Independent review remains the default.
+The binding enrollment CLI writes only existing audited metadata from the
+root-only broker reference; it grants no consent/run/approval. A8 adds no schema
+migration. Actual container refusals/restart, host regressions, backup/off-host
+restore, rollback, growth and internet pilot remain acceptance requirements.
 
 ## Reviewed merge candidates for PR #674
 

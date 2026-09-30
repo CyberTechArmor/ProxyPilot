@@ -108,7 +108,11 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
     agentHandle((r,a)=>agentRuns.rules(a,r.params.id,r.params.profileId),200,'profile_rules_read'));
   router.get('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.list(a,r.params.id,r.query),200,'agent_runs_read'));
   router.post('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.start(a,r.params.id,r.body),201,'agent_run_start'));
-  router.get('/:id/agent-runs/:runId', agentRunsOnly, agentHandle((r,a)=>agentRuns.status(a,r.params.id,r.params.runId),200,'agent_run_read'));
+  router.get('/:id/agent-runs/:runId', agentRunsOnly, agentHandle(async (r,a)=>{
+    const data = await agentRuns.statusWithRecords(a,r.params.id,r.params.runId);
+    if (!runsEnabled()) throw new OperationsError(404, 'Not found');
+    return data;
+  },200,'agent_run_read'));
   router.post('/:id/agent-runs/:runId/stop', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.stop(a,r.params.id,r.params.runId);},
     data=>data.stopping?202:200,'agent_run_stop'));
   router.get('/:id/agent-runs/:runId/view', agentRunsOnly, agentHandle((r,a)=>agentRuns.view(a,r.params.id,r.params.runId),200,'agent_run_view'));

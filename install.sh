@@ -1023,6 +1023,9 @@ create_env_file() {
     # The executor policy is an installation decision, preserved like a
     # secret: a re-run never rewrites runner-required to backend-allowed.
     local setup_executor_policy=""
+    # A8 is an explicit host-operator opt-in. Preserve its three pins on
+    # reinstall; the wiring helper validates them before adding any mounts.
+    local a8_socket="" a8_public_key="" a8_vm_uuid=""
     if [ -f "${install_dir}/.env" ]; then
         log_info "Existing .env detected — preserving secrets"
         # `|| true` on each pipe: install.sh runs under `set -euo pipefail`,
@@ -1040,6 +1043,9 @@ create_env_file() {
         vapid_private_key=$(grep -E '^VAPID_PRIVATE_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
         vapid_subject=$(grep -E '^VAPID_SUBJECT=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
         setup_executor_policy=$(grep -E '^SETUP_EXECUTOR_POLICY=' "${install_dir}/.env" | head -1 | cut -d= -f2- | tr -d '"' || true)
+        a8_socket=$(grep -E '^OPERATIONS_AGENT_SUPERVISOR_SOCKET=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        a8_public_key=$(grep -E '^OPERATIONS_AGENT_SUPERVISOR_PUBLIC_KEY=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
+        a8_vm_uuid=$(grep -E '^OPERATIONS_AGENT_VM_UUID=' "${install_dir}/.env" | head -1 | cut -d= -f2- || true)
     fi
 
     [ -z "$jwt_secret" ]     && jwt_secret=$(generate_password 64)
@@ -1112,6 +1118,11 @@ DATABASE_PATH=/data/db/proxypilot.db
 # runner unit is verified active on this host (see "Setup runner" below); an
 # existing value is preserved on re-run and never downgraded.
 SETUP_EXECUTOR_POLICY=${setup_executor_policy:-backend-allowed}
+
+# A8 supervised pilot; blank on a new install. Toggles remain dashboard-owned.
+OPERATIONS_AGENT_SUPERVISOR_SOCKET=${a8_socket}
+OPERATIONS_AGENT_SUPERVISOR_PUBLIC_KEY=${a8_public_key}
+OPERATIONS_AGENT_VM_UUID=${a8_vm_uuid}
 
 # Caddy Configuration Path
 CADDY_SITES_DIR=/etc/caddy/sites
@@ -1261,6 +1272,8 @@ EOF
     if [[ -z "$agent_gid" ]]; then
         log_warn "proxypilot-agent group not found at compose-write time; group_add line is empty. Phase A agent will be unreachable from the container until install.sh creates the group and re-runs create_docker_compose."
     fi
+
+    python3 "${install_dir}/scripts/a8-wire-dashboard.py" patch --install-dir "$install_dir"
 
     log_success "Docker Compose file created"
 }

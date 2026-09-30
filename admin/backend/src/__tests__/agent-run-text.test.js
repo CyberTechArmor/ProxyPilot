@@ -33,3 +33,11 @@ test('no words object in agent-run-text.js has a key written twice', () => {
   assert.equal(text.DECK_TEXT.review, 'Review and approve');
   assert.equal(text.DECK_TEXT.reviewTab, 'Review');
 });
+
+test('A8 reconciliation distinguishes missing and unavailable records and explains command completion', () => {
+  assert.match(text.RECONCILE_TEXT.supervisor({ supervisor_record: { status: 'missing' } }), /no matching record/);
+  assert.match(text.RECONCILE_TEXT.supervisor({}), /unavailable/);
+  assert.match(text.RECONCILE_TEXT.supervisor({ supervisor_record: { status: 'recorded',
+    record: { state: 'done', at: '2026-09-30T12:00:00Z', latency_ms: 12 } } }), /Reserved at 2026-09-30T12:00:00Z/);
+  assert.match(text.RECONCILE_TEXT.supervisorNote, /uncertain site outcome/);
+});

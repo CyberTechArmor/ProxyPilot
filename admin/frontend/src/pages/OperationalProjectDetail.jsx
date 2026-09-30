@@ -62,6 +62,7 @@ function Operation({id}) {
   const {p,d,v,r,e,a}=data,owner=p.own_role==='owner',editable=['owner','editor'].includes(p.own_role),reviewer=['owner','reviewer'].includes(p.own_role);
   const active=!p.archived_at,canRun=p.own_role!=='viewer',pending=d.pending_submission;
   const independent=pending&&pending.submitted_by!==user?.id&&!JSON.parse(pending.contributors_json).includes(user?.id);
+  const pilotReview=pending?.pilot_self_review?.owner_id===user?.id;
   const dirty=draft&&(draft.title!==d.title||draft.instructions!==d.instructions||draft.revision!==d.revision);
   async function record(event) {
     event.preventDefault();
@@ -103,7 +104,7 @@ function Operation({id}) {
       <Panel title="Activity"><ul className="space-y-3">{e.events.map(row=><li key={row.id} className="text-sm break-words"><span className="font-medium">{row.action.replaceAll('_',' ')}</span> · <time>{row.created_at}</time></li>)}</ul>{e.next_cursor&&<Action disabled={busy} variant="outline" onClick={()=>loadMore('e')}>Load more activity</Action>}</Panel>
     </>}
     {section==='Guide'&&<Panel title="Guide">
-      <p>Status: {d.status==='draft'?'Draft — not approved':d.status==='pending'?'Awaiting independent review':'Published — start a revision to edit'}</p>
+      <p>Status: {d.status==='draft'?'Draft — not approved':d.status==='pending'?'Awaiting review':'Published — start a revision to edit'}</p>
       {d.latest_submission?.reason&&<p className="whitespace-pre-wrap break-words">Latest review note: {d.latest_submission.reason}</p>}
       {editable&&active&&d.status==='draft'&&draft?<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('/draft',{title:draft.title,instructions:draft.instructions},draft.revision,'PATCH'),'Draft saved.','draft');}}>
         <Field label="Guide title" maxLength={200} value={draft.title} onChange={ev=>setDraft({...draft,title:ev.target.value})}/><Field label="Instructions" textarea rows={12} value={draft.instructions} onChange={ev=>setDraft({...draft,instructions:ev.target.value})}/>
@@ -115,9 +116,9 @@ function Operation({id}) {
       {capability&&<Demonstrations key={`${id}:${user?.id}:${p.own_role}:${active}`} base={base} user={user} project={p} draft={d} guideDirty={dirty} busy={busy} onSelectionDirty={setSelectionDirty} onSelectionSaved={revision=>{setDraft(old=>old?{...old,revision}:old);}} onEvidenceChanged={async()=>{try{await refresh(false);}catch(e){clearPrivate();throw e;}}} refreshKey={evidenceTick}/>}
       {pending&&<div className="space-y-4 border-t pt-4"><h3 className="font-semibold">Submitted snapshot</h3><GuideText version={pending}/><EvidenceSet base={base} evidence={pending.evidence} enabled={capability} refreshKey={evidenceTick}/><p className="text-xs break-all">Submitted by {pending.submitted_by} · {pending.submitted_at}</p>
         {active&&(reviewer||editable)&&<><Field label="Review or cancellation reason" textarea rows={2} maxLength={2000} value={reason} onChange={ev=>setReason(ev.target.value)}/><div className="flex flex-wrap gap-2">
-          {reviewer&&<><Action disabled={busy||!independent} onClick={()=>perform(()=>write(`/submissions/${pending.id}/decision`,{decision:'approve',reason},pending.revision),'Guide approved and published.')}>Approve and publish</Action><Action variant="outline" disabled={busy||!reason.trim()} onClick={()=>perform(()=>write(`/submissions/${pending.id}/decision`,{decision:'changes_requested',reason},pending.revision),'Changes requested.')}>Request changes</Action></>}
+          {reviewer&&<><Action disabled={busy||(!independent&&!pilotReview)} onClick={()=>perform(()=>write(`/submissions/${pending.id}/decision`,{decision:'approve',reason},pending.revision),'Guide approved and published.')}>Approve and publish</Action><Action variant="outline" disabled={busy||!reason.trim()} onClick={()=>perform(()=>write(`/submissions/${pending.id}/decision`,{decision:'changes_requested',reason},pending.revision),'Changes requested.')}>Request changes</Action></>}
           {editable&&<Action variant="outline" disabled={busy||!reason.trim()} onClick={()=>perform(()=>write(`/submissions/${pending.id}/cancel`,{reason},pending.revision),'Review cancelled.')}>Cancel submission</Action>}
-        </div>{reviewer&&!independent&&<p className="text-sm">A submitter or contributor cannot approve this iteration. Add an independent reviewer in Access.</p>}</>}
+        </div>{pilotReview&&<p className="text-sm" role="status">Pilot exception: you may manually approve this exact submitted guide once, until {pending.pilot_self_review.expires_at}. Your approval is recorded in the audit.</p>}{reviewer&&!independent&&!pilotReview&&<p className="text-sm">A submitter or contributor cannot approve this iteration. Add an independent reviewer in Access.</p>}</>}
       </div>}
     </Panel>}
     {section==='Versions'&&<Panel title="Approved versions">

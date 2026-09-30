@@ -35,6 +35,9 @@ jobs:
       - name: Pomerium route protection and Platform MCP integration
         working-directory: admin/backend
         run: node --test src/__tests__/pomerium-setup.test.js src/__tests__/full-platform-mcp.test.js
+      - name: Operations and supervised agent authorization, fencing and recovery
+        working-directory: admin/backend
+        run: node --test src/__tests__/operational-*.test.js src/__tests__/agent-run*.test.js src/__tests__/operations-toggles.test.js
       - name: Root-only bootstrap integration (disposable runner and temporary databases)
         working-directory: admin/backend
         run: sudo "$(command -v node)" --test src/__tests__/security-bootstrap*.test.js
@@ -69,7 +72,7 @@ jobs:
         working-directory: ${{ matrix.directory }}
   frontend:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,6 +85,12 @@ jobs:
           npm ci --prefix admin/backend --ignore-scripts --no-audit --no-fund
           node admin/backend/node_modules/playwright-core/cli.js install --with-deps chromium
           node admin/frontend/tests/mcp-access.browser.mjs
+      - name: Supervised agent A6, A7 and A8 dashboard journeys
+        working-directory: admin/frontend
+        run: |
+          export BROWSER_EXE="$(node --input-type=module -e "import { chromium } from '../backend/node_modules/playwright-core/index.mjs'; console.log(chromium.executablePath())")"
+          node tests/agent-runs.browser.mjs
+          node tests/agent-runs-a7.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -40,6 +40,28 @@ Opened 2026-09-29, at A6's acceptance. The user asked that these items be
 | **`nodemailer` < 10.0.2** (GHSA-6vj9-mwq6-2f5v, moderate) | Fixed 2026-09-29: 10.0.12, deployed (live `776045d7`; the running container reports 10.0.12) | Keep `npm audit` in CI |
 | **Lighthouse mobile accessibility** | Done 2026-09-29: **100** on all six A6 pages (Operations and inbox, Agent runs, the run deck's Browser, Activity and Details, Agents) with `admin/frontend/tests/agent-runs-lighthouse.mjs` | Re-run after UI changes |
 
+## A8 release dispositions recorded 2026-09-30
+
+Implementation is in progress, not deployed or accepted. S6/SEC-01 remain open:
+the dedicated read-only socket/public-key mounts do not isolate the existing
+root-equivalent backend. Written acceptance is required for Thomas's limited
+demo pilot. SEC-02 requires exact-head CI/review and unsuppressed inventory;
+SEC-03 requires fresh private/off-host backup, isolated restore, migration,
+rollback and disk-growth proof. INF-01–04 require current auth, pins, scoped
+broker/key/proxy and actual revocation proof on the wired target. SEC-04's
+worker is already a VM; broader estate migration stays later. SEC-05 requires
+compatible integration without merging unrelated drafts.
+
+User decision: the same person drafts/reviews this pilot guide. An exact pending
+demo submission/hash/revision may receive a root-only, one-hour, single-use
+authorization, with immutable grant/consumption audit and separate manual
+dashboard approval. Independent review remains the default. This exception must
+be included in pilot acceptance and later audit. No host grant has been issued.
+Fresh container refusals/restart and A3/A4/A5/A7 regressions remain pending.
+The reboot test is deferred and protected snapshots are retained. Broader
+Infisical→OpenBao agent-vault/general broker work follows visible live agents;
+A4's scoped OpenBao broker already exists. See A8 reference/evidence.
+
 ## How revoking a credential binding works (A4)
 
 - **What a binding is.** A broker record (`scripts/a4-credential-broker.py`):

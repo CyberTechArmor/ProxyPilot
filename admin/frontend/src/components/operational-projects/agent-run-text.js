@@ -132,6 +132,14 @@ export const RECONCILE_TEXT = {
   heading: 'Decisions for a person',
   note: 'Each decision is recorded with your name and time; nothing is re-sent. Deciding needs your own confirmation once in this session.',
   by: (who, at) => `Recorded by ${who} · ${at}`,
+  supervisor: item => {
+    const evidence = item.supervisor_record;
+    if (!evidence || evidence.status === 'unavailable') return 'The supervisor record is unavailable.';
+    if (evidence.status === 'missing') return 'The supervisor has no matching record of this step.';
+    const r = evidence.record;
+    return `Supervisor recorded: ${r.state}. Reserved at ${r.at}${r.latency_ms != null ? `; command latency ${r.latency_ms} ms` : ''}${r.error ? `; ${r.error}` : ''}.`;
+  },
+  supervisorNote: 'A completed command can still have an uncertain site outcome. Check the site before deciding.',
 };
 
 // A7 decision 5: the rule-based review, one sentence per code.

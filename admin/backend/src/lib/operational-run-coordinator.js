@@ -69,6 +69,7 @@ const ACTION_STOP = Object.freeze({
   BINDING_MISMATCH: ['blocked', 'binding_changed'],
   CREDENTIAL_NOT_BOUND: ['blocked', 'binding_changed'],
   CREDENTIAL_BROKER_UNAVAILABLE: ['failed', 'broker_unavailable'],
+  STEP_ALREADY_RESERVED: ['failed', 'attempt_lost'],
 });
 const coded = (code, detail) => { const e = new Error(code); e.code = code; if (detail !== undefined) e.detail = detail; return e; };
 const fail = (code, detail) => { throw coded(code, detail); };
@@ -607,7 +608,7 @@ export function createRunCoordinator({ db, launcher, verifyTeardown, clock = () 
         rule: decision.rule });
       if (hooks.afterStepReserved) await hooks.afterStepReserved({ ...ref, ordinal, action: decision.action });
       let result = null, code = null;
-      try { result = await launcher.action(request); } catch (error) { code = codeOf(error); }
+      try { result = await launcher.action({ ...request, ordinal }); } catch (error) { code = codeOf(error); }
       const finish = (stepState, claims, errorCode) => tx(() => run(`UPDATE ops_agent_run_steps SET state=?,claims_json=?,
         error_code=?,finished_at=? WHERE run_id=? AND ordinal=?`, stepState, JSON.stringify(claims), errorCode, stamp(),
       runId, ordinal));

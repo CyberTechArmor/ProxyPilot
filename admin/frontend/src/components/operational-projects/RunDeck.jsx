@@ -209,6 +209,10 @@ export function ReconcilePanel({ data, busy, onDecide }) {
         {item.gates && <Badge tone="bad">Blocks the next start</Badge>}
         {!item.open && <Badge tone="good">Decided</Badge>}</p>
       <p className="text-sm text-muted-foreground break-words">Why: {RECONCILE_TEXT.reason(item.reason)}. {RECONCILE_TEXT.question(item)}</p>
+      {item.subject.startsWith('step:') && <div className="text-sm break-words space-y-1" data-testid="supervisor-record">
+        <p>{RECONCILE_TEXT.supervisor(item)}</p>
+        <p className="text-muted-foreground">{RECONCILE_TEXT.supervisorNote}</p>
+      </div>}
       {item.decision && <p className="text-sm break-words">{RECONCILE_TEXT.decision[item.decision.decision] ?? item.decision.decision} · {RECONCILE_TEXT.by(item.decision.decided_by, when(item.decision.decided_at))}</p>}
       {item.open && <div className="grid grid-cols-1 sm:flex sm:flex-wrap gap-2">{choices(item).map(choice =>
         <Action key={choice} variant="outline" disabled={busy} onClick={() => onDecide(item.subject, choice)}>

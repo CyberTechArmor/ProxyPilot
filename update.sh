@@ -1952,6 +1952,14 @@ PYEOF
             rm -rf /run/proxypilot-agent.sock
         fi
 
+        # A8: only an explicitly configured pilot gets the two reviewed
+        # directory mounts. Refuse stale keys or a custom/conflicting layout
+        # before stopping the current dashboard. Ordinary installs are untouched.
+        python3 "${INSTALL_DIR}/scripts/a8-wire-dashboard.py" patch --install-dir "$INSTALL_DIR" || {
+            log "${RED}A8 supervisor wiring refused; the running dashboard has not been stopped.${NC}"
+            exit 1
+        }
+
         # Rebuild frontend at the install location
         log "Rebuilding frontend..."
         cd "${INSTALL_DIR}/admin/frontend"

@@ -177,6 +177,9 @@ lock. No route or MCP tool imports this operator enrollment module.
    digests, a new receipt key (previous public key archived), and the two runtime
    directories. A7's installed Neko/TURN/policy/marker are retained and checked;
    no reprovision, router change, Incus upgrade or snapshot deletion is needed.
+   Run the installer's `status` from the reviewed checkout as well: the installer
+   itself is not copied into `/etc/proxypilot-a3-proof/supervisor`. Its status
+   command verifies the installed journal, recorded files, unit and serving key.
 5. **Configure/rebuild dashboard.** Run `a8-wire-dashboard.py configure`; record
    private backup path and public key ID. Deploy through the normal reviewed
    update/promotion path and record its rollback tag. `patch` must pass before

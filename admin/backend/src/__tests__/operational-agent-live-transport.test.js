@@ -105,7 +105,7 @@ test('stream: a refusal, a garbage answer, an unreachable socket and a viewer cl
 // A live route on a real server, with a fake service and session check.
 async function liveServer(options = {}) {
   const calls = { opened: [], sent: [], closed: [] };
-  const state = { enabled: true, allow: true, verify: true, unavailable: null };
+  const state = { enabled: true, allow: true, verify: true, unavailable: null, openingMessages: [], openingClose: null };
   const handles = [];
   const agentRuns = {
     assertLive(actor, projectId, runId) {
@@ -118,6 +118,10 @@ async function liveServer(options = {}) {
       const viewer = `${handles.length}`.padStart(16, '0');
       handles.push({ viewer, onMessage, onClose });
       calls.opened.push({ actor: actor.id, sessionId, viewer });
+      // The real supervisor can deliver init/candidates in the same read as
+      // its opening answer, before openLive's promise continuation runs.
+      for (const message of state.openingMessages) onMessage(message);
+      if (state.openingClose) onClose(state.openingClose);
       return { viewer, ice_servers: ICE, ttl_seconds: 3600 };
     },
     sendLive(viewer, actorId, message) { calls.sent.push({ viewer, actorId, message }); return true; },
@@ -143,6 +147,54 @@ async function liveServer(options = {}) {
   });
   return { calls, state, handles, open, close: () => new Promise(done => server.close(done)) };
 }
+
+test('live route: ready precedes init, early ICE, offers and drops received during opening', async () => {
+  const s = await liveServer();
+  const messages = [{ event: 'system/init', payload: { session_id: 'me' } }, null,
+    { event: 'signal/candidate', payload: { candidate: 'candidate:1 1 udp 1 10.185.17.179 18091 typ host' } },
+    { event: 'signal/provide', payload: { sdp: 'v=0' } }];
+  let a;
+  try {
+    s.state.openingMessages = messages;
+    a = await s.open();
+    await until(() => a.messages.length === 5, 'opening messages');
+    assert.equal(a.messages[0].type, 'ready');
+    assert.deepEqual(a.messages.slice(1), messages.map(message => message === null
+      ? { type: 'dropped' } : { type: 'neko', message }));
+    s.handles[0].onMessage({ event: 'control/host', payload: { has_host: false } });
+    await until(() => a.messages.length === 6, 'later message');
+    assert.equal(a.messages[5].message.event, 'control/host');
+  } finally { a?.ws.close(); await s.close(); }
+});
+
+test('live route: a relay closed during opening discards its early messages and returned handle', async () => {
+  const s = await liveServer();
+  let a;
+  try {
+    s.state.openingMessages = [{ event: 'system/init', payload: { session_id: 'me' } }];
+    s.state.openingClose = 'attempt_ended';
+    a = await s.open();
+    await until(() => a.ws.readyState === WebSocket.CLOSED, 'opening close');
+    assert.deepEqual(a.messages, [{ type: 'closed', reason: 'attempt_ended' }]);
+    assert.deepEqual(s.calls.closed, [{ viewer: '0000000000000000', reason: 'viewer_closed' }]);
+  } finally { a?.ws.close(); await s.close(); }
+});
+
+test('live route: an opening flood closes the view without ready or queued signalling', async () => {
+  const s = await liveServer();
+  let a, b;
+  try {
+    s.state.openingMessages = Array.from({ length: 41 }, () => ({ event: 'system/heartbeat' }));
+    a = await s.open();
+    await until(() => a.ws.readyState === WebSocket.CLOSED, 'opening overflow');
+    assert.deepEqual(a.messages, [{ type: 'closed', reason: 'opening_overflow' }]);
+    assert.deepEqual(s.calls.closed, [{ viewer: '0000000000000000', reason: 'viewer_closed' }]);
+    s.state.openingMessages = [];
+    b = await s.open();
+    await until(() => b.messages.some(m => m.type === 'ready'), 'slot freed');
+    b.ws.close();
+  } finally { a?.ws.close(); b?.ws.close(); await s.close(); }
+});
 
 test('live route: refusals before the upgrade, then ready, relay both ways and filtered closing', async () => {
   const s = await liveServer();

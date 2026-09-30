@@ -295,6 +295,14 @@ class ProviderHost(harness5.ProviderHost):
         return super().provider(url, key, body)
 
 
+@unittest.skipUnless(shutil.which('node') and os.name == 'posix', 'node and Unix sockets are required')
+class A7OpeningRelayTests(unittest.TestCase):
+    def test_early_messages_opening_failure_and_close(self):
+        result = subprocess.run(['node', '--no-warnings', '--test', str(ROOT / 'tests' / 'a7-opening-relay.mjs')],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 @unittest.skipUnless(shutil.which('openssl') and shutil.which('node') and os.geteuid() == 0,
                      'openssl, node and root (the sockets answer uid 0 peers only) are required')
 class A7ProbeHarnessTests(unittest.TestCase):

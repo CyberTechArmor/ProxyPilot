@@ -1,6 +1,6 @@
 import { WebSocketServer } from 'ws';
 import { verifyWsUpgrade } from '../middleware/wsAuth.js';
-import { MAX_MESSAGE_BYTES, MAX_VIEWER_RATE } from '../lib/operational-live-relay.js';
+import { MAX_MESSAGE_BYTES, MAX_VIEWER_RATE, createLiveOpeningQueue } from '../lib/operational-live-relay.js';
 
 // A7 live view of an agent run: one WebSocket per viewer at
 //   /api/operational-projects/:id/agent-runs/:runId/live
@@ -66,12 +66,14 @@ export function attachAgentLiveServer(httpServer, { agentRuns, enabled = () => f
       if (closed) return;
       send({ type: 'closed', reason });
       closed = true;
+      opening.close();
       timers.forEach(clearInterval);
       if (viewer) agentRuns.closeLive(viewer, reason);
       const left = (perUser.get(user.id) || 1) - 1;
       if (left > 0) perUser.set(user.id, left); else perUser.delete(user.id);
       try { ws.close(code, reason.slice(0, 64)); } catch { /* gone */ }
     };
+    const opening = createLiveOpeningQueue({ send, onOverflow: () => finish(1008, 'opening_overflow') });
     ws.on('close', () => finish(1000, 'viewer_closed'));
     ws.on('error', () => finish(1011, 'closed'));
     ws.on('pong', () => { alive = true; });
@@ -92,7 +94,7 @@ export function attachAgentLiveServer(httpServer, { agentRuns, enabled = () => f
     try {
       opened = await agentRuns.openLive(actor, projectId, runId, {
         sessionId: user.jti ?? null,
-        onMessage: message => send(message === null ? { type: 'dropped' } : { type: 'neko', message }),
+        onMessage: message => opening.message(message === null ? { type: 'dropped' } : { type: 'neko', message }),
         onClose: reason => { viewer = null; finish(1000, reason); },
       });
     } catch (error) {
@@ -102,7 +104,7 @@ export function attachAgentLiveServer(httpServer, { agentRuns, enabled = () => f
     }
     if (closed) { agentRuns.closeLive(opened.viewer, 'viewer_closed'); return undefined; }
     viewer = opened.viewer;
-    send({ type: 'ready', viewer, ice_servers: opened.ice_servers, ice_transport_policy: 'relay',
+    opening.open({ type: 'ready', viewer, ice_servers: opened.ice_servers, ice_transport_policy: 'relay',
       ttl_seconds: opened.ttl_seconds });
     // Neko expects a client heartbeat; the backend sends it, not the browser.
     timers.push(setInterval(() => { if (viewer) agentRuns.sendLive(viewer, actor.id, { event: 'client/heartbeat' }); },

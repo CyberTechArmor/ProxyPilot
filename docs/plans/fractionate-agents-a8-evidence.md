@@ -204,3 +204,54 @@ decision remain pending. No pilot binding or agent run has been created.
 The live pilot, negative/restart proof, fresh A3/A4/A5/A7 regressions, canaries,
 rollback/growth proof and explicit acceptance remain open. The Windows off-host
 backup is still unverified; S6/SEC-01 remain the accepted limited-pilot finding.
+
+## 2026-09-30 — enrollment release deployed; host regression failures reviewed
+
+After the user's "Please deploy it", PR #714 was merged as
+`18c0ea140417e29db523bdf457686e6ca7f009dd`; all seven checks passed on reviewed
+head `d311dc6ee5b00d427e34fca0cb5fd38c56d26585`. Normal promotion deployed clean
+live/candidate `022c5e090a39ea306976d86bada913a2365a4fe8`. Update
+`441c00dc-96dd-4fbe-bcc8-720ea31c0aef` succeeded at 2026-09-30T19:39:28Z;
+rollback tag `pp-rollback-20260930T193818Z`. The actual frontend build and
+container health passed.
+
+The operator's `A8_BOUNDARY_DONE` proof verified actual container UID 0, both
+read-only directory mounts, public-key/source pins and migrations 1100–1112.
+The non-root client was refused by filesystem permissions (this does not alone
+prove the supervisor's peer-UID branch); wrong socket, actual runtime with
+missing/invalid key, isolated wiring with missing/wrong key/directory, and
+Docker's missing bind source all refused. Restarting the idle supervisor kept
+directory inodes, replaced the socket inode and left the existing container
+able to reach it. Receipt key remains `bffb86e3…`; S6 remains open.
+
+Fresh H4 job `h4-20260930T200231Z-7ffkztbw` ended failed, preserving its reports:
+A3 **20/20**, A4 **6/6**, A7 **15/18**, both canaries clean. A7 takeover's viewer
+timed out, its dependent resume had no prior takeover, and worker-kill occurred
+after sign-in completed, during `read_session`. This last case did not exercise
+an uncertain write. A3's guest-crash case changed the proof VM boot from
+`f55089ba…` to `8c2511ae-624f-46b0-9160-4841c4a8d90c`; receipt key unchanged,
+supervisor idle/ready after the job.
+
+Focused job `a7-diag-20260930T202408Z-kjxhb_35` used the unchanged A7 source
+with its documented kill-delay setting at **100 ms** and typed viewer
+diagnostics. `worker_killed_mid_write` passed all existing assertions; its
+canary passed. Takeover instead failed immediately with `SUPERVISOR_PROTOCOL`
+(`first line`), and resume remained dependent on it. One viewer failed before
+`opened`; the second opened and was closed by cleanup. Boot/key unchanged and
+supervisor idle/ready. The original full H4 failure is not reclassified as a
+pass; no production pilot binding/run has been created.
+
+Source review found the same opening race in the host harness and dashboard
+WebSocket route: callbacks can deliver init/candidates before `openLive`'s
+promise resolves. Two deterministic route tests reproduced signalling before
+`ready` and unwanted early delivery when opening closes. The correction shares
+a bounded opening queue, sends the opening reply first and retains early
+filtered messages in order; close, refusal and overflow discard them. Existing
+auth, filters, TURN policy, takeover and uncertain-write assertions are intact.
+Local Linux validation: **24/24** focused backend/client/Unix-relay tests,
+**18/18** full A7 harness cases against the real supervisor and broker classes
+(scripted guest/viewer/provider), and the unsuppressed **97-file** host inventory
+passed. Those local cases do not establish real host media acceptance. The
+correction still needs exact-head CI, the user's merge/deploy decision and a
+fresh full host A7 proof. A5/H6, enrollment, internet pilot, rollback/growth and
+explicit A8 acceptance remain pending; the off-host backup remains open.

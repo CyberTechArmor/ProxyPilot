@@ -269,6 +269,13 @@ root-only broker reference; it grants no consent/run/approval. A8 adds no schema
 migration. Actual container refusals/restart, host regressions, backup/off-host
 restore, rollback, growth and internet pilot remain acceptance requirements.
 
+The live WebSocket route and host proof share an opening queue: the viewer's
+opening reply precedes early filtered Neko signalling, even when messages arrive
+before `openLive` resolves. The transient queue caps at 40 messages/256 KiB,
+preserves order and discards everything on close, refusal or overflow. It adds
+no route, supervisor method, input authority or stored signalling; existing
+session/access checks and relay-only TURN policy still apply. S6 remains open.
+
 ## Reviewed merge candidates for PR #674
 
 This is acceptance of two *static inventory entries*, not closure of S6 or

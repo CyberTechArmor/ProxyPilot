@@ -16,6 +16,41 @@ export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_VIEWER_RATE = 40;
 const INIT_FIELDS = ['session_id', 'control_host', 'screen_size', 'webrtc'];
 
+// The supervisor can send init/candidates in the same read as its opening
+// answer, before openLive resolves. Both the dashboard and host proof must
+// deliver their opening reply first, then retain every early filtered message
+// in order. Keep this transient queue bounded and discard it on any close.
+export function createLiveOpeningQueue({ send, onOverflow }) {
+  let phase = 'opening', pending = [], bytes = 0;
+  const close = () => { phase = 'closed'; pending = []; bytes = 0; };
+  return {
+    message(value) {
+      if (phase === 'closed') return false;
+      if (phase === 'ready') { send(value); return true; }
+      let size;
+      try { size = Buffer.byteLength(JSON.stringify(value)); } catch { size = Infinity; }
+      if (pending.length >= MAX_VIEWER_RATE || bytes + size > MAX_MESSAGE_BYTES * 4) {
+        close(); onOverflow(); return false;
+      }
+      pending.push({ value, size }); bytes += size;
+      return true;
+    },
+    open(reply) {
+      if (phase !== 'opening') return false;
+      phase = 'flushing';
+      send(reply);
+      while (phase === 'flushing' && pending.length) {
+        const item = pending.shift(); bytes -= item.size;
+        send(item.value);
+      }
+      if (phase !== 'flushing') return false;
+      phase = 'ready';
+      return true;
+    },
+    close,
+  };
+}
+
 // One relayed message, or null: an allowed event with an absent or object
 // payload, within the size bound. The viewer's system/init names only its own
 // session, the control holder and the screen; a provide carries no ICE servers

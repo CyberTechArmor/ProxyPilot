@@ -30,6 +30,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { settings as a5Settings, socketCall, createWorld, seed, bindFresh, revokeBinding } from './a5-probe.mjs';
+import { createLiveOpeningQueue } from '../admin/backend/src/lib/operational-live-relay.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LIB = path.resolve(HERE, '..', 'admin', 'backend', 'src', 'lib');
@@ -180,18 +181,21 @@ const attemptOf = (world, runId) => world.db.prepare(
 // The backend path for one viewer: the service's live relay behind a private
 // socket speaking the supervisor's stream protocol, with the WebSocket route's
 // access re-check (every second here).
-function relay(world, ctx, actor, sessionId, projectId, runId) {
+export function relay(world, ctx, actor, sessionId, projectId, runId) {
   const file = path.join(world.dir, `viewer-${randomUUID().slice(0, 8)}.sock`);
   const server = net.createServer((socket) => {
     let viewer = null, buffer = '', first = true;
     const write = value => { if (!socket.destroyed) socket.write(`${JSON.stringify(value)}\n`); };
+    const opening = createLiveOpeningQueue({ send: write, onOverflow: () => {
+      write({ ok: false, error: 'LIVE_UNAVAILABLE' }); socket.end();
+    } });
     const recheck = setInterval(() => {
       if (!viewer) return;
       try { ctx.s.assertLive(actor, projectId, runId); } catch { const v = viewer; viewer = null; ctx.s.closeLive(v, 'access_ended'); }
     }, 1000);
     socket.setEncoding('utf8');
     socket.on('error', () => {});
-    socket.on('close', () => { clearInterval(recheck); if (viewer) ctx.s.closeLive(viewer, 'viewer_closed'); viewer = null; });
+    socket.on('close', () => { opening.close(); clearInterval(recheck); if (viewer) ctx.s.closeLive(viewer, 'viewer_closed'); viewer = null; });
     socket.on('data', (chunk) => {
       buffer += chunk;
       for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
@@ -201,14 +205,19 @@ function relay(world, ctx, actor, sessionId, projectId, runId) {
         if (first) {
           first = false;
           ctx.s.openLive(actor, projectId, runId, { sessionId,
-            onMessage: m => write(m === null ? { dropped: true } : { recv: m }),
-            onClose: (reason) => { viewer = null; write({ closed: reason }); socket.end(); } })
-            .then((opened) => { viewer = opened.viewer; write({ ok: true, result: { conn: opened.viewer,
-              ice_servers: opened.ice_servers, ttl_seconds: opened.ttl_seconds } }); },
-            (error) => { write({ ok: false, error: codeOf(error) }); socket.end(); });
+            onMessage: m => opening.message(m === null ? { dropped: true } : { recv: m }),
+            onClose: (reason) => { opening.close(); viewer = null; write({ closed: reason }); socket.end(); } })
+            .then((opened) => {
+              if (socket.destroyed || socket.writableEnded) { ctx.s.closeLive(opened.viewer, 'viewer_closed'); return; }
+              viewer = opened.viewer;
+              opening.open({ ok: true, result: { conn: opened.viewer,
+                ice_servers: opened.ice_servers, ttl_seconds: opened.ttl_seconds } });
+            }, (error) => { opening.close(); write({ ok: false, error: codeOf(error) }); socket.end(); });
         } else if (message?.close) {
+          opening.close();
           if (viewer) ctx.s.closeLive(viewer, 'viewer_closed');
           viewer = null;
+          socket.end();
         } else if (viewer && message && 'send' in message) ctx.s.sendLive(viewer, actor.id, message.send);
       }
     });

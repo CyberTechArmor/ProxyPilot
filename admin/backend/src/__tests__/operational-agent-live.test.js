@@ -9,7 +9,7 @@ import { fixtureRouter } from './helpers/operations-fixture.js';
 import { agentRunsWorld } from './helpers/agent-runs-world.js';
 import { createOperationsRouter } from '../routes/operational-projects.js';
 import { createDemoFixtureWriter, DEMO_FIXTURE, fixtureDocument } from '../lib/operational-demo-fixtures.js';
-import { fromViewer, toViewer } from '../lib/operational-live-relay.js';
+import { fromViewer, toViewer, createLiveOpeningQueue } from '../lib/operational-live-relay.js';
 import { createWorkerLauncher } from '../lib/operational-worker-boundary.js';
 
 // A7 live view and dashboard takeover (user decisions 1, 1a-1c): the relay
@@ -76,6 +76,35 @@ test('relay filter: signalling only, both ways; init and provide are reduced', (
     { sdp: 's' });
   for (const hidden of ['chat/message', 'member/created', 'session/created', 'clipboard/updated', 'system/admin',
     'filetransfer/update', 'send/broadcast']) assert.equal(toViewer({ event: hidden, payload: {} }), null, hidden);
+});
+
+test('opening queue: its byte bound closes once, discards everything and never reopens', () => {
+  const sent = [];
+  let overflows = 0;
+  const q = createLiveOpeningQueue({ send: m => sent.push(m), onOverflow: () => { overflows += 1; } });
+  const message = { type: 'neko', message: { event: 'signal/provide', payload: { sdp: 'x'.repeat(63 * 1024) } } };
+  for (let n = 0; n < 4; n += 1) assert.equal(q.message(message), true);
+  assert.equal(q.message(message), false);
+  assert.equal(q.message(message), false);
+  assert.equal(q.open({ type: 'ready' }), false);
+  assert.equal(overflows, 1);
+  assert.deepEqual(sent, []);
+});
+
+test('opening queue: messages received while flushing retain order and close discards later ones', () => {
+  const sent = [];
+  const q = createLiveOpeningQueue({ send: m => {
+    sent.push(m);
+    if (m === 'ready') q.message('during_flush');
+  }, onOverflow: () => assert.fail('not overflowing') });
+  q.message('first'); q.message('second');
+  assert.equal(q.open('ready'), true);
+  q.message('after_open');
+  assert.deepEqual(sent, ['ready', 'first', 'second', 'during_flush', 'after_open']);
+  q.close();
+  assert.equal(q.message('after_close'), false);
+  assert.equal(q.open('again'), false);
+  assert.equal(sent.length, 5);
 });
 
 test('live view: run access only, each viewer its own TURN credential, closed when the attempt ends', async () => {

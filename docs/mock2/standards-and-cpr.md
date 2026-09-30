@@ -44,6 +44,15 @@ executable check scripts, and skill templates — not a set of files for
 - **MCP server instructions** now point chat clients at the standards and at the
   project's constitution files.
 
+*2026-09-30, partial fold of site 1.7.0.* Constitution §15, phones and installed
+apps: the safe-area inset variable, the fallback for Android that reports no inset,
+and proof of the installed view. It is the site's `rules/mock2-mobile-web.md` and CPR
+current §O, from Nodus R-041. It was folded in on its own because every scaffolded
+application ships an installable manifest (`scaffold.js` `pwaManifest`,
+`display: standalone`). Site versions 1.0.0–1.6.0 are still not folded, so
+`standards-version.json` stays at 0.3.0 and the Update block keeps saying the site
+has moved on.
+
 Deliberately **not** changed: the gate battery's blocking semantics at finish
 (the runner still drives red items green where it can, and the finish-guard budget
 hands the cycle to the operator otherwise — that *is* the human decision the

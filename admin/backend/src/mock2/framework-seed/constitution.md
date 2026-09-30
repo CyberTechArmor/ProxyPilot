@@ -520,3 +520,53 @@ that bind every project:
 - **Rollback**: the previous known-good state is identified and reachable without
   rebuilding (CPR §15) — the release before this one, by commit and deploy stamp.
 
+## 15. Phones and installed apps (mock2-core 1.7.0, CPR current §O)
+
+Every scaffolded application ships `public/manifest.webmanifest` with
+`display: standalone`, so it can be installed to a phone's home screen. Installed,
+Android Chrome can draw the app edge-to-edge, and iOS runs it under the home
+indicator once the viewport has `viewport-fit=cover`: `100dvh` and
+`position: fixed; bottom: 0` then reach behind the system navigation bar, where a
+tap goes to the system and not to the app. A layout that is right in the browser
+tab can put its bottom controls under the navigation buttons once installed. That
+happened on 2026-09-30 on an Android phone with three-button navigation that
+reported a safe-area inset of 0, while every check at 375px was green.
+
+- **Viewport.** `viewport-fit=cover` goes into the viewport meta only together with
+  the inset padding: the bottom as below, and the sides by
+  `max(<own padding>, env(safe-area-inset-left, 0px))` and `-right`. Without it iOS
+  reports every inset as 0; with it and no padding, content runs under the notch in
+  landscape, which is worse than before. A page with no bottom-anchored control
+  needs no script.
+- **One inset variable** at `:root`:
+  `--reported-inset: max(env(safe-area-inset-bottom, 0px), env(safe-area-max-inset-bottom, 0px))`
+  and `--bottom-inset: max(var(--reported-inset), var(--nav-fallback, 0px))`. Bottom
+  bars, bottom sheets, full-screen dialogs on phones and sticky action footers pad
+  by it (`padding-bottom: max(<own padding>, var(--bottom-inset))`), so their
+  background still reaches the screen edge; floating buttons and toasts are offset
+  instead (`bottom: calc(16px + var(--bottom-inset))`). Every `env()` has its `, 0px`
+  fallback: an unknown name without one makes the whole declaration invalid, and the
+  padding drops to 0.
+- **Android that reports 0.** A script sets `--nav-fallback` to 48px (Android's
+  three-button bar) only when all of these hold: the app runs installed
+  (`display-mode: standalone` or `fullscreen`), the user agent is Android, the phone
+  is in portrait, the reported inset is under 1px, and
+  `screen.height - innerHeight < 48`. Otherwise it sets 0. It measures again on
+  resize and on a display-mode change. The reported inset is read from a hidden,
+  fixed, zero-size probe whose `padding-bottom` is `var(--reported-inset)`, never
+  from `--bottom-inset`, which already contains the fallback; without the probe's
+  CSS it reads 0 and the fallback fires where it should not. The conditions live in
+  one pure, unit-tested function. The fallback is an OPEN decision in
+  `state/decisions.md` until a device confirms it.
+- **Proof (§11).** Where the browser harness supports it, the phone checks render the
+  installed view as well as the tab: standalone display mode, an Android user agent,
+  `screen.height` overridden, and Chromium's `Emulation.setSafeAreaInsetsOverride`
+  for the reported inset. They assert clearance: the window height minus the lowest
+  bottom control's bottom edge is at least the inset, with an inset reported and with
+  none, and stays below the inset plus the bar's own padding where nothing should be
+  added. A display-mode stub reaches script only, so CSS display-mode rules are
+  recorded as not verified. Emulation is a substitute measurement. The change record
+  states whether the check on a device was done (who, which device) or not verified.
+  Where the harness cannot render the installed view, the change record says so.
+
+Full rule: `rules/mock2-mobile-web.md` on the standards site.

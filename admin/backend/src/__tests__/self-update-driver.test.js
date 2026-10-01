@@ -131,6 +131,18 @@ test('startUpdate: allowlist before the wire; agent codes surface as .code', asy
   await assert.rejects(startUpdate({ requestedBy: 'admin', call: deadCall }), (e) => e.code === 'agent_unreachable');
 });
 
+test('startUpdate sends a pinned build through the same agent and rejects ambiguous intent before RPC', async () => {
+  const sha = 'a'.repeat(40);
+  const calls = [];
+  const call = async (method, params) => { calls.push({ method, params }); return { id: ID }; };
+  await startUpdate({ requestedBy: 'admin', buildCurrentSha: sha, call });
+  assert.deepEqual(calls, [{ method: 'update.request', params: { requested_by: 'admin', flags: [`--build-current=${sha}`] } }]);
+  for (const options of [{ rebuild: true }, { flags: ['--rebuild'] }, { buildCurrentSha: 'main' }]) {
+    await assert.rejects(startUpdate({ requestedBy: 'admin', buildCurrentSha: sha, call, ...options }), (e) => e.code === 'invalid_params');
+  }
+  assert.equal(calls.length, 1);
+});
+
 function stubFetch(routes) {
   const calls = [];
   const fetchImpl = async (url) => {

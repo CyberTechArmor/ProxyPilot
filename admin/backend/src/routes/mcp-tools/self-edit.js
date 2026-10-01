@@ -13,8 +13,8 @@
 //   promote         fast-forward the LIVE checkout to the candidate HEAD (after
 //                   recording the previous HEAD as the rollback point and
 //                   tagging it), then ask the root update runner for a rebuild —
-//                   the same `update.sh --yes --rebuild` the Update button runs.
-//   rollback        reset the live checkout to the recorded HEAD, same rebuild.
+//                   `update.sh --yes --build-current=<promoted SHA>`.
+//   rollback        reset to a compatible recorded HEAD, then exact rebuild.
 //
 // Every git operation on the LIVE checkout goes through the host pivot as root
 // with safe.directory pinned to that one path, and refuses when the checkout
@@ -26,6 +26,7 @@
 // carry it (lib/mcp-ext/logic.js scopeRefusal).
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { access, mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { intIn, stamp, sha256Hex, validGitRefName } from '../../lib/mcp-ext/logic.js';
@@ -61,7 +62,32 @@ export function createSelfEditHandlers(kit) {
   }
   async function dirty(dir) {
     const r = await hgit(dir, ['status', '--porcelain']);
-    return (r.stdout || '').split('\n').filter((l) => l.trim() && !/package-lock\.json$/.test(l));
+    if (r.status !== 0) return ['Could not verify checkout status'];
+    return (r.stdout || '').split('\n').filter((l) => l.trim());
+  }
+
+  // A rollback executes the TARGET's updater. Never reset into a legacy
+  // updater or a changed build contract and hope the new runner can fix it.
+  // Compare immutable blobs, without executing target code. Contract changes
+  // and the first repair bootstrap require separately reviewed host recovery.
+  async function exactBuildRefusal(liveDir, liveHead, targetDir, target) {
+    const marker = '# ProxyPilot pinned-build contract: 1';
+    for (const file of ['update.sh', 'scripts/update-git.sh']) {
+      const r = await hgit(targetDir, ['show', `${target}:${file}`]);
+      if (r.status !== 0 || !(r.stdout || '').split('\n').includes(marker))
+        return `Target ${target} does not declare the repaired exact-build contract; preserve the current checkout and use reviewed host recovery.`;
+    }
+    const files = ['update.sh', 'scripts/update-git.sh', 'scripts/update-runner.sh',
+      'cmd/agent/methods/update.go', 'admin/backend/src/lib/self-update.js',
+      'admin/backend/src/lib/self-update-logic.js',
+      'admin/backend/src/routes/mcp-tools/self-edit.js'];
+    for (const file of files) {
+      const a = await rev(liveDir, `${liveHead}:${file}`);
+      const b = await rev(targetDir, `${target}:${file}`);
+      if (!a || !b || a !== b)
+        return `Exact-build contract differs at ${file}; source advancement/reset and rebuild were refused. Use separately reviewed host recovery for this target.`;
+    }
+    return null;
   }
   async function candidateExists() {
     const r = await hostSh('test -d "$1/.git" && echo yes || echo no', [CAND], { timeoutMs: 10000 });
@@ -80,6 +106,7 @@ export function createSelfEditHandlers(kit) {
     if (SELF_UPDATE_POLICY.enabled !== true) return { error: 'run_proxypilot_update is disabled by self-update-allowlist.json, so promote/rollback (which rebuild through the same runner) are off too.' };
     const l = await live();
     if (l.error) return l;
+    if (requireClean && (await dirty(l.dir)).length) return { error: 'The live checkout has uncommitted changes, including lockfiles; preserve them before promotion or rollback.' };
     const progress = await selfUpdateStatus({ logTailBytes: 0 }).catch(() => null);
     if (progress && ['queued', 'running'].includes(progress.status)) return { error: `An update is ${progress.status} (${progress.id || 'unknown id'}) — wait for it to finish.` };
     if (progress?.pending) return { error: 'An update request is already pending for the runner.' };
@@ -161,7 +188,7 @@ export function createSelfEditHandlers(kit) {
       candidate: exists ? candidate : null,
       checks: state.checks, last_promotion: state.promotions?.[state.promotions.length - 1] || null, rollback_points: (state.rollback_points || []).slice(-5),
       policy: { required_checks_for_promote: cfg.required_checks_for_promote, checks: Object.keys(cfg.checks) },
-      flow: 'apply_self_patch → run_self_checks → promote_self (confirmation token) → poll get_proxypilot_update_status; rollback_self restores the recorded HEAD.',
+      flow: 'apply_self_patch → run_self_checks → promote_self (confirmation token) → poll get_proxypilot_update_status; rollback_self restores a compatible recorded HEAD; legacy or changed updater contracts require reviewed host recovery.',
     });
   });
 
@@ -289,6 +316,8 @@ export function createSelfEditHandlers(kit) {
     const state = await readState();
     const head = await rev(CAND);
     const liveHead = await rev(l.dir);
+    const incompatible = await exactBuildRefusal(l.dir, liveHead, CAND, head);
+    if (incompatible) { note.refused = true; return err(incompatible); }
     const base = state.candidate?.base_sha || null;
     if (!base || base !== liveHead) { note.refused = true; return err(`The candidate is based on ${base ? base.slice(0, 8) : 'nothing'} but the live checkout is at ${liveHead?.slice(0, 8)}. apply_self_patch({ reset: true }) and re-apply the change on the current HEAD.`); }
     const ahead = Number((await hgit(CAND, ['rev-list', '--count', `${base}..HEAD`])).stdout.trim()) || 0;
@@ -296,22 +325,27 @@ export function createSelfEditHandlers(kit) {
     if ((await dirty(CAND)).length) return err('The candidate has uncommitted changes — apply_self_patch commits, so something else touched it; reset it.');
     if (!state.checks || state.checks.sha !== head || !state.checks.ok) { note.refused = true; return err(`The required checks (${cfg.required_checks_for_promote.join(', ')}) have not passed on candidate HEAD ${head.slice(0, 8)} — run_self_checks first.`); }
     const log = await hgit(CAND, ['log', '--oneline', `${base}..HEAD`]);
-    const plan = { live_dir: l.dir, live_branch: l.installed.branch, from_sha: liveHead, to_sha: head, commits: (log.stdout || '').trim().split('\n').filter(Boolean), checks: state.checks, then: 'update.sh --yes --rebuild through the root runner (API unreachable ~1–2 min)', rollback_point: `git tag pp-rollback-<timestamp> at ${liveHead.slice(0, 8)}` };
+    const plan = { live_dir: l.dir, live_branch: l.installed.branch, from_sha: liveHead, to_sha: head, commits: (log.stdout || '').trim().split('\n').filter(Boolean), checks: state.checks, then: `update.sh --yes --build-current=${head} through the root runner (API temporarily unreachable)`, rollback_point: `git tag pp-rollback-<timestamp> at ${liveHead.slice(0, 8)}` };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'promote_self', subject: head, action: `promote candidate ${head.slice(0, 8)} (${ahead} commit(s)) onto the live ProxyPilot checkout and rebuild`, preview: plan });
     if (gate) return gate;
-    const tag = `pp-rollback-${stamp()}`;
+    const tag = `pp-rollback-${stamp()}-${liveHead.slice(0, 12)}-${randomUUID().slice(0, 8)}`;
     const t = await hgit(l.dir, ['tag', tag, liveHead]);
     if (t.status !== 0) return err(`Could not tag the rollback point: ${tail(t.stderr)}`);
     const f = await hgit(l.dir, ['fetch', '-q', CAND, BRANCH], { timeoutMs: 5 * 60 * 1000 });
     if (f.status !== 0) return err(`fetch from the candidate failed: ${tail(f.stderr)}`);
-    const m = await hgit(l.dir, ['merge', '--ff-only', 'FETCH_HEAD']);
+    const fetched = await rev(l.dir, 'FETCH_HEAD');
+    if (fetched !== head || await rev(l.dir) !== liveHead) return err('Candidate fetch or live HEAD changed; refusing a raced promotion.');
+    const m = await hgit(l.dir, ['merge', '--ff-only', head]);
     if (m.status !== 0) { await hgit(l.dir, ['merge', '--abort']).catch(() => null); return err(`Fast-forward failed (${tail(m.stderr || m.stdout)}); the live checkout is unchanged, tag ${tag} marks it.`); }
     note.snapshot = tag;
+    if (await rev(l.dir) !== head) return err('Promotion HEAD postcondition failed; rebuild was not requested.');
     let started;
-    try { started = await selfUpdateStart({ requestedBy: `mcp-self:${auth.created_by}`, rebuild: true }); } catch (e) {
+    try { started = await selfUpdateStart({ requestedBy: `mcp-self:${auth.created_by}`, buildCurrentSha: head }); } catch (e) {
       // Undo the fast-forward so the live checkout never sits ahead of what runs.
-      await hgit(l.dir, ['reset', '-q', '--hard', liveHead]);
+      if (await rev(l.dir) !== head || (await dirty(l.dir)).length) return err(`The rebuild request was refused (${e.message}); checkout changed concurrently, so automatic reset was refused. Rollback tag: ${tag}.`);
+      const undo = await hgit(l.dir, ['reset', '-q', '--hard', liveHead]);
+      if (undo.status !== 0 || await rev(l.dir) !== liveHead) return err(`The rebuild request was refused and restoring ${liveHead.slice(0, 8)} failed; rollback tag: ${tag}.`);
       return err(`The rebuild request was refused (${e.code || 'error'}: ${e.message}); the live checkout was reset to ${liveHead.slice(0, 8)}.`);
     }
     state.promotions = [...(state.promotions || []), { at: new Date().toISOString(), by: auth.created_by, from_sha: liveHead, to_sha: head, tag, update_id: started.id }].slice(-50);
@@ -343,19 +377,26 @@ export function createSelfEditHandlers(kit) {
     }
     const liveHead = await rev(l.dir);
     if (liveHead === target) return ok({ applied: false, note: `The live checkout is already at ${target.slice(0, 8)}.` });
+    const incompatible = await exactBuildRefusal(l.dir, liveHead, l.dir, target);
+    if (incompatible) { note.refused = true; return err(incompatible); }
     const log = await hgit(l.dir, ['log', '--oneline', `${target}..HEAD`]);
-    const plan = { live_dir: l.dir, from_sha: liveHead, to_sha: target, drops: (log.stdout || '').trim().split('\n').filter(Boolean), then: 'update.sh --yes --rebuild through the root runner', safety: `the current HEAD is tagged pp-rollback-<timestamp> first, so this rollback is itself reversible` };
+    const plan = { live_dir: l.dir, from_sha: liveHead, to_sha: target, drops: (log.stdout || '').trim().split('\n').filter(Boolean), then: `update.sh --yes --build-current=${target} through the root runner`, safety: `the current HEAD is tagged pp-rollback-<timestamp> first, so this rollback is itself reversible` };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'rollback_self', subject: target, action: `reset the live ProxyPilot checkout from ${liveHead.slice(0, 8)} to ${target.slice(0, 8)} and rebuild`, preview: plan });
     if (gate) return gate;
-    const tag = `pp-rollback-${stamp()}`;
-    await hgit(l.dir, ['tag', tag, liveHead]);
+    const tag = `pp-rollback-${stamp()}-${liveHead.slice(0, 12)}-${randomUUID().slice(0, 8)}`;
+    const tagged = await hgit(l.dir, ['tag', tag, liveHead]);
+    if (tagged.status !== 0) return err(`Could not tag the rollback point: ${tail(tagged.stderr)}`);
+    if (await rev(l.dir) !== liveHead || (await dirty(l.dir)).length) return err('Live checkout changed before rollback; refusing reset.');
     const r = await hgit(l.dir, ['reset', '-q', '--hard', target]);
     if (r.status !== 0) return err(`git reset failed: ${tail(r.stderr)}`);
     note.snapshot = tag;
+    if (await rev(l.dir) !== target) return err('Rollback HEAD postcondition failed; rebuild was not requested.');
     let started;
-    try { started = await selfUpdateStart({ requestedBy: `mcp-self-rollback:${auth.created_by}`, rebuild: true }); } catch (e) {
-      await hgit(l.dir, ['reset', '-q', '--hard', liveHead]);
+    try { started = await selfUpdateStart({ requestedBy: `mcp-self-rollback:${auth.created_by}`, buildCurrentSha: target }); } catch (e) {
+      if (await rev(l.dir) !== target || (await dirty(l.dir)).length) return err(`The rebuild request was refused (${e.message}); checkout changed concurrently, so automatic reset was refused. Rollback tag: ${tag}.`);
+      const undo = await hgit(l.dir, ['reset', '-q', '--hard', liveHead]);
+      if (undo.status !== 0 || await rev(l.dir) !== liveHead) return err(`The rebuild request was refused and restoring ${liveHead.slice(0, 8)} failed; rollback tag: ${tag}.`);
       return err(`The rebuild request was refused (${e.code || 'error'}: ${e.message}); the live checkout was put back at ${liveHead.slice(0, 8)}.`);
     }
     state.rollback_points = [...points, { tag, sha: liveHead, at: new Date().toISOString(), kind: 'pre-rollback' }].slice(-20);

@@ -19,6 +19,7 @@ const UPDATE_SH = fileURLToPath(new URL('../../../../update.sh', import.meta.url
 const COPY_ADMIN = fileURLToPath(new URL('../../../../scripts/copy-admin-to-install.sh', import.meta.url));
 
 const FAKE_UPDATE_SH = `#!/bin/bash
+# ProxyPilot pinned-build contract: 1
 echo "args: $*"
 echo -e "\\033[0;34m[0/7] Backing up database...\\033[0m"
 echo "[1/7] Fetching latest changes..."
@@ -30,15 +31,26 @@ echo "[7/7] Restarting ProxyPilot..."
 if [ "\${FAKE_UPTODATE:-}" = 1 ]; then echo "Code is already up to date!"; fi
 if [ "\${FAKE_FAIL:-}" = 1 ]; then echo "boom: simulated failure"; exit 3; fi
 echo "done"
+if [ "\${FAKE_MISSING_RESULT:-}" != 1 ]; then
+  sha=$(git rev-parse HEAD)
+  expected=\${FAKE_EXPECTED_SHA:-$sha}
+  outcome=build-current
+  if [ "\${FAKE_UPTODATE:-}" = 1 ]; then outcome=already-current; fi
+  printf '{"expected_sha":"%s","status":"success","outcome":"%s","reason":""}\\n' "$expected" "$outcome" > "$PROXYPILOT_UPDATE_RESULT_FILE"
+fi
 `;
 
-function setup() {
+function setup({ legacy = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pp-runner-'));
   const run = join(root, 'run');
   const state = join(root, 'state');
   const src = join(root, 'src');
   mkdirSync(run); mkdirSync(state); mkdirSync(join(src, 'admin', 'backend'), { recursive: true });
-  writeFileSync(join(src, 'update.sh'), FAKE_UPDATE_SH, { mode: 0o755 });
+  writeFileSync(join(src, 'update.sh'), legacy ? readFileSync(new URL('./fixtures/pre-pinned-update.sh', import.meta.url)) : FAKE_UPDATE_SH, { mode: 0o755 });
+  if (!legacy) {
+    mkdirSync(join(src, 'scripts'));
+    writeFileSync(join(src, 'scripts', 'update-git.sh'), '# ProxyPilot pinned-build contract: 1\n');
+  }
   writeFileSync(join(src, 'admin', 'backend', 'package.json'), '{\n  "name": "x",\n  "version": "1.4.0"\n}\n');
   const git = (...args) => execFileSync('git', ['-C', src, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   git('init', '-q', '-b', 'main');
@@ -209,6 +221,72 @@ test('a valid update request runs update.sh --yes with the allowlisted flags and
   assert.equal(s.readJson('installed.json').head_sha, st.to_sha);
 });
 
+test('zero exit without completion or with wrong expected HEAD is failed, never success', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  for (const extra of [{ FAKE_MISSING_RESULT: '1' }, { FAKE_EXPECTED_SHA: 'a'.repeat(40) }]) {
+    const id = s.request({});
+    assert.notEqual(s.runner([], extra).status, 0);
+    const st = s.readJson(`state.${id}.json`);
+    assert.equal(st.status, 'failed');
+    assert.equal(st.exit_code, 98);
+    assert.match(st.reason, /postcondition/);
+    assert.equal(st.to_sha, s.git('rev-parse', 'HEAD').trim());
+  }
+});
+
+test('pinned build request preserves exact SHA and rejects mixed or malformed targets', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  const sha = s.git('rev-parse', 'HEAD').trim();
+  const id = s.request({ flags: `--build-current=${sha}` });
+  assert.equal(s.runner().status, 0);
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.expected_sha, sha);
+  assert.equal(st.outcome, 'build-current');
+  assert.equal(st.up_to_date, false);
+  for (const flags of [`--build-current=${sha} --rebuild`, '--build-current=main', `--build-current=${sha} --enable-mock2`]) {
+    const bad = s.request({ flags });
+    assert.notEqual(s.runner().status, 0);
+    assert.equal(s.readJson(`state.${bad}.json`).status, 'refused');
+  }
+  const wrong = s.request({ flags: '--build-current=' + 'a'.repeat(40) });
+  assert.notEqual(s.runner().status, 0);
+  assert.match(s.readJson(`state.${wrong}.json`).reason, /pinned_build_mismatch/);
+  assert.equal(readFileSync(join(s.state, `${wrong}.log`), 'utf8'), '', 'mismatched pin never executes update.sh');
+});
+
+test('pinned build refuses the genuine pre-repair updater before executing it', (t) => {
+  const s = setup({ legacy: true }); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  const sha = s.git('rev-parse', 'HEAD').trim();
+  const before = readFileSync(join(s.src, 'update.sh'));
+  const id = s.request({ flags: `--build-current=${sha}` });
+  assert.notEqual(s.runner().status, 0);
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.status, 'refused');
+  assert.match(st.reason, /^pinned_build_unsupported:/);
+  assert.equal(s.git('rev-parse', 'HEAD').trim(), sha);
+  assert.deepEqual(readFileSync(join(s.src, 'update.sh')), before);
+  assert.equal(readFileSync(join(s.state, `${id}.log`), 'utf8'), '');
+  assert.ok(!existsSync(join(s.state, `result.${id}.json`)));
+});
+
+test('a dirty legacy updater cannot bypass the committed capability check', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  const sha = s.git('rev-parse', 'HEAD').trim();
+  writeFileSync(join(s.src, 'update.sh'), readFileSync(new URL('./fixtures/pre-pinned-update.sh', import.meta.url)));
+  const id = s.request({ flags: `--build-current=${sha}` });
+  assert.notEqual(s.runner().status, 0);
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.status, 'refused');
+  assert.match(st.reason, /^pinned_build_dirty:/);
+  assert.equal(s.git('rev-parse', 'HEAD').trim(), sha);
+  assert.equal(readFileSync(join(s.state, `${id}.log`), 'utf8'), '');
+  assert.ok(!existsSync(join(s.state, `result.${id}.json`)));
+});
+
 test('phases are tracked from the [n/7] markers (3.5 included) and a failure keeps the last line as the reason', (t) => {
   const s = setup();
   t.after(s.cleanup);
@@ -339,8 +417,8 @@ test('update.sh: every prompt is guarded by --yes, and --discard-local is the on
   }
   assert.match(sh, /--yes\|-y\)\s*\n\s*ASSUME_YES=true/);
   assert.match(sh, /--discard-local\)\s*\n\s*DISCARD_LOCAL=true/);
-  assert.match(sh, /\$GIT_CMD reset --hard HEAD/);
-  assert.match(sh, /\$GIT_CMD clean -fd\b/);
+  assert.match(sh, /pp_git_logged reset --hard HEAD/);
+  assert.match(sh, /pp_git_logged clean -fd\b/);
   assert.doesNotMatch(sh, /clean -fdx/, 'ignored files (.env, data/) must survive --discard-local');
   // The re-exec after the pull forwards the original arguments, --yes included.
   assert.match(sh, /exec bash "\$SCRIPT_DIR\/update\.sh" --rebuild "\$@"/);

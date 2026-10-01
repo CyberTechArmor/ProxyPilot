@@ -3,13 +3,55 @@
 ProxyPilot can update itself from the dashboard (Profile → Application
 Settings → **Update now**) and over MCP (`run_proxypilot_update`). Both do
 exactly one thing: ask the host to run `update.sh --yes`, the same script an
-operator runs by hand — DB backup, `git pull`, self re-exec, dependency
+operator runs by hand — pin fetched main, refuse divergent ancestry, DB backup,
+`git merge --ff-only <pinned SHA>`, self re-exec, dependency
 install, frontend build, host-agent rebuild, `docker compose down/build/up`,
 health check. Nothing is re-implemented over RPC. An application update never
 installs or upgrades Incus, including when the application code is current.
 An operator must explicitly run `sudo ./update.sh --yes --upgrade-incus` on the
 host to request the Incus stable-channel check and guarded upgrade. The
 dashboard and MCP update runner do not accept that flag.
+
+Git fetch/advance failures remain failures even when `tee` writes the log
+successfully. The target is resolved from a private fetch ref once; moving
+`origin/main` or `FETCH_HEAD` cannot change this run's target. The script checks
+HEAD and branch after advancement, on re-exec, before runtime/build/deployment
+work and before completion. It holds the same updater lock through re-exec
+and preserves stderr. Divergence is refused before lockfile restoration,
+database backup, dependencies or service changes. Preserve local commits and
+review their changes separately; the updater never merges, rebases or resets
+history to reconcile divergence.
+
+`--rebuild` retains its update-latest behavior, forcing a build when current.
+`--build-current=<full 40-character SHA>` is the separate exact-commit mode:
+it requires HEAD to match and the checkout to be clean (including lockfiles
+and untracked files), and never fetches or advances Git. It cannot be combined
+with `--rebuild`, `--discard-local`, `--enable-mock2` or `--upgrade-incus`.
+Promotion and rollback use this mode only for targets with the same repaired
+build contract as the live checkout. Before tagging, advancing or resetting,
+self-edit compares immutable blobs for the updater/helper/runner, agent
+validator and backend update/self-edit files. Legacy or changed contracts are
+refused without a rebuild request. The runner independently refuses a pin
+unless HEAD matches and both updater files declare exact-build contract 1.
+This deliberately excludes rollback across the repair boundary and updater
+contract upgrades; those require separately reviewed host recovery. An older
+target's updater is never executed as a compatibility probe. The three request validators accept
+only this SHA-shaped flag, with no extra flags or arbitrary Git ref/path.
+
+The root runner requires `result.<id>.json` from the updater with a valid
+`expected_sha`, successful completion and an `outcome` (`updated`,
+`already-current` or `build-current`). It independently reads HEAD and rejects
+missing/mismatched completion with exit 98. These fields and the refusal
+reason are included in progress. Already-current remains a successful no-op;
+an explicit build remains success with `up_to_date: false`.
+
+Bootstrap compatibility: an older updater that re-execs this version without
+a pinned target stops safely before application work. Run the new updater
+again from SSH/console after inspecting the checkout; do not keep retrying an
+old script. New pinned requests require the updated agent and root runner;
+an older validator refuses them. For privately modified deployments, review
+and preserve the complete source/configuration/state before installing the
+new components. A clean status does not inventory ignored secrets or data.
 
 The explicitly requested Incus step uses `scripts/upgrade-incus-stable.sh`. It
 refuses a clustered host, a kernel below the current Incus minimum,
@@ -127,7 +169,7 @@ prefixed by one of these codes — when:
 | `malformed` | `id` is not a uuid, `action` ∉ {`update`, `check`}, `requested_by` ∉ `^[A-Za-z0-9._@:+-]{1,80}$`, `requested_at_unix` missing. |
 | `stale` | older than 120 s (or more than 60 s in the future). |
 | `nonce_mismatch` | no `nonce.<id>`, not owned by the agent, or its content differs. |
-| `invalid_flags` | any token outside `--rebuild --enable-mock2`. |
+| `invalid_flags` | any token outside `--rebuild --enable-mock2` or a sole `--build-current=<full SHA>`, or contradictory flags. |
 | `source_dir_missing` | no recorded checkout (see `source-dir`). |
 | `already_running` | `/var/lock/proxypilot-update.lock` is held (a manual `update.sh` is running). |
 

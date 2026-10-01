@@ -52,6 +52,7 @@ S_ID="" S_ACTION="" S_STATUS="" S_PHASE="" S_PHASE_INDEX=0
 S_STARTED_AT="" S_STARTED_UNIX=0 S_FINISHED_AT="" S_EXIT=""
 S_REQUESTED_BY="" S_FROM_SHA="" S_TO_SHA="" S_FROM_VERSION="" S_TO_VERSION=""
 S_FLAGS="" S_REASON="" S_LOG="" S_UP_TO_DATE=false
+S_EXPECTED_SHA="" S_OUTCOME=""
 
 log() {
     printf '%s proxypilot-update-runner: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2
@@ -112,6 +113,7 @@ write_state() {
         "$(json_str "$S_REQUESTED_BY")" "$(json_str "$S_FROM_SHA")" "$(json_str "$S_TO_SHA")" \
         "$(json_str "$S_FROM_VERSION")" "$(json_str "$S_TO_VERSION")" "$(json_str "$S_FLAGS")" \
         "$(json_opt_str "$S_REASON")" "$S_UP_TO_DATE" "$(json_str "$S_LOG")" "$$" "$(now_iso)")
+    json="${json%\}},\"expected_sha\":\"$S_EXPECTED_SHA\",\"outcome\":\"$S_OUTCOME\"}"
     write_atomic "$STATE_DIR/state.$S_ID.json" "$json"
     # A refusal must not clobber the record of a run that is still going.
     if [ "$S_STATUS" = "refused" ] && [ -f "$STATE_DIR/state.json" ]; then
@@ -220,7 +222,7 @@ prune_history() {
         n=$((n + 1))
         [ "$n" -le "$HISTORY_KEEP" ] && continue
         id=$(basename "$f" .json); id=${id#state.}
-        rm -f "$f" "$STATE_DIR/$id.log" "$STATE_DIR/done.$id"
+        rm -f "$f" "$STATE_DIR/$id.log" "$STATE_DIR/done.$id" "$STATE_DIR/result.$id.json"
     done
 }
 
@@ -280,6 +282,34 @@ run_update() {
     git_env
     S_FROM_SHA=$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo '')
     S_FROM_VERSION=$(package_version "$SOURCE_DIR")
+    if [[ "$S_FLAGS" =~ ^--build-current=([0-9a-f]{40})$ ]]; then
+        if [ "$S_FROM_SHA" != "${BASH_REMATCH[1]}" ]; then
+            refuse pinned_build_mismatch "checkout HEAD differs from the requested exact-build commit; nothing executed"
+            return 1
+        fi
+        local pinned_dirty contract_file contract_source
+        pinned_dirty=$(git -C "$SOURCE_DIR" status --porcelain --untracked-files=all 2>/dev/null) || {
+            refuse pinned_build_dirty "could not verify exact-build checkout status; nothing executed"
+            return 1
+        }
+        if [ -n "$pinned_dirty" ]; then
+            refuse pinned_build_dirty "exact-build checkout is dirty, including lockfiles/untracked files; nothing executed"
+            return 1
+        fi
+        for contract_file in update.sh scripts/update-git.sh; do
+            contract_source=$(git -C "$SOURCE_DIR" show "$S_FROM_SHA:$contract_file" 2>/dev/null) || {
+                refuse pinned_build_unsupported "target lacks repaired exact-build code; nothing executed; use reviewed host recovery"
+                return 1
+            }
+            if ! grep -Fqx '# ProxyPilot pinned-build contract: 1' <<< "$contract_source"; then
+                refuse pinned_build_unsupported "target does not declare exact-build contract 1; nothing executed; use reviewed host recovery"
+                return 1
+            fi
+        done
+    fi
+    local result_file="$STATE_DIR/result.$S_ID.json"
+    # Old updater scripts and stale results must never produce false success.
+    rm -f "$result_file"
     write_state
 
     S_STATUS=running
@@ -292,9 +322,12 @@ run_update() {
         cd "$SOURCE_DIR" || exit 97
         export TERM="${TERM:-dumb}"
         export PROXYPILOT_UPDATE_RUNNER=1 PROXYPILOT_UPDATE_ID="$S_ID"
+        export PROXYPILOT_UPDATE_RESULT_FILE="$result_file"
         exec bash ./update.sh --yes $S_FLAGS
     ) 2>&1 | track_output
-    local rc=${PIPESTATUS[0]}
+    local -a run_rc=("${PIPESTATUS[@]}")
+    local rc=${run_rc[0]}
+    if [ "${run_rc[1]}" -ne 0 ]; then rc=98; S_REASON='Update output tracking failed'; fi
 
     # The phase tracker ran in the pipeline subshell; read back what it recorded.
     S_PHASE=$(json_field "$STATE_DIR/state.$S_ID.json" phase)
@@ -302,19 +335,40 @@ run_update() {
     [ -n "$S_PHASE_INDEX" ] || S_PHASE_INDEX=0
     S_TO_SHA=$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo '')
     S_TO_VERSION=$(package_version "$SOURCE_DIR")
+    S_EXPECTED_SHA=$(json_field "$result_file" expected_sha)
+    S_OUTCOME=$(json_field "$result_file" outcome)
+    local result_status
+    result_status=$(json_field "$result_file" status)
+    if [ "$rc" -eq 0 ] && { ! [[ "$S_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [ "$result_status" != success ] || [ "$S_TO_SHA" != "$S_EXPECTED_SHA" ]; }; then
+        rc=98
+        S_REASON="HEAD postcondition failed or missing completion record: expected ${S_EXPECTED_SHA:-unknown}, observed ${S_TO_SHA:-unknown}; update.sh returned 0"
+    fi
+    case "$S_OUTCOME" in
+        updated|build-current|already-current) ;;
+        *) if [ "$rc" -eq 0 ]; then rc=98; S_REASON='Missing valid update outcome'; fi ;;
+    esac
+    if [[ "$S_FLAGS" =~ ^--build-current=([0-9a-f]{40})$ ]] && [ "$rc" -eq 0 ]; then
+        if [ "$S_EXPECTED_SHA" != "${BASH_REMATCH[1]}" ] || [ "$S_OUTCOME" != build-current ]; then
+            rc=98; S_REASON='Pinned build result differs from the requested commit or mode'
+        fi
+    fi
+    if [ "$rc" -eq 0 ] && [ "$S_OUTCOME" = already-current ] && [ "$S_FROM_SHA" != "$S_TO_SHA" ]; then
+        rc=98; S_REASON='Already-current result changed HEAD'
+    fi
     S_FINISHED_AT=$(now_iso)
     S_EXIT="$rc"
     if [ "$rc" -eq 0 ]; then
         S_STATUS=success
         S_PHASE="Update complete"
         S_PHASE_INDEX=$PHASE_TOTAL
-        if grep -q 'Code is already up to date' "$S_LOG" 2>/dev/null && [ "$S_FROM_SHA" = "$S_TO_SHA" ]; then
+        if [ "$S_OUTCOME" = already-current ]; then
             S_UP_TO_DATE=true
             S_PHASE="Already up to date"
         fi
     else
         S_STATUS=failed
-        S_REASON=$(grep -v '^[[:space:]]*$' "$S_LOG" 2>/dev/null | tail -n 1 | strip_ansi | cut -c1-240)
+        [ -n "$S_REASON" ] || S_REASON=$(json_field "$result_file" reason)
+        [ -n "$S_REASON" ] || S_REASON=$(grep -v '^[[:space:]]*$' "$S_LOG" 2>/dev/null | tail -n 1 | strip_ansi | cut -c1-240)
         [ -n "$S_REASON" ] || S_REASON="update.sh exited with status $rc"
     fi
     write_state
@@ -417,12 +471,17 @@ handle_request() {
     local f ok
     for f in $flags; do
         ok=false
+        [[ "$f" =~ ^--build-current=[0-9a-f]{40}$ ]] && ok=true
         for a in $ALLOWED_FLAGS; do [ "$f" = "$a" ] && ok=true; done
         if [ "$ok" != true ]; then
             refuse invalid_flags "flag '$f' is not allowed (allowed: $ALLOWED_FLAGS)"
             return 1
         fi
     done
+    if [[ "$flags" == *--build-current=* ]] && ! [[ "$flags" =~ ^--build-current=[0-9a-f]{40}$ ]]; then
+        refuse invalid_flags 'build-current requires exactly one SHA and cannot be combined with update flags'
+        return 1
+    fi
 
     case "$action" in
         check)

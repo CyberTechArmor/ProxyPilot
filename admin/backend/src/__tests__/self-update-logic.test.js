@@ -47,6 +47,15 @@ test('sanitizeRequestedBy squeezes into the runner-safe character class', () => 
   assert.equal(sanitizeRequestedBy(null, 'user'), 'user');
 });
 
+test('pinned build flags require one full immutable SHA without update flags', () => {
+  const pin = '--build-current=' + 'a'.repeat(40);
+  assert.deepEqual(validateUpdateFlags([pin]), { ok: true, flags: [pin] });
+  assert.equal(validateUpdateFlags(['--build-current=main']).ok, false);
+  assert.equal(validateUpdateFlags([pin, '--rebuild']).ok, false);
+  assert.equal(validateUpdateFlags([pin, '--enable-mock2']).ok, false);
+  assert.equal(validateUpdateFlags([pin, '--build-current=' + 'b'.repeat(40)]).ok, false);
+});
+
 test('agent error codes map to 409 / 400 / 502', () => {
   assert.equal(mapAgentErrorToHttp('update_in_progress'), 409);
   assert.equal(mapAgentErrorToHttp('update_pending'), 409);
@@ -153,7 +162,8 @@ test('phaseList follows the [n/7] index: done before, active at, pending after; 
 });
 
 test('UPDATE_PHASES matches the [n/7] markers update.sh actually prints', () => {
-  const sh = readFileSync(new URL('../../../../update.sh', import.meta.url), 'utf8');
+  const sh = readFileSync(new URL('../../../../update.sh', import.meta.url), 'utf8') + '\n' +
+    readFileSync(new URL('../../../../scripts/update-git.sh', import.meta.url), 'utf8');
   const markers = new Set();
   for (const m of sh.matchAll(/log "\$\{BLUE\}\[([0-9.]+)\/7\]/g)) markers.add(Number(m[1]));
   const listed = UPDATE_PHASES.map((p) => p.index);

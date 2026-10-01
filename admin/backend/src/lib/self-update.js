@@ -174,8 +174,13 @@ export async function updateStatus({ id, logTailBytes = DEFAULT_LOG_TAIL, call =
  * an Error carrying .code (update_in_progress, update_pending,
  * invalid_params, agent_unreachable…) for the route to map to a status.
  */
-export async function startUpdate({ requestedBy, flags = [], rebuild, call = agentCall, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
-  const chosen = flags.length ? flags : flagsFromOptions({ rebuild: !!rebuild });
+export async function startUpdate({ requestedBy, flags = [], rebuild, buildCurrentSha, call = agentCall, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  if (buildCurrentSha !== undefined && (rebuild || flags.length || !/^[0-9a-f]{40}$/.test(buildCurrentSha))) {
+    const e = new Error('buildCurrentSha requires a full commit SHA and cannot be combined with update flags');
+    e.code = 'invalid_params';
+    throw e;
+  }
+  const chosen = buildCurrentSha !== undefined ? [`--build-current=${buildCurrentSha}`] : flags.length ? flags : flagsFromOptions({ rebuild: !!rebuild });
   const v = validateUpdateFlags(chosen);
   if (!v.ok) {
     const e = new Error(v.error);

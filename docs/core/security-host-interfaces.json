@@ -125,10 +125,10 @@
       "host_command: //     spawnHost (argv-based; per shell-quote.js guidance all": 1,
       "host_command: // Promise wrapper over spawnHost for the zip flow's incus calls:": 1,
       "host_command: // impure export is runHostCapture.": 1,
-      "host_command: const child = spawnHost(bin, args, {": 1,
       "host_command: export function runHostCapture(bin, args, {": 1,
       "host_command: import { spawnHost } from './host-exec.js';": 1,
       "host_command: return runHostCapture('incus', ['exec', incusName, '--', 'sh', '-c', script], opts);": 1,
+      "host_command: spawnImpl = spawnHost,": 1,
       "host_files: 'mkdir -p /etc/systemd/system',": 1,
       "host_files: export const STARTUP_UNIT_PATH = `/etc/systemd/system/${STARTUP_UNIT_NAME}`;": 1
     },

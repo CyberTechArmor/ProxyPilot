@@ -45,6 +45,14 @@ verification pending.” Do not describe all eight audit findings as closed.
   deliberately includes comments/imports. It is review evidence, not a claim
   that all matches execute or that nonmatching indirect access is safe.
 
+`runHostCapture` still defaults to `spawnHost`, including its host namespace
+transport in Docker. Its optional `spawnImpl` dependency lets the collector
+regression launch a local fixture process through real pipes without host
+namespace privileges. Only the test supplies this function; it is not an HTTP
+or MCP request field. Capture limits, completion flags and failures are unchanged,
+and a failed host namespace entry never falls back to local execution. This
+test seam adds no host operation or privilege and does not close S6.
+
 The `get_lxc_container` MCP read now invokes fixed `incus operation list
 --format json` through the existing host adapter with a 10-second timeout and
 1 MiB capture limit. It returns only operations whose resource or description

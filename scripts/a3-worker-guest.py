@@ -988,6 +988,8 @@ class Browser:
         # The bound account's user name (not secret; the broker's binding names it),
         # kept after a submit so a later session read can name it too.
         self.bound_email = None
+        self.sign_out_attempted = False
+        self.sign_out_confirmed = False
         home = os.path.join(WORKSPACE, 'home')
         profile = os.path.join(WORKSPACE, 'profile')
         for path in (home, profile):
@@ -1237,6 +1239,10 @@ class Browser:
 
     def logout(self):
         """POST /api/logout before teardown when this attempt submitted a credential."""
+        # A prior UI sign-out already sent (or may have sent) this write.
+        # Teardown must report its confirmation, never repeat the request.
+        if self.sign_out_attempted:
+            return 'done' if self.sign_out_confirmed else 'failed'
         try:
             return 'done' if self.isolated(LOGOUT, await_promise=True, timeout=10) is True else 'failed'
         except Refused:
@@ -1264,8 +1270,9 @@ class Browser:
             return {'at': 'workspace'}
         if name == 'read_session':
             data = self.fixed_json('/api/session')
+            expected_email = self.bound_email or 'demo@fractionate.ai'
             out = {'untrusted_page_claim_authenticated': isinstance(data, dict) and
-                   data.get('authenticated') is True and data.get('email') == 'demo@fractionate.ai'}
+                   data.get('authenticated') is True and data.get('email') == expected_email}
             if self.bound_email is not None:
                 # A5: after a submit, whether the session names the bound account.
                 out['untrusted_page_claim_authenticated_as_bound_account'] = (
@@ -1279,11 +1286,29 @@ class Browser:
                 isinstance(f, dict) and f.get('id') == 'sample-metrics' and
                 f.get('name') == 'sample-metrics.csv' for f in files)}
         if name == 'sign_out':
-            if not self.button('Sign out', True):
+            deadline = time.monotonic() + STEP_SECONDS
+            self.sign_out_attempted = True
+            self.sign_out_confirmed = False
+            try:
+                clicked = self.button('Sign out', True)
+            except Refused as error:
+                raise Refused('SIGN_OUT_UNCONFIRMED') from error
+            if not clicked:
+                self.sign_out_attempted = False
                 raise Refused('BROWSER_ELEMENT_MISSING')
-            data = self.fixed_json('/api/session')
-            return {'untrusted_page_claim_signed_out': isinstance(data, dict) and
-                    data.get('authenticated') is False}
+            # The SPA's click handler starts an asynchronous POST. Observe its
+            # effect with fixed reads; never click or submit the write again.
+            while True:
+                try:
+                    data = self.fixed_json('/api/session')
+                except Refused as error:
+                    raise Refused('SIGN_OUT_UNCONFIRMED') from error
+                if isinstance(data, dict) and data.get('authenticated') is False:
+                    self.sign_out_confirmed = True
+                    return {'untrusted_page_claim_signed_out': True}
+                if time.monotonic() >= deadline:
+                    return {'untrusted_page_claim_signed_out': False}
+                time.sleep(0.1)
         raise Refused('INVALID_BROWSER_ACTION')
 
     def view(self):

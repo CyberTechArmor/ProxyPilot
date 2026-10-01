@@ -91,6 +91,59 @@ class FrameTests(unittest.TestCase):
         self.assertTrue(g.permits('https://demo.fractionate.ai/api/logout', 'POST'))
 
 
+class SessionClaimTests(unittest.TestCase):
+    def test_session_requires_the_expected_account(self):
+        browser = object.__new__(g.Browser)
+        for bound, email, authenticated, expected in (
+                (USERNAME, USERNAME, True, True),
+                (USERNAME, 'demo@fractionate.ai', True, False),
+                (USERNAME, USERNAME, False, False),
+                (None, 'demo@fractionate.ai', True, True),
+                (None, USERNAME, True, False)):
+            browser.bound_email = bound
+            with patch.object(browser, 'fixed_json', return_value={'authenticated': authenticated, 'email': email}):
+                claims = browser.action('read_session')
+            self.assertIs(claims['untrusted_page_claim_authenticated'], expected)
+            if bound:
+                self.assertIs(claims['untrusted_page_claim_authenticated_as_bound_account'], expected)
+            else:
+                self.assertNotIn('untrusted_page_claim_authenticated_as_bound_account', claims)
+
+    def test_readback_failure_after_logout_click_is_unconfirmed(self):
+        browser = object.__new__(g.Browser)
+        with patch.object(browser, 'button', return_value=True) as click, patch.object(
+                browser, 'fixed_json', side_effect=g.Refused('BROWSER_READBACK_FAILED')):
+            with self.assertRaises(g.Refused) as caught:
+                browser.action('sign_out')
+            self.assertEqual(caught.exception.code, 'SIGN_OUT_UNCONFIRMED')
+            click.assert_called_once_with('Sign out', True)
+        with patch.object(browser, 'isolated') as post:
+            self.assertEqual(browser.logout(), 'failed')
+            post.assert_not_called()
+
+    def test_unconfirmed_logout_expires_without_another_click(self):
+        browser = object.__new__(g.Browser)
+        with patch.object(browser, 'button', return_value=True) as click, patch.object(
+                browser, 'fixed_json', return_value={'authenticated': True}), patch.object(
+                g.time, 'monotonic', side_effect=[0, g.STEP_SECONDS + 1]):
+            self.assertEqual(browser.action('sign_out'), {'untrusted_page_claim_signed_out': False})
+            click.assert_called_once_with('Sign out', True)
+        with patch.object(browser, 'isolated') as post:
+            self.assertEqual(browser.logout(), 'failed')
+            post.assert_not_called()
+
+    def test_lost_click_reply_is_not_retried_during_teardown(self):
+        browser = object.__new__(g.Browser)
+        with patch.object(browser, 'button', side_effect=g.Refused('BROWSER_TIMEOUT')) as click:
+            with self.assertRaises(g.Refused) as caught:
+                browser.action('sign_out')
+            self.assertEqual(caught.exception.code, 'SIGN_OUT_UNCONFIRMED')
+            click.assert_called_once_with('Sign out', True)
+        with patch.object(browser, 'isolated') as post:
+            self.assertEqual(browser.logout(), 'failed')
+            post.assert_not_called()
+
+
 # A login page shaped like the demo's: a dialog named by its title, one
 # username field, one password field and one submit button in one form.
 PAGE = b'''<!doctype html><html><body>
@@ -102,6 +155,10 @@ PAGE = b'''<!doctype html><html><body>
 <script>
 const $ = id => document.getElementById(id);
 $('s').onclick = () => { $('dlg').style.display = 'block'; };
+$('out').onclick = async () => {
+  await fetch('/api/logout', {method: 'POST', body: '{}'});
+  $('ws').style.display = 'none';
+};
 $('f').onsubmit = async e => {
   e.preventDefault();
   const r = await fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -122,6 +179,7 @@ class LoginOrigin(BaseHTTPRequestHandler):
     logins = []
     # A5 outcome fixtures, applied after a correct password (the demo's A5 modes).
     mode = 'normal'
+    logout_delay = 0
 
     def log_message(self, *args):
         pass
@@ -151,6 +209,7 @@ class LoginOrigin(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
         if self.path == '/api/logout':
+            time.sleep(LoginOrigin.logout_delay)
             LoginOrigin.sessions.discard(self._session())
             LoginOrigin.logins.append('logout')
             return self._send(200, b'{"authenticated":false}', extra=[('Set-Cookie', 'sid=; Max-Age=0')])
@@ -222,6 +281,7 @@ class CredentialBrowserTests(unittest.TestCase):
 
     def setUp(self):
         LoginOrigin.mode = 'normal'
+        LoginOrigin.logout_delay = 0
         LoginOrigin.password = 'A4-canary-' + secrets.token_urlsafe(18)
         LoginOrigin.sessions.clear()
         LoginOrigin.logins.clear()
@@ -286,7 +346,7 @@ class CredentialBrowserTests(unittest.TestCase):
             self.assertFalse(os.path.exists(self.fifo))
             # A5: after a submit the session read also says whether it names the bound account.
             self.assertEqual(send('action', action='read_session')['result'],
-                             {'untrusted_page_claim_authenticated': False,
+                             {'untrusted_page_claim_authenticated': True,
                               'untrusted_page_claim_authenticated_as_bound_account': True})
             stopped = send('stop')
             self.assertEqual(stopped['result'], {'stopping': True, 'logout': 'done'})
@@ -304,6 +364,25 @@ class CredentialBrowserTests(unittest.TestCase):
                      base64.b64encode(LoginOrigin.password.encode()).decode()):
             self.assertNotIn(form, channel)
         self.assertIn(BINDING, channel)
+
+    def test_sign_out_waits_for_the_single_delayed_logout(self):
+        LoginOrigin.logout_delay = 0.7
+        browser = g.Browser(self.spki, g.Channel(open(os.devnull, 'w')))
+        writer = None
+        try:
+            browser.action('open_landing')
+            browser.action('open_login')
+            writer = threading.Thread(target=deliver, args=(self.fifo, frame(USERNAME, LoginOrigin.password)))
+            writer.start()
+            self.assertEqual(browser.action('submit_bound_fixture', BINDING)['outcome'], 'signed_in')
+            self.assertEqual(browser.action('sign_out'), {'untrusted_page_claim_signed_out': True})
+            self.assertEqual(browser.logout(), 'done')
+            self.assertEqual(LoginOrigin.sessions, set())
+            self.assertEqual(LoginOrigin.logins, ['accepted', 'logout'])
+        finally:
+            browser.close()
+            if writer:
+                writer.join(5)
 
     def test_rejected_value_is_cleared_and_unarmed_posts_are_refused(self):
         channel = g.Channel(open(os.devnull, 'w'))
@@ -432,6 +511,10 @@ class RealProxyBrowserTests(unittest.TestCase):
             channel = g.Channel(open(os.devnull, 'w'))
             browser = g.Browser(self.spki, channel)
             try:
+                # This local fixture reuses its workspace across browsers;
+                # production attempts each get a fresh one. In particular an
+                # earlier MFA cookie must not classify a later slow reply.
+                browser.cdp.call('Network.clearBrowserCookies', session=browser.session)
                 browser.action('open_landing')
                 browser.action('open_login')
                 writer = threading.Thread(target=deliver, args=(fifo, frame(USERNAME, LoginOrigin.password)))

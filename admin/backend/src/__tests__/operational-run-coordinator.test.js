@@ -64,7 +64,8 @@ function setup({ rules = baseRules, consent = true, actions = ['navigate', 'clic
 
 // A scripted stand-in for the host supervisor's backend socket, behind the real
 // createWorkerLauncher so every request and reply goes through its validation.
-function fakeSupervisor({ outcome = 'signed_in', choices = [], modelError = null, actionErrors = {} } = {}) {
+function fakeSupervisor({ outcome = 'signed_in', choices = [], modelError = null, actionErrors = {},
+  signOutClaims = { untrusted_page_claim_signed_out: true } } = {}) {
   const calls = [];
   let ordinal = 0, active = null, boundAfterSubmit = false;
   const results = {
@@ -74,7 +75,7 @@ function fakeSupervisor({ outcome = 'signed_in', choices = [], modelError = null
     read_session: () => ({ untrusted_page_claim_authenticated: false,
       ...(boundAfterSubmit ? { untrusted_page_claim_authenticated_as_bound_account: outcome === 'signed_in' } : {}) }),
     read_files: () => ({ untrusted_page_claim_sample_present: true, untrusted_injected_text: INJECTION }),
-    sign_out: () => ({ untrusted_page_claim_signed_out: true }),
+    sign_out: () => signOutClaims,
   };
   const client = {
     async request(method, params) {
@@ -431,6 +432,27 @@ test('an uncertain browser step becomes a human decision; a takeover hands the r
     const result = await c.execute(c.start(t.operator, startInput(t)).run_id);
     assert.deepEqual([result.final_state, result.result_class, result.needs_human], ['blocked', 'taken_over', 1]);
   } finally { t.f.close(); }
+});
+
+test('unconfirmed sign-out is uncertain, never replayed and gates the next start', async () => {
+  for (const patch of [{ signOutClaims: { untrusted_page_claim_signed_out: false } }, { signOutClaims: {} },
+    { actionErrors: { sign_out: 'SIGN_OUT_UNCONFIRMED' } }]) {
+    const s = setup();
+    try {
+      const sup = fakeSupervisor({ choices: ['submit_bound_fixture', 'read_files'], ...patch });
+      const holder = {};
+      Object.assign(holder, coordinator(s, sup, { onApprovalRequested: r => autoApprove(s, holder)(r) }));
+      const runId = holder.c.start(s.operator, startInput(s)).run_id;
+      const result = await holder.c.execute(runId);
+      assert.deepEqual([result.final_state, result.result_class, result.needs_human, result.uncertain_steps],
+        ['failed', 'uncertain_step', 1, 1]);
+      const step = s.f.db.prepare("SELECT state,error_code FROM ops_agent_run_steps WHERE run_id=? AND action='sign_out'").get(runId);
+      assert.deepEqual({ ...step }, { state: 'uncertain', error_code: 'SIGN_OUT_UNCONFIRMED' });
+      assert.equal(sup.calls.filter(c => c.method === 'action' && c.params.action === 'sign_out').length, 1);
+      assert.throws(() => holder.c.start(s.operator, startInput(s)), { code: 'RECONCILIATION_REQUIRED' });
+      assert.equal(sup.calls.filter(c => c.method === 'stop').length, 1);
+    } finally { s.f.close(); }
+  }
 });
 
 test('a step the supervisor never sent (the runner had already exited) fails; it is not uncertain', async () => {

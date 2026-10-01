@@ -111,11 +111,24 @@ try{
  });
  await journey('permission filtering clears hidden metadata',async()=>{forbidden=true;await page.getByRole('button',{name:'Refresh connections'}).click();await page.getByText('No permitted connections to show.',{exact:false}).waitFor();assert.equal(await page.getByText('Fixture ledger',{exact:true}).count(),0);forbidden=false;});
  await journey('three color-only themes preserve structure, persist choice and support keyboard selection',async()=>{
- await page.setViewportSize({width:1280,height:1000});await page.goto(`${origin}/connections`);await page.getByRole('button',{name:'Add connection',exact:true}).waitFor();
+ await page.setViewportSize({width:1280,height:1000});
+ const expectedCatalogue=structuredClone([connection]);
+ async function loadCatalogue(navigate) {
+   // Page chrome renders before the async catalogue. Compare each theme only
+   // after the same fixture data has arrived and its card has rendered.
+   const response=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/connections'&&r.request().method()==='GET');
+   await navigate();
+   const loaded=await response;
+   assert.equal(loaded.status(),200);
+   assert.deepEqual((await loaded.json()).connections,expectedCatalogue);
+   await page.getByText(connection.name,{exact:true}).waitFor();
+   await page.getByRole('button',{name:'Details and access',exact:true}).waitFor();
+ }
+ await loadCatalogue(()=>page.goto(`${origin}/connections`));await page.getByRole('button',{name:'Add connection',exact:true}).waitFor();
  const signature=()=>page.evaluate(()=>[...document.querySelectorAll('h1,main h2,main button')].map(e=>({text:e.textContent,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));
  const baseline=await signature();const backgrounds=[];
  for(const [id,name] of [['midnight','Midnight'],['latte','Latte'],['office','Office']]){
-   await page.getByRole('button',{name:/Color theme:/}).first().click();assert.equal(await page.getByRole('menuitemradio').count(),3);await page.getByRole('menuitemradio',{name,exact:true}).click();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),id);assert.equal(await page.evaluate(()=>localStorage.getItem('pp-theme')),id);await page.reload();await page.getByRole('button',{name:`Color theme: ${name}`}).first().waitFor();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),id);assert.deepEqual(await signature(),baseline);backgrounds.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));
+   await page.getByRole('button',{name:/Color theme:/}).first().click();assert.equal(await page.getByRole('menuitemradio').count(),3);await page.getByRole('menuitemradio',{name,exact:true}).click();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),id);assert.equal(await page.evaluate(()=>localStorage.getItem('pp-theme')),id);await loadCatalogue(()=>page.reload());await page.getByRole('button',{name:`Color theme: ${name}`}).first().waitFor();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),id);assert.deepEqual(await signature(),baseline);backgrounds.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));
  }
  assert.equal(new Set(backgrounds).size,3);
  await page.getByRole('button',{name:'Color theme: Office'}).first().focus();await page.keyboard.press('Enter');await page.keyboard.press('Home');await page.waitForFunction(()=>document.activeElement?.textContent==='Midnight');await page.keyboard.press('ArrowDown');await page.waitForFunction(()=>document.activeElement?.textContent==='Latte');await page.keyboard.press('Enter');await page.waitForFunction(()=>document.documentElement.dataset.theme==='latte');

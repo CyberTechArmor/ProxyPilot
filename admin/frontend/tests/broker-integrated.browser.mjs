@@ -27,8 +27,8 @@ try {
  await page.getByLabel('Connection name').fill('Real fixture ledger');await page.getByRole('button',{name:'Save setup details'}).click();
  const link=page.getByRole('link',{name:'Open trusted broker intake'});await link.waitFor();
  const intake=await context.newPage();await intake.goto(await link.getAttribute('href'));
- await intake.getByLabel('Synthetic API credential').fill(h.credential);await intake.getByRole('button',{name:'Save once',exact:true}).click();await intake.getByRole('status').filter({hasText:'committed'}).waitFor();
- assert.equal(await intake.getByLabel('Synthetic API credential').inputValue(),'');await intake.close();
+ await intake.getByLabel('API credential',{exact:true}).fill(h.credential);await intake.getByRole('button',{name:'Save once',exact:true}).click();await intake.getByRole('status').filter({hasText:'committed'}).waitFor();
+ assert.equal(await intake.getByLabel('API credential',{exact:true}).inputValue(),'');await intake.close();
  await page.getByRole('button',{name:'Check enrollment status'}).click();await page.getByText('Connection enrolled.',{exact:false}).waitFor();await page.keyboard.press('Escape');
  await page.getByRole('button',{name:'Details and access'}).click();await page.getByRole('button',{name:'Test (read only)',exact:true}).click();
  await page.getByText('Synthetic ledger (development) · active',{exact:false}).waitFor();
@@ -46,7 +46,7 @@ try {
  await page.getByRole('button',{name:'Rotate credential',exact:true}).click();await page.getByRole('button',{name:'Prepare rotation'}).click();
  const rotatedSecret=randomBytes(32).toString('base64url');h.dependencies.setCredential(rotatedSecret);
  const rotationPage=await context.newPage();await rotationPage.goto(await page.getByRole('link',{name:'Open trusted broker intake'}).getAttribute('href'));
- await rotationPage.getByLabel('Synthetic API credential').fill(rotatedSecret);await rotationPage.getByRole('button',{name:'Save once',exact:true}).click();await rotationPage.getByRole('status').filter({hasText:'committed'}).waitFor();await rotationPage.close();
+ await rotationPage.getByLabel('API credential',{exact:true}).fill(rotatedSecret);await rotationPage.getByRole('button',{name:'Save once',exact:true}).click();await rotationPage.getByRole('status').filter({hasText:'committed'}).waitFor();await rotationPage.close();
  await page.getByRole('button',{name:'Check rotation status'}).click();await page.getByText('Credential rotated. Old sessions',{exact:false}).waitFor();await page.keyboard.press('Escape');
  await assert.rejects(()=>consumer.execute('item.read',{resource_id:h.resource},randomUUID()));
  await page.getByRole('button',{name:'Details and access'}).click();await page.getByRole('button',{name:'Test (read only)',exact:true}).click();await page.getByText('Synthetic ledger (development) · active',{exact:false}).waitFor();

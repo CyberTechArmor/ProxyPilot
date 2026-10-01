@@ -287,10 +287,11 @@ export const CAPTURE_FLUSH_GRACE_MS = 500;
 export function runHostCapture(bin, args, {
   input = null, inputFile = null, timeoutMs = 120000,
   maxCapture = CAPTURE_CAP, flushGraceMs = CAPTURE_FLUSH_GRACE_MS,
+  spawnImpl = spawnHost,
 } = {}) {
   return new Promise((resolvePromise) => {
     const wantStdin = input !== null || inputFile !== null;
-    const child = spawnHost(bin, args, {
+    const child = spawnImpl(bin, args, {
       stdio: [wantStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     const out = { chunks: [], bytes: 0, truncated: false, ended: false };

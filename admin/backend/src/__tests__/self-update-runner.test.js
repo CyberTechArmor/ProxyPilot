@@ -19,6 +19,7 @@ const UPDATE_SH = fileURLToPath(new URL('../../../../update.sh', import.meta.url
 const COPY_ADMIN = fileURLToPath(new URL('../../../../scripts/copy-admin-to-install.sh', import.meta.url));
 
 const FAKE_UPDATE_SH = `#!/bin/bash
+# ProxyPilot pinned-build contract: 1
 echo "args: $*"
 echo -e "\\033[0;34m[0/7] Backing up database...\\033[0m"
 echo "[1/7] Fetching latest changes..."
@@ -39,13 +40,17 @@ if [ "\${FAKE_MISSING_RESULT:-}" != 1 ]; then
 fi
 `;
 
-function setup() {
+function setup({ legacy = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pp-runner-'));
   const run = join(root, 'run');
   const state = join(root, 'state');
   const src = join(root, 'src');
   mkdirSync(run); mkdirSync(state); mkdirSync(join(src, 'admin', 'backend'), { recursive: true });
-  writeFileSync(join(src, 'update.sh'), FAKE_UPDATE_SH, { mode: 0o755 });
+  writeFileSync(join(src, 'update.sh'), legacy ? readFileSync(new URL('./fixtures/pre-pinned-update.sh', import.meta.url)) : FAKE_UPDATE_SH, { mode: 0o755 });
+  if (!legacy) {
+    mkdirSync(join(src, 'scripts'));
+    writeFileSync(join(src, 'scripts', 'update-git.sh'), '# ProxyPilot pinned-build contract: 1\n');
+  }
   writeFileSync(join(src, 'admin', 'backend', 'package.json'), '{\n  "name": "x",\n  "version": "1.4.0"\n}\n');
   const git = (...args) => execFileSync('git', ['-C', src, ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
   git('init', '-q', '-b', 'main');
@@ -247,7 +252,39 @@ test('pinned build request preserves exact SHA and rejects mixed or malformed ta
   }
   const wrong = s.request({ flags: '--build-current=' + 'a'.repeat(40) });
   assert.notEqual(s.runner().status, 0);
-  assert.match(s.readJson(`state.${wrong}.json`).reason, /Pinned build result/);
+  assert.match(s.readJson(`state.${wrong}.json`).reason, /pinned_build_mismatch/);
+  assert.equal(readFileSync(join(s.state, `${wrong}.log`), 'utf8'), '', 'mismatched pin never executes update.sh');
+});
+
+test('pinned build refuses the genuine pre-repair updater before executing it', (t) => {
+  const s = setup({ legacy: true }); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  const sha = s.git('rev-parse', 'HEAD').trim();
+  const before = readFileSync(join(s.src, 'update.sh'));
+  const id = s.request({ flags: `--build-current=${sha}` });
+  assert.notEqual(s.runner().status, 0);
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.status, 'refused');
+  assert.match(st.reason, /^pinned_build_unsupported:/);
+  assert.equal(s.git('rev-parse', 'HEAD').trim(), sha);
+  assert.deepEqual(readFileSync(join(s.src, 'update.sh')), before);
+  assert.equal(readFileSync(join(s.state, `${id}.log`), 'utf8'), '');
+  assert.ok(!existsSync(join(s.state, `result.${id}.json`)));
+});
+
+test('a dirty legacy updater cannot bypass the committed capability check', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  const sha = s.git('rev-parse', 'HEAD').trim();
+  writeFileSync(join(s.src, 'update.sh'), readFileSync(new URL('./fixtures/pre-pinned-update.sh', import.meta.url)));
+  const id = s.request({ flags: `--build-current=${sha}` });
+  assert.notEqual(s.runner().status, 0);
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.status, 'refused');
+  assert.match(st.reason, /^pinned_build_dirty:/);
+  assert.equal(s.git('rev-parse', 'HEAD').trim(), sha);
+  assert.equal(readFileSync(join(s.state, `${id}.log`), 'utf8'), '');
+  assert.ok(!existsSync(join(s.state, `result.${id}.json`)));
 });
 
 test('phases are tracked from the [n/7] markers (3.5 included) and a failure keeps the last line as the reason', (t) => {

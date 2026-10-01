@@ -282,6 +282,31 @@ run_update() {
     git_env
     S_FROM_SHA=$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo '')
     S_FROM_VERSION=$(package_version "$SOURCE_DIR")
+    if [[ "$S_FLAGS" =~ ^--build-current=([0-9a-f]{40})$ ]]; then
+        if [ "$S_FROM_SHA" != "${BASH_REMATCH[1]}" ]; then
+            refuse pinned_build_mismatch "checkout HEAD differs from the requested exact-build commit; nothing executed"
+            return 1
+        fi
+        local pinned_dirty contract_file contract_source
+        pinned_dirty=$(git -C "$SOURCE_DIR" status --porcelain --untracked-files=all 2>/dev/null) || {
+            refuse pinned_build_dirty "could not verify exact-build checkout status; nothing executed"
+            return 1
+        }
+        if [ -n "$pinned_dirty" ]; then
+            refuse pinned_build_dirty "exact-build checkout is dirty, including lockfiles/untracked files; nothing executed"
+            return 1
+        fi
+        for contract_file in update.sh scripts/update-git.sh; do
+            contract_source=$(git -C "$SOURCE_DIR" show "$S_FROM_SHA:$contract_file" 2>/dev/null) || {
+                refuse pinned_build_unsupported "target lacks repaired exact-build code; nothing executed; use reviewed host recovery"
+                return 1
+            }
+            if ! grep -Fqx '# ProxyPilot pinned-build contract: 1' <<< "$contract_source"; then
+                refuse pinned_build_unsupported "target does not declare exact-build contract 1; nothing executed; use reviewed host recovery"
+                return 1
+            fi
+        done
+    fi
     local result_file="$STATE_DIR/result.$S_ID.json"
     # Old updater scripts and stale results must never produce false success.
     rm -f "$result_file"

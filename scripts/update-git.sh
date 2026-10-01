@@ -1,4 +1,5 @@
 #!/bin/bash
+# ProxyPilot pinned-build contract: 1
 # Scoped Git checks for update.sh. Do not enable pipefail globally in the
 # legacy operator script: many of its best-effort probes depend on that.
 

@@ -14,7 +14,7 @@
 //                   recording the previous HEAD as the rollback point and
 //                   tagging it), then ask the root update runner for a rebuild —
 //                   `update.sh --yes --build-current=<promoted SHA>`.
-//   rollback        reset the live checkout to the recorded HEAD, same rebuild.
+//   rollback        reset to a compatible recorded HEAD, then exact rebuild.
 //
 // Every git operation on the LIVE checkout goes through the host pivot as root
 // with safe.directory pinned to that one path, and refuses when the checkout
@@ -64,6 +64,30 @@ export function createSelfEditHandlers(kit) {
     const r = await hgit(dir, ['status', '--porcelain']);
     if (r.status !== 0) return ['Could not verify checkout status'];
     return (r.stdout || '').split('\n').filter((l) => l.trim());
+  }
+
+  // A rollback executes the TARGET's updater. Never reset into a legacy
+  // updater or a changed build contract and hope the new runner can fix it.
+  // Compare immutable blobs, without executing target code. Contract changes
+  // and the first repair bootstrap require separately reviewed host recovery.
+  async function exactBuildRefusal(liveDir, liveHead, targetDir, target) {
+    const marker = '# ProxyPilot pinned-build contract: 1';
+    for (const file of ['update.sh', 'scripts/update-git.sh']) {
+      const r = await hgit(targetDir, ['show', `${target}:${file}`]);
+      if (r.status !== 0 || !(r.stdout || '').split('\n').includes(marker))
+        return `Target ${target} does not declare the repaired exact-build contract; preserve the current checkout and use reviewed host recovery.`;
+    }
+    const files = ['update.sh', 'scripts/update-git.sh', 'scripts/update-runner.sh',
+      'cmd/agent/methods/update.go', 'admin/backend/src/lib/self-update.js',
+      'admin/backend/src/lib/self-update-logic.js',
+      'admin/backend/src/routes/mcp-tools/self-edit.js'];
+    for (const file of files) {
+      const a = await rev(liveDir, `${liveHead}:${file}`);
+      const b = await rev(targetDir, `${target}:${file}`);
+      if (!a || !b || a !== b)
+        return `Exact-build contract differs at ${file}; source advancement/reset and rebuild were refused. Use separately reviewed host recovery for this target.`;
+    }
+    return null;
   }
   async function candidateExists() {
     const r = await hostSh('test -d "$1/.git" && echo yes || echo no', [CAND], { timeoutMs: 10000 });
@@ -164,7 +188,7 @@ export function createSelfEditHandlers(kit) {
       candidate: exists ? candidate : null,
       checks: state.checks, last_promotion: state.promotions?.[state.promotions.length - 1] || null, rollback_points: (state.rollback_points || []).slice(-5),
       policy: { required_checks_for_promote: cfg.required_checks_for_promote, checks: Object.keys(cfg.checks) },
-      flow: 'apply_self_patch → run_self_checks → promote_self (confirmation token) → poll get_proxypilot_update_status; rollback_self restores the recorded HEAD.',
+      flow: 'apply_self_patch → run_self_checks → promote_self (confirmation token) → poll get_proxypilot_update_status; rollback_self restores a compatible recorded HEAD; legacy or changed updater contracts require reviewed host recovery.',
     });
   });
 
@@ -292,6 +316,8 @@ export function createSelfEditHandlers(kit) {
     const state = await readState();
     const head = await rev(CAND);
     const liveHead = await rev(l.dir);
+    const incompatible = await exactBuildRefusal(l.dir, liveHead, CAND, head);
+    if (incompatible) { note.refused = true; return err(incompatible); }
     const base = state.candidate?.base_sha || null;
     if (!base || base !== liveHead) { note.refused = true; return err(`The candidate is based on ${base ? base.slice(0, 8) : 'nothing'} but the live checkout is at ${liveHead?.slice(0, 8)}. apply_self_patch({ reset: true }) and re-apply the change on the current HEAD.`); }
     const ahead = Number((await hgit(CAND, ['rev-list', '--count', `${base}..HEAD`])).stdout.trim()) || 0;
@@ -351,6 +377,8 @@ export function createSelfEditHandlers(kit) {
     }
     const liveHead = await rev(l.dir);
     if (liveHead === target) return ok({ applied: false, note: `The live checkout is already at ${target.slice(0, 8)}.` });
+    const incompatible = await exactBuildRefusal(l.dir, liveHead, l.dir, target);
+    if (incompatible) { note.refused = true; return err(incompatible); }
     const log = await hgit(l.dir, ['log', '--oneline', `${target}..HEAD`]);
     const plan = { live_dir: l.dir, from_sha: liveHead, to_sha: target, drops: (log.stdout || '').trim().split('\n').filter(Boolean), then: `update.sh --yes --build-current=${target} through the root runner`, safety: `the current HEAD is tagged pp-rollback-<timestamp> first, so this rollback is itself reversible` };
     const d = dry(args, plan); if (d) return d;

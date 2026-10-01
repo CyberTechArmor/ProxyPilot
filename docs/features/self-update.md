@@ -27,8 +27,15 @@ history to reconcile divergence.
 it requires HEAD to match and the checkout to be clean (including lockfiles
 and untracked files), and never fetches or advances Git. It cannot be combined
 with `--rebuild`, `--discard-local`, `--enable-mock2` or `--upgrade-incus`.
-Promotion and rollback use this mode through the same agent/root runner, so
-rollback cannot silently pull forward. The three request validators accept
+Promotion and rollback use this mode only for targets with the same repaired
+build contract as the live checkout. Before tagging, advancing or resetting,
+self-edit compares immutable blobs for the updater/helper/runner, agent
+validator and backend update/self-edit files. Legacy or changed contracts are
+refused without a rebuild request. The runner independently refuses a pin
+unless HEAD matches and both updater files declare exact-build contract 1.
+This deliberately excludes rollback across the repair boundary and updater
+contract upgrades; those require separately reviewed host recovery. An older
+target's updater is never executed as a compatibility probe. The three request validators accept
 only this SHA-shaped flag, with no extra flags or arbitrary Git ref/path.
 
 The root runner requires `result.<id>.json` from the updater with a valid

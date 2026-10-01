@@ -1,12 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createSelfEditHandlers } from '../routes/mcp-tools/self-edit.js';
 
-function setup(t) {
+const ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+const LEGACY = readFileSync(new URL('./fixtures/pre-pinned-update.sh', import.meta.url));
+assert.equal(createHash('sha1').update(`blob ${LEGACY.length}\0`).update(LEGACY).digest('hex'), '5ed35ad1f283ba0f4c880d095180225043ad5d81', 'genuine update.sh from pre-repair main 984a57b9');
+const CONTRACT_FILES = ['update.sh', 'scripts/update-git.sh', 'scripts/update-runner.sh',
+  'cmd/agent/methods/update.go', 'admin/backend/src/lib/self-update.js',
+  'admin/backend/src/lib/self-update-logic.js', 'admin/backend/src/routes/mcp-tools/self-edit.js'];
+function installContract(dir) {
+  for (const file of CONTRACT_FILES) {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    writeFileSync(join(dir, file), readFileSync(join(ROOT, file)));
+  }
+}
+
+function setup(t, { legacyBase = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pp-self-pin-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const live = join(root, 'live'), candidate = join(root, 'candidate'), state = join(root, 'state.json');
@@ -18,10 +33,13 @@ function setup(t) {
   };
   git(live, 'init', '-q', '-b', 'main');
   writeFileSync(join(live, 'file'), 'base');
+  if (legacyBase) writeFileSync(join(live, 'update.sh'), LEGACY);
+  else installContract(live);
   git(live, 'add', '.'); git(live, 'commit', '-q', '-m', 'base');
   const base = git(live, 'rev-parse', 'HEAD');
   git(root, 'clone', '-q', live, candidate);
   git(candidate, 'checkout', '-q', '-b', 'candidate');
+  if (legacyBase) installContract(candidate);
   writeFileSync(join(candidate, 'file'), 'candidate');
   git(candidate, 'add', '.'); git(candidate, 'commit', '-q', '-m', 'candidate');
   const head = git(candidate, 'rev-parse', 'HEAD');
@@ -47,7 +65,7 @@ function setup(t) {
   };
   const handlers = createSelfEditHandlers(kit), auth = { created_by: 'fixture' };
   const call = (name, args = {}) => handlers[name](args, auth, {}, {});
-  return { live, candidate, base, head, git, requests, commands, plans, behavior, call };
+  return { live, candidate, state, base, head, git, requests, commands, plans, behavior, call };
 }
 
 test('promotion and rollback request exact builds of their chosen commit', async (t) => {
@@ -86,4 +104,31 @@ test('refused rebuild restores the previous checkout and preserves a rollback ta
   assert.match((await s.call('promote_self')).error, /rebuild request was refused/);
   assert.equal(s.git(s.live, 'rev-parse', 'HEAD'), s.base);
   assert.match(s.git(s.live, 'tag', '--list'), /pp-rollback-/);
+});
+
+test('rollback across the repair boundary refuses a genuine legacy target before reset, tag or request', async (t) => {
+  const s = setup(t, { legacyBase: true });
+  assert.equal(s.git(s.live, 'rev-parse', 'HEAD:update.sh'), '5ed35ad1f283ba0f4c880d095180225043ad5d81');
+  s.git(s.live, 'fetch', '-q', s.candidate, 'candidate');
+  s.git(s.live, 'merge', '--ff-only', s.head); // simulate the reviewed first repair bootstrap
+  writeFileSync(s.state, JSON.stringify({ rollback_points: [{ sha: s.base }] }));
+  const before = readFileSync(s.state, 'utf8');
+  const r = await s.call('rollback_self');
+  assert.match(r.error, /does not declare the repaired exact-build contract/);
+  assert.equal(s.git(s.live, 'rev-parse', 'HEAD'), s.head);
+  assert.equal(s.git(s.live, 'tag', '--list'), '');
+  assert.equal(readFileSync(s.state, 'utf8'), before);
+  assert.equal(s.requests.length, 0, 'no root-runner or runtime request');
+  assert.ok(!s.commands.some(a => a.includes('reset') || a.includes('tag') || a.includes('merge') || a.includes('fetch')));
+});
+
+test('promotion refuses a changed exact-build contract before changing live source', async (t) => {
+  const s = setup(t);
+  writeFileSync(join(s.candidate, 'update.sh'), '#!/bin/bash\n# ProxyPilot pinned-build contract: 1\nexit 0\n');
+  s.git(s.candidate, 'add', '.'); s.git(s.candidate, 'commit', '-q', '-m', 'changed updater');
+  const r = await s.call('promote_self');
+  assert.match(r.error, /Exact-build contract differs at update.sh/);
+  assert.equal(s.git(s.live, 'rev-parse', 'HEAD'), s.base);
+  assert.equal(s.git(s.live, 'tag', '--list'), '');
+  assert.equal(s.requests.length, 0);
 });

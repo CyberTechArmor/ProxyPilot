@@ -166,6 +166,18 @@ sys.exit(r.returncode)
         self.assertEqual(self.events().count('build'), 1)
         self.assertFalse(any(e.startswith(('fetch ', 'merge ')) for e in self.events()))
 
+    def test_current_message_names_fetched_target_even_if_cached_main_is_stale(self):
+        stale = self.target()
+        self.git('push', '-q', '--force', 'origin', self.base + ':main')
+        self.git('update-ref', 'refs/remotes/origin/main', stale)
+        r = self.run_update()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        reported = r.stdout.split('Local and fetched main are both at: ', 1)[1].splitlines()[0]
+        self.assertIn(self.base[:7], reported)
+        self.assertNotIn(stale[:7], reported)
+        self.assertNotIn('build', self.events())
+        self.assertEqual(json.loads((self.root / 'result.json').read_text())['expected_sha'], self.base)
+
     def test_wrong_pinned_sha_dirty_pinned_build_and_conflicting_flags_refuse(self):
         target = self.target()
         for flags in [('--build-current=' + target,), ('--build-current=' + self.base, '--rebuild'),

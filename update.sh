@@ -1048,7 +1048,7 @@ if [ "$LOCAL" = "$REMOTE" ]; then
         log "${GREEN}Code is already up to date!${NC}"
         # Prove it: name the commit both sides sit on, so "up to date" is
         # verifiable against GitHub instead of taken on faith.
-        log "Local and origin/main are both at: $($GIT_CMD log -1 --format='%h (%ad) %s' --date=short origin/main 2>/dev/null || echo "$REMOTE")"
+        log "Local and fetched main are both at: $($GIT_CMD log -1 --format='%h (%ad) %s' --date=short "$REMOTE" 2>/dev/null || echo "$REMOTE")"
         log ""
         if [ "$ASSUME_YES" = true ]; then
             # Only an explicit host request may change Incus packages.

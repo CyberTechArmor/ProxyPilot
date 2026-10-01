@@ -2434,13 +2434,16 @@ test('a 15-guest incus list is captured whole, not cut into unparseable JSON', a
     `the regression needs a payload over the default budget, got ${payload.length}`);
   const dir = mkdtempSync(join(tmpdir(), 'pp-incus-list-'));
   const file = join(dir, 'list.json');
+  // Exercise real pipes and the capture collector locally. The fixture is
+  // local to the test and needs no host namespace access or Incus daemon.
+  const readArgs = ['-e', "process.stdout.write(require('node:fs').readFileSync(process.argv[1]))", file];
   try {
     writeFileSync(file, payload);
 
     // The bug, reproduced: the DEFAULT budget cuts the JSON mid-object, and
     // the old message blamed incus for our own truncation.
-    const capped = await runHostCapture('cat', [file]);
-    assert.equal(capped.status, 0);
+    const capped = await runHostCapture(process.execPath, readArgs, { spawnImpl: spawn });
+    assert.equal(capped.status, 0, capped.stderr || capped.error);
     assert.equal(capped.stdoutTruncated, true);
     const cut = parseLxcListJson(capped.stdout, capped);
     assert.match(cut.error, /truncated/);
@@ -2449,7 +2452,9 @@ test('a 15-guest incus list is captured whole, not cut into unparseable JSON', a
     assert.match(lxcListFailureDetail(capped, cut.error), new RegExp(`${CAPTURE_CAP} bytes captured`));
 
     // The fix: the listing's own budget reads the whole stream.
-    const full = await runHostCapture('cat', [file], { maxCapture: LXC_LIST_CAPTURE_CAP });
+    const full = await runHostCapture(process.execPath, readArgs,
+      { maxCapture: LXC_LIST_CAPTURE_CAP, spawnImpl: spawn });
+    assert.equal(full.status, 0, full.stderr || full.error);
     assert.equal(full.stdoutTruncated, false);
     assert.equal(full.stdoutComplete, true);
     assert.equal(full.stdoutBytes, Buffer.byteLength(payload));

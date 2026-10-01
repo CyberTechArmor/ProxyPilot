@@ -1,0 +1,13 @@
+{
+  "version": "broker.v1",
+  "adapter": "synthetic-ledger-v1",
+  "operations": ["item.read", "item.set_state"],
+  "rights": ["view", "use", "assign", "manage"],
+  "manage_actions": ["rename", "test", "rotate", "revoke", "permissions"],
+  "readiness_states": ["ready", "unfinished", "unverified", "unavailable", "failed", "revoked", "stale"],
+  "limits": {"session_seconds": 300, "approval_seconds": 120, "request_bytes": 16384, "response_bytes": 32768, "task_actions": 20},
+  "dashboard_prefix": "/api/connections",
+  "agent_prefix": "/api/operational-projects/:projectId/agent-configurations",
+  "production_intake_enabled": false,
+  "production_execution_enabled": false
+}

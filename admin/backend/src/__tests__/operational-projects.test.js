@@ -230,10 +230,10 @@ test('composition preserves authoritative auth/CSRF and new modules have no runt
   assert.equal(csrf.includes('operational-projects'),false);
   for(const name of ['operational-projects-store.js','operational-projects-logic.js','operational-projects-schema.js','operational-projects-workflow.js',
     'operational-evidence-guide.js','operational-evidence-guide-schema.js','operational-evidence-logic.js',
-    'operational-agents-store.js','operational-agents-schema.js','operational-pilot-review.js']) {
+    'operational-configurations.js','operational-agents-store.js','operational-agents-schema.js','operational-pilot-review.js']) {
     const content=readFileSync(new URL('../lib/'+name,import.meta.url),'utf8');
     const imports=[...content.matchAll(/(?:from\s+|import\s*\()(['"])([^'"]+)\1/g)].map(m=>m[2]);
-    assert.ok(imports.every(i=>['node:crypto','zod','./operational-projects-logic.js','./operational-projects-workflow.js',
+    assert.ok(imports.every(i=>['node:crypto','zod','./operational-configurations.js','./operational-projects-logic.js','./operational-projects-workflow.js',
       './operational-evidence-guide.js','./operational-evidence-logic.js','./operational-agents-store.js','./operational-pilot-review.js'].includes(i)),imports.join(','));
   }
 });

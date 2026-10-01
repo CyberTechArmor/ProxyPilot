@@ -299,3 +299,26 @@ widths after the bounded accessibility fixes; Profile and setup Lighthouse each 
 Evidence is in the external `operations-completion-evidence` directory. Operations
 uses a real isolated API/native SQLite fixture; Profile/setup use synthetic APIs.
 These checks do not establish deployed auth, remote SSO or host isolation.
+
+# Broker setup and three color themes — 2026-10-01
+
+Project/agent Work, Connections, Controls and Review, reusable catalogue,
+broker-intake links, rotation and readiness were exercised in synthetic browser
+journeys. Midnight, Latte and Office share typography, icons, spacing and layout.
+Each palette passed overflow checks at 360/375/390/768/1280/1920px with the global
+horizontal guard disabled. Modal keyboard/focus, persistent theme selection and
+legacy preference migration passed. Mobile Lighthouse Project Agents and all
+three themed Add connection dialogs scored 100. Root visually inspected the
+three 375px dialogs; original-reference pixels were unavailable in cloud.
+
+Evidence: `/tmp/broker-ui-theme-artifacts/broker-ui-report.json` and adjacent
+screenshots, plus the broker implementation evidence document. UI fixture checks
+are separate from the real OpenBao browser journey and do not prove live identity,
+production deployment or A8 acceptance. The existing synthetic-agent section
+stays open to preserve its human controls.
+
+Final scoped role checks pass focus ≥3:1, functional input outlines ≥3:1, and
+status/error text ≥4.5:1 across all three palettes. New broker/setup controls
+reuse existing high-contrast Midnight colors without modifying its original
+tokens or unrelated legacy controls. Final evidence is under
+`/tmp/broker-ui-role-contrast-artifacts`.

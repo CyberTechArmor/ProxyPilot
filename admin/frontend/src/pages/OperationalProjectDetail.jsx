@@ -5,6 +5,8 @@ import { operationsApi as api } from '@/lib/api';
 import { Action, Panel, Field, Choice, GuideText, roleNames } from '@/components/operational-projects/shared';
 
 import { Demonstrations, EvidenceSet, evidenceDisclaimer } from '@/components/operational-projects/Evidence';
+import { BrokerAgents } from '@/components/operational-projects/BrokerAgents';
+import { ConnectionCatalogue } from '@/components/operational-projects/Connections';
 import { AgentConfiguration } from '@/components/operational-projects/Agents';
 import { AccessPolicy } from '@/components/operational-projects/AccessPolicy';
 import { AgentRunsPanel } from '@/components/operational-projects/AgentRuns';
@@ -26,6 +28,9 @@ function Operation({id}) {
   const [capability,setCapability]=useState(false),[evidenceTick,setEvidenceTick]=useState(0),[selectionDirty,setSelectionDirty]=useState(false);
   const [agentCapability,setAgentCapability]=useState(false),[runsCapability,setRunsCapability]=useState(false);
   const [params,setParams]=useSearchParams(),openRun=params.get('run');
+  const [projectList,setProjectList]=useState([]),[brokerSetupActive,setBrokerSetupActive]=useState(false);
+  useEffect(()=>{const c=new AbortController();api.get('',c.signal).then(r=>{if(!c.signal.aborted)setProjectList(r.projects);}).catch(()=>setProjectList([]));return()=>c.abort();},[user?.id]);
+  useEffect(()=>{const target=params.get('section');if(['Overview','Guide','Versions','Runs','Access','Agents','Agent runs'].includes(target))setSection(target);},[params]);
   const requests=useRef(null),generation=useRef(0);
   const retry=useRef(null),alive=useRef(true),errorRef=useRef(null);
   const clearPrivate=()=>{setData(null);setDraft(null);setMeta(null);setRunForm(blankRun);setRunVersion(null);setCorrecting(null);setRelatedRun(null);setSelectedVersion(null);setCandidate(null);setReason('');setIdentifier('');retry.current=null;};
@@ -87,12 +92,13 @@ function Operation({id}) {
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {runsPanel}
   </div>;
-  return <div className="max-w-5xl mx-auto space-y-6 p-4 sm:p-6 min-w-0">
-    <header className="space-y-2"><Link className="underline inline-flex min-h-11 items-center" to="/operational-projects">Back to Operations</Link><h1 className="text-2xl font-bold break-words [overflow-wrap:anywhere]">{p.name}</h1><p className="text-sm text-muted-foreground">Your role: {p.own_role} · {p.archived_at?'Archived':'Active'} · {p.current_version?`Current guide v${p.current_version.version_number}`:'No current approved guide'}</p></header>
+  return <div className="w-full max-w-screen-2xl mx-auto space-y-5"><header className="flex flex-col sm:flex-row sm:items-center justify-between gap-3"><div><h1 className="text-2xl font-semibold">Projects &amp; SOPs</h1><p className="text-sm text-muted-foreground mt-1">Organize projects, approved guides and the agents that use them.</p></div><Link to="/operational-projects" className="inline-flex min-h-11 items-center justify-center self-start rounded-md bg-primary text-primary-foreground px-4 text-sm font-medium">New project</Link></header><div className="w-full grid grid-cols-1 xl:grid-cols-[minmax(0,0.35fr)_minmax(0,0.65fr)] gap-3 min-w-0" data-project-workspace>
+    <ProjectBrowser projects={projectList} selectedId={id}/>
+    <div className="space-y-4 min-w-0 rounded-lg border bg-card p-4 sm:p-5" data-selected-project>
+    <header className="space-y-2"><div className="flex flex-wrap items-center justify-between gap-2"><Link className="underline inline-flex min-h-11 items-center text-sm" to="/operational-projects">Back to Operations</Link><Action className="text-xs" variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh server state</Action></div><h2 className="text-2xl font-semibold break-words [overflow-wrap:anywhere]">{p.name}</h2><p className="text-sm text-muted-foreground">Owner: {p.owner_name} · {p.archived_at?'Archived':'Active'} · {p.current_version?`Approved guide v${p.current_version.version_number}`:'No current approved guide'}</p></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
-    <p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>
-    <nav aria-label="Operation sections" className={`grid grid-cols-2 sm:grid-cols-3 ${runsCapability?'lg:grid-cols-7':'lg:grid-cols-6'} gap-2`}>{['Overview','Guide','Versions','Runs','Access',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[])].map(tab=><Action key={tab} aria-pressed={section===tab} variant={section===tab?'default':'outline'} onClick={()=>{setSection(tab);setError('');if(openRun)setParams({section:tab},{replace:true});}}>{tab}</Action>)}</nav>
-    <Action variant="outline" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh server state</Action>
+    {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}
+    <nav aria-label="Operation sections" className="flex flex-wrap gap-1 border-b pb-1">{['Overview','Guide','Versions','Runs','Access',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[])].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={`shrink-0 rounded-none px-3 text-sm border-b-2 ${section===tab?'border-primary font-semibold':'border-transparent'}`} onClick={()=>{setSection(tab);setError('');if(openRun)setParams({section:tab},{replace:true});}}>{tab}</Action>)}</nav>
     {section==='Overview'&&<>
       <Panel title="Overview"><p className="whitespace-pre-wrap break-words">{p.description||'No description yet.'}</p><p className="text-sm break-words">Owner: {p.owner_name}</p>{agentCapability&&<p className="text-sm break-words">Project site: {p.site_origin||'Not set'} · Visibility: {p.visibility}</p>}{p.archived_at&&<p>Archived: {p.archive_reason}</p>}
         {editable&&active&&meta&&<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('',{name:meta.name,description:meta.description},meta.revision,'PATCH'),'Details saved.','meta');}}>
@@ -160,9 +166,10 @@ function Operation({id}) {
       </>:<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await write(`/members/${user.id}`,{},p.revision,'DELETE');navigate('/operational-projects');},'You left the operation.')}>Leave operation</Action>}
       {p.ownership_offer&&active&&<div className="space-y-3 border rounded-md p-3"><p>Ownership offer expires {p.ownership_offer.expires_at}.</p><div className="flex flex-wrap gap-2">{(owner?['cancel']:['accept','decline']).map(decision=><Action key={decision} disabled={busy} variant={decision==='accept'?'default':'outline'} onClick={()=>perform(()=>write(`/ownership-offers/${p.ownership_offer.id}/decision`,{decision},p.revision),`Ownership offer ${decision} completed.`)}>{decision==='accept'?'Accept ownership':decision==='decline'?'Decline ownership':'Cancel ownership offer'}</Action>)}</div></div>}
     </Panel>}
-    {section==='Agents'&&agentCapability&&<AgentConfiguration base={base} project={p} runsEnabled={runsCapability} onChanged={()=>refresh(false)}/>}
+    {section==='Access'&&<Panel title="Access · Connections"><ConnectionCatalogue projectId={id}/></Panel>}
+    {section==='Agents'&&agentCapability&&<><BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Existing synthetic sign-in agents</summary><p className="text-sm text-muted-foreground mb-4">Separate browser workflow. Its existing settings and live-run controls remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} onChanged={()=>refresh(false)}/></details></>}
     {section==='Agent runs'&&runsCapability&&runsPanel}
-  </div>;
+  </div></div></div>;
 }
 
 function Member({member,busy,active,save,remove}) {
@@ -176,4 +183,11 @@ function VersionEvidence({base,versionId,enabled,refreshKey}) {
   useEffect(()=>{const c=new AbortController();setEvidence(null);api.get(`${base}/versions/${versionId}`,c.signal).then(r=>{if(!c.signal.aborted)setEvidence(r.version.evidence);}).catch(()=>{if(!c.signal.aborted)setEvidence({unavailable:true});});return()=>c.abort();},[base,versionId,enabled,refreshKey]);
   if(evidence?.unavailable)return <p role="status">Pinned evidence unavailable; reauthorize and refresh.</p>;
   return <EvidenceSet {...{base,evidence,enabled,refreshKey}}/>;
+}
+
+function ProjectBrowser({projects,selectedId}) {
+  const [search,setSearch]=useState('');
+  const rows=projects.filter(project=>project.name.toLowerCase().includes(search.toLowerCase()));
+  const list=<><Field label="Search projects" type="search" value={search} onChange={e=>setSearch(e.target.value)}/><nav aria-label="Projects" className="space-y-1">{rows.map(item=><Link key={item.id} aria-current={item.id===selectedId?'page':undefined} className={`block rounded-md border p-3 min-h-11 space-y-2 ${item.id===selectedId?'bg-accent border-primary text-accent-foreground':'border-transparent hover:bg-muted'}`} to={`/operational-projects/${item.id}?section=Agents`}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium break-words min-w-0">{item.name}</span><span className="text-xs rounded-full border px-2 py-1">{item.archived_at?'Archived':item.current_version?'Guide approved':'Draft guide'}</span></div><p className="text-xs text-muted-foreground">Your access: {item.own_role} · {item.current_version?`Guide v${item.current_version.version_number}`:'Guide review pending'}</p>{item.description&&<p className="text-sm text-muted-foreground line-clamp-2 break-words">{item.description}</p>}</Link>)}</nav>{!rows.length&&<p className="text-sm text-muted-foreground">No matching projects.</p>}<p className="text-xs text-muted-foreground border-t pt-3">{rows.length} permitted project{rows.length===1?'':'s'}</p></>;
+  return <aside className="rounded-lg border bg-card p-4 space-y-3 self-start xl:sticky xl:top-4 min-w-0" data-project-browser><div className="flex items-center justify-between gap-2"><h2 className="text-lg font-semibold">Projects</h2><Link className="inline-flex min-h-11 items-center text-sm underline" to="/operational-projects">New project</Link></div><div className="hidden xl:block space-y-3">{list}</div><details className="xl:hidden"><summary className="min-h-11 cursor-pointer text-sm flex items-center">Browse or switch project</summary><div className="space-y-3 pt-2">{list}</div></details></aside>;
 }

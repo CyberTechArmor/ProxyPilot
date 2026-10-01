@@ -3,11 +3,8 @@
 @tailwind utilities;
 
 @layer base {
-  /* Light theme (default token set). ProxyPilot historically shipped
-     dark-only with these tokens frozen to dark values; the palette is now
-     split the idiomatic shadcn way — light here in :root, dark under
-     `.dark` below — so the app can toggle. The page is a faint cool-gray
-     (not pure white) so white cards read as raised against it. */
+  /* Office: white/cool surfaces with blue actions. Midnight remains the
+     pre-paint default. Themes override color channels only. */
   :root {
     --background: 210 40% 98%;
     --foreground: 222.2 84% 4.9%;
@@ -15,7 +12,7 @@
     --card-foreground: 222.2 84% 4.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --primary: 142.1 76.2% 36.3%;
+    --primary: 221 83% 45%;
     --primary-foreground: 0 0% 100%;
     --secondary: 210 40% 94%;
     --secondary-foreground: 222.2 47.4% 11.2%;
@@ -26,16 +23,40 @@
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
     --border: 214.3 31.8% 88%;
-    --input: 214.3 31.8% 88%;
+    --input: 215 20% 53%;
     --sidebar: var(--card);
     --navigation-backdrop: 0 0% 0% / 0.6;
-    --ring: 142.1 76.2% 36.3%;
+    --ring: 221 83% 45%;
     --radius: 0.5rem;
+  }
+
+  /* Latte: ivory, charcoal and muted sand-gold. No branding overrides. */
+  :root[data-theme="latte"] {
+    --background: 40 35% 95%;
+    --foreground: 35 10% 18%;
+    --card: 42 40% 98%;
+    --card-foreground: 35 10% 18%;
+    --popover: 42 40% 98%;
+    --popover-foreground: 35 10% 18%;
+    --primary: 37 31% 34%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 39 28% 88%;
+    --secondary-foreground: 35 10% 18%;
+    --muted: 40 24% 91%;
+    --muted-foreground: 35 10% 35%;
+    --accent: 39 28% 88%;
+    --accent-foreground: 35 10% 18%;
+    --destructive: 0 62% 40%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 36 22% 78%;
+    --input: 36 20% 50%;
+    --sidebar: 41 30% 92%;
+    --ring: 37 31% 34%;
   }
 
   /* Theme editing guide: see THEME.md. Values are HSL channels.
      Dark theme — neutral charcoal surfaces with raised dark-grey cards.
-     Keep the stock green accents and the light palette independent. */
+     Midnight retains its existing stock green accents and exact palette. */
   .dark {
     --background: 0 0% 10%;
     --foreground: 210 40% 98%;
@@ -151,4 +172,24 @@
    this is a no-op. */
 .pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Broker-specific functional roles borrow existing palette colors. This keeps
+   Midnight's historical global palette intact while making new broker controls
+   and errors readable. Portaled broker dialogs carry the same scope class. */
+.broker-colors {
+  --broker-control-outline: var(--input);
+  --broker-error-text: var(--destructive);
+}
+.dark .broker-colors {
+  --broker-control-outline: var(--muted-foreground);
+  --broker-error-text: var(--foreground);
+}
+.broker-colors input:not([type="checkbox"]):not([type="radio"]),
+.broker-colors select,
+.broker-colors textarea {
+  border-color: hsl(var(--broker-control-outline));
+}
+.broker-colors [role="alert"] {
+  color: hsl(var(--broker-error-text));
 }

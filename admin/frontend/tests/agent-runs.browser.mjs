@@ -685,7 +685,7 @@ try {
     await admin.getByRole('dialog').filter({ hasText: 'Confirm with password' }).waitFor(WAIT);
     await sudoIfAsked(admin);
     await admin.getByText('Operations turned on.').waitFor(WAIT);
-    await admin.getByRole('heading', { name: 'New operation' }).waitFor(WAIT);
+    await admin.getByRole('heading', { name: 'New project' }).waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent metadata' }).click();
     await admin.getByText('Agent metadata turned on.').waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent runs' }).click();

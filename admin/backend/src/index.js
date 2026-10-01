@@ -1,3 +1,8 @@
+import { configuredAuthoritySource } from './lib/broker-authority-source-client.js';
+import { createBrokerTaskProposals } from './lib/broker-task-proposals.js';
+import { createBrokerTaskDispatch } from './lib/broker-task-dispatch.js';
+import { configuredBrokerBridge, configuredBrokerWorker, configurationConnectionReader } from './lib/credential-broker-remote.js';
+import { createConnectionsRouter } from './routes/connections.js';
 import { ssoRouter } from './routes/sso.js';
 import { recoveryBoundary } from './lib/sso/sessions.js';
 import express from 'express';
@@ -623,6 +628,11 @@ const agentRuns = createAgentRunRuntime(agentRunsConfig, { db: getDb(),
   log: entry => console.log('[agent-runs]', JSON.stringify(entry)),
   audit: (actor, action, details) => logAudit(actor?.id ?? null, action, 'operational_agent_run', details?.run_id ?? null, details, null) });
 const operationsToggle = name => () => effectiveToggles(getDb())[name];
+const connectionBridge = configuredBrokerBridge();
+const brokerTaskWorker = await configuredBrokerWorker();
+const brokerTaskDispatch = createBrokerTaskDispatch({db:getDb(),store:operationsStore,runner:brokerTaskWorker,authoritySource:configuredAuthoritySource()});
+const brokerTaskProposals = createBrokerTaskProposals({db:getDb(),store:operationsStore,dispatch:brokerTaskDispatch});
+app.use('/api/connections', authenticateToken, blockPendingRole, createConnectionsRouter({ Router: express.Router, store: operationsStore, bridge: connectionBridge, requireSudo }));
 app.use('/api/operations-settings', authenticateToken, blockPendingRole, createOperationsSettingsRouter({
   Router: express.Router, db: getDb, requireAdmin, requireSudo }));
 app.use('/api/operational-projects', authenticateToken, blockPendingRole, createOperationsRouter({
@@ -631,6 +641,8 @@ app.use('/api/operational-projects', authenticateToken, blockPendingRole, create
   agentsEnabled: operationsToggle('agents_metadata'),
   agentRunsEnabled: operationsToggle('agent_runs'),
   store: operationsStore,
+  brokerTasks: brokerTaskDispatch, brokerTaskProposals,
+  configurationConnections: configurationConnectionReader(connectionBridge),
   agentRuns,
   requireSudo,
   controlVerified: req => hasControlGrant(getDb(), { sessionId: req.user?.jti, userId: req.user?.id }),

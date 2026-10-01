@@ -1,3 +1,4 @@
+import { createConfigurationsStore } from './operational-configurations.js';
 import { randomUUID } from 'node:crypto';
 import { createOperationsWorkflow } from './operational-projects-workflow.js';
 import { createOperationalAgentsStore } from './operational-agents-store.js';
@@ -66,6 +67,7 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
     ...(evidence ? { evidence } : {}),
     ...workflow.methods,
     ...agents,
+    ...createConfigurationsStore({one,all,run,tx,access,event,now,uuid,workflow}),
     assertActor: eligible,
     create(actor, input) {
       const v = parse(schemas.create, input);
@@ -76,6 +78,12 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
           VALUES (?,?,?,?,?,?,?)`, id, v.name, v.description, actor.id, actor.id, timestamp, timestamp);
         run('INSERT INTO ops_guide_drafts(project_id,updated_by,updated_at) VALUES (?,?,?)', id, actor.id, timestamp);
         run('INSERT INTO ops_guide_state(project_id) VALUES (?)',id);
+        for (const member of v.members) {
+          targetUser(member.user_id);
+          if (member.user_id === actor.id) fail(400, 'Owner is already a member');
+          run('INSERT INTO ops_project_grants(project_id,user_id,role,granted_by,granted_at) VALUES(?,?,?,?,?)', id, member.user_id, member.role, actor.id, timestamp);
+          event(actor,id,'member_granted',member.user_id,{role:member.role});
+        }
         event(actor, id, 'created');
         return summary(one('SELECT * FROM ops_projects WHERE id = ?', id), 'owner', actor.id);
       });

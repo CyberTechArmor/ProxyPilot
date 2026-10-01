@@ -8,6 +8,7 @@ import { OperationsSettings } from '@/components/operational-projects/Operations
 export default function OperationalProjects() {
   const [enabled,setEnabled]=useState(null),[rows,setRows]=useState([]),[cursor,setCursor]=useState(null);
   const [state,setState]=useState('active'),[name,setName]=useState(''),[description,setDescription]=useState('');
+  const [members,setMembers]=useState([]),[memberId,setMemberId]=useState(''),[memberRole,setMemberRole]=useState('viewer');
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const [agentCapability,setAgentCapability]=useState(false),[directory,setDirectory]=useState([]),[directoryCursor,setDirectoryCursor]=useState(null);
   const [runsCapability,setRunsCapability]=useState(false),[canManage,setCanManage]=useState(false);
@@ -29,7 +30,7 @@ export default function OperationalProjects() {
   useEffect(()=>{if(agentCapability)loadDirectory();},[agentCapability]);
   async function create(e) {
     e.preventDefault();setBusy(true);setError('');
-    try {const result=await api.write('',{name,description});navigate(`/operational-projects/${result.project.id}`);}
+    try {const result=await api.write('',{name,description,members});navigate(`/operational-projects/${result.project.id}?section=Agents`);}
     catch(e){setError(e.message);setBusy(false);}
   }
   return <div className="max-w-5xl mx-auto space-y-6 p-4 sm:p-6">
@@ -37,11 +38,11 @@ export default function OperationalProjects() {
     {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
     {enabled===null?<p role="status">Loading Operations…</p>:!enabled?<p>Operations is not turned on for this installation.{canManage?' Turn it on in Operations settings below.':' An administrator turns it on in Operations settings.'}</p>:<>
       {runsCapability&&<AgentInbox/>}
-      <Panel title="New operation"><form onSubmit={create} className="space-y-4">
+      <Panel title="New project"><form onSubmit={create} className="broker-colors space-y-4">
         <Field label="Name" required maxLength={200} value={name} onChange={e=>setName(e.target.value)}/>
-        <Field label="Description (optional)" textarea rows={3} maxLength={20000} value={description} onChange={e=>setDescription(e.target.value)}/>
-        <p className="text-sm text-muted-foreground">Private to you until you add members. Creating an operation stores records only.</p>
-        <Action type="submit" disabled={busy}>Create operation</Action>
+        <Field label="Purpose (optional)" textarea rows={3} maxLength={20000} value={description} onChange={e=>setDescription(e.target.value)}/>
+        <fieldset className="border rounded-lg p-4 space-y-3"><legend className="text-sm font-medium">People / access</legend><p className="text-sm">Private to you by default. Optional existing account IDs receive only the project role selected; private connection access is separate.</p><Field label="Existing account ID (optional)" value={memberId} onChange={e=>setMemberId(e.target.value)}/><Choice label="Project role" value={memberRole} onChange={e=>setMemberRole(e.target.value)}>{['viewer','operator','editor','reviewer'].map(role=><option key={role}>{role}</option>)}</Choice><p id="project-member-hint" className="text-sm text-muted-foreground">Enter an existing account ID to add a person.</p><Action type="button" variant="outline" aria-describedby="project-member-hint" disabled={!memberId.trim()} onClick={()=>{setMembers(old=>[...old.filter(m=>m.user_id!==memberId.trim()),{user_id:memberId.trim(),role:memberRole}]);setMemberId('');}}>Add person</Action>{members.map(m=><div key={m.user_id} className="flex flex-col sm:flex-row gap-3 items-start min-w-0"><p className="break-all text-sm">{m.user_id} · {m.role}</p><Action type="button" variant="outline" onClick={()=>setMembers(old=>old.filter(x=>x.user_id!==m.user_id))}>Remove person</Action></div>)}</fieldset><p className="text-sm text-muted-foreground">Create the project now. Agents, guides and readiness can follow.</p>
+        <Action type="submit" disabled={busy}>Create project</Action>
       </form></Panel>
       <Panel title="Your operations"><div className="flex flex-wrap gap-3 items-end"><Choice label="Show" value={state} onChange={e=>setState(e.target.value)}><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></Choice><Action variant="outline" disabled={busy} onClick={()=>load()}>Refresh</Action></div>
         {busy&&<p role="status">Loading…</p>}{!busy&&!rows.length&&<p>No operations to show.</p>}

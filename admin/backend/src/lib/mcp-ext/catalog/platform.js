@@ -41,6 +41,20 @@ export const PLATFORM_TOOLS = Object.freeze([
     { route_id: { type: 'string', description: 'Existing service_http_routes id from get_route_protection.' }, action: { type: 'string', enum: ['protect', 'remove'] }, allowed_identities: { type: 'array', items: { type: 'string' }, description: 'Verified Keycloak subject IDs; empty when removing protection.' }, expected_revision: { type: 'number', description: 'Pomerium revision from get_route_protection.' }, dry_run: P.dry_run, confirmation_token: P.confirmation_token },
     ['route_id', 'action', 'allowed_identities', 'expected_revision']),
 
+  tool('get_route_ingress_fence',
+    'Read the exact managed guest identity and the host-owned nftables ingress fence recorded for one Pomerium route. This is installation evidence, not independent bypass proof. Read-only.',
+    { route_id: { type: 'string', description: 'Existing managed LXC route ID from get_route_protection.' } }, ['route_id']),
+
+  tool('set_route_ingress_fence',
+    'Review, install or remove a host-owned IPv4/IPv6 ingress fence for one managed LXC application route. Install rechecks the exact Incus UUID, MAC and addresses before persisting the rule in the boot-time firewall state and reconciling nftables. Remove refuses while any Pomerium protection intent remains active. Does not change the guest. First call returns a one-time confirmation_token; dry_run only previews.',
+    { route_id: { type: 'string' }, expected_revision: { type: 'number' }, action: { type: 'string', enum: ['install','remove'], description: 'Default install. Remove only after Pomerium policy removal is verified.' }, dry_run: P.dry_run, confirmation_token: P.confirmation_token },
+    ['route_id', 'expected_revision']),
+
+  tool('prove_route_ingress_fence',
+    'Independently prove the installed fence: direct IPv4 and IPv6 from a separate same-bridge managed guest and an isolated routed network namespace must fail and increment the owned nftables drop counters; the host must still reach the upstream. Records a short-lived proof bound to the exact guest and route. Creates and removes only temporary host network namespaces and veth links; never changes the guest. First call returns a one-time confirmation_token; dry_run previews.',
+    { route_id: { type: 'string' }, expected_revision: { type: 'number' }, peer_container: { type: 'string', description: 'A running managed guest on the same bridge, different from the protected guest.' }, dry_run: P.dry_run, confirmation_token: P.confirmation_token },
+    ['route_id', 'expected_revision', 'peer_container']),
+
   tool('save_platform_setup',
     'Save the Full Platform plan (stage A) — domains, realm and additional administrator addresses. All five services are always installed; the VPN networks are included automatically. Inert, exactly like the dashboard\'s "Save reviewed plan": nothing is installed and no job is queued. Only the fields you pass change; the rest keep their saved (or suggested) values. Refused when if_revision is not the saved revision (another session changed it), while an operation is running, and for input the dashboard refuses — with the dashboard\'s own messages (hostname/realm/ownership migrations, additional-address changes after apply — use set_platform_restricted_networks, a hostname that already serves a route, unrestricted networks). dry_run returns the changes and DNS work without saving. Next: apply_platform_setup with the returned revision and review_digest.',
     {

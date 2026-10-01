@@ -358,9 +358,9 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
  * can say "updated to vX at T". The backend that requested the run died in
  * the rebuild, so this is the only place that can write that row.
  */
-export async function noteCompletedUpdateOnBoot({ getSetting, setSetting, logAudit, call = agentCall, now = Date.now } = {}) {
+export async function noteCompletedUpdateOnBoot({ getSetting, setSetting, logAudit, call = agentCall, now = Date.now, readState = readStateFromDisk } = {}) {
   installedCache = null;
-  const progress = await updateStatus({ logTailBytes: 0, call });
+  const progress = await updateStatus({ logTailBytes: 0, call, readState });
   const last = getSetting('last_update_id');
   if (!shouldRecordCompletedUpdate({ progress, lastRecordedId: last, nowMs: now() })) return null;
   const detail = {

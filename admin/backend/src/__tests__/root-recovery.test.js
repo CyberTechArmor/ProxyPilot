@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, writeFileSync, readFileSync, statSync, existsSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from '../../../../cli/node_modules/bcryptjs/index.js';
 
@@ -152,15 +152,21 @@ test('databaseCandidates maps the container path onto the bind mount and tries t
 
 test('resolveInstall finds the live database through .env, prefers it over the legacy file, and never carries a key value', () => {
   const root = tmpTree();
+  // The absolute container fallback may exist on the test runner itself.
+  // Resolve only this real temporary filesystem, never the live /data mount.
+  const fixtureFs = { readFileSync, statSync(p) {
+    if (!p.startsWith(root + sep)) throw new Error('Outside recovery fixture');
+    return statSync(p);
+  } };
   try {
     writeFileSync(join(root, '.env'), 'DOMAIN=pp.example.com\nDATABASE_PATH=/data/db/proxypilot.db\nTOTP_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nJWT_SECRET=sekrit\n');
     writeFileSync(join(root, 'data', 'proxypilot.db'), 'legacy');
-    const miss = resolveInstall({ installDir: root });
+    const miss = resolveInstall({ installDir: root }, fixtureFs);
     // Only the legacy file exists: it is found, last.
     assert.equal(miss.ok, true);
     assert.equal(miss.dbPath, join(root, 'data', 'proxypilot.db'));
     writeFileSync(join(root, 'data', 'db', 'proxypilot.db'), 'live');
-    const hit = resolveInstall({ installDir: root });
+    const hit = resolveInstall({ installDir: root }, fixtureFs);
     assert.equal(hit.ok, true);
     assert.equal(hit.dbPath, join(root, 'data', 'db', 'proxypilot.db'));
     assert.equal(hit.domain, 'pp.example.com');
@@ -168,7 +174,7 @@ test('resolveInstall finds the live database through .env, prefers it over the l
     assert.equal(hit.hasJwtSecret, true);
     assert.equal(JSON.stringify(hit).includes('sekrit'), false);
     assert.equal(JSON.stringify(hit).includes('0123456789abcdef'), false);
-    const none = resolveInstall({ installDir: join(root, 'nowhere') });
+    const none = resolveInstall({ installDir: join(root, 'nowhere') }, fixtureFs);
     assert.equal(none.ok, false);
     assert.equal(none.reason, 'database_not_found');
     assert.match(none.message, /--db <path>/);

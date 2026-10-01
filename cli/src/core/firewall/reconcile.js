@@ -240,6 +240,14 @@ export async function reconcile({ dryRun = false, forceLockoutOk = false, actor 
     };
   }
 
+  const ingressVerify = nft(['list', 'table', 'bridge', 'proxypilot_ingress']);
+  if (ingressVerify.status !== 0) {
+    recordReconcile({ checksum: sum, ruleCount, applied: 0,
+      rejection: `protected upstream bridge table verification failed: ${ingressVerify.stderr.trim()}`, actor });
+    return { ok: false, applied: false, ruleset, checksum: sum, ruleCount,
+      rejection: { reason: 'protected upstream bridge table verification failed', stderr: ingressVerify.stderr } };
+  }
+
   recordReconcile({ checksum: sum, ruleCount, applied: 1, actor });
   audit({
     subsystem: 'firewall',

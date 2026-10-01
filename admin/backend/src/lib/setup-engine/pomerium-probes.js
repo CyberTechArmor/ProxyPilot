@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { POMERIUM_PORT, pomeriumError as fail } from './pomerium-logic.js';
+import { readIngressGuest, verifiedHostIngress } from './pomerium-ingress.js';
 
 export function verifyLoopbackSockets(output,intents) {
   const lines=output.trim().split('\n').filter(Boolean);
@@ -15,14 +16,27 @@ export function verifyLoopbackSockets(output,intents) {
 }
 export async function verifyPrivateApplications(intents,{exec,job,sysRoot='/proc/sys/net/ipv4/conf'}={}) {
   if(!intents.some(i=>i.action!=='remove')) return {state:'not_applicable'};
-  if (intents.some(i=>i.action!=='remove' && i.lxcContainer))
-    throw fail('Managed LXC upstream is not yet protected by a verified persistent host ingress fence; the Pomerium job refuses before changing Caddy.');
+  const host = async (bin,args) => {
+    job.fence(); const r = await exec.host([bin,...args],{timeoutMs:30000}); job.fence();
+    return { status:r.code, stdout:r.stdout || '', stderr:r.stderr || '' };
+  };
+  const lxcEvidence=[];
+  for (const intent of intents.filter(i=>i.action!=='remove' && i.lxcContainer)) {
+    const target=new URL(intent.upstream);
+    const entry=await readIngressGuest({id:intent.routeId,lxc_container_name:intent.lxcContainer,
+      target_ip:target.hostname,target_port:Number(target.port)},host);
+    const verified=await verifiedHostIngress(entry,host);
+    lxcEvidence.push({routeId:intent.routeId,guest:entry.container,proofCheckedAt:verified.proof.checked_at,
+      bridgeTable:verified.bridge_table,inetTable:verified.inet_table});
+  }
+  const loopbackIntents=intents.filter(i=>i.action!=='remove' && !i.lxcContainer);
+  if (!loopbackIntents.length) return {hostIngress:lxcEvidence};
   job.fence();
   const sockets=await exec.host(['ss','-H','-ltnp'],{timeoutMs:10000});
   if(sockets.code!==0) throw fail('Cannot inspect host listeners; direct-upstream bypass prevention is not established.');
-  const evidence=verifyLoopbackSockets(sockets.stdout,intents);
+  const evidence=verifyLoopbackSockets(sockets.stdout,loopbackIntents);
   for(const name of readdirSync(sysRoot)) if(readFileSync(`${sysRoot}/${name}/route_localnet`,'utf8').trim()!=='0') throw fail(`Direct-upstream bypass: ${name}.route_localnet permits external routing to loopback; G4 will not rebuild host networking.`);
-  job.fence(); return {...evidence,loopbackRoutingDisabled:true};
+  job.fence(); return {...evidence,loopbackRoutingDisabled:true,hostIngress:lxcEvidence};
 }
 export function checkGatewayRedirect(response,origin,domain) {
   const status=Number(response.match(/^HTTP\/\S+\s+(\d+)/m)?.[1]);

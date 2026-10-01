@@ -487,7 +487,7 @@ test('no secret, credential, password or key material appears in any platform to
 
 test('human-only actions have no MCP tool; platform tools take no secret input; scoped keys and job validation know the family', () => {
   const names = MCP_EXT_TOOL_GROUPS.platform.map((t) => t.name);
-  assert.deepEqual(names.sort(), ['apply_platform_setup', 'continue_platform_setup', 'control_platform_container', 'get_platform_job', 'get_platform_service', 'get_platform_service_logs', 'get_platform_setup', 'get_route_protection', 'list_platform_jobs', 'manage_platform_service', 'platform_preflight', 'recover_keycloak_bootstrap', 'reset_platform_setup', 'resync_platform_plan', 'save_platform_setup', 'set_platform_restricted_networks', 'set_route_protection', 'verify_platform_service']);
+  assert.deepEqual(names.sort(), ['apply_platform_setup', 'continue_platform_setup', 'control_platform_container', 'get_platform_job', 'get_platform_service', 'get_platform_service_logs', 'get_platform_setup', 'get_route_ingress_fence', 'get_route_protection', 'list_platform_jobs', 'manage_platform_service', 'platform_preflight', 'prove_route_ingress_fence', 'recover_keycloak_bootstrap', 'reset_platform_setup', 'resync_platform_plan', 'save_platform_setup', 'set_platform_restricted_networks', 'set_route_ingress_fence', 'set_route_protection', 'verify_platform_service']);
   // recover_keycloak_bootstrap is the one reviewed exception: it generates its
   // own credential and takes none (the property check below covers that).
   for (const t of MCP_EXT_TOOLS) if (t.name !== 'recover_keycloak_bootstrap') assert.doesNotMatch(t.name, /reveal|bootstrap|activate_sso|unseal|keycloak_admin|retire/, `${t.name} must not exist`);

@@ -276,4 +276,12 @@ test('noteCompletedUpdateOnBoot audits a fresh success once and clears the dismi
   // Agent down and no state file: nothing to record, no throw.
   const enoent = Object.assign(new Error('x'), { code: 'ENOENT' });
   assert.equal(await noteCompletedUpdateOnBoot({ ...deps, call: deadCall, readState: async () => { throw enoent; } }), null);
+  // The same injected file reader must also support the successful fallback.
+  const fallbackId = '22222222-3333-4444-8555-666666666666';
+  const recorded = await noteCompletedUpdateOnBoot({ ...deps, call: deadCall,
+    readState: async () => ({ id:fallbackId, status:'success', finished_at:finished,
+      to_version:'1.5.1', pending:false, id_match:true }) });
+  assert.equal(recorded.id, fallbackId);
+  assert.equal(audits.length, 2);
+  assert.equal(settings.last_update_version, '1.5.1');
 });

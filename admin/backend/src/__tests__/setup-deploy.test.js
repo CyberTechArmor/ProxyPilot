@@ -543,10 +543,14 @@ test('contention: a restore is refused while the runner deploys (no change), and
 
 // ── real processes ──────────────────────────────────────────────────────
 
-test('a guest script carrying the deploy marker is really killed by the reap and none survive (real child process)', { skip: !HAS_PKILL && 'pkill/pgrep not installed' }, async () => {
-  const child = spawn('sh', ['-c', `: ${DEPLOY_MARKER}_realtest; sleep 60`], { stdio: 'ignore' });
+test('a guest script carrying the deploy marker is really killed by the reap and none survive (real child process)', { skip: !HAS_PKILL && 'pkill/pgrep not installed' }, async (t) => {
+  // A trailing builtin keeps ash from exec-optimizing the final sleep and
+  // losing the marker before the reaper gets to inspect the fixture.
+  const child = spawn('sh', ['-c', `: ${DEPLOY_MARKER}_realtest; sleep 60; :`], { stdio: 'ignore', detached: true });
+  t.after(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
   await new Promise((r) => setTimeout(r, 150));
   assert.doesNotThrow(() => process.kill(child.pid, 0), 'the stale writer is alive before the reap');
+  if (process.platform === 'linux') assert.match(readFileSync(`/proc/${child.pid}/cmdline`, 'utf8'), new RegExp(DEPLOY_MARKER), 'the live fixture still carries the marker');
   const localSh = { guest: (_c, script, { timeoutMs = 10_000 } = {}) => new Promise((resolve) => {
     const p = spawn('sh', [], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
@@ -556,6 +560,7 @@ test('a guest script carrying the deploy marker is really killed by the reap and
     p.stdin.end(script);
   }) };
   const r = await localSh.guest('local', reapOrphansScript());
+  assert.equal(r.code, 0, r.stderr);
   assert.equal(parseOrphans(r.stdout), 0, `no survivors: ${r.stdout} ${r.stderr}`);
   await new Promise((r2) => setTimeout(r2, 100));
   let alive = true;

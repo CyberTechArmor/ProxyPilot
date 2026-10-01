@@ -114,6 +114,7 @@ ${lifted}
 ${body}
 `;
     const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+    assert.ifError(r.error);
     return r;
   };
   const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);

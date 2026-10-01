@@ -87,7 +87,7 @@ const AUTH = { id: 7, created_by: 'admin-1', name: 'test key', scope_json: null 
 /* -------------------------------- catalog ------------------------------ */
 
 test('the extended catalog is well-formed, unique, and every family is represented', () => {
-  assert.equal(MCP_EXT_TOOLS.length, 200);
+  assert.equal(MCP_EXT_TOOLS.length, 203);
   assert.equal(new Set(MCP_EXT_TOOL_NAMES).size, MCP_EXT_TOOL_NAMES.length);
   for (const t of MCP_EXT_TOOLS) {
     assert.match(t.name, /^[a-z][a-z0-9_]+$/);
@@ -97,7 +97,7 @@ test('the extended catalog is well-formed, unique, and every family is represent
     for (const r of t.inputSchema.required || []) assert.ok(t.inputSchema.properties[r], `${t.name}: required ${r} is not a property`);
   }
   assert.deepEqual(Object.keys(MCP_EXT_TOOL_GROUPS), ['builds', 'project_config', 'lxc_admin', 'edge', 'static_admin', 'admin', 'self_edit', 'storage', 'migration', 'platform']);
-  assert.equal(MCP_TOOLS.length, 72 + 200);
+  assert.equal(MCP_TOOLS.length, 72 + 203);
   assert.ok(Object.isFrozen(MCP_TOOLS));
   assert.match(MCP_SERVER_INSTRUCTIONS, /confirmation_token/);
   assert.match(MCP_SERVER_INSTRUCTIONS, /scope\.self_edit/);
@@ -221,7 +221,7 @@ test('inspect_a3_vm requires a VM and actual Debian 13 guest proof', async () =>
   const image = 'a'.repeat(64);
   const responses = new Map([
     ['query /1.0', JSON.stringify({ environment: { server_version: '7.5.1' } })],
-    ['config show pp-proof --expanded --format=json', JSON.stringify({ expanded_config: { 'limits.cpu': '2', 'limits.memory': '4GiB' }, expanded_devices: { root: { type: 'disk', path: '/', size: '12GiB', pool: 'default' } } })],
+    ['query /1.0/instances/pp-proof', JSON.stringify({ config: { 'volatile.eth0.host_name': 'tap-proof', 'volatile.eth0.hwaddr': '00:16:3e:11:22:33' }, expanded_config: { 'limits.cpu': '2', 'limits.memory': '4GiB' }, expanded_devices: { eth0: { type: 'nic', network: 'incusbr0' }, root: { type: 'disk', path: '/', size: '12GiB', pool: 'default' } } })],
     ['query /1.0/instances/pp-proof/state', JSON.stringify({ pid: 42 })],
     ['exec pp-proof -- cat /etc/os-release', 'ID=debian\nVERSION_ID="13"\n'],
     ['exec pp-proof -- cat /proc/sys/kernel/random/boot_id', '11111111-2222-3333-4444-555555555555\n'],
@@ -234,18 +234,31 @@ test('inspect_a3_vm requires a VM and actual Debian 13 guest proof', async () =>
   const vm = { type: 'virtual-machine', status: 'Running', config: { 'volatile.base_image': image,
     'volatile.uuid': 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } };
   const { ctx } = makeCtx({ fetchLxcInstance: async () => ({ instance: vm }), lxcContainerDetail: () => ({ status: 'Running' }),
-    runHostCapture: async (_bin, argv) => ({ status: 0, stdout: responses.get(argv.join(' ')) || '', stderr: '' }) });
+    runHostCapture: async (_bin, argv) => {
+      assert.ok(responses.has(argv.join(' ')), `Unexpected Incus proof command: ${argv.join(' ')}`);
+      return { status: 0, stdout: responses.get(argv.join(' ')), stderr: '' };
+    } });
   const { handlers } = createExtendedHandlers(ctx);
   const proof = parse(await handlers.inspect_a3_vm({ container: 'proof' }, AUTH));
   assert.equal(proof.incus_server_version, '7.5.1');
+  assert.deepEqual(proof.network_devices, [{ id: 'eth0', network: 'incusbr0', parent: null,
+    host_name: 'tap-proof', hwaddr: '00:16:3e:11:22:33' }]);
   assert.equal(proof.vm_identity, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
   assert.equal(proof.boot_generation, '11111111-2222-3333-4444-555555555555');
   assert.equal(proof.memory.guest_mem_total_bytes, 4000000 * 1024);
   assert.equal(proof.root_disk.guest_filesystem_bytes, 12884901888);
   assert.equal(proof.swap.disabled, true);
   assert.equal(proof.host_qemu.descendant_rss_bytes, 1100 * 1024);
-  responses.set('-eo pid=,ppid=,rss=,comm=,args=', '43 1 100 helper helper\n');
+  // Incus 7.5 uses the bare -name form. Still require the exact state PID.
+  responses.set('-eo pid=,ppid=,rss=,comm=,args=', '42 1 1000 qemu-system-x86 qemu-system-x86_64 -name pp-proof\n43 42 100 helper helper\n');
+  assert.equal(parse(await handlers.inspect_a3_vm({ container: 'proof' }, AUTH)).host_qemu.pid, 42);
+  responses.set('query /1.0/instances/pp-proof/state', JSON.stringify({ pid: 99 }));
   assert.match((await handlers.inspect_a3_vm({ container: 'proof' }, AUTH)).content[0].text, /QEMU process/);
+  responses.set('query /1.0/instances/pp-proof/state', JSON.stringify({ pid: 42 }));
+  responses.set('-eo pid=,ppid=,rss=,comm=,args=', '43 1 100 helper helper\n');
+  const incomplete = await handlers.inspect_a3_vm({ container: 'proof' }, AUTH);
+  assert.match(incomplete.content[0].text, /QEMU process/);
+  assert.match(incomplete.content[0].text, /diagnostic=.*"qemu_candidates":\[\]/);
   responses.set('-eo pid=,ppid=,rss=,comm=,args=', '42 1 1000 qemu-system-x86 qemu-system-x86_64 -name guest=pp-proof,debug-threads=on\n43 42 100 helper helper\n');
   vm.type = 'container';
   assert.match((await handlers.inspect_a3_vm({ container: 'proof' }, AUTH)).content[0].text, /not a VM/);

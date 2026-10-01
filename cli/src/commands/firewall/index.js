@@ -14,3 +14,4 @@ export {
 export { panicCloseCommand, panicOpenCommand } from './panic.js';
 export { egressAllowCommand, egressDenyCommand, egressListCommand } from './egress.js';
 export { detectBridgeCommand } from './detect-bridge.js';
+export { ingressProtectCommand, ingressShowCommand, ingressBootCheckCommand, ingressRemoveCommand } from './ingress.js';

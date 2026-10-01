@@ -21,7 +21,7 @@ import {
 } from '../lib/passkey-policy.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const src = (rel) => readFileSync(path.join(here, '..', rel), 'utf8');
+const src = (rel) => readFileSync(path.join(here, '..', rel), 'utf8').replace(/\r\n/g, '\n');
 
 // ---- passkey policy (pure) ----
 
@@ -82,9 +82,13 @@ test('ratchet: migration 605 closes every open sudo window once', () => {
 test('ratchet: MCP token lookup consults the owner on every call and audits the refusal', () => {
   const mcp = src('routes/mcp.js');
   const fn = mcp.slice(mcp.indexOf('function findToken('), mcp.indexOf('// ---- upload tickets'));
-  assert.match(fn, /SELECT id, role FROM users WHERE id = \?/);
-  assert.match(fn, /mcpTokenRefusal\(\{ expiresAt: row\.expires_at, ownerId: row\.created_by, owner \}\)/);
-  assert.match(fn, /if \(refusal\) \{ noteOwnerRefusal\(row, refusal\); return null; \}/);
+  assert.match(mcp, /import \{ mcpKeyRefusal, redactMcpSecrets \} from '\.\.\/lib\/mcp-key-authority\.js'/);
+  assert.match(fn, /const refusal\s*=\s*mcpKeyRefusal\(db,\s*row\)/);
+  assert.match(fn, /if\s*\(refusal\)\s*\{\s*noteOwnerRefusal\(row,\s*refusal\);\s*return null;\s*\}/);
+  const authority = src('lib/mcp-key-authority.js');
+  assert.match(authority, /SELECT id,role FROM users WHERE id=\?/);
+  assert.match(authority, /mcpTokenRefusal\(\{expiresAt:current\.expires_at,ownerId:current\.created_by,owner,now\}\)/);
+  assert.match(authority, /if \(invalid\) return invalid;/);
   assert.match(mcp, /'MCP_TOKEN_OWNER_REFUSED'/);
 });
 
@@ -107,8 +111,8 @@ test('ratchet: disabling or deleting a user revokes the MCP keys it minted', () 
   // Expiry column (914) and the per-call rule that reads it.
   assert.match(db, /runMigration\(db, 914, 'mcp_tokens_expiry'/);
   assert.match(db, /ALTER TABLE mcp_tokens ADD COLUMN expires_at TEXT/);
-  const mcp = src('routes/mcp.js');
-  assert.match(mcp, /mcpTokenRefusal\(\{ expiresAt: row\.expires_at, ownerId: row\.created_by, owner \}\)/);
+  const authority = src('lib/mcp-key-authority.js');
+  assert.match(authority, /mcpTokenRefusal\(\{expiresAt:current\.expires_at,ownerId:current\.created_by,owner,now\}\)/);
   // Demotion (admin → user) revokes keys in both the dashboard and the tool.
   assert.match(user, /\} else if \(isDemotion\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*revoked = revokeUserAccess\(db, id, \{ sessions: false \}\);/);
   assert.match(admin, /if \(demotion \|\| role === 'pending'\) \{/);
@@ -247,7 +251,14 @@ test('ratchet (A-17.6): the Incus lifecycle and snapshot verbs of the dashboard 
   assert.doesNotMatch(wholeDelete, /errors\.push\(\{ scope: 'local'/, 'a local failure is never a "partial" failure');
   // What is left on the container's pivot in this file is the import / export transport group (recorded in the ledger), nothing of this group.
   const leftover = [...lxcRoute.matchAll(/execOnHost\(`incus (start|stop|restart|delete|launch) /g)].map((m) => m[1]);
-  assert.deepEqual(leftover.sort(), ['delete', 'delete', 'start', 'start'], `only the import/export transports' post-import start and temp cleanup remain (A-17 transport group): ${leftover.join(', ')}`);
+  assert.deepEqual(leftover.sort(), ['delete', 'delete', 'start', 'stop', 'stop'], `only import verification and import/export cleanup remain (A-17 transport group): ${leftover.join(', ')}`);
+  // Debian 13 import verification consolidated the two starts in one helper.
+  // Its stops reject a wrong release or restore the requested stopped state.
+  const importProof = lxcRoute.slice(lxcRoute.indexOf('async function proveImportedDebian13('), lxcRoute.indexOf('// In-memory tracking'));
+  assert.deepEqual([...importProof.matchAll(/execOnHost\(`incus (start|stop|restart|delete|launch) /g)].map((m) => m[1]), ['start', 'stop', 'stop']);
+  assert.match(importProof, /if \(!parseDebian13Release\(release\.stdout\)\) \{/);
+  assert.match(importProof, /if \(!leaveRunning\) await execOnHost\(`incus stop/);
+  assert.equal((lxcRoute.match(/await proveImportedDebian13\(/g) || []).length, 2, 'both import transports use the same release proof');
   // MCP: the three original tools and the two admin tools.
   const mcp = src('routes/mcp.js');
   assert.match(mcp, /runLifecycle\(\{ kind: LIFECYCLE_ACTIONS\[action\], containerName: incusName, force: false/, 'control_lxc_container is a job, clean shutdown only');
@@ -354,7 +365,7 @@ test('ratchet (A-17.7): the post-launch and post-start fix-ups are setup-engine 
   assert.match(lxcRoute, /export \{ findOrCreateLxcService \} from '\.\.\/lib\/guest-routes\.js';/);
   const mcp = src('routes/mcp.js');
   assert.doesNotMatch(mcp, /ensureNetworkNat/, 'MCP\'s create does not run NAT itself');
-  assert.match(mcp, /runLifecycle\(\{ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, rootSize: diskGb !== null \? `\$\{diskGb\}GiB` : null, setup: \{ phases: \['network_nat', 'await_address'\], addressTimeoutMs: 15_000 \}/, 'the launch carries the NAT + address plan');
+  assert.match(mcp, /runLifecycle\(\{ kind: 'instance_create', containerName: incusName, image, profile: 'default', config, vm: isVm, rootSize: diskGb !== null \? `\$\{diskGb\}GiB` : null, setup: \{ phases: \['network_nat', 'await_address'\], addressTimeoutMs: 15_000 \}/, 'the launch carries the VM flag, root size and NAT + address plan');
   assert.match(mcp, /await waitForSetup\(containerLockStore\(\)\.getDb\(\), launch\.setupJobId, \{ timeoutMs: 60_000 \}\)/, 'the tool waits on the setup record, not on a host poll');
   assert.doesNotMatch(mcp, /for \(let i = 0; i < 15; i \+= 1\) \{\n\s+const probe = await fetchLxcInstance\(incusName\);/, 'no DHCP poll in the tool');
   // The engine side: fixed argv, contained guest scripts, no shell of its own.

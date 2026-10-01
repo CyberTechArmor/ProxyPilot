@@ -57,19 +57,25 @@ WORKDIR /app
 #   - util-linux: provides nsenter for the host pivot
 #   - git: source-git sync clones into /var/lib/proxypilot/cve-inbox-source
 #   - curl: healthcheck
+#   - bash: real shell regression tests run by the candidate promotion gate
+#   - openssl: local TLS certificates for credential-transport regression tests
+#   - coreutils: GNU host-command semantics in shell regression tests
 #   - chromium (+ fonts): the Mock2 browser smoke connector — playwright-core
 #     (a plain npm dep, no bundled browser) drives this system Chromium against
 #     the deployed project UI after user-facing builds. ui-checks.js probes
 #     /usr/bin/chromium(-browser) automatically; SMOKE_BROWSER_EXECUTABLE
 #     overrides.
 RUN for i in 1 2 3 4 5; do \
-        apk add --no-cache curl python3 py3-ruamel.yaml util-linux git \
+        apk add --no-cache bash openssl coreutils curl python3 py3-ruamel.yaml util-linux git \
             chromium nss freetype harfbuzz ca-certificates ttf-freefont \
             && break || { \
             echo "apk add attempt $i/5 failed, sleeping $((i*i*2))s"; \
             sleep $((i*i*2)); \
         }; \
     done && command -v curl >/dev/null \
+         && command -v bash >/dev/null \
+         && command -v openssl >/dev/null \
+         && base64 --version >/dev/null \
          && command -v python3 >/dev/null \
          && command -v nsenter >/dev/null \
          && command -v git >/dev/null \

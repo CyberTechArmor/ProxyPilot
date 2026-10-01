@@ -305,6 +305,10 @@ import {
   egressDenyCommand as firewallEgressDenyCommand,
   egressListCommand as firewallEgressListCommand,
   detectBridgeCommand as firewallDetectBridgeCommand,
+  ingressProtectCommand as firewallIngressProtectCommand,
+  ingressShowCommand as firewallIngressShowCommand,
+  ingressBootCheckCommand as firewallIngressBootCheckCommand,
+  ingressRemoveCommand as firewallIngressRemoveCommand,
 } from '../src/commands/firewall/index.js';
 
 const firewall = program
@@ -461,6 +465,23 @@ firewall
 const egress = firewall
   .command('egress')
   .description('Per-container egress allow rules (LXC bridge → host services)');
+
+const ingress = firewall.command('ingress').description('Owned managed-guest application ingress fences');
+ingress.command('protect <route-id>')
+  .requiredOption('--container <name>', 'Managed guest name without pp-')
+  .requiredOption('--target-ip <ip>', 'Recorded application IPv4 upstream')
+  .requiredOption('--port <port>', 'Application TCP port')
+  .requiredOption('--expected-uuid <uuid>', 'Guest identity from the reviewed snapshot')
+  .requiredOption('--expected-mac <mac>', 'Guest NIC identity from the reviewed snapshot')
+  .action(async (routeId, opts, cmd) => firewallIngressProtectCommand(routeId, opts, cmd.optsWithGlobals()));
+ingress.command('show <route-id>')
+  .action(async (routeId, opts, cmd) => firewallIngressShowCommand(routeId, opts, cmd.optsWithGlobals()));
+ingress.command('boot-check')
+  .description('Refuse Incus start unless every recorded host ingress fence is live')
+  .action(async (opts, cmd) => firewallIngressBootCheckCommand(opts, cmd.optsWithGlobals()));
+ingress.command('remove <route-id>')
+  .description('Remove an ingress fence only after its Pomerium policy has been removed')
+  .action(async (routeId, opts, cmd) => firewallIngressRemoveCommand(routeId, opts, cmd.optsWithGlobals()));
 
 egress
   .command('list')

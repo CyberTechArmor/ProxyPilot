@@ -39,6 +39,8 @@ import { isEncrypted, decryptSecret } from '../../lib/secrets.js';
 import { nowIso } from '../../lib/mcp-ext/logic.js';
 import { readPomerium, pomeriumIntents, routeSnapshot, subjectChoices, reviewPomeriumRoute, savePomeriumRoute } from '../../lib/setup-engine/pomerium-store.js';
 import { resolveKeycloakEmail, verifyKeycloakSubjects } from '../../lib/setup-engine/pomerium-subjects.js';
+import { digest } from '../../lib/setup-engine/pomerium-logic.js';
+import { readIngressGuest, recordedHostIngress, installHostIngress, removeHostIngress, proveHostIngress, verifiedHostIngress } from '../../lib/setup-engine/pomerium-ingress.js';
 
 export const PLATFORM_FLAG = 'mcp.platform';
 export const PURGE_FLAG = 'mcp.platform.purge';
@@ -55,6 +57,7 @@ export function createPlatformHandlers(kit) {
   const db = () => ctx.getDb();
   // One host-command seam for every platform tool (the backend's nsenter-aware runner).
   const run = (argv, timeoutMs = 30000) => ctx.runHostCapture(argv[0], argv.slice(1), { timeoutMs });
+  const runIngress = (bin, args) => run([bin, ...args]);
   const resolvers = ctx.platformResolvers || undefined;
   const requestedBy = (auth) => `mcp:${auth?.id ?? 'unknown'}`;
   // Last line of defence on every result: no protected value this install
@@ -183,8 +186,9 @@ export function createPlatformHandlers(kit) {
       warning: review.warning, revision: input.expectedRevision };
     if (args.dry_run === true) return ok({ dry_run: true, preview, note: 'Nothing was queued and no confirmation token was issued.' });
     if (review.action === 'protect' && review.lxcContainer) {
-      note.refused = true;
-      return err('Managed LXC protection requires a persistent host ingress fence and direct-IP bypass proof. No Pomerium job was queued or Caddy route changed.');
+      const route = routeSnapshot(d, review.routeId, readPomerium(d).config);
+      const entry = await readIngressGuest(route, runIngress);
+      await verifiedHostIngress(entry, runIngress);
     }
     const gate = confirmToken(args, auth, note, { tool: 'set_route_protection', subject: review.reviewToken,
       action: `${input.action} ${review.domain}`, preview: { preview } });
@@ -195,6 +199,86 @@ export function createPlatformHandlers(kit) {
       next_revision: input.expectedRevision + 1, job_id: result.job.id };
     return ok({ queued: true, job: jobSummary(result.job), preview,
       next: `get_platform_job({ id: "${result.job.id}" }); then get_route_protection to verify the final state.` });
+  });
+
+  const get_route_ingress_fence = read('get_route_ingress_fence', async (args) => {
+    const d = db(), state = readPomerium(d);
+    if (!state) return err('Pomerium is not configured.');
+    const route = routeSnapshot(d, String(args.route_id || ''), state.config);
+    if (route.runtime !== 'lxc') return err('The selected route is not a managed LXC upstream.');
+    const entry = await readIngressGuest(route, runIngress);
+    const installed = await recordedHostIngress(entry, runIngress);
+    let proof = null, proof_error = null;
+    if (installed.installed) {
+      try { proof = (await verifiedHostIngress(entry, runIngress)).proof; }
+      catch (error) { proof_error = error.message; }
+    }
+    return ok({ revision: state.revision, entry, ...installed, proof, proof_error,
+      apply_ready: installed.installed && !!proof });
+  });
+
+  const set_route_ingress_fence = write('set_route_ingress_fence', { audit: 'POMERIUM_INGRESS_FENCE_REVIEWED' }, async (args, auth, _req, note) => {
+    const d = db(), state = readPomerium(d);
+    if (!state || Number(args.expected_revision) !== state.revision) return err('Pomerium revision changed; reopen the route and fence review.');
+    const action = args.action || 'install';
+    if (!['install','remove'].includes(action)) return err('action must be install or remove.');
+    if (action === 'remove') {
+      const routeId = String(args.route_id || '');
+      if (!/^[A-Za-z0-9-]{1,100}$/.test(routeId)) return err('Invalid route ID.');
+      const active = d.prepare("SELECT state FROM setup_route_protection WHERE route_id=? AND state!='removed'").get(routeId);
+      if (active) return err('Remove and verify the Pomerium route policy before removing its host ingress fence.');
+      const stored = await runIngress(process.env.PROXYPILOT_BIN || '/usr/local/bin/proxypilot', ['--json','firewall','ingress','show',routeId]);
+      let entry; try { entry = JSON.parse(stored.stdout).entry; } catch { return err('The recorded host ingress fence could not be read.'); }
+      if (stored.status !== 0 || !entry) return err('No recorded host ingress fence for this route.');
+      const preview = { action:'remove', revision:state.revision, route_id:routeId, guest:entry,
+        effect:'Reopen direct guest-IP access to this port after the Pomerium policy has been removed.' };
+      note.subject_id = routeId;
+      if (args.dry_run === true) return ok({ dry_run:true, preview });
+      const gate = confirmToken(args, auth, note, { tool:'set_route_ingress_fence', subject:digest(preview),
+        action:`remove the host ingress fence for ${routeId}`, preview:{ preview } });
+      if (gate) return gate;
+      const removed = await removeHostIngress(routeId, runIngress);
+      note.summary = `host ingress fence removed for ${routeId}`;
+      return ok({ removed });
+    }
+    const route = routeSnapshot(d, String(args.route_id || ''), state.config);
+    if (route.runtime !== 'lxc') return err('The selected route is not a managed LXC upstream.');
+    const entry = await readIngressGuest(route, runIngress);
+    note.subject_id = route.id;
+    const preview = { action:'install', revision: state.revision, route_id: route.id, domain: route.domain,
+      upstream: `http://${route.target_ip}:${route.target_port}`, guest: entry,
+      effect: 'Persist a host-owned dual-stack ingress fence and reconcile nftables; the Pomerium policy remains unchanged.' };
+    if (args.dry_run === true) return ok({ dry_run: true, preview });
+    const gate = confirmToken(args, auth, note, { tool: 'set_route_ingress_fence', subject: digest(preview),
+      action: `install the host ingress fence for ${route.domain}`, preview: { preview } });
+    if (gate) return gate;
+    const installed = await installHostIngress(entry, runIngress);
+    note.summary = `host ingress fence installed for ${route.domain}`;
+    note.detail = { ...note.detail, route_id: route.id, revision: state.revision, guest_uuid: entry.uuid,
+      nft_checksum: installed.checksum };
+    return ok({ installed, next: `get_route_ingress_fence({ route_id: "${route.id}" }); independent peer, routed and host-upstream proof is still required before policy apply.` });
+  });
+
+  const prove_route_ingress_fence = write('prove_route_ingress_fence', { audit: 'POMERIUM_INGRESS_FENCE_PROVED' }, async (args, auth, _req, note) => {
+    const d = db(), state = readPomerium(d);
+    if (!state || Number(args.expected_revision) !== state.revision) return err('Pomerium revision changed; reopen the route and fence proof.');
+    const route = routeSnapshot(d, String(args.route_id || ''), state.config);
+    if (route.runtime !== 'lxc') return err('The selected route is not a managed LXC upstream.');
+    const peer = String(args.peer_container || '');
+    const entry = await readIngressGuest(route, runIngress);
+    const installed = await recordedHostIngress(entry, runIngress);
+    if (!installed.installed) return err(installed.reason);
+    const preview = { revision: state.revision, route_id: route.id, domain: route.domain, guest: entry,
+      peer_container: peer, tests: ['same-bridge IPv4/IPv6 direct-IP denial', 'isolated routed IPv4/IPv6 direct-IP denial', 'host upstream HTTP access'] };
+    note.subject_id = route.id;
+    if (args.dry_run === true) return ok({ dry_run: true, preview });
+    const gate = confirmToken(args, auth, note, { tool: 'prove_route_ingress_fence', subject: digest(preview),
+      action: `test the host ingress fence for ${route.domain}`, preview: { preview } });
+    if (gate) return gate;
+    const proof = await proveHostIngress(entry, peer, runIngress);
+    note.summary = `host ingress fence independently proved for ${route.domain}`;
+    note.detail = { ...note.detail, route_id: route.id, revision: state.revision, checks: proof.checks };
+    return ok({ proof, next: `get_route_ingress_fence({ route_id: "${route.id}" }); then review set_route_protection with the current Pomerium revision.` });
   });
 
   /* -------------------------------- writes ------------------------------- */
@@ -372,7 +456,7 @@ export function createPlatformHandlers(kit) {
   return {
     verify_platform_service, get_platform_service_logs, control_platform_container, set_platform_restricted_networks, resync_platform_plan, recover_keycloak_bootstrap,
     get_platform_setup, get_platform_service, list_platform_jobs, get_platform_job, platform_preflight,
-    get_route_protection, set_route_protection,
+    get_route_protection, set_route_protection, get_route_ingress_fence, set_route_ingress_fence, prove_route_ingress_fence,
     save_platform_setup, apply_platform_setup: queueApply('apply'), continue_platform_setup: queueApply('continue'),
     manage_platform_service, reset_platform_setup,
   };

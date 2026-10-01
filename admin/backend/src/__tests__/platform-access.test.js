@@ -3,7 +3,7 @@
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDb, driveStages } from './helpers/full-platform-fixture.js';
@@ -15,6 +15,12 @@ import { parseRouteEdgeOptions, routeEdgeOptionLines } from '../lib/caddy-site-f
 import { defaultGateway, localEdgeAddress, containerSources, recordSelfCheckSources, selfCheckSources } from '../lib/setup-engine/local-edge.js';
 import { approvedFetch } from '../lib/sso/oidc.js';
 
+// This fixture owns temporary files in the test process, including in Docker.
+// Never send its temporary paths to the real host writer.
+const localIo = {
+  read: file => existsSync(file) ? readFileSync(file, 'utf8') : null,
+  write: (file, value) => { writeFileSync(`${file}.tmp`, value); renameSync(`${file}.tmp`, file); },
+};
 const ADMIN = 'pilot.example.com';
 const SITE = `# ProxyPilot Admin Dashboard\n# Domain: ${ADMIN}\n\n${ADMIN} {\n    reverse_proxy 127.0.0.1:3001\n}\n`;
 
@@ -39,7 +45,7 @@ test('defaults: Vaultwarden and Keycloak admin restricted, dashboard open; recov
   const p = await platform();
   try {
     assert.deepEqual(ACCESS_DEFAULTS, { vaultwarden: 'restricted', keycloakAdmin: 'restricted', proxypilot: 'open' });
-    const s = accessState(p.db, { adminDomain: ADMIN, snippet: p.snippet, sitesDir: p.sites });
+    const s = accessState(p.db, { adminDomain: ADMIN, snippet: p.snippet, sitesDir: p.sites, io: localIo });
     assert.deepEqual(s.fixed.map((f) => [f.id, f.access]), [['recovery', 'restricted'], ['openbao', 'restricted'], ['infisical', 'restricted']]);
     assert.deepEqual(s.applied, { vaultwarden: 'restricted', keycloakAdmin: 'open', proxypilot: 'open' });
     assert.deepEqual(s.pending, ['keycloakAdmin'], 'Keycloak admin is restricted by default but only after Apply');
@@ -49,7 +55,7 @@ test('defaults: Vaultwarden and Keycloak admin restricted, dashboard open; recov
 test('apply: Vaultwarden open keeps /admin restricted; Keycloak /admin restricted; dashboard snippet + import; one validate + reload', async () => {
   const p = await platform();
   try {
-    const s = await applyAccess(p.db, { vaultwarden: 'open', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '10.20.30.7', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites });
+    const s = await applyAccess(p.db, { vaultwarden: 'open', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '10.20.30.7', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites, io: localIo });
     assert.deepEqual(s.applied, { vaultwarden: 'open', keycloakAdmin: 'restricted', proxypilot: 'restricted' });
     const vw = route(p.db, p.vwRoute), kc = route(p.db, p.kcId);
     assert.equal(vw.ip_allowlist_json, JSON.stringify(['10.20.30.0/24']), 'Vaultwarden keeps its allowlist (the adapter checks it)');
@@ -62,7 +68,7 @@ test('apply: Vaultwarden open keeps /admin restricted; Keycloak /admin restricte
     assert.deepEqual(p.calls.filter((c) => !c.startsWith('regen')), ['adapt', 'reload']);
     assert.deepEqual(p.calls.filter((c) => c.startsWith('regen')).sort(), ['regen id.example.com', 'regen vault.example.com']);
     // Back to open: the snippet opens, the import stays (harmless), Keycloak's allowlist is removed.
-    const back = await applyAccess(p.db, { vaultwarden: 'restricted', keycloakAdmin: 'open', proxypilot: 'open', reviewed: true }, { client: '203.0.113.9', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites });
+    const back = await applyAccess(p.db, { vaultwarden: 'restricted', keycloakAdmin: 'open', proxypilot: 'open', reviewed: true }, { client: '203.0.113.9', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites, io: localIo });
     assert.deepEqual(back.applied, { vaultwarden: 'restricted', keycloakAdmin: 'open', proxypilot: 'open' });
     assert.equal(route(p.db, p.kcId).ip_allowlist_json, null); assert.equal(route(p.db, p.vwRoute).ip_allowlist_paths_json, null);
     assert.match(readFileSync(p.snippet, 'utf8'), /# access: open/);
@@ -72,7 +78,7 @@ test('apply: Vaultwarden open keeps /admin restricted; Keycloak /admin restricte
 test('the dashboard cannot be made VPN-only from a browser outside the networks', async () => {
   const p = await platform();
   try {
-    await assert.rejects(applyAccess(p.db, { vaultwarden: 'restricted', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '203.0.113.9', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites }), /lock you out/);
+    await assert.rejects(applyAccess(p.db, { vaultwarden: 'restricted', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '203.0.113.9', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites, io: localIo }), /lock you out/);
     assert.equal(existsSync(p.snippet), false); assert.deepEqual(p.calls, [], 'nothing was touched');
     assert.equal(readFileSync(join(p.sites, ADMIN), 'utf8'), SITE);
   } finally { p.cleanup(); }
@@ -82,11 +88,11 @@ test('a failed reload restores the routes, the snippet and the site file', async
   const p = await platform();
   try {
     const deps = { ...p.deps, reload: async () => { p.calls.push('reload'); if (p.calls.filter((c) => c === 'reload').length === 1) throw Object.assign(new Error('reload failed'), { stderr: 'caddy: bad config' }); } };
-    await assert.rejects(applyAccess(p.db, { vaultwarden: 'open', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '10.20.30.7', adminDomain: ADMIN, deps, snippet: p.snippet, sitesDir: p.sites }), /restored: caddy: bad config/);
+    await assert.rejects(applyAccess(p.db, { vaultwarden: 'open', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '10.20.30.7', adminDomain: ADMIN, deps, snippet: p.snippet, sitesDir: p.sites, io: localIo }), /restored: caddy: bad config/);
     assert.equal(route(p.db, p.vwRoute).ip_allowlist_paths_json, null); assert.equal(route(p.db, p.kcId).ip_allowlist_json, null);
     assert.equal(readFileSync(join(p.sites, ADMIN), 'utf8'), SITE);
     assert.match(readFileSync(p.snippet, 'utf8'), /# access: open/);
-    assert.deepEqual(accessState(p.db, { adminDomain: ADMIN, snippet: p.snippet, sitesDir: p.sites }).choices, ACCESS_DEFAULTS, 'the choices are not saved');
+    assert.deepEqual(accessState(p.db, { adminDomain: ADMIN, snippet: p.snippet, sitesDir: p.sites, io: localIo }).choices, ACCESS_DEFAULTS, 'the choices are not saved');
   } finally { p.cleanup(); }
 });
 
@@ -98,16 +104,16 @@ test('helpers: networks match, client address, import placement, snippet refresh
   assert.equal(withAdminImport(withAdminImport(SITE, ADMIN, '/s'), ADMIN, '/s').split('import /s').length, 2, 'the import is added once');
   const dir = mkdtempSync(join(tmpdir(), 'pp-snip-')), f = join(dir, 's.caddy');
   try {
-    writeFileSync(f, adminAccessSnippet(false, [])); assert.equal(refreshAdminSnippet(null, ['10.1.0.0/24'], { snippet: f }), false, 'an open snippet is left alone');
-    writeFileSync(f, adminAccessSnippet(true, ['10.0.0.0/24'])); assert.equal(refreshAdminSnippet(null, ['10.1.0.0/24'], { snippet: f }), true);
+    writeFileSync(f, adminAccessSnippet(false, [])); assert.equal(refreshAdminSnippet(null, ['10.1.0.0/24'], { snippet: f, io: localIo }), false, 'an open snippet is left alone');
+    writeFileSync(f, adminAccessSnippet(true, ['10.0.0.0/24'])); assert.equal(refreshAdminSnippet(null, ['10.1.0.0/24'], { snippet: f, io: localIo }), true);
     assert.match(readFileSync(f, 'utf8'), /not remote_ip 10\.1\.0\.0\/24/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
   const p = await platform();
   try {
     writeFileSync(join(p.sites, ADMIN), `${ADMIN} {\n    reverse_proxy 127.0.0.1:3001\n}\n`);
-    const s = accessState(p.db, { adminDomain: ADMIN, snippet: p.snippet, sitesDir: p.sites });
+    const s = accessState(p.db, { adminDomain: ADMIN, snippet: p.snippet, sitesDir: p.sites, io: localIo });
     assert.equal(s.switches.find((x) => x.id === 'proxypilot').available, false);
-    await assert.rejects(applyAccess(p.db, { vaultwarden: 'restricted', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '10.20.30.7', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites }), /not the one ProxyPilot installed/);
+    await assert.rejects(applyAccess(p.db, { vaultwarden: 'restricted', keycloakAdmin: 'restricted', proxypilot: 'restricted', reviewed: true }, { client: '10.20.30.7', adminDomain: ADMIN, deps: p.deps, snippet: p.snippet, sitesDir: p.sites, io: localIo }), /not the one ProxyPilot installed/);
   } finally { p.cleanup(); }
 });
 

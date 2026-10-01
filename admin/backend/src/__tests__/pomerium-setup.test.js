@@ -191,6 +191,21 @@ test('G4 reviews managed LXC port 3001 and WebSocket intent but refuses without 
   assert.match(refused.content[0].text,/host ingress fence/);
   assert.equal(db.prepare('SELECT count(*) AS n FROM setup_route_protection').get().n,0);
 }));
+test('MCP refuses host fence removal while a Pomerium route intent remains active',()=>withDb(async db=>{
+  savePomerium(db,configInput);
+  db.prepare("UPDATE services SET runtime='lxc',target_ip='10.185.17.240',lxc_container_name='nodus' WHERE id='app'").run();
+  db.prepare("UPDATE service_http_routes SET target_port=3001 WHERE id='test-route'").run();
+  protect(db);
+  db.exec(`CREATE TABLE mcp_ledger (id INTEGER PRIMARY KEY,ts TEXT,token_id INTEGER,actor TEXT,tool TEXT,subject_type TEXT,subject_id TEXT,project_id INTEGER,args_json TEXT,outcome TEXT,dry_run INTEGER,confirmation_used INTEGER,snapshot TEXT,summary TEXT,detail_json TEXT,duration_ms INTEGER)`);
+  const ctx={getDb:()=>db,getSetting:()=>null,policy:{feature_flags:{'mcp.platform':{default:true}}},confirmations:createConfirmationStore(),
+    toolResult:(data,{isError=false}={})=>({content:[{type:'text',text:JSON.stringify(data)}],isError}),logAudit:()=>{},
+    runHostCapture:async()=>{throw new Error('must refuse before host command');}};
+  const tools=createPlatformHandlers(createToolkit(ctx));
+  const result=await tools.set_route_ingress_fence({route_id:'test-route',expected_revision:2,action:'remove'},
+    {id:7,created_by:'admin'});
+  assert.equal(result.isError,true);
+  assert.match(result.content[0].text,/Remove and verify the Pomerium route policy/);
+}));
 test('G4.3 SQL route ownership prevents aliases, edits, delete and moving the protected upstream',()=>withDb(db=>{
   savePomerium(db,configInput);protect(db);
   assert.throws(()=>db.exec("UPDATE service_http_routes SET target_port=9999 WHERE id='test-route'"),/owns/);

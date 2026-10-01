@@ -46,6 +46,7 @@ export function defaultState() {
     base,
     discovered: [],
     container_egress: [],
+    protected_upstreams: [],
     panic_close: false,
   };
 }

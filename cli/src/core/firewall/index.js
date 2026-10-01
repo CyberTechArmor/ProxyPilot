@@ -5,3 +5,4 @@ export { scan, scanHost, reconcileDiscovery } from './discover.js';
 export { enable, disable, setScope, setPort, addManual, removeManual, addServiceL4, removeServiceL4, list } from './toggle.js';
 export { panicClose, panicOpen } from './panic.js';
 export { allowEgress, denyEgress, listEgress } from './egress.js';
+export { protectIngress, recordedIngress, ingressGuestSnapshot } from './ingress.js';

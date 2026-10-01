@@ -67,11 +67,16 @@ export function nonStringBodies(rawSrc) {
   const bad = [];
   const lines = src.split('\n');
   for (const [i, line] of lines.entries()) {
+    // A method's parameter named body is outside the request options.
+    // Start at request( when it begins on this line; continuation lines
+    // still start at zero and are checked by the window below.
+    const requestAt = line.search(/\brequest\s*\(/);
+    const callLine = requestAt === -1 ? line : line.slice(requestAt);
     // BOTH forms. The shorthand `{ method: 'POST', body }` is how the broken
     // method was first written, and a `body:`-only regex walks straight past it.
-    const at = line.search(/\bbody\s*[:,}]/);
+    const at = callLine.search(/\bbody\s*[:,}]/);
     if (at === -1) continue;
-    const rest = line.slice(at).replace(/^body\s*/, '');
+    const rest = callLine.slice(at).replace(/^body\s*/, '');
     const value = rest.startsWith(':') ? readValue(rest.slice(1).trim()) : 'body';
     if (STRINGY.test(value)) continue;
     // A raw fetch() may legitimately send a File / FormData / Blob — those are
@@ -91,6 +96,9 @@ test('the checker catches the shape that shipped', () => {
   assert.deepEqual(nonStringBodies(passed).map((b) => b.value), ['body']);
   const fixed = "  mock2CreateFirstAdmin: (id, body) => request(`/x/${id}`, { method: 'POST', body: JSON.stringify(body) }),\n";
   assert.deepEqual(nonStringBodies(fixed), []);
+  const multiline = "write: (path, body, revision) => request(path, {\n  method: 'POST', body: JSON.stringify(body),\n}),\n";
+  assert.deepEqual(nonStringBodies(multiline), [], 'a parameter is not an option value');
+  assert.deepEqual(nonStringBodies(multiline.replace('body: JSON.stringify(body)', 'body')).map((b) => b.value), ['body'], 'the same multiline call still rejects an unserialised body');
   // Prose describing a body shape is not a call site.
   assert.deepEqual(nonStringBodies('// body: { item_id, reason }.\n'), []);
 });

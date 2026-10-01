@@ -558,7 +558,7 @@ export function createLxcAdminHandlers(kit) {
     try {
       const [serverRaw, expandedRaw, stateRaw, release, bootRaw, cpuRaw, memRaw, swapsRaw, rootFsRaw, psRaw] = await Promise.all([
         capture('incus', ['query', '/1.0']),
-        capture('incus', ['config', 'show', guest, '--expanded', '--format=json']),
+        capture('incus', ['query', `/1.0/instances/${guest}`]),
         capture('incus', ['query', `/1.0/instances/${guest}/state`]),
         capture('incus', ['exec', guest, '--', 'cat', '/etc/os-release']),
         capture('incus', ['exec', guest, '--', 'cat', '/proc/sys/kernel/random/boot_id']),
@@ -581,20 +581,38 @@ export function createLxcAdminHandlers(kit) {
       const rootFsBytes = Number(rootFsRaw.trim().split(/\s+/).at(-1));
       const processes = psRaw.split(/\r?\n/).map(line => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line))
         .filter(Boolean).map(m => ({ pid: Number(m[1]), ppid: Number(m[2]), rssKb: Number(m[3]), comm: m[4], args: m[5] }));
-      const qemuName = new RegExp(`(?:^|[ ,])guest=${guest}(?:[, ]|$)`);
-      const qemu = processes.find(p => p.pid === state.pid && /^qemu-system-/.test(p.comm) && qemuName.test(p.args)) ||
-        processes.find(p => /^qemu-system-/.test(p.comm) && qemuName.test(p.args));
+      const qemuName = p => {
+        const token = /(?:^|\s)-name\s+(\S+)/.exec(p.args)?.[1]?.split(',')[0];
+        return token === guest || token === `guest=${guest}`;
+      };
+      const qemu = processes.find(p => p.pid === state.pid &&
+        /^qemu-system-/.test(p.comm) && qemuName(p));
       if (!server.environment?.server_version || !/^[a-f0-9]{64}$/i.test(image || '') ||
           !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(identity || '') ||
           !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(bootGeneration) ||
           !root?.size || !Number.isInteger(cpu) || cpu < 1 ||
           !Number.isFinite(ramKb) || ramKb <= 0 || !Number.isFinite(swapKb) ||
           !Number.isFinite(rootFsBytes) || rootFsBytes <= 0 || !qemu)
-        return err('VM proof incomplete: image fingerprint, VM identity/boot generation, root disk/filesystem, guest CPU/RAM/swap, or exact host QEMU process could not be established');
+        return err('VM proof incomplete: image fingerprint, VM identity/boot generation, root disk/filesystem, guest CPU/RAM/swap, or exact host QEMU process could not be established; diagnostic=' + JSON.stringify({
+          server_version: server.environment?.server_version || null, image, identity, bootGeneration,
+          root_size: root?.size || null, cpu, ramKb, swapKb, rootFsBytes, state_pid: state.pid || null,
+          network_devices: Object.entries(expanded.expanded_devices || expanded.devices || {})
+            .filter(([, d]) => d.type === 'nic').map(([id,d]) => ({ id, network:d.network || null,
+              parent:d.parent || null, host_name:expanded.config?.[`volatile.${id}.host_name`] || d.host_name || null })),
+          qemu_candidates: processes.filter(p => /^qemu-system-/.test(p.comm) &&
+            (p.pid === state.pid || p.args.includes(guest))).map(p => ({ pid:p.pid, comm:p.comm,
+              name_argument: /(?:^|\s)-name\s+(\S+)/.exec(p.args)?.[1] || null })),
+        }));
       const tree = [qemu];
       for (let i = 0; i < tree.length; i++) for (const p of processes) if (p.ppid === tree[i].pid && !tree.some(x => x.pid === p.pid)) tree.push(p);
       return ok({ container: name, incus_server_version: server.environment?.server_version || null,
         actual_image_fingerprint: image, vm_identity: identity, boot_generation: bootGeneration, guest_os_release: release.trim(),
+        network_devices: Object.entries(expanded.expanded_devices || expanded.devices || {})
+          .filter(([, device]) => device.type === 'nic').map(([id, device]) => ({
+            id, network: device.network || null, parent: device.parent || null,
+            host_name: expanded.config?.[`volatile.${id}.host_name`] || device.host_name || null,
+            hwaddr: expanded.config?.[`volatile.${id}.hwaddr`] || device.hwaddr || null,
+          })),
         cpu: { guest_visible: cpu, configured: expanded.expanded_config?.['limits.cpu'] || null },
         memory: { guest_mem_total_bytes: ramKb * 1024, configured: expanded.expanded_config?.['limits.memory'] || null },
         root_disk: { configured_size: root.size, guest_filesystem_bytes: rootFsBytes, pool: root.pool || null },

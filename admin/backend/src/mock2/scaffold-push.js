@@ -231,9 +231,14 @@ export type VapidPair = { publicKey: string; privateKey: string; subject: string
 export function generateVapidPair(subject: string): VapidPair {
   const ecdh = crypto.createECDH('prime256v1');
   ecdh.generateKeys();
+  // OpenSSL may omit leading zero bytes from the scalar. VAPID/JWK needs
+  // its fixed-width, 32-byte P-256 representation.
+  const scalar = ecdh.getPrivateKey();
+  const privateKey = Buffer.alloc(32);
+  scalar.copy(privateKey, privateKey.length - scalar.length);
   return {
     publicKey: ecdh.getPublicKey().toString('base64url'),
-    privateKey: ecdh.getPrivateKey().toString('base64url'),
+    privateKey: privateKey.toString('base64url'),
     subject,
   };
 }

@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { localHostCommands } from './helpers/local-host-commands.js';
 
 const MOCK2_DIR = fileURLToPath(new URL('../mock2/', import.meta.url));
 
@@ -61,7 +62,8 @@ exec sh -c "$(cat | sed "s#/srv/app#$FS/srv/app#g")"
 test('a file written into a container arrives byte for byte', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'pp-cwrite-'));
   const prevPath = process.env.PATH;
-  process.env.PATH = `${stubIncus(root)}:${prevPath}`;
+  localHostCommands(t);
+  process.env.PATH = `${stubIncus(root)}:${process.env.PATH}`;
   t.after(() => { process.env.PATH = prevPath; rmSync(root, { recursive: true, force: true }); });
 
   // design-findings.js is the writer this suite can actually import (host.js

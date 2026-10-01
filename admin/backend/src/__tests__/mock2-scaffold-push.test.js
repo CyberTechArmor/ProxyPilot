@@ -216,7 +216,21 @@ const recovered = plain.subarray(0, plain.length - 1).toString('utf8');
 if (recovered !== message) throw new Error('plaintext mismatch: ' + recovered);
 console.log('ROUNDTRIP OK');
 
-const pair = generateVapidPair('https://app.example.com');
+const pairs = [generateVapidPair('https://app.example.com')];
+// Force the rare leading-zero case without weakening the real signature check.
+const originalCreateECDH = crypto.createECDH;
+try {
+  crypto.createECDH = (...args) => {
+    const ec = originalCreateECDH(...args);
+    ec.generateKeys = () => { ec.setPrivateKey(Buffer.from([1])); return ec.getPublicKey(); };
+    return ec;
+  };
+  const padded = generateVapidPair('https://app.example.com');
+  const scalar = Buffer.from(padded.privateKey, 'base64url');
+  if (scalar.length !== 32 || scalar.toString('hex') !== '0'.repeat(63) + '1') throw new Error('VAPID scalar lost its leading zeros');
+  pairs.push(padded);
+} finally { crypto.createECDH = originalCreateECDH; }
+for (const pair of pairs) {
 const jwt = signVapidJwt('https://fcm.googleapis.com/fcm/send/abc123', pair.subject, pair.privateKey);
 const [h, b, sig] = jwt.split('.');
 const claims = JSON.parse(Buffer.from(b, 'base64url').toString());
@@ -234,4 +248,5 @@ if (!crypto.createVerify('SHA256').update(h + '.' + b).verify({ key, dsaEncoding
   throw new Error('the VAPID JWT does not verify against its own public key');
 }
 console.log('VAPID OK');
+}
 `;

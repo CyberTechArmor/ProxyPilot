@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isIP } from 'node:net';
 
 const RFC1918 = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
 const VPN_CIDR = '10.100.0.0/24';
@@ -23,6 +24,33 @@ const DEFAULT_BRIDGE_GW = '10.0.100.1';
 const IFACE_RE = /^[A-Za-z0-9_.-]{1,15}$/;
 const CIDR_RE = /^(?:\d{1,3}\.){3}\d{1,3}\/(?:\d|[12]\d|3[0-2])$/;
 const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+const MAC_RE = /^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+const INGRESS_MARK = '0x40000000';
+
+function protectedUpstreams(state) {
+  const entries = state.protected_upstreams ?? [];
+  if (!Array.isArray(entries) || entries.length > 20) throw new Error('invalid protected_upstreams');
+  return entries.map(e => {
+    if (!IFACE_RE.test(e.bridge) || !MAC_RE.test(e.mac) || isIP(e.ipv4) !== 4 ||
+        (e.ipv6 != null && isIP(e.ipv6) !== 6) || !Number.isInteger(e.port) || e.port < 1024 || e.port > 65535 ||
+        !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(e.container) || !/^[A-Za-z0-9-]{1,100}$/.test(e.route_id))
+      throw new Error('invalid protected upstream entry');
+    return e;
+  });
+}
+
+// The bridge hooks cover direct traffic from another guest even when it is
+// switched locally without visiting the IP forward hook. Routed traffic is
+// caught by inet/forward and again at bridge/output. Only packets generated
+// by the host for the recorded guest address receive the output mark, so the
+// Pomerium host-network upstream remains reachable. A changed guest address
+// fails closed at bridge/output until the recorded fence is reconciled.
+export function renderProtectedUpstreams(state) {
+  const entries = protectedUpstreams(state);
+  const switched = entries.map(e => `    ether daddr ${e.mac} meta l4proto tcp tcp dport ${e.port} counter drop comment "pp-ingress-${e.route_id}"`);
+  const bridgeOutput = entries.map(e => `    ether daddr ${e.mac} meta l4proto tcp tcp dport ${e.port} meta mark & ${INGRESS_MARK} == 0 counter drop comment "pp-ingress-${e.route_id}"`);
+  return `\nadd table bridge proxypilot_ingress\nflush table bridge proxypilot_ingress\n\ntable bridge proxypilot_ingress {\n  chain switched {\n    type filter hook forward priority -20; policy accept;\n${switched.join('\n') || '    # no protected upstreams'}\n  }\n  chain routed_to_bridge {\n    type filter hook output priority -20; policy accept;\n${bridgeOutput.join('\n') || '    # no protected upstreams'}\n  }\n}\n`;
+}
 
 function bridgeFromState(state) {
   const n = state.network ?? {};
@@ -203,6 +231,15 @@ export function render(state) {
 
   const containerEgressBody = renderContainerEgress(state);
   const natPostroutingBody = renderNatPostrouting(state);
+  const protectedEntries = protectedUpstreams(state);
+  const ingressMarkBody = protectedEntries.flatMap(e => [
+    `    oifname "${e.bridge}" ip daddr ${e.ipv4} tcp dport ${e.port} meta mark set meta mark | ${INGRESS_MARK}`,
+    ...(e.ipv6 ? [`    oifname "${e.bridge}" ip6 daddr ${e.ipv6} tcp dport ${e.port} meta mark set meta mark | ${INGRESS_MARK}`] : []),
+  ]).join('\n') || '    # no protected upstreams';
+  const ingressForwardBody = protectedEntries.flatMap(e => [
+    `    oifname "${e.bridge}" ip daddr ${e.ipv4} tcp dport ${e.port} counter drop comment "pp-ingress-${e.route_id}"`,
+    ...(e.ipv6 ? [`    oifname "${e.bridge}" ip6 daddr ${e.ipv6} tcp dport ${e.port} counter drop comment "pp-ingress-${e.route_id}-v6"`] : []),
+  ]).join('\n') || '    # no protected upstreams';
 
   // The leading `add table` + `flush table` pair makes the apply
   // idempotent: it creates the table on first run and empties every
@@ -269,8 +306,18 @@ ${containerEgressBody}
     type nat hook postrouting priority 100;
 ${natPostroutingBody}
   }
+
+  chain protected_upstream_mark {
+    type filter hook output priority -20; policy accept;
+${ingressMarkBody}
+  }
+
+  chain protected_upstream_forward {
+    type filter hook forward priority -20; policy accept;
+${ingressForwardBody}
+  }
 }
-`;
+${renderProtectedUpstreams(state)}`;
 
   return ruleset;
 }

@@ -66,7 +66,7 @@ const withDb = async (fn) => { const db = makeDb(); try { await fn(db); } finall
 test('every Platform MCP tool refuses before any work while mcp.platform is off, and is not flag-refused when on', () => withDb(async (db) => {
   await connected(db);
   const names = MCP_EXT_TOOL_GROUPS.platform.map((t) => t.name);
-  assert.equal(names.length, 16);
+  assert.equal(names.length, 21);
   const argsFor = { get_platform_service: { service: 'vaultwarden' }, get_platform_job: { id: 'x' }, verify_platform_service: { service: 'vaultwarden' }, get_platform_service_logs: { service: 'vaultwarden' },
     control_platform_container: { service: 'vaultwarden', container: 'x', action: 'stop' }, manage_platform_service: { service: 'vaultwarden', action: 'repair', dry_run: true },
     set_platform_restricted_networks: { additional_networks: ['10.9.0.0/24'], dry_run: true }, resync_platform_plan: { revision: 1, dry_run: true }, save_platform_setup: { if_revision: 1, dry_run: true },
@@ -162,7 +162,7 @@ test('3c: a service route restricted to one external IP still passes its own boo
   // The adapter's own bootstrap check: connected to the local edge, SNI/Host kept.
   let seen = null;
   const request = (u, opts, cb) => { seen = { url: String(u), opts }; opts.lookup('secrets.example.com', { all: false }, (_e, address) => { seen.address = address; }); const res = new EventEmitter(); res.statusCode = 200; setImmediate(() => { cb(res); res.emit('data', Buffer.from('{"date":"x"}')); res.emit('end'); }); return { on() {}, end() {}, destroy() {} }; };
-  const api = createInfisicalClient('https://secrets.example.com', { send: (o, p, x) => infisicalRequest(o, p, { ...x, request }), edge: localEdge(db) });
+  const api = createInfisicalClient('https://secrets.example.com', { send: (o, p, x) => infisicalRequest(o, p, { ...x, request }), edge: localEdge(db, { PROXYPILOT_LOCAL_EDGE: '127.0.0.1' }) });
   const r = await api('/api/status');
   assert.equal(r.status, 200);
   assert.equal(seen.address, '127.0.0.1'); assert.equal(new URL(seen.url).hostname, 'secrets.example.com');

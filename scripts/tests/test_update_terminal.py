@@ -27,6 +27,7 @@ class TerminalUpdate(unittest.TestCase):
         (self.root / 'bin').mkdir()
         shutil.copyfile(ROOT / 'update.sh', self.checkout / 'update.sh')
         shutil.copyfile(HELPER, self.checkout / 'scripts' / HELPER.name)
+        shutil.copyfile(ROOT / 'scripts/update-git.sh', self.checkout / 'scripts/update-git.sh')
         for command in ['systemd-run', 'systemctl', 'flock', 'git', 'npm', 'docker', 'apt-get']:
             stub = self.root / 'bin' / command
             stub.write_text('''#!/usr/bin/env python3
@@ -42,7 +43,11 @@ sys.exit(99)
 ''')
             stub.chmod(0o755)
         self.env = dict(os.environ, PATH=str(self.root / 'bin') + os.pathsep + os.environ['PATH'],
-                        FIXTURE_EVENTS=str(self.root / 'events'), PROXYPILOT_TERMINAL='host')
+                        FIXTURE_EVENTS=str(self.root / 'events'), PROXYPILOT_TERMINAL='host',
+                        # Never create or reuse the host's shared lock: Linux's
+                        # sticky-directory protection can refuse a later root
+                        # run's open of a lock made by the non-root suite.
+                        PROXYPILOT_UPDATE_LOCK=str(self.root / 'update.lock'))
         for key in ['PROXYPILOT_UPDATE_RUNNER', 'PROXYPILOT_UPDATE_REEXEC', 'PROXYPILOT_TERMINAL_HANDOFF']:
             self.env.pop(key, None)
 
@@ -92,9 +97,17 @@ sys.exit(99)
 
     def test_host_runner_does_not_handoff_again(self):
         r = self.run_entry('--rebuild', PROXYPILOT_UPDATE_RUNNER='1')
-        self.assertNotEqual(r.returncode, 0)
-        self.assertTrue(self.events())
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.events(), r.stdout + r.stderr)
+        self.assertEqual(self.events(), [['flock', ['-n', '200']]])
         self.assertFalse(any(name in ['systemd-run', 'systemctl'] for name, _ in self.events()))
+
+    def test_unavailable_lock_stops_at_git_boundary_without_handoff(self):
+        r = self.run_entry('--rebuild', PROXYPILOT_UPDATE_RUNNER='1',
+                           PROXYPILOT_UPDATE_LOCK=str(self.root / 'missing' / 'update.lock'))
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.events(), [['git', ['-C', str(self.checkout), 'rev-parse', '--verify', 'HEAD']]])
+        self.assertNotIn('No such file or directory', r.stderr)
 
     def test_no_restart_remains_foreground(self):
         r = self.run_entry('--no-restart')

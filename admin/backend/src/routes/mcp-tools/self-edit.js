@@ -299,7 +299,7 @@ export function createSelfEditHandlers(kit) {
     if ((await dirty(CAND)).length) return err('The candidate has uncommitted changes — apply_self_patch commits, so something else touched it; reset it.');
     if (!state.checks || state.checks.sha !== head || !state.checks.ok) { note.refused = true; return err(`The required checks (${cfg.required_checks_for_promote.join(', ')}) have not passed on candidate HEAD ${head.slice(0, 8)} — run_self_checks first.`); }
     const log = await hgit(CAND, ['log', '--oneline', `${base}..HEAD`]);
-    const plan = { live_dir: l.dir, live_branch: l.installed.branch, from_sha: liveHead, to_sha: head, commits: (log.stdout || '').trim().split('\n').filter(Boolean), checks: state.checks, then: 'update.sh --yes --rebuild through the root runner (API unreachable ~1–2 min)', rollback_point: `git tag pp-rollback-<timestamp> at ${liveHead.slice(0, 8)}` };
+    const plan = { live_dir: l.dir, live_branch: l.installed.branch, from_sha: liveHead, to_sha: head, commits: (log.stdout || '').trim().split('\n').filter(Boolean), checks: state.checks, then: `update.sh --yes --build-current=${head} through the root runner (API temporarily unreachable)`, rollback_point: `git tag pp-rollback-<timestamp> at ${liveHead.slice(0, 8)}` };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'promote_self', subject: head, action: `promote candidate ${head.slice(0, 8)} (${ahead} commit(s)) onto the live ProxyPilot checkout and rebuild`, preview: plan });
     if (gate) return gate;
@@ -352,7 +352,7 @@ export function createSelfEditHandlers(kit) {
     const liveHead = await rev(l.dir);
     if (liveHead === target) return ok({ applied: false, note: `The live checkout is already at ${target.slice(0, 8)}.` });
     const log = await hgit(l.dir, ['log', '--oneline', `${target}..HEAD`]);
-    const plan = { live_dir: l.dir, from_sha: liveHead, to_sha: target, drops: (log.stdout || '').trim().split('\n').filter(Boolean), then: 'update.sh --yes --rebuild through the root runner', safety: `the current HEAD is tagged pp-rollback-<timestamp> first, so this rollback is itself reversible` };
+    const plan = { live_dir: l.dir, from_sha: liveHead, to_sha: target, drops: (log.stdout || '').trim().split('\n').filter(Boolean), then: `update.sh --yes --build-current=${target} through the root runner`, safety: `the current HEAD is tagged pp-rollback-<timestamp> first, so this rollback is itself reversible` };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'rollback_self', subject: target, action: `reset the live ProxyPilot checkout from ${liveHead.slice(0, 8)} to ${target.slice(0, 8)} and rebuild`, preview: plan });
     if (gate) return gate;

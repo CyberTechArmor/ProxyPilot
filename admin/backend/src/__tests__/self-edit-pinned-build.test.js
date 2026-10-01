@@ -26,7 +26,7 @@ function setup(t) {
   git(candidate, 'add', '.'); git(candidate, 'commit', '-q', '-m', 'candidate');
   const head = git(candidate, 'rev-parse', 'HEAD');
   writeFileSync(state, JSON.stringify({ candidate: { base_sha: base }, checks: { sha: head, ok: true }, rollback_points: [] }));
-  const requests = [], commands = [], behavior = {};
+  const requests = [], commands = [], plans = [], behavior = {};
   const kit = {
     ctx: {
       runHostCapture: async (command, argv) => {
@@ -41,13 +41,13 @@ function setup(t) {
       SELF_UPDATE_POLICY: { enabled: true },
     },
     ok: (value) => value, err: (error) => ({ error }), mutation: (_name, _spec, fn) => fn, reader: (_name, fn) => fn,
-    confirmToken: () => null, dry: () => null, tail: (s = '') => s,
+    confirmToken: () => null, dry: (_args, plan) => { plans.push(plan); return null; }, tail: (s = '') => s,
     hostSh: async (_command, args) => ({ stdout: existsSync(join(args[0], '.git')) ? 'yes' : 'no' }),
     policy: { self_edit: { candidate_dir: candidate, state_file: state, candidate_branch: 'candidate', required_checks_for_promote: ['backend-tests'] } },
   };
   const handlers = createSelfEditHandlers(kit), auth = { created_by: 'fixture' };
   const call = (name, args = {}) => handlers[name](args, auth, {}, {});
-  return { live, candidate, base, head, git, requests, commands, behavior, call };
+  return { live, candidate, base, head, git, requests, commands, plans, behavior, call };
 }
 
 test('promotion and rollback request exact builds of their chosen commit', async (t) => {
@@ -56,10 +56,12 @@ test('promotion and rollback request exact builds of their chosen commit', async
   assert.equal(promoted.promoted, true, promoted.error);
   assert.equal(s.git(s.live, 'rev-parse', 'HEAD'), s.head);
   assert.deepEqual(s.requests[0], { requestedBy: 'mcp-self:fixture', buildCurrentSha: s.head });
+  assert.ok(s.plans.some(p => p.to_sha === s.head && p.then.includes('--build-current=' + s.head)));
   const rollback = await s.call('rollback_self');
   assert.equal(rollback.rolled_back, true, rollback.error);
   assert.equal(s.git(s.live, 'rev-parse', 'HEAD'), s.base);
   assert.deepEqual(s.requests[1], { requestedBy: 'mcp-self-rollback:fixture', buildCurrentSha: s.base });
+  assert.ok(s.plans.some(p => p.to_sha === s.base && p.then.includes('--build-current=' + s.base)));
   assert.equal(s.commands.filter((a) => a.includes('merge')).length, 1);
   assert.ok(s.commands.some((a) => a.includes('merge') && a.at(-1) === s.head), 'promotion merges the immutable checked SHA');
 });

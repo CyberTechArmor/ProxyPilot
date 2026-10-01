@@ -29,11 +29,9 @@ import {
   Globe,
   Lock,
   Plug,
-  Sun,
-  Moon,
   X,
 } from 'lucide-react';
-import { useTheme } from '@/context/ThemeContext';
+import { ThemeSelector } from '@/components/ThemeSelector';
 import { cn } from '@/lib/utils';
 import { useBranding } from '@/lib/branding';
 import { SnapshotExportProvider } from '@/context/SnapshotExportContext';
@@ -197,8 +195,6 @@ export default function Layout() {
   const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
   const isAdmin = user?.role === 'admin' || storedUser?.role === 'admin';
 
-  const { theme, toggleTheme } = useTheme();
-  const ThemeIcon = theme === 'dark' ? Sun : Moon;
 
   // Feature permissions for the 'user' role (refreshed by the
   // AuthContext 30s re-verify, so grants show up without re-login).
@@ -313,7 +309,7 @@ export default function Layout() {
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
     ...(mock2Enabled ? [{ name: 'Dev Studio', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
-    ...(operationsEnabled ? [{ name: 'Operations', href: '/operational-projects', icon: ClipboardList }] : []),
+    ...(operationsEnabled ? [{ name: 'Operations', href: '/operational-projects', icon: ClipboardList }, { name: 'Access · Connections', href: '/connections', icon: KeyRound }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
@@ -355,16 +351,7 @@ export default function Layout() {
             : <Rocket className="h-6 w-6 shrink-0 text-primary" />}
           <span className="text-lg font-bold truncate">{branding.name}</span>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={toggleTheme}
-          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          className="ml-auto h-11 w-11"
-        >
-          <ThemeIcon className="h-5 w-5" />
-        </Button>
+        <ThemeSelector className="ml-auto" />
       </header>
 
       {/* Mobile sidebar backdrop (click to close) */}
@@ -535,16 +522,7 @@ export default function Layout() {
                 <p className="text-sm font-medium truncate">{user?.username}</p>
                 <p className="text-xs text-muted-foreground">{isAdmin ? 'Administrator' : 'User'}</p>
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={toggleTheme}
-                aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                className="h-11 w-11 shrink-0"
-              >
-                <ThemeIcon className="h-5 w-5" />
-              </Button>
+              <ThemeSelector />
               <div className="relative" ref={notifPanelRef}>
                 <Button
                   variant="ghost"

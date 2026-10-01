@@ -1,45 +1,28 @@
-// Light/dark theme. The token palettes live in index.css (:root = light,
-// .dark = dark); this context just owns which one is active by toggling the
-// `dark` class on <html> and persisting the choice.
-//
-// Default is DARK — ProxyPilot historically shipped dark-only, so existing
-// users see no change until they flip the sun/moon toggle. A pre-paint
-// inline script in index.html applies the stored class before React mounts
-// so there's no flash of the wrong theme on load; this provider keeps it in
-// sync afterward.
-
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-
-const STORAGE_KEY = 'pp-theme';
-const ThemeContext = createContext({ theme: 'dark', toggleTheme: () => {}, setTheme: () => {} });
-
+// Color palettes only: every theme shares typography, icons and component layout.
+// index.html applies the same normalization before React/CSS paint.
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState } from 'react';
+import { normalizeTheme, THEME_STORAGE_KEY, THEMES } from '@/lib/theme';
+const ThemeContext = createContext({ theme: 'midnight', setTheme: () => {} });
 function getInitialTheme() {
-  if (typeof window === 'undefined') return 'dark';
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  return stored === 'light' || stored === 'dark' ? stored : 'dark';
+  try { return normalizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY)); }
+  catch { return 'midnight'; }
 }
-
 export function ThemeProvider({ children }) {
   const [theme, setThemeState] = useState(getInitialTheme);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement;
-    root.classList.toggle('dark', theme === 'dark');
-    // Tell the UA so native form controls, scrollbars and the like match.
-    root.style.colorScheme = theme;
-    try { window.localStorage.setItem(STORAGE_KEY, theme); } catch { /* private mode */ }
+    root.classList.toggle('dark', theme === 'midnight');
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme === 'midnight' ? 'dark' : 'light';
+    try { window.localStorage.setItem(THEME_STORAGE_KEY, theme); } catch { /* blocked storage */ }
   }, [theme]);
-
-  const setTheme = useCallback((t) => setThemeState(t === 'light' ? 'light' : 'dark'), []);
-  const toggleTheme = useCallback(() => setThemeState((t) => (t === 'dark' ? 'light' : 'dark')), []);
-
-  return (
-    <ThemeContext.Provider value={{ theme, toggleTheme, setTheme }}>
-      {children}
-    </ThemeContext.Provider>
-  );
+  useEffect(() => {
+    const sync = event => { if (event.key === THEME_STORAGE_KEY) setThemeState(normalizeTheme(event.newValue)); };
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
+  }, []);
+  const setTheme = useCallback(value => setThemeState(normalizeTheme(value)), []);
+  const toggleTheme = useCallback(() => setThemeState(value => THEMES[(THEMES.findIndex(t => t.id === value) + 1) % THEMES.length].id), []);
+  return <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>{children}</ThemeContext.Provider>;
 }
-
-export function useTheme() {
-  return useContext(ThemeContext);
-}
+export function useTheme() { return useContext(ThemeContext); }

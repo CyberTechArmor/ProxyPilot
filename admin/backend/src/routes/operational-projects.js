@@ -1,3 +1,4 @@
+import { assessConfigurationConnections } from '../lib/operational-configuration-readiness.js';
 import { randomUUID } from 'node:crypto';
 import { OperationsError, parse, revision, schemas } from '../lib/operational-projects-logic.js';
 
@@ -14,7 +15,7 @@ const noSudo = (_req, res) => res.status(401).json({ error: 'sudo_required', sud
 // once-per-session agent-control verification (lib/operational-control-grants.js);
 // without it nothing is verified, so takeover and reconciliation are refused.
 export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false,
-  agentRuns = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
+  brokerTasks = null, brokerTaskProposals = null, configurationConnections = null, agentRuns = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
   const router = Router();
   const on = value => (typeof value === 'function' ? value() : value) === true;
   const opsOn = () => on(enabled), agentsOn = () => opsOn() && on(agentsEnabled);
@@ -40,7 +41,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   const handle = (fn, status = 200, denialAction = null) => (req, res) => {
     try {
       const data = fn(req, req.operationsActor);
-      const rev = data?.revision ?? data?.project?.revision ?? data?.draft?.revision;
+      const rev = data?.agent?.revision ?? data?.revision ?? data?.project?.revision ?? data?.draft?.revision;
       if (rev) res.set('ETag', `"${rev}"`);
       return res.status(status).json(data);
     } catch (err) {
@@ -93,6 +94,28 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.get('/:id/access-requests', agentsOnly, handle((r,a)=>store.requests(a,r.params.id),200,'membership_requests_read'));
   router.post('/:id/access-requests/:requestId/decision', agentsOnly,
     handle((r,a)=>store.decideRequest(a,r.params.id,r.params.requestId,expected(r),r.body),200,'membership_decision'));
+  const configHandle=(fn,status=200)=>async(req,res)=>{
+    try {let value=fn(req,req.operationsActor);if(value.agent&&value.readiness) value={...value,readiness:await assessConfigurationConnections({readConnections:configurationConnections?(actor)=>configurationConnections(actor,req):null,actor:req.operationsActor,agent:value.agent,readiness:value.readiness})};if(req.path.endsWith('/readiness'))value=value.readiness;if(value.agent?.revision)res.set('ETag',`"${value.agent.revision}"`);return res.status(status).json(value);}
+    catch(err){const status=err instanceof OperationsError?err.status:500;
+      const code=({400:'INVALID_REQUEST',401:'AUTH_REQUIRED',403:'NOT_PERMITTED',404:'NOT_FOUND',409:'REVISION_MISMATCH',428:'REVISION_REQUIRED'})[status]??'BROKER_UNAVAILABLE';
+      return res.status(status).json({contract_version:'broker.v1',error:{code,message:code.replaceAll('_',' '),request_id:req.operationsActor.requestId,retryable:false,next_action:null}});}
+  };
+  router.get('/:id/agent-configurations', agentsOnly, configHandle((r,a)=>store.configurations(a,r.params.id)));
+  router.post('/:id/agent-configurations', agentsOnly, configHandle((r,a)=>store.createConfiguration(a,r.params.id,r.body),201));
+  router.get('/:id/agent-configurations/:configurationId', agentsOnly, configHandle((r,a)=>store.configuration(a,r.params.id,r.params.configurationId)));
+  router.patch('/:id/agent-configurations/:configurationId', agentsOnly, configHandle((r,a)=>store.updateConfiguration(a,r.params.id,r.params.configurationId,expected(r),r.body)));
+  router.get('/:id/agent-configurations/:configurationId/readiness', agentsOnly, configHandle((r,a)=>store.configuration(a,r.params.id,r.params.configurationId)));
+  const tasksOnly=(_req,res,next)=>brokerTasks?next():res.status(503).json({error:{code:'BROKER_UNAVAILABLE',message:'Worker unavailable',retryable:false}});
+  router.get('/:id/broker-registrations',agentsOnly,tasksOnly,agentHandle((r,a)=>brokerTasks.registrations(a,r.params.id)));
+  const proposalsOnly=(_req,res,next)=>brokerTaskProposals?next():res.status(503).json({error:{code:'TASK_READINESS_UNAVAILABLE',message:'Task preparation unavailable',retryable:false}});
+  router.post('/:id/agent-configurations/:configurationId/task-proposals',agentsOnly,proposalsOnly,agentHandle((r,a)=>brokerTaskProposals.prepare(a,r.params.id,r.params.configurationId,r.body),201));
+  router.post('/:id/agent-configurations/:configurationId/task-proposals/:proposalId/start',agentsOnly,proposalsOnly,requireSudo,agentHandle((r,a)=>{empty(r);return brokerTaskProposals.start(a,r.params.id,r.params.configurationId,r.params.proposalId);},202));
+  router.get('/:id/agent-configurations/:configurationId/tasks',agentsOnly,tasksOnly,agentHandle((r,a)=>brokerTasks.list(a,r.params.id,r.params.configurationId)));
+  router.post('/:id/agent-configurations/:configurationId/tasks/readiness',agentsOnly,tasksOnly,agentHandle((r,a)=>brokerTasks.readiness(a,r.params.id,r.params.configurationId,r.body)));
+  router.post('/:id/agent-configurations/:configurationId/tasks',agentsOnly,tasksOnly,requireSudo,agentHandle((r,a)=>brokerTasks.start(a,r.params.id,r.params.configurationId,r.body),202));
+  router.get('/:id/agent-configurations/:configurationId/tasks/:taskId',agentsOnly,tasksOnly,agentHandle((r,a)=>brokerTasks.status(a,r.params.id,r.params.configurationId,r.params.taskId)));
+  router.post('/:id/agent-configurations/:configurationId/tasks/:taskId/cancel',agentsOnly,tasksOnly,requireSudo,agentHandle((r,a)=>{empty(r);return brokerTasks.cancel(a,r.params.id,r.params.configurationId,r.params.taskId);}));
+  router.post('/:id/agent-configurations/:configurationId/tasks/:taskId/approval',agentsOnly,tasksOnly,requireSudo,agentHandle((r,a)=>brokerTasks.approve(a,r.params.id,r.params.configurationId,r.params.taskId,r.body)));
   router.get('/:id/agent-profiles', agentsOnly, handle((r,a)=>store.profiles(a,r.params.id),200,'profiles_read'));
   router.post('/:id/agent-profiles', agentsOnly, handle((r,a)=>store.createProfile(a,r.params.id,expected(r),r.body),201,'profile_create'));
   router.get('/:id/agent-profiles/:profileId', agentsOnly, handle((r,a)=>store.profile(a,r.params.id,r.params.profileId),200,'profile_read'));

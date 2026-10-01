@@ -19,6 +19,7 @@ import Housekeeping from '@/pages/Housekeeping';
 import Storage from '@/pages/Storage';
 import Migrations from '@/pages/Migrations';
 import Projects from '@/pages/Projects';
+import Connections from '@/pages/Connections';
 import OperationalProjects from '@/pages/OperationalProjects';
 import OperationalProjectDetail from '@/pages/OperationalProjectDetail';
 import ProjectSettings from '@/pages/ProjectSettings';
@@ -125,6 +126,7 @@ function App() {
             production-pinned host GET /api/mock2/status 404s and it bounces
             home, so the route staying registered leaks nothing. */}
         <Route path="projects" element={<Projects />} />
+        <Route path="connections" element={<Connections />} />
         <Route path="operational-projects" element={<OperationalProjects />} />
         <Route path="operational-projects/:id" element={<OperationalProjectDetail />} />
         {/* Everything that is not a project lives under Settings (the gear in

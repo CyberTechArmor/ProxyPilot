@@ -32,7 +32,7 @@ const profileFields = { display_name: name, workflow_type: z.literal('synthetic_
   proposed_actions: z.array(z.enum(['navigate','click','type','read','download','logout'])).max(6).refine(v => new Set(v).size === v.length),
   proposed_origins: z.array(z.string().max(2048)).max(5) };
 export const schemas = {
-  create: z.object({ name, description: text(20000).default('') }).strict(),
+  create: z.object({ name, description: text(20000).default(''), members: z.array(z.object({user_id:uuid,role:z.enum(roles)}).strict()).max(32).default([]).refine(v=>new Set(v.map(m=>m.user_id)).size===v.length) }).strict(),
   project: z.object({ name: name.optional(), description: text(20000).optional() }).strict().refine(v => Object.keys(v).length > 0),
   visibility: z.object({ visibility: z.enum(['hidden','read-only','collaborative']),
     reviewed_visibility: z.literal('Expose redacted project card').optional() }).strict(),

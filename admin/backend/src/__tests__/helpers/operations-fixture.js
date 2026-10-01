@@ -1,3 +1,4 @@
+import { operationalConfigurationsMigration1113 } from '../../lib/operational-configurations.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { operationalProjectsMigration1100, operationalProjectsMigration1101, operationalProjectsMigration1102 } from '../../lib/operational-projects-schema.js';
@@ -10,10 +11,10 @@ import { operationalRunMigration1111 } from '../../lib/operational-run-schema.js
 import { operationalRecoveryMigration1112 } from '../../lib/operational-recovery-schema.js';
 import { createOperationsStore } from '../../lib/operational-projects-store.js';
 
-export function operationsFixture() {
-  const db = new DatabaseSync(':memory:');
+export function operationsFixture({path=':memory:'}={}) {
+  const db = new DatabaseSync(path);
   db.exec(`PRAGMA foreign_keys=ON;
-    CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT UNIQUE,role TEXT);
+    CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT UNIQUE,role TEXT,locked_until TEXT,updated_at TEXT);
     CREATE TABLE sessions(id TEXT PRIMARY KEY,user_id TEXT,expires_at TEXT,revoked_at TEXT,last_used_at TEXT,auth_level TEXT);
     CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT);
     CREATE TABLE mock2_projects(id INTEGER PRIMARY KEY,name TEXT);
@@ -48,11 +49,12 @@ export function operationsFixture() {
   operationalCredentialBindingMigration1110(adapter);
   operationalRunMigration1111(adapter);
   operationalRecoveryMigration1112(adapter);
+  operationalConfigurationsMigration1113(adapter);
   let time = Date.now();
   const store = createOperationsStore(adapter, { now: () => new Date(time).toISOString() });
   const addUser = (role = 'user') => {
     const id = randomUUID();
-    db.prepare('INSERT INTO users VALUES(?,?,?)').run(id, `person-${id}`, role);
+    db.prepare('INSERT INTO users(id,username,role) VALUES(?,?,?)').run(id, `person-${id}`, role);
     return { id, role };
   };
   return { db, adapter, store, migrate, addUser, advance: ms => { time += ms; }, close: () => db.close() };

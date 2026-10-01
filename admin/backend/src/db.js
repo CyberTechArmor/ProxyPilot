@@ -1,3 +1,6 @@
+import { brokerTaskProposalsMigration1115 } from './lib/broker-task-proposals.js';
+import { brokerTaskMigration1114 } from './lib/broker-task-dispatch.js';
+import { operationalConfigurationsMigration1113 } from './lib/operational-configurations.js';
 import {resumeAuditedMcpRoots} from './lib/mcp-legacy-recovery.js';
 import {ADMIN_BOOTSTRAP_SCHEMA} from './lib/admin-bootstrap.js';
 import { TOTP_ENROLLMENT_SCHEMA } from './lib/totp-enrollment.js';
@@ -2048,6 +2051,9 @@ export function initDatabase() {
   runMigration(db, 1110, 'operational_credential_bindings', operationalCredentialBindingMigration1110);
   runMigration(db, 1111, 'operational_supervised_runs', operationalRunMigration1111);
   runMigration(db, 1112, 'operational_practice_recovery', operationalRecoveryMigration1112);
+  runMigration(db, 1113, 'operational_agent_configurations', operationalConfigurationsMigration1113);
+  runMigration(db, 1114, 'broker_task_dispatch', brokerTaskMigration1114);
+  runMigration(db, 1115, 'broker_task_proposals', brokerTaskProposalsMigration1115);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

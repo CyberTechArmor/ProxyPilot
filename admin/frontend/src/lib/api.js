@@ -2,6 +2,21 @@ import { requestSudo } from './sudo.js';
 import { requestAgentControl } from './agent-control.js';
 
 const API_BASE = '/api';
+// Independent broker delegation exists only in this tab's memory. Never persist
+// it in browser storage, URLs, application state serialization or logs.
+let brokerDelegation=null;
+export function clearBrokerDelegation(){brokerDelegation=null;}
+export function brokerDelegationStatus(){
+  if(brokerDelegation?.expires_at<=Date.now())brokerDelegation=null;
+  return brokerDelegation?{user_id:brokerDelegation.user_id,expires_at:brokerDelegation.expires_at}:null;
+}
+export function acceptBrokerDelegation(value,expectedUserId){
+  if(!expectedUserId||value?.user_id!==expectedUserId||typeof value.delegation!=='string'||
+    !/^[A-Za-z0-9._~-]{32,4096}$/.test(value.delegation)||!Number.isFinite(value.expires_at)||
+    value.expires_at<=Date.now()||value.expires_at>Date.now()+300000)throw new Error('Invalid broker identity response');
+  brokerDelegation={delegation:value.delegation,user_id:value.user_id,expires_at:value.expires_at};
+}
+
 
 class ApiError extends Error {
   constructor(message, status, data = {}) {
@@ -24,11 +39,17 @@ function readCookie(name) {
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 async function request(endpoint, options = {}, _retryOnSudo = true) {
+  const { noReplay = false, ...fetchOptions } = options;
+  if (noReplay) _retryOnSudo = false;
   const method = (options.method || 'GET').toUpperCase();
   const headers = {
     'Content-Type': 'application/json',
     ...options.headers,
   };
+
+  if((endpoint.startsWith('/connections')||/^\/operational-projects\/[^/]+\/agent-configurations/.test(endpoint))&&brokerDelegationStatus()) {
+    headers['X-Broker-Delegation']=brokerDelegation.delegation;
+  }
 
   // Echo the CSRF cookie back as a header on state-changing requests.
   // Backend's CSRF middleware compares the two — same value means the
@@ -40,7 +61,7 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   }
 
   const response = await fetch(`${API_BASE}${endpoint}`, {
-    ...options,
+    ...fetchOptions,
     headers,
     // Send the httpOnly pp_token cookie on every request — this is
     // how the browser carries the session post-B4. Required for
@@ -72,6 +93,11 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
         response.status,
       );
     }
+  }
+
+  if (!response.ok && (noReplay || typeof data.error === 'object')) {
+    const failure = data.error;
+    throw new ApiError(typeof failure === 'object' ? failure.message : 'Request refused. Verify your session, then submit explicitly.', response.status, { code: failure?.code ?? (typeof data.code === 'string' && /^[A-Z_]{1,64}$/.test(data.code) ? data.code : undefined), next_action: failure?.next_action });
   }
 
   if (response.status === 401) {
@@ -286,7 +312,7 @@ export const api = {
 
   verify: () => request('/auth/verify'),
 
-  logout: () => request('/auth/logout', { method: 'POST' }),
+  logout: () => { clearBrokerDelegation(); return request('/auth/logout', { method: 'POST' }); },
 
   // Sudo re-auth (K.2). Always passes _retryOnSudo=false so that a
   // failed sudo (bad password / bad TOTP) doesn't recursively prompt
@@ -2553,3 +2579,20 @@ function evidenceUpload(endpoint, file, signal, onProgress) {
     xhr.send(file);
   });
 }
+
+// Metadata-only broker requests. No automatic authentication replay for mutations.
+export const connectionsApi = {
+  get: (path = '', signal) => request(`/connections${path}`, { cache: 'no-store', signal }),
+  write: (path, body = {}, revision, method = 'POST') => request(`/connections${path}`, {
+    noReplay: true, cache: 'no-store', method, body: JSON.stringify(body),
+    ...(revision == null ? {} : { headers: { 'If-Match': `"${revision}"` } }),
+  }),
+};
+
+export const brokerTasksApi = {
+  registrations: projectId => request(`/operational-projects/${projectId}/broker-registrations`, {cache:'no-store'}),
+  propose: (projectId,agentId,body) => request(`/operational-projects/${projectId}/agent-configurations/${agentId}/task-proposals`, {method:'POST',noReplay:true,cache:'no-store',body:JSON.stringify(body)}),
+  start: (projectId,agentId,proposalId) => request(`/operational-projects/${projectId}/agent-configurations/${agentId}/task-proposals/${proposalId}/start`, {method:'POST',noReplay:true,cache:'no-store',body:'{}'}),
+  get: (projectId,agentId,taskId) => request(`/operational-projects/${projectId}/agent-configurations/${agentId}/tasks${taskId?`/${taskId}`:''}`,{cache:'no-store'}),
+  write: (projectId,agentId,suffix,body={}) => request(`/operational-projects/${projectId}/agent-configurations/${agentId}/tasks${suffix}`,{method:'POST',noReplay:true,cache:'no-store',body:JSON.stringify(body)}),
+};

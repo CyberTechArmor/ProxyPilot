@@ -85,10 +85,14 @@ export function validateUpdateFlags(flags) {
   if (!Array.isArray(flags)) return { ok: false, error: 'flags must be an array of strings' };
   const out = [];
   for (const f of flags) {
-    if (typeof f !== 'string' || !UPDATE_FLAGS.includes(f)) {
+    if (typeof f !== 'string' || (!UPDATE_FLAGS.includes(f) && !/^--build-current=[0-9a-f]{40}$/.test(f))) {
       return { ok: false, error: `flag ${JSON.stringify(f)} is not allowed (allowed: ${UPDATE_FLAGS.join(' ')})` };
     }
     if (!out.includes(f)) out.push(f);
+  }
+  const pins = out.filter((f) => f.startsWith('--build-current='));
+  if (pins.length > 1 || (pins.length && out.length !== 1)) {
+    return { ok: false, error: 'build-current requires exactly one SHA and cannot be combined with update flags' };
   }
   return { ok: true, flags: out };
 }
@@ -242,8 +246,10 @@ export function parseState(raw, { nowMs = Date.now() } = {}) {
     finished_at: r.finished_at || null,
     exit_code: r.exit_code == null ? null : num(r.exit_code),
     requested_by: typeof r.requested_by === 'string' ? r.requested_by : null,
-    from_sha: r.from_sha || null,
-    to_sha: r.to_sha || null,
+      from_sha: r.from_sha || null,
+      to_sha: r.to_sha || null,
+      expected_sha: r.expected_sha || null,
+      outcome: typeof r.outcome === 'string' ? r.outcome : null,
     from_version: r.from_version || null,
     to_version: r.to_version || null,
     flags: typeof r.flags === 'string' ? r.flags : '',

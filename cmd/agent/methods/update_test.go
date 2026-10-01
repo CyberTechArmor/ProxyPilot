@@ -98,6 +98,10 @@ func TestUpdateRequest(t *testing.T) {
 		{"malformed json", `{"requested_by":`, "invalid_params"},
 		{"ok no flags", `{"requested_by":"admin"}`, ""},
 		{"ok both flags, deduplicated", `{"requested_by":"user:42","flags":["--rebuild","--enable-mock2","--rebuild"]}`, ""},
+		{"pinned build", `{"requested_by":"admin","flags":["--build-current=` + strings.Repeat("a", 40) + `"]}`, ""},
+		{"pinned build mixed with rebuild", `{"requested_by":"admin","flags":["--build-current=` + strings.Repeat("a", 40) + `","--rebuild"]}`, "invalid_params"},
+		{"pinned build mixed with config", `{"requested_by":"admin","flags":["--build-current=` + strings.Repeat("a", 40) + `","--enable-mock2"]}`, "invalid_params"},
+		{"unpinned build", `{"requested_by":"admin","flags":["--build-current=main"]}`, "invalid_params"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

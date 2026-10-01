@@ -34,6 +34,7 @@ NC='\033[0m' # No Color
 
 # Parse arguments
 FORCE_REBUILD=false
+BUILD_CURRENT_SHA=""
 SKIP_RESTART=false
 VERBOSE=false
 ENABLE_MOCK2=false
@@ -69,6 +70,13 @@ for arg in "$@"; do
         --discard-local)
             DISCARD_LOCAL=true
             ;;
+        --build-current=*)
+            if [ -n "$BUILD_CURRENT_SHA" ]; then echo 'Duplicate --build-current target' >&2; exit 2; fi
+            BUILD_CURRENT_SHA="${arg#--build-current=}"
+            if ! [[ "$BUILD_CURRENT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+                echo '--build-current requires one full 40-character commit SHA' >&2; exit 2
+            fi
+            ;;
         --help|-h)
             echo "ProxyPilot Update Script"
             echo ""
@@ -76,6 +84,9 @@ for arg in "$@"; do
             echo ""
             echo "Options:"
             echo "  --rebuild, --force, -f   Force rebuild even if code is up to date"
+            echo "  --build-current=<sha>    Build exactly this clean checkout SHA; never fetch"
+            echo "                           or advance Git. Cannot combine with --rebuild,"
+            echo "                           --discard-local, --upgrade-incus or --enable-mock2."
             echo "  --no-restart             Don't restart after update"
             echo "  --enable-mock2           Turn on the Mock2 dev/build module (sets"
             echo "                           MOCK2_ENABLED=true in the deployed .env). The"
@@ -99,6 +110,13 @@ for arg in "$@"; do
             ;;
     esac
 done
+if [ -n "$BUILD_CURRENT_SHA" ] && { [ "$FORCE_REBUILD" = true ] || [ "$DISCARD_LOCAL" = true ] || [ "$UPGRADE_INCUS" = true ] || [ "$ENABLE_MOCK2" = true ]; }; then
+    echo '--build-current cannot be combined with update or configuration-changing flags' >&2
+    exit 2
+fi
+if [ -n "${PROXYPILOT_UPDATE_REEXEC:-}" ] && [ "${PROXYPILOT_UPDATE_REEXEC:-}" != 1 ]; then
+    echo 'Invalid self-update re-exec marker' >&2; exit 2
+fi
 
 log() {
     echo -e "$1"
@@ -866,41 +884,25 @@ fi
 # backup, the git pull, and the docker rebuild. flock is in util-linux
 # on every Debian/Ubuntu we support; if it's missing we just warn and
 # continue.
-LOCK_FILE="/var/lock/proxypilot-update.lock"
-# The writability probe runs in a SUBSHELL so its 2>/dev/null cannot stick.
-# Never put a redirection like 2>/dev/null on the bare `exec` below:
-# redirections on exec are permanent for the whole script, and doing so
-# pointed stderr at /dev/null from here on — every interactive `read -p`
-# prompt (which writes to stderr) became invisible, so updates looked hung
-# at the uncommitted-changes question, and all error output was swallowed
-# (operator report, 2026-07-31).
+LOCK_FILE="${PROXYPILOT_UPDATE_LOCK:-/var/lock/proxypilot-update.lock}"
+# Keep the same locked open file description through self re-exec. Closing
+# and reacquiring it creates a race, and a re-exec marker never grants a bypass.
 if command -v flock &>/dev/null && ( : >"$LOCK_FILE" ) 2>/dev/null; then
-    exec 200>"$LOCK_FILE"
-    LOCK_OPTIONS=(-n)
-    # Let inherited pre-pull children release the old updater's lock during a
-    # terminal handoff. A timeout still refuses; it never bypasses another run.
-    if [[ "${PROXYPILOT_TERMINAL_HANDOFF:-}" = 1 ]]; then LOCK_OPTIONS=(-w 30); fi
-    if ! flock "${LOCK_OPTIONS[@]}" 200 2>/dev/null; then
-        # A held lock during the self-update re-exec is our own
-        # lineage, not a second operator. Children spawned while the
-        # pre-pull process held fd 200 (git's post-pull background
-        # maintenance is the usual one) inherit the locked file
-        # description and keep the flock alive past the exec, which
-        # used to abort the update right after "[2/7] Pulling latest
-        # code". The re-exec'd run already owns this update — warn
-        # and carry on; the stray child exits on its own shortly.
-        if [ -n "${PROXYPILOT_UPDATE_REEXEC:-}" ]; then
-            echo -e "\033[1;33m[WARN]\033[0m Update lock still held by a child of the pre-update process; continuing (self-update re-exec)."
-            # Best-effort re-acquire so the rest of this run is still
-            # guarded once the straggler exits (git gc is quick).
-            flock -w 30 200 2>/dev/null || true
-        else
-            echo -e "\033[0;31m[ERROR]\033[0m Another update.sh is already running (lock: $LOCK_FILE)."
-            echo "If you're sure no other process is running:"
-            echo "  rm $LOCK_FILE && retry"
+    if [[ "${PROXYPILOT_UPDATE_REEXEC:-}" = 1 && "${PROXYPILOT_UPDATE_LOCK_INHERITED:-}" = 1 ]]; then
+        if ! flock -n 200; then
+            echo 'Cannot verify the inherited update lock; refusing re-exec.' >&2
+            exit 1
+        fi
+    else
+        exec 200>"$LOCK_FILE"
+        LOCK_OPTIONS=(-n)
+        if [[ "${PROXYPILOT_TERMINAL_HANDOFF:-}" = 1 ]]; then LOCK_OPTIONS=(-w 30); fi
+        if ! flock "${LOCK_OPTIONS[@]}" 200; then
+            echo "Another update.sh is already running (lock: $LOCK_FILE)." >&2
             exit 1
         fi
     fi
+    export PROXYPILOT_UPDATE_LOCK_INHERITED=1
 fi
 
 echo ""
@@ -945,6 +947,10 @@ done
 # Change to project directory
 cd "$SCRIPT_DIR"
 log_verbose "Working directory: $SCRIPT_DIR"
+source "$SCRIPT_DIR/scripts/update-git.sh"
+# Resolve and validate ancestry before lockfile restoration, DB backups,
+# dependency provisioning, environment changes or service work.
+pp_prepare_update_target || exit 1
 
 # Get current version
 CURRENT_VERSION=$("$NODE_CMD" -p "require('./admin/backend/package.json').version" 2>/dev/null || echo "unknown")
@@ -978,8 +984,8 @@ if [ -n "$($GIT_CMD status --porcelain 2>/dev/null)" ]; then
             # edits and untracked files. Ignored files (.env, data/) are
             # untouched — no -x.
             log "${YELLOW}--discard-local: resetting the checkout to HEAD and removing untracked files${NC}"
-            $GIT_CMD reset --hard HEAD 2>&1 | tee -a "$LOG_FILE"
-            $GIT_CMD clean -fd 2>&1 | tee -a "$LOG_FILE"
+            pp_git_logged reset --hard HEAD || exit 1
+            pp_git_logged clean -fd || exit 1
         else
             # Non-interactive runs take the prompt's safe default: no.
             log "${RED}Update cancelled: uncommitted local changes in $SCRIPT_DIR and --yes was given.${NC}"
@@ -1016,17 +1022,8 @@ trap 'on_error' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Fetch latest changes
-log "${BLUE}[1/7] Fetching latest changes...${NC}"
-log_verbose "Running: $GIT_CMD fetch origin main"
-if ! $GIT_CMD fetch origin main 2>&1 | tee -a "$LOG_FILE"; then
-    log "${RED}Error: Failed to fetch from remote${NC}"
-    exit 1
-fi
-
-# Check if there are updates
-LOCAL=$($GIT_CMD rev-parse HEAD 2>/dev/null)
-REMOTE=$($GIT_CMD rev-parse origin/main 2>/dev/null)
+# The target was fetched once before mutations. Re-exec and pinned builds
+# never fetch again, even when main or origin/main changes in the meantime.
 log_verbose "Local commit: $LOCAL"
 log_verbose "Remote commit: $REMOTE"
 
@@ -1044,7 +1041,8 @@ if [ "$EUID" -eq 0 ] && [ -f /etc/systemd/system/proxypilot-update.service ] \
 fi
 
 if [ "$LOCAL" = "$REMOTE" ]; then
-    if [ "$FORCE_REBUILD" = true ]; then
+    if [ "$FORCE_REBUILD" = true ] || [ -n "$BUILD_CURRENT_SHA" ]; then
+        if [ "$UPDATE_OUTCOME" = already-current ]; then UPDATE_OUTCOME=build-current; fi
         log "${YELLOW}Code is up to date, but rebuilding as requested...${NC}"
     else
         log "${GREEN}Code is already up to date!${NC}"
@@ -1074,22 +1072,20 @@ if [ "$LOCAL" = "$REMOTE" ]; then
             else
                 log "Incus package and image settings unchanged (pass --upgrade-incus for an explicit host upgrade)."
             fi
+            pp_complete_update || exit 1
             exit 0
         fi
         read -p "Do you want to rebuild anyway? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             log "${BLUE}No changes made. Use --rebuild to force rebuild.${NC}"
+            pp_complete_update || exit 1
             exit 0
         fi
+        UPDATE_OUTCOME=build-current
     fi
 else
-    log "${BLUE}[2/7] Pulling latest code...${NC}"
-    log_verbose "Running: $GIT_CMD pull origin main"
-    if ! $GIT_CMD pull origin main 2>&1 | tee -a "$LOG_FILE"; then
-        log "${RED}Error: Failed to pull from remote${NC}"
-        exit 1
-    fi
+    pp_advance_update_target || exit 1
 
     # Self-update bootstrap. bash reads update.sh from disk in chunks;
     # any logic past this point that the git pull just changed (e.g.
@@ -1116,18 +1112,17 @@ else
             export PROXYPILOT_DEP_CHANGED=0
         fi
         export PROXYPILOT_UPDATE_REEXEC=1
+        export PROXYPILOT_UPDATE_EXPECTED_SHA="$EXPECTED_UPDATE_SHA"
+        export PROXYPILOT_UPDATE_EXPECTED_BRANCH="$EXPECTED_UPDATE_BRANCH"
         export PROXYPILOT_DB_BACKUP_FILE="$DB_BACKUP_FILE"
         export PROXYPILOT_DB_BACKUP_SOURCE="$DB_BACKUP_SOURCE"
         log_verbose "Re-executing update.sh with the freshly-pulled version"
-        # Release our claim on the update lock before replacing the
-        # process image so the re-exec'd run can re-acquire it.
-        # Children that inherited fd 200 may still hold the old
-        # description; the lock block tolerates that when
-        # PROXYPILOT_UPDATE_REEXEC is set.
-        exec 200>&- 2>/dev/null || true
+        # Preserve fd 200 and stderr across exec; the new process verifies the lock.
         exec bash "$SCRIPT_DIR/update.sh" --rebuild "$@"
     fi
 fi
+
+pp_verify_update_head before-runtime || exit 1
 
 # A new dependency floor must not strand the dashboard updater on the old
 # host runtime. Preflight and checkout checks have passed; provision/verify the
@@ -1232,6 +1227,7 @@ log ""
 # path actually calls the agent yet. The migration is a scaffold so
 # Phases B-E can flip individual operations onto the agent behind
 # feature flags without touching the deploy mechanics.
+pp_verify_update_head before-agent-build || exit 1
 log "${BLUE}[3.5/7] Installing host-side agent (Phase A scaffold)...${NC}"
 
 AGENT_GO_VERSION="1.27.1"
@@ -1517,6 +1513,7 @@ for candidate in "/opt/proxypilot" "$SCRIPT_DIR" "$(dirname "$SCRIPT_DIR")"; do
 done
 
 # Install backend dependencies
+pp_verify_update_head before-build || exit 1
 log "${BLUE}[4/7] Installing backend dependencies...${NC}"
 if [ "$IS_DOCKER_DEPLOY" = "true" ]; then
     log "Docker deployment detected — skipping host-side backend npm install (Dockerfile installs deps in alpine builder)"
@@ -1650,7 +1647,8 @@ if [ "$SKIP_RESTART" = true ]; then
     log "${YELLOW}Skipping restart (--no-restart specified)${NC}"
     log "Run manually: sudo $SCRIPT_DIR/restart.sh"
 else
-    log "${BLUE}[7/7] Restarting ProxyPilot...${NC}"
+pp_verify_update_head before-deployment || exit 1
+log "${BLUE}[7/7] Restarting ProxyPilot...${NC}"
     log ""
 
     # Check if running via Docker - check multiple possible locations.
@@ -2110,6 +2108,7 @@ PYEOF
         log "${GREEN}       Restart completed!               ${NC}"
         log "${GREEN}========================================${NC}"
         log ""
+        pp_complete_update || exit 1
         pp_report_update_completion
         # Disarm the trap before the early exit (the trap-disarm at
         # the bottom of the script is unreachable on the Docker path).
@@ -2256,6 +2255,7 @@ if [[ -d "$SCRIPT_DIR/cli" ]]; then install_setup_runner; fi
 
 # Never announce success before restart/readiness: the operator may see only
 # this log's last lines if their browser terminal disconnects.
+pp_complete_update || exit 1
 pp_report_update_completion
 
 # Update succeeded — disarm the restore trap. The backup is kept on disk

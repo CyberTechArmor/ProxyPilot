@@ -154,7 +154,9 @@ sys.exit(99)
         for kind, block in [('docker', docker), ('native', native)]:
             for ready in [True, False]:
                 with self.subTest(kind=kind, ready=ready):
-                    script = 'set -e\nsource "$1"\nlog(){ printf "%s\\n" "$1"; }; sleep(){ :; }; docker(){ :; }; install_setup_runner(){ :; }; curl(){ return ' + ('0' if ready else '1') + '; }\n' + block
+                    # This fixture isolates service readiness. Git completion
+                    # and refusal are exercised by test_update_git's real repos.
+                    script = 'set -e\nsource "$1"\npp_complete_update(){ :; }; log(){ printf "%s\\n" "$1"; }; sleep(){ :; }; docker(){ :; }; install_setup_runner(){ :; }; curl(){ return ' + ('0' if ready else '1') + '; }\n' + block
                     r = subprocess.run(['bash', '-c', script, 'test', str(HELPER)],
                                        env=dict(os.environ, INSTALL_DIR=str(self.root), SCRIPT_DIR=str(self.root),
                                                 SKIP_RESTART='false', PORT_TO_FREE='3001'),

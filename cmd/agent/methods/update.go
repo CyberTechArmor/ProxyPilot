@@ -66,11 +66,12 @@ const (
 )
 
 var (
-	updateAllowedFlags  = []string{"--rebuild", "--enable-mock2"}
-	updateRequestedByRe = regexp.MustCompile(`^[A-Za-z0-9._@:+-]{1,80}$`)
-	updateIDRe          = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	updateLogNameRe     = regexp.MustCompile(`^[0-9a-f-]{36}\.log$`)
-	ansiEscapeRe        = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
+	updateAllowedFlags   = []string{"--rebuild", "--enable-mock2"}
+	updateRequestedByRe  = regexp.MustCompile(`^[A-Za-z0-9._@:+-]{1,80}$`)
+	updateIDRe           = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	updateLogNameRe      = regexp.MustCompile(`^[0-9a-f-]{36}\.log$`)
+	updateBuildCurrentRe = regexp.MustCompile(`^--build-current=[0-9a-f]{40}$`)
+	ansiEscapeRe         = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]")
 )
 
 // updateRequestFile is what lands in /run/proxypilot-update/request.json.
@@ -246,7 +247,7 @@ func validateUpdateFlags(flags []string) ([]string, string) {
 	out := make([]string, 0, len(flags))
 	seen := map[string]bool{}
 	for _, f := range flags {
-		ok := false
+		ok := updateBuildCurrentRe.MatchString(f)
 		for _, a := range updateAllowedFlags {
 			if f == a {
 				ok = true
@@ -259,6 +260,11 @@ func validateUpdateFlags(flags []string) ([]string, string) {
 		if !seen[f] {
 			seen[f] = true
 			out = append(out, f)
+		}
+	}
+	for _, f := range out {
+		if updateBuildCurrentRe.MatchString(f) && len(out) != 1 {
+			return nil, "build-current requires exactly one SHA and cannot be combined with update flags"
 		}
 	}
 	return out, ""

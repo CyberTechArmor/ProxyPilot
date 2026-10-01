@@ -30,6 +30,13 @@ echo "[7/7] Restarting ProxyPilot..."
 if [ "\${FAKE_UPTODATE:-}" = 1 ]; then echo "Code is already up to date!"; fi
 if [ "\${FAKE_FAIL:-}" = 1 ]; then echo "boom: simulated failure"; exit 3; fi
 echo "done"
+if [ "\${FAKE_MISSING_RESULT:-}" != 1 ]; then
+  sha=$(git rev-parse HEAD)
+  expected=\${FAKE_EXPECTED_SHA:-$sha}
+  outcome=build-current
+  if [ "\${FAKE_UPTODATE:-}" = 1 ]; then outcome=already-current; fi
+  printf '{"expected_sha":"%s","status":"success","outcome":"%s","reason":""}\\n' "$expected" "$outcome" > "$PROXYPILOT_UPDATE_RESULT_FILE"
+fi
 `;
 
 function setup() {
@@ -209,6 +216,40 @@ test('a valid update request runs update.sh --yes with the allowlisted flags and
   assert.equal(s.readJson('installed.json').head_sha, st.to_sha);
 });
 
+test('zero exit without completion or with wrong expected HEAD is failed, never success', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  for (const extra of [{ FAKE_MISSING_RESULT: '1' }, { FAKE_EXPECTED_SHA: 'a'.repeat(40) }]) {
+    const id = s.request({});
+    assert.notEqual(s.runner([], extra).status, 0);
+    const st = s.readJson(`state.${id}.json`);
+    assert.equal(st.status, 'failed');
+    assert.equal(st.exit_code, 98);
+    assert.match(st.reason, /postcondition/);
+    assert.equal(st.to_sha, s.git('rev-parse', 'HEAD').trim());
+  }
+});
+
+test('pinned build request preserves exact SHA and rejects mixed or malformed targets', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  assert.equal(s.runner(['record-source', s.src]).status, 0);
+  const sha = s.git('rev-parse', 'HEAD').trim();
+  const id = s.request({ flags: `--build-current=${sha}` });
+  assert.equal(s.runner().status, 0);
+  const st = s.readJson(`state.${id}.json`);
+  assert.equal(st.expected_sha, sha);
+  assert.equal(st.outcome, 'build-current');
+  assert.equal(st.up_to_date, false);
+  for (const flags of [`--build-current=${sha} --rebuild`, '--build-current=main', `--build-current=${sha} --enable-mock2`]) {
+    const bad = s.request({ flags });
+    assert.notEqual(s.runner().status, 0);
+    assert.equal(s.readJson(`state.${bad}.json`).status, 'refused');
+  }
+  const wrong = s.request({ flags: '--build-current=' + 'a'.repeat(40) });
+  assert.notEqual(s.runner().status, 0);
+  assert.match(s.readJson(`state.${wrong}.json`).reason, /Pinned build result/);
+});
+
 test('phases are tracked from the [n/7] markers (3.5 included) and a failure keeps the last line as the reason', (t) => {
   const s = setup();
   t.after(s.cleanup);
@@ -339,8 +380,8 @@ test('update.sh: every prompt is guarded by --yes, and --discard-local is the on
   }
   assert.match(sh, /--yes\|-y\)\s*\n\s*ASSUME_YES=true/);
   assert.match(sh, /--discard-local\)\s*\n\s*DISCARD_LOCAL=true/);
-  assert.match(sh, /\$GIT_CMD reset --hard HEAD/);
-  assert.match(sh, /\$GIT_CMD clean -fd\b/);
+  assert.match(sh, /pp_git_logged reset --hard HEAD/);
+  assert.match(sh, /pp_git_logged clean -fd\b/);
   assert.doesNotMatch(sh, /clean -fdx/, 'ignored files (.env, data/) must survive --discard-local');
   // The re-exec after the pull forwards the original arguments, --yes included.
   assert.match(sh, /exec bash "\$SCRIPT_DIR\/update\.sh" --rebuild "\$@"/);

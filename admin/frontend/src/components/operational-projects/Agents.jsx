@@ -9,10 +9,11 @@ const blank = { display_name:'', workflow_type:'synthetic_sign_in', proposed_act
   proposed_origins:[] };
 const actions=['navigate','click','type','read','download','logout'];
 
-export function SupportedWorkflowNotice({projectId, compact=false}) {
+export function SupportedWorkflowNotice({projectId, compact=false, websiteAvailable=false}) {
   return <div className="rounded-md border bg-muted/30 p-4 space-y-3 min-w-0" data-testid="supported-browser-workflow">
-    <div><h3 className="text-base font-semibold">Supported browser workflow</h3>
+    <div><h3 className="text-base font-semibold">Demo sign-in workflow</h3>
       <p className="text-sm text-muted-foreground mt-1 break-words">This pilot runs synthetic sign-in at <span className="font-medium text-foreground break-all">{PILOT_ORIGIN}</span>. A profile name or task description does not create a runnable research workflow.</p></div>
+    {websiteAvailable===true&&<p className="text-sm text-muted-foreground">For public HTML/text summaries, use the separate <Link className="inline-flex min-h-11 items-center underline underline-offset-4" to={operationSectionUrl(projectId,'Website reviews')}>Open website reviews</Link> workflow with an approved guide. No demo sign-in profile is needed.</p>}
     {!compact && <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
       <div className="min-w-0"><p className="font-medium flex items-center gap-2"><Globe aria-hidden="true" className="h-4 w-4"/>Site and limits</p>
         <Link className="inline-flex min-h-11 items-center underline underline-offset-4" to={operationSectionUrl(projectId,'Access')}>Review in Access</Link></div>
@@ -24,7 +25,7 @@ export function SupportedWorkflowNotice({projectId, compact=false}) {
   </div>;
 }
 
-export function AgentConfiguration({base,project,onChanged,runsEnabled=false}) {
+export function AgentConfiguration({base,project,onChanged,runsEnabled=false,websiteAvailable=false}) {
   const [profiles,setProfiles]=useState([]),[form,setForm]=useState(blank),[selected,setSelected]=useState(null);
   const [origins,setOrigins]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
   const editable=['owner','editor'].includes(project.own_role)&&!project.archived_at;
@@ -39,16 +40,16 @@ export function AgentConfiguration({base,project,onChanged,runsEnabled=false}) {
   function choose(p) {setSelected(p);setForm({display_name:p.display_name,workflow_type:p.workflow_type,
     proposed_actions:p.proposed_actions,proposed_origins:p.proposed_origins});setOrigins(p.proposed_origins.join('\n'));setError('');}
   function payload() {return {...form,proposed_origins:origins.split(/\r?\n/).map(s=>s.trim()).filter(Boolean)};}
-  return <Panel title="Agent profiles" icon={Bot} description="Configure the supported synthetic sign-in workflow before starting a supervised run.">
-    <SupportedWorkflowNotice projectId={project.id}/>
-    {runsEnabled?<p>Saving a profile or assigning a guide starts no run. Runs start only from Agent runs, where each profile shows whether it can start and why not.</p>
+  return <Panel title="Demo sign-in profiles" icon={Bot} description="Configure the demo sign-in workflow before starting a supervised run.">
+    <SupportedWorkflowNotice projectId={project.id} websiteAvailable={websiteAvailable}/>
+    {runsEnabled?<p>Saving a profile or assigning a guide starts no run. Start from Demo sign-in runs after the server readiness checks pass.</p>
       :<p>Configuration only. Every profile is disabled for execution; saving or assigning a guide starts no run.</p>}
     <p className="text-sm text-muted-foreground">Run limits belong to the project. The owner can set them in Access → Project discovery and site; unset limits are unbounded.</p>
     {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
     <p role="status" aria-live="polite">{busy?'Working…':message}</p>
     <ul className="space-y-3">{profiles.map(p=><li key={p.id} className="rounded-md border p-3 space-y-2 min-w-0">
       <h3 className="text-base font-semibold break-words">{p.display_name}</h3>
-      <p className="text-xs text-muted-foreground break-all">Synthetic sign-in · Profile {p.id.slice(0,8)} · Revision {p.revision}{runsEnabled?'':' · Disabled'}</p>
+      <p className="text-xs text-muted-foreground break-all">Demo sign-in · Profile {p.id.slice(0,8)} · Revision {p.revision}{runsEnabled?'':' · Disabled'}</p>
       <p className={`text-sm break-words ${!p.guide_version_id?'font-medium':''}`}>Guide: {p.guide_version_id?`Approved v${p.guide_version_number??'?'}`:'Unassigned — save a guide and assign its approved version.'}</p>
       {p.guide_version_id&&<details className="text-xs text-muted-foreground"><summary className="cursor-pointer min-h-11 flex items-center">Guide version and hash</summary><p className="break-all">{p.guide_version_id} · SHA-256 {p.guide_hash}</p></details>}
       <p className="text-sm break-words">Scope: {p.proposed_actions.join(', ')||'No actions'} · {p.proposed_origins.join(', ')||'No origins'}</p>
@@ -67,7 +68,7 @@ export function AgentConfiguration({base,project,onChanged,runsEnabled=false}) {
       <h3 className="font-semibold">{selected?'Edit profile':runsEnabled?'Create profile':'Create disabled profile'}</h3>
       <p className="text-sm text-muted-foreground">Choose the proposed scope for synthetic sign-in. Start and practice stay unavailable until the server's readiness checks pass.</p>
       <Field label="Profile display name" required maxLength={200} value={form.display_name} onChange={e=>setForm({...form,display_name:e.target.value})}/>
-      <Choice label="Workflow type" value={form.workflow_type} onChange={e=>setForm({...form,workflow_type:e.target.value})}><option value="synthetic_sign_in">Synthetic sign-in</option></Choice>
+      <Choice label="Workflow type" value={form.workflow_type} onChange={e=>setForm({...form,workflow_type:e.target.value})}><option value="synthetic_sign_in">Demo sign-in</option></Choice>
       <fieldset className="space-y-2"><legend className="text-sm font-medium">Proposed actions</legend><div className="grid grid-cols-1 sm:grid-cols-2 gap-2">{actions.map(a=><label key={a} className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={form.proposed_actions.includes(a)} onChange={e=>setForm({...form,proposed_actions:e.target.checked?[...form.proposed_actions,a]:form.proposed_actions.filter(x=>x!==a)})}/>{a}</label>)}</div></fieldset>
       <Field label="Proposed HTTPS origins, one per line" textarea rows={3} placeholder={PILOT_ORIGIN} value={origins} onChange={e=>setOrigins(e.target.value)}/>
       <p className="text-sm text-muted-foreground break-words">Execution currently supports only {PILOT_ORIGIN}. Adding another origin changes configuration only.</p>

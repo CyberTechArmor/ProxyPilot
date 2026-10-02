@@ -240,7 +240,7 @@ export const ORIGIN_TEXT = {
 // The run deck: the run bar, the approval banner, the Browser pane, the
 // Activity column, the Details tabs and the phone panel bar.
 export const DECK_TEXT = {
-  back: 'Back to runs',
+  back: 'Back to demo sign-in runs',
   stop: 'Stop run',
   stopShort: 'Stop',
   stopHint: 'Stop fences the run at once; nothing more happens, and the verified teardown receipt is collected.',

@@ -168,10 +168,10 @@ function RunBar({ data, busy, message, statusId, onBack, onStop, onResume, onOpe
     <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 min-w-0">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 min-w-0">
-          <h1 id={`${run.id}-title`} className="operations-title !text-[28px] sm:!text-[32px] break-words [overflow-wrap:anywhere]">{run.profile_name ?? 'Agent run'}</h1>
+          <h1 id={`${run.id}-title`} className="operations-title !text-[28px] sm:!text-[32px] break-words [overflow-wrap:anywhere]">{run.profile_name ?? 'Demo sign-in run'}</h1>
           <StateBadge run={run}/>{run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}
         </div>
-        <p className="mt-2 text-sm text-muted-foreground break-words">Synthetic sign-in · Run {shortId(run.id)} · Step {run.action_count} of at most {run.max_actions}</p>
+        <p className="mt-2 text-sm text-muted-foreground break-words">Demo sign-in · Run {shortId(run.id)} · Step {run.action_count} of at most {run.max_actions}</p>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><OriginBadges origin={data.origin} onOpenRun={onOpenRun}/>
           {data.origin?.practice && data.origin.expected_result && <span className="text-sm text-muted-foreground">{ORIGIN_TEXT.expected(data.origin.expected_result)}</span>}</div>
         <p className="text-xs text-muted-foreground break-words">Started by {run.started_by.username ?? run.started_by.id} · {whenShort(run.started_at)} · Guide v{run.guide_version_number ?? '?'}</p>

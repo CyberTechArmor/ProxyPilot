@@ -94,7 +94,7 @@ async function startFromUi(page) {
   const start = page.getByRole('button', { name: 'Start run' });
   await start.waitFor(WAIT);
   await start.click();
-  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
 const approvalCard = page => page.getByRole('region', { name: 'Approval needed' });

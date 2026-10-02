@@ -12,6 +12,7 @@ await vite.listen();
 const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
 const browser = await chromium.launch({executablePath:process.env.BROWSER_EXE || '/usr/bin/chromium',args:['--no-sandbox']});
 const artifacts = process.env.BROWSER_ARTIFACTS;
+const demoNavigationOnly = process.argv.includes('--demo-navigation-only');
 if (artifacts) mkdirSync(artifacts,{recursive:true});
 const owner={id:'00000000-0000-4000-8000-000000000001',username:'Finance owner',role:'user',permissions:[]};
 const guide={id:'00000000-0000-4000-8000-000000000011',title:'Invoice reconciliation',instructions:'Match invoices to purchase orders and record discrepancies.',content_hash:'a'.repeat(64),version_number:3,approved_by:owner.id,approved_at:'2026-10-02T10:00:00Z'};
@@ -21,6 +22,8 @@ const connection={id:'00000000-0000-4000-8000-000000000003',name:'Finance ledger
 const pending={id:'00000000-0000-4000-8000-000000000021',title:'Summarize',instructions:'Summarize the website',content_hash:'b'.repeat(64),submitted_by:owner.id,submitted_at:'2026-10-01T09:35:10Z',contributors:[owner.id],contributors_json:JSON.stringify([owner.id]),revision:1,state:'pending'};
 let role='owner',draftState='published',stale=false,denied=false,connectionState='normal',evidenceEnabled=false,draftRevision=1,serverText=guide.instructions;
 let evidenceReferences=[];
+const reviewedWebsite={website_review_enabled:true,website_review_contract:'website-review.v1',website_review_strategy:'http_extract_v1'};
+let websiteGate={...reviewedWebsite},demoRunsEnabled=false;
 const retainedReference={demonstration_id:'00000000-0000-4000-8000-000000000041',revision_id:'00000000-0000-4000-8000-000000000042',item_position:0,object_id:'00000000-0000-4000-8000-000000000043',annotation_id:'00000000-0000-4000-8000-000000000044',available:false};
 const draft=()=>({title:draftState==='pending'?pending.title:guide.title,instructions:draftState==='pending'?pending.instructions:serverText,revision:draftRevision,status:draftState,pending_submission:draftState==='pending'?pending:null,contributors:[owner.id],evidence:{references:evidenceReferences}});
 const requests=[],errors=[],agents=[];
@@ -34,7 +37,7 @@ await page.route('**/api/**',async route=>{
  const answer=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
  if(path==='/api/auth/verify')return answer({user:owner});
  if(path==='/api/branding')return answer({name:'Fractionate',logo:null});
- if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:false,can_manage_settings:false,website_review_enabled:true,website_review_contract:'website-review.v1',website_review_strategy:'http_extract_v1'});
+ if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled,can_manage_settings:false,...websiteGate});
  if(path==='/api/connections/capabilities')return answer({mode:'disabled',intake_enabled:false,execution_enabled:false,adapters:[],reason:'BROKER_NOT_ACTIVATED'});
  if(path==='/api/connections')return answer({connections:connectionState==='empty'?[]:connectionState==='restricted'?[{...connection,status:'revoked',rights:['view','use'] }]:[connection]});
  if(path.endsWith('/enrollment-intents'))return answer({intent:{id:'metadata-only',status:'awaiting_activation'},intake_enabled:false});
@@ -54,6 +57,9 @@ await page.route('**/api/**',async route=>{
   if(path.endsWith('/agent-configurations')&&method==='POST'){const agent={...body,id:'agent-fixture',revision:1,lifecycle:'draft',execution_enabled:false};agents.push(agent);return answer({agent,readiness:{state:'blocked',can_start:false,checks:[{kind:'broker',state:'unavailable',code:'BROKER_NOT_ACTIVATED',next_action:'review_deployment'}]}},201);}
   if(path.endsWith('/agent-configurations'))return answer({agents});
   if(path.endsWith('/agent-profiles'))return answer({profiles:[]});
+  if(path.endsWith('/agent-runs'))return answer({execution:{available:false,message:'Demo sign-in runtime unavailable in this fixture.'},profiles:[],runs:[],next_before:null});
+  if(path.endsWith('/website-review-agents'))return answer({agents:[]});
+  if(path.endsWith('/website-review-runs'))return answer({runs:[]});
   if(path.endsWith('/draft')&&method==='PATCH'){
    if(stale||(evidenceEnabled&&request.headers()['if-match']!==`"${draftRevision}"`))return answer({error:'The guide changed. Reload before saving.'},412);
    draftState='published';return answer({revision:2,status:'published',version:{...guide,title:body.title,instructions:body.instructions,version_number:4}});
@@ -86,6 +92,38 @@ async function audit(width,state){
  report.layout.push({width,state,...sizes});
 }
 try{
+ await journey('demo profiles and runs link to the separate reviewed website workflow without changing saved routes',async()=>{
+  try{
+   await loaded('Agents');await page.getByRole('heading',{name:'Demo sign-in profiles',exact:true}).waitFor();
+   let link=page.getByRole('link',{name:'Open website reviews',exact:true});
+   assert.equal(await link.getAttribute('href'),`/operational-projects/${project.id}?section=Website%20reviews`);
+   await link.click();await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();
+   demoRunsEnabled=true;await loaded('Agent runs');await page.getByRole('heading',{name:'Demo sign-in runs',exact:true}).waitFor();
+   assert.equal(new URL(page.url()).searchParams.get('section'),'Agent runs','the saved demo section identity remains compatible');
+   assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Demo sign-in runs',exact:true}).getAttribute('aria-pressed'),'true');
+   link=page.getByRole('link',{name:'Open website reviews',exact:true});
+   assert.equal(await link.getAttribute('href'),`/operational-projects/${project.id}?section=Website%20reviews`);
+   await link.click();await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();
+   for(const gate of [{...reviewedWebsite,website_review_enabled:false},{...reviewedWebsite,website_review_enabled:'true'},{...reviewedWebsite,website_review_contract:'website-review.v2'},{...reviewedWebsite,website_review_strategy:'browser_extract_v1'},{}]){
+    websiteGate=gate;
+    for(const section of ['Agents','Agent runs']){
+     const before=requests.length;await loaded(section);await page.getByRole('heading',{name:section==='Agents'?'Demo sign-in profiles':'Demo sign-in runs',exact:true}).waitFor();
+     assert.equal(await page.getByRole('link',{name:'Open website reviews',exact:true}).count(),0,'unreviewed website capability must not expose the demo navigation link');
+     assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Website reviews',exact:true}).count(),0);
+     assert(!requests.slice(before).some(r=>/\/website-review-(agents|runs)/.test(r.path)),'a rejected capability must not mount or read the website workflow');
+    }
+   }
+   websiteGate={...reviewedWebsite};
+   for(const width of [375,1536]){
+    await page.setViewportSize({width,height:width<640?812:1024});
+    await loaded('Agents');await page.getByRole('heading',{name:'Demo sign-in profiles',exact:true}).waitFor();await audit(width,'demo-profiles');await shot(`demo-profiles-${width}`);
+    await loaded('Agent runs');await page.getByRole('heading',{name:'Demo sign-in runs',exact:true}).waitFor();await audit(width,'demo-runs');await shot(`demo-runs-${width}`);
+    await page.getByRole('link',{name:'Open website reviews',exact:true}).click();await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();await audit(width,'website-from-demo');await shot(`website-from-demo-${width}`);
+   }
+   assert(!requests.some(r=>r.method==='POST'&&(/\/agent-runs$|\/website-review-runs$/.test(r.path))),'navigation starts no demo or website execution');
+  }finally{websiteGate={...reviewedWebsite};demoRunsEnabled=false;await page.setViewportSize({width:1536,height:1024});}
+ });
+ if(!demoNavigationOnly){
  await journey('short private creation with cancel/reopen and no raw account IDs',async()=>{
   await page.goto(`${origin}/operational-projects`);await page.getByRole('button',{name:'New project',exact:true}).click();
   let dialog=page.getByRole('dialog');await dialog.waitFor();assert.equal(await dialog.getByLabel(/account ID/i).count(),0);
@@ -150,6 +188,7 @@ try{
   await page.getByRole('button',{name:'New project',exact:true}).click();await page.getByRole('dialog').waitFor();await audit(width,'new-project');if(width===375)await shot('new-project-office-375');await page.keyboard.press('Escape');
   await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByRole('button',{name:'Next: Connections',exact:true}).click();await page.getByRole('button',{name:'Select connection',exact:true}).waitFor();await audit(width,'setup-connections');if([375,768,1920].includes(width))await shot(`setup-connections-office-${width}`);await page.getByRole('button',{name:'Add connection',exact:true}).click();await page.getByRole('dialog').waitFor();await audit(width,'add-connection');if([375,768,1920].includes(width))await shot(`add-connection-office-${width}`);await page.keyboard.press('Escape');
  }
- assert.deepEqual(errors,[]);console.log('PASS UI alignment fixture journeys and seven-width overflow audit');
+ }
+ assert.deepEqual(errors,[]);console.log(demoNavigationOnly?'PASS demo labels, strict website navigation gate and desktop/phone overflow audit':'PASS UI alignment fixture journeys and seven-width overflow audit');
 }catch(error){if(artifacts){await shot('failure');writeFileSync(`${artifacts}/failure.html`,await page.content());}throw error;}
 finally{if(artifacts)writeFileSync(`${artifacts}/ui-alignment-report.json`,JSON.stringify({...report,errors},null,2));await browser.close();await vite.close();}

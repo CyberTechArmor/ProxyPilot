@@ -2,6 +2,17 @@
 // authoritative; these hints never enable a run or change a project's scope.
 export const PILOT_ORIGIN = 'https://demo.fractionate.ai';
 
+// Presentation labels never replace the saved section or API identities.
+export const DEMO_RUNS_LABEL = 'Demo sign-in runs';
+export const operationSectionLabel = section => section === 'Agent runs' ? DEMO_RUNS_LABEL : section;
+export const operationsToggleLabel = toggle => toggle.name === 'agent_runs' ? DEMO_RUNS_LABEL : toggle.label;
+
+export function websiteReviewAvailable(capabilities) {
+  return capabilities?.website_review_enabled === true &&
+    capabilities.website_review_contract === 'website-review.v1' &&
+    capabilities.website_review_strategy === 'http_extract_v1';
+}
+
 export function readinessNextStep(reason) {
   if (/Only https:\/\/demo\.fractionate\.ai/.test(reason)) return {
     text: 'This browser pilot supports synthetic sign-in on the demo site. A research task on another site cannot run here.',

@@ -13,7 +13,9 @@ import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
-const report = { journeys: [], layout: [], started_at: new Date().toISOString() };
+const journeyFilterSource = process.env.AGENT_RUN_JOURNEY_FILTER || '';
+const journeyFilter = journeyFilterSource ? new RegExp(journeyFilterSource) : null;
+const report = { filter: journeyFilterSource || null, skipped: [], journeys: [], layout: [], started_at: new Date().toISOString() };
 const browser = await chromium.launch({ executablePath: process.env.BROWSER_EXE || '/opt/pw-browsers/chromium', headless: true });
 const WAIT = { timeout: 30000 };
 let h;
@@ -51,6 +53,7 @@ async function settleAll() {
   assert.equal(activeRun(), undefined, 'a run is still active');
 }
 async function journey(name, fn) {
+  if (journeyFilter && !journeyFilter.test(name)) { report.skipped.push(name); return; }
   const started = Date.now();
   try { await fn(); report.journeys.push({ name, passed: true, seconds: Math.round((Date.now() - started) / 100) / 10 }); console.log(`ok - ${name}`); }
   catch (error) { report.journeys.push({ name, passed: false, error: error.message }); console.log(`not ok - ${name}\n  ${error.stack}`); throw error; }
@@ -61,7 +64,7 @@ async function startFromUi(page) {
   const start = page.getByRole('button', { name: 'Start run' });
   await start.waitFor(WAIT);
   await start.click();
-  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
 // The run deck: a phone shows one panel at a time behind the bottom bar.
@@ -142,7 +145,7 @@ try {
     }
     const viewer = await as('viewer');
     await viewer.goto(runsUrl());
-    await viewer.getByText('Agent runs are not available to you: Agent runs need run access: owner, operator, editor or reviewer.').waitFor(WAIT);
+    await viewer.getByText('Demo sign-in runs are not available to you: Agent runs need run access: owner, operator, editor or reviewer.').waitFor(WAIT);
     assert.equal(await viewer.getByRole('button', { name: 'Start run' }).count(), 0);
     await viewer.getByRole('button', { name: 'Agents', exact: true }).click();
     await viewer.getByText('Only the owner can change this.').waitFor(WAIT);
@@ -155,7 +158,7 @@ try {
     const outsider = await as('outsider');
     await outsider.goto(runsUrl());
     await outsider.getByText('Operational record not found').waitFor(WAIT);
-    assert.equal(await outsider.getByRole('heading', { name: 'Agent runs' }).count(), 0);
+    assert.equal(await outsider.getByRole('heading', { name: 'Demo sign-in runs' }).count(), 0);
   });
 
   await journey('desktop context tabs use keyboard navigation and show the run\'s immutable pinned guide', async () => {
@@ -269,7 +272,7 @@ try {
     assert.deepEqual(await deadControls(page), []);
     // Tab reaches the active context tab; arrow keys expose Guide and Details
     // (verified by the dedicated keyboard journey above).
-    await page.getByRole('button', { name: 'Back to runs' }).focus();
+    await page.getByRole('button', { name: 'Back to demo sign-in runs' }).focus();
     const order = [];
     for (let i = 0; i < 30 && order.at(-1) !== 'context tabs'; i += 1) {
       const where = await page.evaluate(() => {
@@ -475,7 +478,7 @@ try {
     await page.getByRole('dialog').getByText(/The approval is stale/).waitFor(WAIT);
     await page.keyboard.press('Escape');
     await result(page, 'Approval stale');
-    await page.getByRole('button', { name: 'Back to runs' }).click();
+    await page.getByRole('button', { name: 'Back to demo sign-in runs' }).click();
     await page.getByText('The assigned guide is no longer the current approved version.').waitFor(WAIT);
     assert.equal(await page.getByRole('button', { name: 'Start run' }).isDisabled(), true);
     assert.deepEqual(await deadControls(page), []);
@@ -729,7 +732,7 @@ try {
     await admin.getByText('Operations is not turned on for this installation. Turn it on in Operations settings below.').waitFor(WAIT);
     await admin.locator('summary').filter({hasText:'Operations settings'}).click();
     await admin.getByText('Turn on Operations first.').first().waitFor(WAIT);
-    assert.equal(await admin.getByRole('button', { name: 'Turn on Agent runs' }).isDisabled(), true);
+    assert.equal(await admin.getByRole('button', { name: 'Turn on Demo sign-in runs' }).isDisabled(), true);
     assert.deepEqual(await deadControls(admin), []);
     await layoutCheck(admin, 'settings-off');
     await admin.setViewportSize({ width: 375, height: 900 });
@@ -740,9 +743,9 @@ try {
     await admin.getByRole('button', { name: 'New project', exact: true }).waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent metadata' }).click();
     await admin.getByText('Agent metadata turned on.').waitFor(WAIT);
-    await admin.getByRole('button', { name: 'Turn on Agent runs' }).click();
-    await admin.getByText('Agent runs turned on.').waitFor(WAIT);
-    await admin.getByRole('heading', { name: 'Agent inbox' }).waitFor(WAIT);
+    await admin.getByRole('button', { name: 'Turn on Demo sign-in runs' }).click();
+    await admin.getByText('Demo sign-in runs turned on.').waitFor(WAIT);
+    await admin.getByRole('heading', { name: 'Demo sign-in inbox' }).waitFor(WAIT);
     await layoutCheck(admin, 'settings-on');
     const audit = h.world.f.db.prepare("SELECT resource_id FROM audit_log WHERE action='OPERATIONS_TOGGLE_CHANGED' ORDER BY rowid").all();
     assert.deepEqual(audit.map(a => a.resource_id), ['operations', 'agents_metadata', 'agent_runs']);
@@ -782,9 +785,10 @@ try {
   await h.close();
   await browser.close();
 }
+assert(report.journeys.length > 0, 'the requested browser journey filter must match a real journey');
 report.passed = report.journeys.every(j => j.passed);
 report.finished_at = new Date().toISOString();
 if (artifacts) writeFileSync(`${artifacts}/report.json`, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify({ a6_browser_journeys: report.passed ? 'passed' : 'failed', journeys: report.journeys.length,
-  layout_checks: report.layout.length }));
+  filter: report.filter, skipped: report.skipped, layout_checks: report.layout.length }));
 if (!report.passed) process.exitCode = 1;

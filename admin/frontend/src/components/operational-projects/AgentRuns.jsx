@@ -260,7 +260,7 @@ export function AgentRunDetail({ base, runId, onBack, onOpenRun }) {
   </>;
 }
 
-export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) {
+export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun, websiteAvailable=false }) {
   const [list, setList] = useState(null), [refusal, setRefusal] = useState(''), [error, setError] = useState('');
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [older, setOlder] = useState([]);
   const [activeLink, setActiveLink] = useState(null);
@@ -298,26 +298,26 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
     try { const page = await api.get(`${base}/agent-runs?before=${encodeURIComponent(before)}`); setOlder(o => [...o, ...page.runs]); }
     catch (e) { setError(e.message); }
   }
-  return <Panel title="Agent runs" icon={Activity} description="Start a supported workflow, follow its browser, and review each action that needs your approval.">
-    <SupportedWorkflowNotice projectId={project.id} compact/>
+  return <Panel title="Demo sign-in runs" icon={Activity} description="Run the demo sign-in workflow, follow its browser, and review each action that needs your approval.">
+    <SupportedWorkflowNotice projectId={project.id} compact websiteAvailable={websiteAvailable}/>
     <p className="text-sm text-muted-foreground">One supervised synthetic sign-in per profile at a time. The bound demo credential is submitted only after a person approves the exact action.</p>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
     {activeLink && <Action variant="outline" onClick={() => onOpenRun(activeLink)}>Open that run</Action>}
     <p role="status" aria-live="polite" className="text-sm">{busy ? 'Working…' : message}</p>
-    {refusal ? <p role="alert" className="break-words">Agent runs are not available to you: {refusal}</p> : !list ? <p role="status">Loading agent runs…</p> : <>
+    {refusal ? <p role="alert" className="break-words">Demo sign-in runs are not available to you: {refusal}</p> : !list ? <p role="status">Loading demo sign-in runs…</p> : <>
       {!list.execution.available && <p className="rounded-md border border-amber-500/70 p-3 text-sm break-words" role="note">{list.execution.message} Runs already recorded stay readable.</p>}
       <section className="space-y-3" aria-labelledby="agent-profiles-heading">
-        <h3 id="agent-profiles-heading" className="text-base font-semibold flex items-center gap-2"><Play aria-hidden="true" className="h-4 w-4 text-muted-foreground"/>Start a run</h3>
-        {!list.profiles.length && <p className="text-sm">No agent profiles. <Link className="inline-flex min-h-11 items-center underline underline-offset-4" to={operationSectionUrl(project.id,'Agents')}>Create a synthetic sign-in profile in Agents</Link>.</p>}
+        <h3 id="agent-profiles-heading" className="text-base font-semibold flex items-center gap-2"><Play aria-hidden="true" className="h-4 w-4 text-muted-foreground"/>Start a demo sign-in run</h3>
+        {!list.profiles.length && <p className="text-sm">No demo sign-in profiles. <Link className="inline-flex min-h-11 items-center underline underline-offset-4" to={operationSectionUrl(project.id,'Agents')}>Create a demo sign-in profile in Agents</Link>.</p>}
         <ul className="space-y-3">{list.profiles.map(profile => <ProfileStart key={profile.profile_id} projectId={project.id} profile={profile} busy={busy}
           onStart={practice => start(profile, practice)} onOpenRun={onOpenRun}/>)}</ul>
       </section>
       <section className="space-y-3" aria-labelledby="agent-runs-heading">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <h3 id="agent-runs-heading" className="text-base font-semibold">Run history</h3>
+          <h3 id="agent-runs-heading" className="text-base font-semibold">Demo sign-in run history</h3>
           <Action variant="outline" onClick={() => load()}>Refresh runs</Action>
         </div>
-        {!list.runs.length && <p className="text-sm">No agent runs yet.</p>}
+        {!list.runs.length && <p className="text-sm">No demo sign-in runs yet.</p>}
         <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3">{[...list.runs, ...older].map(r => <RunRow key={r.id} run={r} onOpen={() => onOpenRun(r.id)}/>)}</ul>
         {list.next_before && !older.length && <Action variant="outline" onClick={loadOlder}>Load older runs</Action>}
       </section>
@@ -413,8 +413,8 @@ export function AgentInbox() {
   if (hidden) return null;
   const link = r => `/operational-projects/${r.project_id}?section=${encodeURIComponent('Agent runs')}&run=${r.run_id ?? r.id}`;
   const current = approving ? data?.approvals.find(a => a.id === approving) ?? null : null;
-  return <Panel title="Agent inbox">
-    <p className="text-sm">Approvals waiting for you and runs that need a person, across the operations where you may run agents.</p>
+  return <Panel title="Demo sign-in inbox">
+    <p className="text-sm">Demo sign-in approvals waiting for you and runs that need a person, across projects where you have run access.</p>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
     <p role="status" aria-live="polite" className="text-sm">{message}</p>
     {!data ? <p role="status">Loading the inbox…</p> : <>

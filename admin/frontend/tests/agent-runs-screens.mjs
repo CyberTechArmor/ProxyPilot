@@ -121,7 +121,7 @@ async function runResult(page, label) {
 async function startRun(page) {
   await page.goto(runsUrl());
   await page.getByRole('button', { name: 'Start run' }).click();
-  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
 async function openApproval(page) {

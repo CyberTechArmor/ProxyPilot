@@ -100,7 +100,15 @@ try {
     assert.equal(await page.getByRole('button', { name: 'Start website review', exact: true }).isEnabled(), false); noExecution();
     h.scenario.providerCode = null;
     await page.getByRole('button', { name: 'Refresh reviews', exact: true }).click(); await page.getByText('Ready to start', { exact: true }).waitFor();
-    await page.getByRole('button', { name: 'Start website review', exact: true }).click(); await page.getByRole('region', { name: 'Website review result' }).waitFor();
+    const clickStart = async () => {
+      const [response] = await Promise.all([
+        page.waitForResponse(r => r.url() === `${h.origin}${base}/website-review-runs` && r.request().method() === 'POST'),
+        page.getByRole('button', { name: 'Start website review', exact: true }).click(),
+      ]);
+      assert.equal(response.status(), 202, 'explicit Start accepted by the real route');
+      await page.getByRole('region', { name: 'Website review result' }).getByRole('heading', { name: /Review result.*queued/ }).waitFor();
+    };
+    await clickStart();
     let run = savedRuns()[0]; assert.equal(run.state, 'queued'); await assertPins(run, agent); assert.equal(h.modelCalls.length, 0); assert.equal(h.transport.length, 0);
     const startRequest = h.requests.find(r => r.method === 'POST' && r.path === `${base}/website-review-runs`); assert.deepEqual(startRequest.body, startBody(agent));
     await h.executeNext(); const result = page.getByRole('region', { name: 'Website review result' });
@@ -114,7 +122,7 @@ try {
     await result.getByText('Immutable run guide and agent pins', { exact: true }).click(); await result.getByText(h.version.id, { exact: true }).waitFor(); await result.getByText(h.version.content_hash, { exact: true }).waitFor();
     await audit(page, 'completed-evidence'); report.journeys.push('Exact-pin Start traverses real routes/service/extraction and renders cited completion, source hashes, usage and settled cost');
     await page.getByText('Ready to start', { exact: true }).waitFor(); h.holdNextModel();
-    await page.getByRole('button', { name: 'Start website review', exact: true }).click(); const cancelled = savedRuns().find(r => r.id !== run.id); const execution = h.executeNext(); await h.waitForModel();
+    await clickStart(); const cancelled = savedRuns().find(r => r.id !== run.id); const execution = h.executeNext(); await h.waitForModel();
     await result.getByText('The model review is in progress.', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Cancel website review', exact: true }).click(); await result.getByText('CANCELLED', { exact: true }).waitFor();
     h.releaseModel(); await execution; const after = h.service.status(h.users.owner, h.project.id, cancelled.id).run;

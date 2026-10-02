@@ -14,8 +14,8 @@ const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
 const h = await startWebsiteReviewHarness({ useVite: !serviceOnly });
 const base = `/api/operational-projects/${h.project.id}`;
-let browser, context;
-const errors = [], outbound = [];
+let browser, context, page;
+const errors = [], outbound = [], consoleMessages = [], failedRequests = [], failedResponses = [];
 async function api(path, { method = 'GET', body, revision, role = 'owner', csrf = CSRF } = {}) {
   const res = await fetch(h.origin + path, { method, headers: { Cookie: `pp_review_fixture_session=${role}; pp_csrf=${CSRF}`, 'Content-Type': 'application/json', ...(method !== 'GET' ? { 'X-CSRF-Token': csrf } : {}), ...(revision ? { 'If-Match': `"${revision}"` } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
   return { status: res.status, data: await res.json() };
@@ -78,9 +78,12 @@ try {
     await context.addInitScript(() => { localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', 'office'); });
     // Fail closed if any test accidentally asks the browser for outbound data.
     await context.route('**/*', route => { if (!route.request().url().startsWith(h.origin) && !route.request().url().startsWith('data:')) { outbound.push(route.request().url()); return route.abort(); } return route.continue(); });
-    const page = await context.newPage(); page.setDefaultTimeout(30000); page.setDefaultNavigationTimeout(90000); page.on('pageerror', e => errors.push(e.message));
+    page = await context.newPage(); page.setDefaultTimeout(30000); page.setDefaultNavigationTimeout(90000); page.on('pageerror', e => errors.push(e.message));
+    page.on('console', message => { if (['error', 'warning'].includes(message.type())) consoleMessages.push({ type: message.type(), text: message.text() }); });
+    page.on('requestfailed', request => failedRequests.push({ url: request.url(), error: request.failure()?.errorText }));
+    page.on('response', response => { if (response.status() >= 400) failedResponses.push({ url: response.url(), status: response.status() }); });
     await page.goto(`${h.origin}/operational-projects/${h.project.id}?section=Website%20reviews`);
-    await page.getByRole('heading', { name: 'Public website reviews', exact: true }).waitFor();
+    await page.getByRole('heading', { name: 'Public website reviews', exact: true }).waitFor({ timeout: 90000 });
     await page.getByRole('button', { name: 'Refresh reviews', exact: true }).waitFor();
     await page.getByRole('button', { name: 'New review agent', exact: true }).click();
     await page.getByLabel('Review agent name').fill(input.name); await page.getByLabel('Public website URL').fill(input.url); await page.getByLabel('Review objective').fill(input.objective);
@@ -126,6 +129,9 @@ try {
   report.transport_requests = h.transport.length; report.model_calls = h.modelCalls.length;
   console.log(`PASS ${serviceOnly ? 'local service/HTTP checks' : 'full dashboard browser journey'}: ${report.journeys.join('; ')}`);
 } finally {
-  if (artifacts) writeFileSync(`${artifacts}/website-review-integrated-report.json`, JSON.stringify({ ...report, errors, outbound }, null, 2));
+  if (artifacts) {
+    writeFileSync(`${artifacts}/website-review-integrated-report.json`, JSON.stringify({ ...report, errors, outbound, consoleMessages, failedRequests, failedResponses }, null, 2));
+    if (page) writeFileSync(`${artifacts}/website-review-integrated-final.html`, await page.content().catch(() => 'Page closed'));
+  }
   h.releaseModel(); await context?.close(); await browser?.close(); await h.close();
 }

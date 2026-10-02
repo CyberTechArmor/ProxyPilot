@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer } from 'vite';
 import express from '../../backend/node_modules/express/index.js';
 import { csrfProtection } from '../../backend/src/middleware/csrf.js';
@@ -96,7 +98,7 @@ export async function startWebsiteReviewHarness({ useVite = true } = {}) {
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown integration fixture endpoint' }));
   if (useVite) {
     const root = fileURLToPath(new URL('..', import.meta.url));
-    server = await createServer({ root, configFile: `${root}/vite.config.js`, logLevel: 'error', server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{ name: 'website-review-real-api', configureServer(vite) { vite.middlewares.use((req, res, next) => req.url?.startsWith('/api/') ? app(req, res, next) : next()); } }] });
+    server = await createServer({ root, configFile: `${root}/vite.config.js`, cacheDir: join(tmpdir(), `pp-website-review-vite-${process.pid}`), logLevel: 'error', server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{ name: 'website-review-real-api', configureServer(vite) { vite.middlewares.use((req, res, next) => req.url?.startsWith('/api/') ? app(req, res, next) : next()); } }] });
     await server.listen();
   } else server = await new Promise(done => { const http = app.listen(0, '127.0.0.1', () => done(http)); });
   const port = (useVite ? server.httpServer : server).address().port;

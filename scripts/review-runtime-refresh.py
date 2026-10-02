@@ -29,6 +29,13 @@ ACTIVE_DB = {
     'ops_website_review_runs': {'queued', 'extracting', 'reviewing'},
 }
 MAX_FILE = 2 * 1024 * 1024
+# PR #710's installed Demo worker is protocol-compatible with this review
+# bridge. 39ada2b only corrects bound-session/sign-out observations; that guest
+# refresh remains deferred. Retain its bytes and pin, never copy the candidate.
+GUEST_REVIEW_COMPATIBILITY = (
+    'd0724e5fb5573a18095a8e906cd9bb9c2542c17c494184ca15cbc65d345331f9',
+    '54302e5ee880470480d9b4de3d30616b263c7213d9eb08712b1ef3f50c5c0d21',
+)
 
 
 def sha(data):
@@ -154,9 +161,15 @@ class Host:
             if path in {self.a3.RENEW_SERVICE, self.a3.RENEW_TIMER} and str(path) not in old['files']:
                 continue
             if path != self.targets[0] and old['files'].get(str(path)) != sha(data):
-                raise ValueError('Other A3 package/unit changes require separate review')
+                recorded = old['files'].get(str(path))
+                if (path == self.a3.TARGET / 'a3-worker-guest.py' and
+                        (recorded, sha(data)) == GUEST_REVIEW_COMPATIBILITY):
+                    self.secure(path)
+                    if sha(bounded(path)) == recorded:
+                        continue
+                raise ValueError(f'Other A3 package/unit changes require separate review: {path}')
         if self.a4.read_journal()['files'].get(str(self.a4.UNIT)) != sha(self.a4.UNIT_TEXT.encode()):
-            raise ValueError('Broker unit changes require separate review')
+            raise ValueError(f'Broker unit changes require separate review: {self.a4.UNIT}')
         return candidates
 
     def identity(self):

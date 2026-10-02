@@ -90,6 +90,10 @@ Library delivery checkpoint: the current local two-page PDF and four unchanged P
 
 ## Supported refinement checkpoint
 
+Resumed after parent confirmed PR721 merged. GitHub main was independently verified at `35c2e9d4eb657f92e1499d8d56035217b04f7ae6` and merged locally as `38a14238d9de2c5d12eec99365e095cefc73a0a3`. Website component/backend/updater source is preserved. Local merged-source checks passed: production build, nine frontend unit tests, 224 dashboard contract tests, eight alignment journeys and 28 overflow audits. Measured geometry: 40% list width; Access bottom 929px; selected connection 107px; continuation bottom 897.5px at 1536x1024.
+
+Fresh review exposed two remaining verification defects: the alignment fixture reset every navigation to Office, so its three identically colored screenshots prove Office geometry only; the 1280x800 run fit test showed only three of the latest four activity entries completely visible beside the new approval rail. Neither result is accepted as a final gate. Root is correcting real palette switching and mobile tab visibility; the isolated run owner is fixing the measured activity-space deficit without weakening the four-entry assertion. Chrome/build release priority is cleared. No full UI publication or production work is authorized.
+
 The three isolated source changes are integrated. No claim of new pixel fidelity is made until the browser checks below run against the current source.
 
 | Change | Root commit | Owner commit | Required acceptance |

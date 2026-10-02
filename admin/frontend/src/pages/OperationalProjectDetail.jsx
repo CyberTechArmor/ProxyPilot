@@ -32,6 +32,14 @@ function Operation({id}) {
   const [agentCapability,setAgentCapability]=useState(false),[runsCapability,setRunsCapability]=useState(false),[websiteCapability,setWebsiteCapability]=useState(false);
   const [execution,setExecution]=useState({available:false,message:''});
   const [params,setParams]=useSearchParams(),openRun=params.get('run');
+  const sectionNav=useRef(null);
+  useEffect(()=>{
+    const nav=sectionNav.current,selected=nav?.querySelector('[aria-pressed="true"]');
+    if(!selected)return;
+    const box=nav.getBoundingClientRect(),item=selected.getBoundingClientRect();
+    if(item.left<box.left)nav.scrollLeft-=box.left-item.left;
+    else if(item.right>box.right)nav.scrollLeft+=item.right-box.right;
+  },[section,!!data]);
   const [projectList,setProjectList]=useState([]),[brokerSetupActive,setBrokerSetupActive]=useState(false);
   useEffect(()=>{const c=new AbortController();api.get('',c.signal).then(r=>{if(!c.signal.aborted)setProjectList(r.projects);}).catch(()=>setProjectList([]));return()=>c.abort();},[user?.id]);
   useEffect(()=>{const target=params.get('section');if(['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Details'].includes(target))setSection(target);},[params]);
@@ -74,6 +82,8 @@ function Operation({id}) {
   const {p,d,v,r,e,a}=data,owner=p.own_role==='owner',editable=['owner','editor'].includes(p.own_role),reviewer=['owner','reviewer'].includes(p.own_role);
   const active=!p.archived_at,canRun=p.own_role!=='viewer',pending=d.pending_submission;
   const dirty=draft&&(draft.title!==d.title||draft.instructions!==d.instructions||draft.revision!==d.revision);
+  const peopleCount=1+(a?.members.filter(member=>member.active).length||0);
+  const peopleCount=1+(a?.members.filter(member=>member.active).length||0);
   const actorName=accountId=>accountId===user?.id?user.username:accountId===p.owner_user_id?p.owner_name:a?.members.find(member=>member.user_id===accountId)?.username||'Project member';
   async function record(event) {
     event.preventDefault();
@@ -105,7 +115,7 @@ function Operation({id}) {
     <header className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}
-    <nav aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{tab}</Action>)}</nav>
+    <nav ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{tab}</Action>)}</nav>
     {section==='Overview'&&<>
       <p className="whitespace-pre-wrap break-words text-muted-foreground">{p.description||'Add a purpose in Details to explain the work this project supports.'}</p>
       {p.archived_at&&<p className="rounded-md border bg-muted p-3 text-sm break-words">Archived: {p.archive_reason}</p>}
@@ -132,7 +142,7 @@ function Operation({id}) {
         </Panel>
       </div>
       <div data-overview-access><Panel title="Access & connections" icon={KeyRound} className="!space-y-2 sm:!p-4" actions={<Action variant="ghost" className="text-primary gap-2" onClick={()=>openSection('Access')}>Manage access<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>}>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div className="flex items-start gap-3"><Users className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">People</p><p className="text-sm text-muted-foreground">{a?1+a.members.length+' people with project access':'Your role: '+p.own_role}</p></div></div><div className="flex items-start gap-3"><KeyRound className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">Connection permissions</p><p className="text-sm text-muted-foreground">Granted separately from project membership.</p></div></div></div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div className="flex items-start gap-3"><Users className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">People</p><p className="text-sm text-muted-foreground">{a?`${peopleCount} ${peopleCount===1?'person':'people'} with project access`:'Your role: '+p.own_role}</p></div></div><div className="flex items-start gap-3"><KeyRound className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">Connection permissions</p><p className="text-sm text-muted-foreground">Granted separately from project membership.</p></div></div></div>
       </Panel></div>
     </>}
     {section==='Details'&&<Panel title="Project details" icon={Settings2}>
@@ -200,7 +210,7 @@ function Operation({id}) {
     </Panel>}
     {section==='Access'&&<Panel title="Access · Connections"><ConnectionCatalogue projectId={id}/></Panel>}
     {section==='Website reviews'&&(websiteCapability?<WebsiteReviews base={base} project={p} onChanged={()=>refresh(false)}/>:<Panel title="Website reviews"><p>Public website reviews are unavailable on this installation. This workflow requires the reviewed website review runtime.</p></Panel>)}
-    {section==='Agents'&&agentCapability&&<>{!brokerSetupActive&&<div className="rounded-md border bg-muted/20 p-4 space-y-2"><h3 className="font-semibold">Execution capability</h3><p className="text-sm text-muted-foreground">A configured task describes intended work. Running it requires a supported workflow and runtime, an approved guide, permitted connections and limits.</p><p className="text-sm text-muted-foreground">The synthetic sign-in pilot supports only demo.fractionate.ai. Check the agent readiness before starting work.</p></div>}{websiteCapability&&<Panel title="Review a public website"><p className="text-sm">Use the separate public HTML/text workflow with your approved guide. It requires no website credential and does not use synthetic sign-in.</p><Action variant="outline" onClick={()=>{setSection('Website reviews');setParams({section:'Website reviews'},{replace:true});}}>Open website reviews</Action></Panel>}<BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Existing synthetic sign-in agents</summary><p className="text-sm text-muted-foreground mb-4">Separate browser workflow. Its existing settings and live-run controls remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} onChanged={()=>refresh(false)}/></details></>}
+    {section==='Agents'&&agentCapability&&<>{!brokerSetupActive&&<div className="rounded-md border bg-muted/20 p-4 space-y-2"><h3 className="font-semibold">Execution capability</h3><p className="text-sm text-muted-foreground">A configured task describes intended work. Running it requires a supported workflow and runtime, an approved guide, permitted connections and limits.</p><p className="text-sm text-muted-foreground">The synthetic sign-in pilot supports only demo.fractionate.ai. Check the agent readiness before starting work.</p></div>}{websiteCapability&&!brokerSetupActive&&<Panel title="Review a public website"><p className="text-sm">Use the separate public HTML/text workflow with your approved guide. It requires no website credential and does not use synthetic sign-in.</p><Action variant="outline" onClick={()=>{setSection('Website reviews');setParams({section:'Website reviews'},{replace:true});}}>Open website reviews</Action></Panel>}<BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Existing synthetic sign-in agents</summary><p className="text-sm text-muted-foreground mb-4">Separate browser workflow. Its existing settings and live-run controls remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} onChanged={()=>refresh(false)}/></details></>}
     {section==='Agent runs'&&runsCapability&&runsPanel}
   </div></div></div>;
 }

@@ -26,7 +26,7 @@ const draft=()=>({title:draftState==='pending'?pending.title:guide.title,instruc
 const requests=[],errors=[],agents=[];
 const report={synthetic:true,source_commit:process.env.SOURCE_COMMIT || execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),generated_at:new Date().toISOString(),journeys:[],layout:[],screenshots:[],geometry:[],reference_fit:{}};
 const context=await browser.newContext({viewport:{width:1536,height:1024}});
-await context.addInitScript(()=>{localStorage.setItem('pp-theme','office');});
+await context.addInitScript(()=>{if(!localStorage.getItem('pp-theme'))localStorage.setItem('pp-theme','office');});
 const page=await context.newPage();page.setDefaultTimeout(30000);page.setDefaultNavigationTimeout(90000);page.on('pageerror',e=>errors.push(e.message));
 await page.route('**/api/**',async route=>{
  const request=route.request(),path=new URL(request.url()).pathname,method=request.method(),body=request.postData()?request.postDataJSON():null;
@@ -34,7 +34,7 @@ await page.route('**/api/**',async route=>{
  const answer=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
  if(path==='/api/auth/verify')return answer({user:owner});
  if(path==='/api/branding')return answer({name:'Fractionate',logo:null});
- if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:false,can_manage_settings:false});
+ if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:false,can_manage_settings:false,website_review_enabled:true,website_review_contract:'website-review.v1',website_review_strategy:'http_extract_v1'});
  if(path==='/api/connections/capabilities')return answer({mode:'disabled',intake_enabled:false,execution_enabled:false,adapters:[],reason:'BROKER_NOT_ACTIVATED'});
  if(path==='/api/connections')return answer({connections:connectionState==='empty'?[]:connectionState==='restricted'?[{...connection,status:'revoked',rights:['view','use'] }]:[connection]});
  if(path.endsWith('/enrollment-intents'))return answer({intent:{id:'metadata-only',status:'awaiting_activation'},intake_enabled:false});
@@ -73,7 +73,18 @@ const detail=section=>`${origin}/operational-projects/${project.id}?section=${en
 async function shot(name){if(!artifacts)return;await page.evaluate(()=>{window.scrollTo(0,0);document.querySelectorAll('main, main>div').forEach(e=>e.scrollTop=0);});await page.screenshot({path:`${artifacts}/${name}.png`,animations:'disabled',fullPage:true});report.screenshots.push(`${name}.png`);}
 async function journey(name,fn){await fn();report.journeys.push({name,passed:true});console.log(`ok - ${name}`);}
 async function loaded(section='Overview'){await page.goto(detail(section));await page.locator('[data-selected-project]').waitFor();await page.getByRole('heading',{name:project.name,exact:true}).waitFor();}
-async function audit(width,state){await page.addStyleTag({content:'html,body{overflow-x:visible!important}'});const sizes=await page.evaluate(()=>({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth}));assert(sizes.scroll<=sizes.width,`overflow ${state} at ${width}: ${JSON.stringify(sizes)}`);report.layout.push({width,state,...sizes});}
+async function audit(width,state){
+ await page.addStyleTag({content:'html,body{overflow-x:visible!important}'});
+ const sizes=await page.evaluate(()=>{
+  const nav=document.querySelector('[aria-label="Operation sections"]'),selected=nav?.querySelector('[aria-pressed="true"]');
+  const box=nav?.getBoundingClientRect(),item=selected?.getBoundingClientRect();
+  return {width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,
+   active_section:selected?.textContent,active_section_visible:!item||(item.left>=box.left-1&&item.right<=box.right+1)};
+ });
+ assert(sizes.scroll<=sizes.width,`overflow ${state} at ${width}: ${JSON.stringify(sizes)}`);
+ assert(sizes.active_section_visible,`Selected project tab is offscreen at ${width}: ${JSON.stringify(sizes)}`);
+ report.layout.push({width,state,...sizes});
+}
 try{
  await journey('short private creation with cancel/reopen and no raw account IDs',async()=>{
   await page.goto(`${origin}/operational-projects`);await page.getByRole('button',{name:'New project',exact:true}).click();
@@ -118,7 +129,8 @@ try{
   evidenceEnabled=false;evidenceReferences=[];draftRevision=1;serverText=guide.instructions;draftState='published';
  });
  await journey('same frozen project state has identical theme geometry',async()=>{
-  let baseline;for(const theme of ['office','latte','midnight']){await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();const geometry=await page.evaluate(()=>[...document.querySelectorAll('[data-project-workspace], [data-project-browser], [data-selected-project], main h1, main h2')].map(e=>({tag:e.tagName,text:e.tagName==='H1'||e.tagName==='H2'?e.textContent:null,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));if(baseline)assert.deepEqual(geometry,baseline);else baseline=geometry;report.geometry.push({theme,geometry});await shot(`overview-${theme}-1536`);}
+  let baseline;const palettes=[];for(const theme of ['office','latte','midnight']){await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),theme);palettes.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();const geometry=await page.evaluate(()=>[...document.querySelectorAll('[data-project-workspace], [data-project-browser], [data-selected-project], main h1, main h2')].map(e=>({tag:e.tagName,text:e.tagName==='H1'||e.tagName==='H2'?e.textContent:null,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));if(baseline)assert.deepEqual(geometry,baseline);else baseline=geometry;report.geometry.push({theme,geometry});await shot(`overview-${theme}-1536`);}
+  assert.equal(new Set(palettes).size,3,'Each selected theme must render its own palette');report.theme_palettes=palettes;
  });
  await journey('setup geometry, draft save separation and unsupported capability',async()=>{
   await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByLabel('Agent name',{exact:true}).fill('Invoice assistant');await shot('setup-work-office-1536');await page.getByRole('button',{name:'Next: Connections',exact:true}).click();await page.getByRole('button',{name:'Select connection',exact:true}).waitFor();await page.getByRole('button',{name:'Select connection',exact:true}).click();await shot('setup-connections-office-1536');

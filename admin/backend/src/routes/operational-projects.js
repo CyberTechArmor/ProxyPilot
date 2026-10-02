@@ -15,7 +15,7 @@ const noSudo = (_req, res) => res.status(401).json({ error: 'sudo_required', sud
 // once-per-session agent-control verification (lib/operational-control-grants.js);
 // without it nothing is verified, so takeover and reconciliation are refused.
 export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false,
-  brokerTasks = null, brokerTaskProposals = null, configurationConnections = null, agentRuns = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
+  brokerTasks = null, brokerTaskProposals = null, configurationConnections = null, agentRuns = null, websiteReviews = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
   const router = Router();
   const on = value => (typeof value === 'function' ? value() : value) === true;
   const opsOn = () => on(enabled), agentsOn = () => opsOn() && on(agentsEnabled);
@@ -27,6 +27,8 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
       evidence_enabled: ops && evidenceEnabled, agents_metadata_enabled: agentsOn(),
       agent_runs_enabled: runs, ...(runs ? { agent_execution_available: agentRuns.execution.available,
         agent_execution_message: agentRuns.execution.message } : {}),
+      ...(websiteReviews ? { website_review_enabled: agentsOn() && on(agentRunsEnabled),
+        website_review_contract: 'website-review.v1', website_review_strategy: 'http_extract_v1' } : {}),
       // Only a hint for the sidebar; the settings routes check the role themselves.
       can_manage_settings: req.user?.role === 'admin' });
   });
@@ -76,6 +78,17 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   if (evidenceRouter) router.use('/:id/demonstrations', evidenceRouter);
   const empty = req => parse(schemas.empty, req.body ?? {});
   const agentsOnly = (_req,res,next) => agentsOn() ? next() : res.status(404).json({error:'Not found'});
+  const reviewOnly=(_req,res,next)=>agentsOn()&&on(agentRunsEnabled)&&websiteReviews?next():res.status(404).json({error:'Not found'});
+  router.get('/:id/website-review-agents',reviewOnly,agentHandle((r,a)=>websiteReviews.listAgents(a,r.params.id),200,'website_review_agents_read'));
+  router.post('/:id/website-review-agents',reviewOnly,agentHandle((r,a)=>websiteReviews.createAgent(a,r.params.id,r.body),201,'website_review_agent_save'));
+  router.get('/:id/website-review-agents/:agentId',reviewOnly,agentHandle((r,a)=>websiteReviews.getAgent(a,r.params.id,r.params.agentId),200,'website_review_agent_read'));
+  router.patch('/:id/website-review-agents/:agentId',reviewOnly,agentHandle((r,a)=>websiteReviews.updateAgent(a,r.params.id,r.params.agentId,expected(r),r.body),200,'website_review_agent_save'));
+  router.put('/:id/website-review-agents/:agentId/model-consent',reviewOnly,agentHandle((r,a)=>websiteReviews.setConsent(a,r.params.id,r.params.agentId,expected(r),r.body),200,'website_review_consent'));
+  router.get('/:id/website-review-agents/:agentId/readiness',reviewOnly,agentHandle(async(r,a)=>({readiness:await websiteReviews.readiness(a,r.params.id,r.params.agentId)}),200,'website_review_readiness'));
+  router.get('/:id/website-review-runs',reviewOnly,agentHandle((r,a)=>websiteReviews.listRuns(a,r.params.id),200,'website_review_runs_read'));
+  router.post('/:id/website-review-runs',reviewOnly,agentHandle((r,a)=>websiteReviews.start(a,r.params.id,r.body),202,'website_review_start'));
+  router.get('/:id/website-review-runs/:runId',reviewOnly,agentHandle((r,a)=>websiteReviews.status(a,r.params.id,r.params.runId),200,'website_review_run_read'));
+  router.post('/:id/website-review-runs/:runId/cancel',reviewOnly,agentHandle((r,a)=>{empty(r);return websiteReviews.cancel(a,r.params.id,r.params.runId);},200,'website_review_cancel'));
   router.get('/directory', agentsOnly, handle((r,a)=>store.directory(a,r.query),200,'directory_read'));
   // Human-only: approving needs the session's sudo elevation plus the typed digest.
   router.get('/agent-approvals', agentRunsOnly, agentHandle((_r,a)=>agentRuns.inbox(a),200,'agent_inbox_read'));

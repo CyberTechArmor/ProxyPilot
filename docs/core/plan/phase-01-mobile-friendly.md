@@ -322,3 +322,18 @@ status/error text ≥4.5:1 across all three palettes. New broker/setup controls
 reuse existing high-contrast Midnight colors without modifying its original
 tokens or unrelated legacy controls. Final evidence is under
 `/tmp/broker-ui-role-contrast-artifacts`.
+
+## Public website review - 2026-10-02
+
+The separate Website reviews entry, saved-agent form, consent/readiness and
+completed evidence use mobile-first controls. Component fixtures passed overflow
+audits with the global guard disabled at 360/375/390/768/1280/1536/1920 pixels
+in Midnight, Latte and Office. The real full-dashboard fixture passed new-agent,
+completed-evidence and cancelled layouts at 360/375/768 pixels. Lighthouse12.8.2
+mobile snapshots of the actual new form, saved agent and expanded cited result
+each scored 100 at source `60bf9968a3aac83ef174709f304cdf4fccc58929`.
+
+Tests: `website-review.browser.mjs`, `website-review-integrated.browser.mjs`,
+`website-review-runtime.browser.mjs` and `website-review-lighthouse.mjs` in
+`admin/frontend/tests`. The sessions, public-site transport and model answers
+are scripted fixtures; these checks do not prove production execution.

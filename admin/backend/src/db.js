@@ -1,3 +1,4 @@
+import { websiteReviewMigration1116 } from './lib/operational-website-review.js';
 import { brokerTaskProposalsMigration1115 } from './lib/broker-task-proposals.js';
 import { brokerTaskMigration1114 } from './lib/broker-task-dispatch.js';
 import { operationalConfigurationsMigration1113 } from './lib/operational-configurations.js';
@@ -2054,6 +2055,7 @@ export function initDatabase() {
   runMigration(db, 1113, 'operational_agent_configurations', operationalConfigurationsMigration1113);
   runMigration(db, 1114, 'broker_task_dispatch', brokerTaskMigration1114);
   runMigration(db, 1115, 'broker_task_proposals', brokerTaskProposalsMigration1115);
+  runMigration(db, 1116, 'public_website_reviews', websiteReviewMigration1116);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-02",
+  "branch": "feat/website-review-updater-release-20261002",
+  "website_ui_base": "444cc2fe7b67e0bbea56103a6bbb824e669f06fd",
+  "updater_integration_source": "1d57201827d0766e0369d9fdd0c011ade2a33a5d",
+  "final_code_source": "10446cf9d9369c89667a40b389019b77908a5415",
+  "website_product_blobs_unchanged": true,
+  "checks": [
+    {"name": "Python script aggregate", "source": "1d572018", "tests": 308, "skipped": 33, "failed": 0, "seconds": 77.510, "log": "release-python.log", "sha256": "74ba338aa8f66f0b6a13694f72099aeea9c699c987d130199ff6f8bfa612d37d"},
+    {"name": "Root updater/self-update", "source": "1d572018", "passed": 81, "skipped": 0, "failed": 0, "seconds": 14.571, "log": "release-updater.log", "sha256": "990ed6845bdcb653611f7e64a27753dd9638f81796a3607d9211e73cef1ba8bf"},
+    {"name": "Operations", "source": "1d572018", "passed": 197, "skipped": 0, "failed": 0, "seconds": 18.782, "log": "release-operations.log", "sha256": "347696cd6e4c5bd045027bfe0438f2ba12a5a79517418785eaf28bbffd6c7316"},
+    {"name": "Root paired refresh fixtures", "source": "10446cf9", "passed": 15, "skipped": 0, "failed": 0, "seconds": 0.916, "log": "release-refresh.log", "sha256": "6a76f81c0c29e8d96f12fe9383518f923537a3a06444243d1bcbe229625f8706"}
+  ],
+  "fixture_corrections": "Normalize local Windows CRLF to committed LF for an unchanged systemd unit and A7 pinned patch. No product diff or security assertion changed.",
+  "final_code_delta": "Recognize existing settled provider_error terminal records; covered by the complete refresh selection. Other aggregate-tested sources unchanged.",
+  "production_actions": false,
+  "live_provider_call": false,
+  "new_credential_enrollment": false,
+  "host_rehearsal": false
+}

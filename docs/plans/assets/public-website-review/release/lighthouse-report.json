@@ -1,0 +1,37 @@
+{
+  "source_commit": "60bf9968a3aac83ef174709f304cdf4fccc58929",
+  "minimum": 90,
+  "real_full_dashboard": true,
+  "form_factor": "mobile",
+  "viewport": {
+    "width": 375,
+    "height": 900
+  },
+  "scripted_fixtures": [
+    "session identity",
+    "DNS/HTTP public pages",
+    "model adapter"
+  ],
+  "scores": [
+    {
+      "name": "website-review-new-agent-mobile",
+      "score": 100,
+      "form_factor": "mobile",
+      "failures": []
+    },
+    {
+      "name": "website-review-saved-agent-mobile",
+      "score": 100,
+      "form_factor": "mobile",
+      "failures": []
+    },
+    {
+      "name": "website-review-completed-evidence-mobile",
+      "score": 100,
+      "form_factor": "mobile",
+      "failures": []
+    }
+  ],
+  "page_errors": [],
+  "outbound": []
+}

@@ -301,6 +301,7 @@ function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, vie
   const surface=expanded?'fixed inset-0 z-[60] h-viewport w-full flex flex-col border-0 rounded-none bg-background p-4 min-w-0 min-h-0 overflow-hidden gap-3':`${className} operations-card flex-1 flex-col gap-4 rounded-md border bg-card p-4 min-w-0 min-h-0 overflow-y-auto`;
   const fullscreenButton=<Action variant="outline" size={expanded?'default':'icon'} className={`gap-2 shrink-0 min-h-11 ${expanded?'':'w-11'}`} title={expanded?'Exit fullscreen browser':'Open fullscreen browser'} aria-label={expanded?'Exit fullscreen browser':'Open fullscreen browser'} data-exit-browser-fullscreen={expanded?'':undefined} onClick={()=>expanded?full.current?.exit():full.current?.enter()}>{expanded?<Minimize2 aria-hidden="true" className="h-4 w-4"/>:<Maximize2 aria-hidden="true" className="h-4 w-4"/>}{expanded&&'Exit fullscreen'}</Action>;
   const video = !!liveView && liveView.mode === 'live' && controls.live?.enabled;
+  const beforeDialog=callback=>async event=>{const trigger=event?.currentTarget;if(expanded)await full.current?.exit();trigger?.focus();callback?.();};
   if (video) return <section ref={box} aria-labelledby={headingId} tabIndex={expanded?-1:undefined} className={surface} data-browser-pane data-browser-fullscreen={expanded}>
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h2 id={headingId} className="text-base font-semibold flex items-center gap-2"><Globe aria-hidden="true" className="h-5 w-5 text-muted-foreground"/>Live browser</h2>
@@ -310,7 +311,7 @@ function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, vie
     </div>
     <LiveBrowser base={liveView.base} runId={data.run.id} onState={liveView.onState} onControl={liveView.onControl}
       onViewer={liveView.onViewer} expanded={expanded}/>
-    <TakeoverBar data={data} live={liveView} me={me} busy={busy} onTakeover={async()=>{if(expanded)await full.current?.exit();onTakeover?.();}} onEndTakeover={onEndTakeover}/>
+    <TakeoverBar data={data} live={liveView} me={me} busy={busy} onTakeover={beforeDialog(onTakeover)} onEndTakeover={beforeDialog(onEndTakeover)}/>
     <p className="text-xs text-muted-foreground">{DECK_TEXT.liveNote}</p>
     <RunInformation data={data} active={active} busy={busy} expanded={expanded} {...information}/>
   </section>;
@@ -351,7 +352,7 @@ function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, vie
       <p className="min-w-0 flex-1 text-sm break-words" role="status">{liveView.note}</p>
       {liveView.retry && <Action variant="outline" onClick={liveView.onRetry}>{LIVE_TEXT.retry}</Action>}</div>}
     {controls.takeover?.holder && <TakeoverBar data={data} live={liveView ?? { control: {}, state: 'off' }} me={me} busy={busy}
-      onTakeover={onTakeover} onEndTakeover={onEndTakeover}/>}
+      onTakeover={beforeDialog(onTakeover)} onEndTakeover={beforeDialog(onEndTakeover)}/>}
     <p className="text-xs text-muted-foreground">{active ? DECK_TEXT.viewNote : 'This is a historical run. No browser session is active.'}</p>
     <RunInformation data={data} active={active} busy={busy} expanded={expanded} {...information}/>
   </section>;
@@ -550,7 +551,7 @@ export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, o
         onEnlarge={onFrame} viewNote={viewNote} liveView={liveView} me={me} busy={busy} onTakeover={onTakeover}
         onEndTakeover={onEndTakeover} information={{message,statusId,stopHint,resumeHint,onOpenRun}}/>
       <aside aria-label="Run context" className={`operations-card ${panel === 'browser' && !data.run.help && !data.reconciliation?.items?.length ? 'hidden lg:flex' : 'flex'} flex-col rounded-md border bg-card min-w-0 min-h-0 flex-1 overflow-hidden lg:col-start-2 ${open ? 'lg:row-start-2' : 'lg:row-start-1'}`} data-run-context>
-        {(data.run.help || data.reconciliation?.items?.length > 0) && <div className="space-y-3 p-4 border-b lg:max-h-[45%] lg:overflow-y-auto">
+        {(data.run.help || data.reconciliation?.items?.length > 0) && <div role="region" aria-label="Run review decisions" tabIndex={0} data-run-review-decisions className={`space-y-3 p-4 border-b min-h-0 shrink-0 overflow-y-auto overscroll-contain ${panel==='browser'?'max-h-full':'max-h-[45%]'} lg:max-h-[45%]`}>
           <HelpBanner help={data.run.help}/>
           <ReconcilePanel data={data} busy={busy} onDecide={onDecide}/>
         </div>}

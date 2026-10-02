@@ -105,9 +105,10 @@ function announcementFor(prev, next) {
 }
 
 // A confirmation for the two takeover gestures; full screen on a phone.
-function ConfirmDialog({ title, body, confirm, destructive = false, busy, onConfirm, onClose }) {
+export function ConfirmDialog({ title, body, confirm, destructive = false, busy, onConfirm, onClose }) {
+  const returnFocus=useRef(globalThis.document?.activeElement);
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg flex flex-col">
+    <DialogContent onCloseAutoFocus={event=>{if(returnFocus.current?.isConnected){event.preventDefault();returnFocus.current.focus({preventScroll:true});}}} className="max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-lg flex flex-col">
       <DialogHeader><DialogTitle>{title}</DialogTitle>
         <DialogDescription>{Array.isArray(body) ? body[0] : body}</DialogDescription></DialogHeader>
       {Array.isArray(body) && <ul className="list-disc pl-5 space-y-1 text-sm">{body.slice(1).map(line => <li key={line} className="break-words">{line}</li>)}</ul>}

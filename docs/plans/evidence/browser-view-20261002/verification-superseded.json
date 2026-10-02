@@ -3,289 +3,176 @@
     {
       "surface": "deck",
       "width": 360,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "deck",
       "width": 375,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "deck",
       "width": 768,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "deck",
       "width": 1280,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "deck",
       "width": 1920,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "deck",
       "width": 375,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "project",
       "width": 360,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "project",
       "width": 375,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "project",
       "width": 768,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "project",
       "width": 1280,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "project",
       "width": 1920,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "project",
       "width": 375,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "projects",
       "width": 360,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "projects",
       "width": 375,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "projects",
       "width": 768,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "projects",
       "width": 1280,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "projects",
       "width": 1920,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "projects",
       "width": 375,
-      "height": 900,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 360,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 360,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 360,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 360,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 375,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 375,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 375,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 375,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 768,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 768,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 768,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 768,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 1280,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 1280,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "fullscreen",
       "width": 1280,
-      "height": 800,
       "document_scroll": false
     },
     {
       "surface": "fullscreen-resize",
       "width": 1280,
-      "height": 640,
       "document_scroll": false
     },
     {
       "surface": "frame-modal",
       "width": 375,
-      "height": 800,
-      "document_scroll": false
-    },
-    {
-      "surface": "give-back-native",
-      "width": 375,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "give-back-fallback",
-      "width": 375,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-review",
-      "width": 360,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-approval-modal",
-      "width": 360,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-review",
-      "width": 375,
-      "height": 667,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-approval-modal",
-      "width": 375,
-      "height": 667,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-review",
-      "width": 768,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-approval-modal",
-      "width": 768,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-review",
-      "width": 1280,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-approval-modal",
-      "width": 1280,
-      "height": 640,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-review",
-      "width": 1920,
-      "height": 800,
-      "document_scroll": false
-    },
-    {
-      "surface": "populated-approval-modal",
-      "width": 1920,
-      "height": 800,
-      "document_scroll": false
-    },
-    {
-      "surface": "keyboard-height-reload",
-      "width": 375,
-      "height": 450,
       "document_scroll": false
     }
   ],
@@ -294,9 +181,5 @@
   "same_media_node": true,
   "frame_modal": true,
   "internal_activity_scroll": true,
-  "give_back_native_and_fallback": true,
-  "give_back_cancel_preserves_control": true,
-  "populated_review_internal_scroll": true,
-  "keyboard_height_reload": true,
   "page_errors": []
 }

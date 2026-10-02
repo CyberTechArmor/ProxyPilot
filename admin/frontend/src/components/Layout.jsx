@@ -394,13 +394,13 @@ export default function Layout() {
       >
         <div className="flex flex-col h-full">
           {/* Logo and Version */}
-          <div className={cn("flex items-start justify-between gap-2 px-4 py-4 border-b", operationsSurface ? "md:px-4" : "md:px-6")}>
+          <div className={cn("flex items-start justify-between gap-2 px-4 py-4 border-b", operationsSurface ? "md:px-3 md:gap-1" : "md:px-6")}>
             <div className="flex flex-col min-w-0">
               <div className="flex items-center gap-2 min-w-0">
                 {branding.logo
-                  ? <img src={branding.logo} alt="" className="h-8 w-8 shrink-0 rounded object-contain" />
-                  : <Rocket className="h-8 w-8 text-primary shrink-0" />}
-                <span className="text-xl font-bold truncate">{branding.name}</span>
+                  ? <img src={branding.logo} alt="" className={cn("h-8 w-8 shrink-0 rounded object-contain",operationsSurface&&"md:h-6 md:w-6")} />
+                  : <Rocket className={cn("h-8 w-8 text-primary shrink-0",operationsSurface&&"md:h-6 md:w-6")} />}
+                <span className={cn("text-xl font-bold truncate",operationsSurface&&"md:text-lg")}>{branding.name}</span>
               </div>
               <div className="flex items-center gap-2 mt-1">
                 {/* Version (backend, moves on releases) + UI build stamp
@@ -443,7 +443,7 @@ export default function Layout() {
               type="button"
               onClick={() => setCollapsed(true)}
               aria-label="Collapse navigation"
-              className="hidden md:inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              className={cn("hidden md:inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground",operationsSurface&&"md:h-6 md:w-6")}
             >
               <ChevronsLeft className="h-5 w-5" />
             </button>

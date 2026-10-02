@@ -3,6 +3,8 @@
 Owner: Thomas · implementation on Duo · started 2026-10-02.
 Branch: `ui/mockup-alignment-20261002`. Publication/merge remains pending explicit instruction.
 
+Delivery priority updated by Thomas: **first authorized guide Save-to-approved plus public read-only website review end-to-end**, then finish full visual alignment. A separate runtime worker owns the website capability and will provide its contract before UI integration. General login, credentials, writes, private-network access and bypassing site protections are outside that slice. Other expanded broker/guide/storage items remain in the original backlog.
+
 ## Verified baseline and backlog
 
 - GitHub main verified by remote Git read on 2026-10-02: `0f1b48f33fe31723100b8c758c717899bb7b3f1d`; fetched into the isolated local repository.
@@ -15,13 +17,14 @@ Branch: `ui/mockup-alignment-20261002`. Publication/merge remains pending explic
 | ID | Deliverable | Current state | Independently verifiable acceptance/evidence | Implementation commit |
 | --- | --- | --- | --- | --- |
 | UX01 | Reference inventory, route/state/viewport mapping and contract gaps | Mapping recorded; visual acceptance pending | Actual reference pixels inspected on Duo; see reference map; all supplied Library bytes now readable | c4cc81a8 (tracker start) |
-| UX02 | Shared type, icons, spacing, controls, border/radius tokens | Implemented; browser verification pending | Same geometry in Midnight/Latte/Office; 44px mobile actions; no Nodus brand; screenshot measurements | bf9b241e |
-| UX03 | Operations shell, persistent project list and overview cards; short creation | Pending | Desktop list/detail proportions; mobile disclosure; guide/readiness/agents/activity/access cards; settings separated; safe people picker or exact API gap | Pending |
-| UX04 | Work/Connections/Controls/Review agent setup | Pending | Bounded cards, narrow assignment summary; cancel/back/reopen/repeated save; draft never starts a run | Pending |
-| UX05 | Connection picker, centered Add dialog, catalogue/readiness actions | Pending | Accurate supported types/availability; optional assignment; permission/revoked/unavailable states; remove assignment distinct from global revoke | Pending |
-| UX06 | Run hierarchy and browser/activity balance | Pending | Historical states, approvals, takeover and reconcile preserved; desktop/mobile screenshots | Pending |
-| UX07 | Final aggregate checks, browser journeys and visual review | Pending | Required checks/build; 360/375/390/768/1280/1536/1920 viewports, overflow guard disabled; keyboard/focus; local screenshots compared to references; accessibility gate | Pending |
-| G01 | User-directed authorized guide save/approval policy | In progress; separate local worktree | Authorized edit saves publish immutable approved version atomically; explicit pending Save and approve; revisions, provenance and run pins retained; no run or credential-write approval on save | Pending |
+| UX02 | Shared type, icons, spacing, controls, border/radius tokens | Implemented; frozen-state geometry passed | Same measured geometry in Midnight/Latte/Office; actual screenshots inspected; final accessibility gate pending | bf9b241e |
+| UX03 | Operations shell, persistent project list and overview cards; short creation | Implemented; integrated browser passed | List/detail screenshots inspected; private creation, cancel/reopen and separate Details verified; exact precreate lookup gap below | b35ac7bd, 608e47a7 |
+| UX04 | Work/Connections/Controls/Review agent setup | Implemented; local fixture journeys passed | Bounded cards, 208px summary at xl; Save draft on every step, no assignments or execution; screenshot comparison in progress | 6bfde28a |
+| UX05 | Connection picker, centered Add dialog, catalogue/readiness actions | Implemented; 13 connection journeys passed | Exact-agent authority denial, revoked/use-only states, draft/assignment separation; 18 theme/viewport checks plus contrast; final integrated rerun pending | 6bfde28a |
+| UX06 | Run hierarchy and browser/activity balance | Implemented; run journeys in progress | Historical states, pinned guide and approvals retained; desktop/mobile run screenshots pending final review | 0a88e924 |
+| UX07 | Final aggregate checks, browser journeys and visual review | In progress; environment blockers recorded | Backend 201 passed; frontend build and 9 unit tests passed; UI flow/seven-width audit passed; Docker integration and final accessibility remain open | Final ledger pending |
+| G01 | User-directed authorized guide save/approval policy | Implemented; backend and real browser passed | 11 guide regressions plus integrated 201 suite; private creation, atomic save, immutable versions, explicit pending approval, viewer restrictions, no run starts | 1ded124d, b35ac7bd |
+| W01 | Public read-only website review entry and end-to-end flow | First-priority; runtime contract pending | Separate capability, public site validation, no login/credentials/writes; review output and browser/activity flow; no capability claims before integration tests | Pending separate runtime worker |
 
 No completion percentage is assigned. A milestone is accepted only when its evidence is linked and limitations are stated.
 
@@ -50,12 +53,13 @@ Excluded: production shell/SSH/MCP mutation, deployment, credential enrollment, 
 
 - Baseline and original backlog ancestry verified; no remote mutation.
 - Local mockup pixels inspected using image viewer.
-- AGENTS.md and .agents/skills are absent from current repository; CLAUDE.md, LEARNINGS.md, MOBILE_FIRST.md and available relevant repository skills are being inspected.
-- Build/browser evidence and final commit ledger: pending implementation.
+- AGENTS.md and .agents/skills are absent from current repository; CLAUDE.md, LEARNINGS.md, MOBILE_FIRST.md and relevant design-reference instructions were inspected.
+- Local evidence lives in sibling `../verification/`: `final-dashboard.log`, `final-build.log`, `operations-guide.log`, `ui-alignment/ui-alignment-report.json`, and `connections/broker-ui-report.json`. Reports identify disposable/frozen fixtures; no production proof is inferred.
+- The user-facing tracker PDF is Library file `libfile_e940e43282948191b79f8d07093b9e22`; future updates replace this identity.
 
 ## Blockers and decisions
 
 - Library helper Windows metadata incompatibility resolved with NTFS named streams while keeping the current helper unchanged; all requested references readable with identity/version preserved.
 - Precreation user-picker contract gap: `GET /:id/access/candidate` requires an existing project and owner access; the global user directory is administrative. The short creation flow defaults private, then directs the owner to named existing-user lookup in Access. No new account-enumeration endpoint is introduced.
 - Browser execution remains the synthetic sign-in pilot at `https://demo.fractionate.ai`; configured generic work is not general research capability. Typed API configuration remains limited to supported adapters. Surface those constraints before setup and beside readiness actions.
-- Required aggregate selection/build and broker/agent browser suites identified from repository CI; dependency installation and local validation in progress. Linux host/root tests can only use disposable local WSL fixtures, never production.
+- Required aggregate selection/build and broker/agent browser suites identified from repository CI; local validation in progress. Linux host/root tests only use disposable local WSL fixtures. Docker and iptables are absent: two real OpenBao cases in the broker aggregate failed with `spawnSync docker ENOENT`; 83 remaining broker tests passed. No test is silently skipped or counted as passed.

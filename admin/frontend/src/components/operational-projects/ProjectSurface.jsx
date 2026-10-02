@@ -20,7 +20,8 @@ export function NewProjectButton() {
       navigate(`/operational-projects/${result.project.id}`);
     } catch(e) {setError(e.message);} finally {setBusy(false);}
   }
-  return <Dialog open={open} onOpenChange={value=>{if(!busy){setOpen(value);setError('');}}}>
+  function close() {setOpen(false);setName('');setDescription('');setError('');}
+  return <Dialog open={open} onOpenChange={value=>{if(!busy){if(value){setOpen(true);setError('');}else close();}}}>
     <DialogTrigger asChild><Button className="min-h-11 gap-2 rounded-md px-4"><Plus className="h-4 w-4" aria-hidden="true"/>New project</Button></DialogTrigger>
     <DialogContent className="operations-dialog max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-md flex flex-col p-6 [&>button]:h-11 [&>button]:w-11 [&>button]:flex [&>button]:items-center [&>button]:justify-center">
       <DialogHeader className="pr-8"><DialogTitle className="operations-heading">New project</DialogTitle><DialogDescription>Give the work a name. Add guides and agents when you are ready.</DialogDescription></DialogHeader>
@@ -32,7 +33,7 @@ export function NewProjectButton() {
           <p className="flex items-center gap-2 font-medium"><Lock className="h-4 w-4 shrink-0" aria-hidden="true"/>Private to you</p>
           <p className="text-sm text-muted-foreground">After creating, open Access to find an existing person by username and choose their project role. Connection permissions are managed separately.</p>
         </fieldset>
-        <div className="flex flex-col sm:flex-row sm:justify-end gap-2"><Action type="button" variant="outline" disabled={busy} onClick={()=>setOpen(false)}>Cancel</Action><Action type="submit" disabled={busy||!name.trim()}>{busy?'Creating…':'Create project'}</Action></div>
+        <div className="flex flex-col sm:flex-row sm:justify-end gap-2"><Action type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Action><Action type="submit" disabled={busy||!name.trim()}>{busy?'Creating…':'Create project'}</Action></div>
       </form>
     </DialogContent>
   </Dialog>;
@@ -47,7 +48,7 @@ export function ProjectBrowser({projects,selectedId,section='Overview',collapsib
   const [search,setSearch]=useState(''),[filter,setFilter]=useState('all');
   const searchId=useId();
   const saved=projects.filter(p=>p.current_version&&!p.archived_at).length;
-  const rows=projects.filter(p=>`${p.name} ${p.description||''}`.toLowerCase().includes(search.toLowerCase())&&(filter==='all'||(filter==='saved'?p.current_version&&!p.archived_at:!p.current_version&&!p.archived_at)));
+  const rows=projects.filter(p=>`${p.name} ${p.description||''} ${p.current_version?.title||''}`.toLowerCase().includes(search.toLowerCase())&&(filter==='all'||(filter==='saved'?p.current_version&&!p.archived_at:!p.current_version&&!p.archived_at)));
   const list=<>
     <div className="p-4 space-y-4"><div className="relative"><label htmlFor={searchId} className="sr-only">Search projects and procedures</label><Search className="pointer-events-none absolute left-3 top-3 h-5 w-5 text-muted-foreground" aria-hidden="true"/><input id={searchId} type="search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search projects and procedures…" className="min-h-11 w-full rounded-md border bg-background py-2 pl-10 pr-3 text-sm"/></div>
       <nav className="operations-tabs gap-4" aria-label="Filter projects">{[['all','All',projects.length],['saved','Guide saved',saved],['draft','No guide',projects.filter(p=>!p.current_version&&!p.archived_at).length]].map(([key,label,count])=><button type="button" key={key} aria-pressed={filter===key} onClick={()=>setFilter(key)} className={`min-h-11 shrink-0 border-b-2 pb-2 text-sm ${filter===key?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground'}`}>{label}<span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground">{count}</span></button>)}</nav>

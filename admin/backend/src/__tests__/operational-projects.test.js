@@ -14,6 +14,24 @@ function withFixture(fn) {
 const rev = (f, owner, id) => f.store.get(owner,id).revision;
 const add = (f, owner, p, member, role) => f.store.grant(owner,p.id,member.id,rev(f,owner,p.id),{role});
 
+test('recent activity reads newest events beyond the first page with stable cursors and redaction', withFixture(f => {
+  const owner=f.addUser(), viewer=f.addUser(), outsider=f.addUser(), p=f.store.create(owner,{name:'Activity'});
+  add(f,owner,p,viewer,'viewer');
+  for(let n=0;n<30;n++)f.store.update(owner,p.id,rev(f,owner,p.id),{description:`Change ${n}`});
+  add(f,owner,p,f.addUser(),'editor');
+  const oldest=f.store.events(owner,p.id,{limit:'4'});
+  const recent=f.store.events(owner,p.id,{limit:'4',order:'desc'});
+  assert.equal(oldest.events[0].action,'created');
+  assert.equal(recent.events[0].action,'member_set');
+  assert(recent.events[0].id>oldest.events.at(-1).id);
+  const next=f.store.events(owner,p.id,{limit:'4',order:'desc',after:recent.next_cursor});
+  assert(next.events.every(e=>e.id<recent.events.at(-1).id));
+  const redacted=f.store.events(viewer,p.id,{limit:'4',order:'desc'}).events[0];
+  assert.equal(redacted.subject_id,null);assert.deepEqual(redacted.metadata,{});
+  refused(404,()=>f.store.events(outsider,p.id,{order:'desc'}));
+  refused(400,()=>f.store.events(owner,p.id,{order:'other'}));
+}));
+
 test('create private record/draft; filter lists before pagination; admin does not bypass access', withFixture(f => {
   const a=f.addUser(), b=f.addUser(), admin=f.addUser('admin');
   const p=f.store.create(a,{name:'  Onboarding  '}), hidden=f.store.create(b,{name:'Private'});

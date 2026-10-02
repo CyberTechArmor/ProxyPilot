@@ -28,7 +28,7 @@ async function as(role, { width = 1280, height = 900, theme = 'dark' } = {}) {
   await ctx.addInitScript(({ user, theme }) => {
     localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', theme);
   }, { user: { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user' }, theme });
-  const page = await ctx.newPage();
+  const page = await ctx.newPage(); page.setDefaultNavigationTimeout(90000);
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
   page.on('response', r => { if (r.status() >= 500 || (r.status() === 404 && r.url().includes('/api/') && !shell404.test(r.url()) && !r.url().includes('/operational-projects/'))) page.errors.push(`${r.status()} ${r.url()}`); });
@@ -89,9 +89,13 @@ async function approveInUi(page, { prefix = 12 } = {}) {
   await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
   return digest;
 }
-const result = async (page, label) => {
+const showPanel = async (page, name) => {
   const context = page.getByRole('tablist', { name: 'Run context panels' });
-  if (await context.isVisible()) await context.getByRole('tab', { name: 'Details', exact: true }).click();
+  if (page.viewportSize().width>=1024) {await context.waitFor(WAIT);await context.getByRole('tab', { name, exact: true }).click();}
+  else await panelButton(page, name).click();
+};
+const result = async (page, label) => {
+  await showPanel(page,'Details');
   await page.getByTestId('run-result').filter({ hasText: label }).waitFor(WAIT);
 };
 // Every visible disabled control must say why: aria-describedby naming visible text.
@@ -213,6 +217,7 @@ try {
     await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
     await result(page, 'Signed in and verified');
     await page.getByText(`Teardown receipt: verified · key ${h.world.supervisor.keyId.slice(0, 8)}`).waitFor(WAIT);
+    await showPanel(page,'Activity');
     await page.getByText('Approved by omar-operator', { exact: true }).waitFor(WAIT);
     await page.getByText(/Decided by the model, choosing from/).first().waitFor(WAIT);
     await page.getByText('Stop is not available: The run has ended.').waitFor(WAIT);

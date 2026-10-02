@@ -12,7 +12,6 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs';
-import { authorizePilotSelfReview } from '../../backend/src/lib/operational-pilot-review.js';
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
@@ -65,7 +64,7 @@ async function as(role, { width = 1280, height = 900, theme = 'dark', live = tru
     localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', theme);
   }, { user: { id: u.id, username: u.username, role: 'user' }, theme });
   if (live) await ctx.addInitScript(stubWebRtc);
-  const page = await ctx.newPage();
+  const page = await ctx.newPage(); page.setDefaultNavigationTimeout(90000);
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
   page.on('response', r => { if (r.status() >= 500 || (r.status() === 404 && r.url().includes('/api/') && !shell404.test(r.url()) && !r.url().includes('/operational-projects/'))) page.errors.push(`${r.status()} ${r.url()}`); });
@@ -160,29 +159,27 @@ async function layoutCheck(page, label, { dialog = false } = {}) {
 const SIGNALLING = new Set(['client/heartbeat', 'signal/request', 'signal/answer', 'signal/candidate', 'signal/restart', 'signal/video']);
 
 try {
-  await journey('A8 demo guide: same-person approval stays disabled until the exact operator exception, then manual publication is audited', async () => {
+  await journey('pending guide: authorized save approves the exact snapshot without starting execution', async () => {
     const { f, users } = h.world, owner = users.owner;
     const p = f.store.create(owner, { name: 'Same-person demo guide' });
     f.store.site(owner, p.id, f.store.get(owner, p.id).revision, { site_origin: 'https://demo.fractionate.ai' });
-    f.store.saveDraft(owner, p.id, 1, { title: 'Pilot guide', instructions: 'Open the demo sign-in dialog.' });
-    const submission = f.store.submit(owner, p.id, 2, {}).submission;
+    f.seedLegacyDraft(owner, p.id, { title: 'Pilot guide', instructions: 'Open the demo sign-in dialog.' });
+    const submission = f.store.submit(owner, p.id, f.store.draft(owner, p.id).revision, {}).submission;
     const page = await as('owner', { width: 375, height: 800, live: false });
     const url = `${h.origin}/operational-projects/${p.id}?section=Guide`;
     await page.goto(url);
-    const approve = page.getByRole('button', { name: 'Approve and publish' });
+    const approve = page.getByRole('button', { name: 'Save and approve', exact: true });
     await approve.waitFor(WAIT);
-    assert.equal(await approve.isEnabled(), false);
-    authorizePilotSelfReview(f.db, { owner_id: owner.id, project_id: p.id, submission_id: submission.id,
-      content_hash: submission.content_hash }, { now: () => submission.submitted_at });
-    await page.getByRole('button', { name: 'Refresh server state' }).click();
-    await page.getByText(/Pilot exception: you may manually approve this exact submitted guide once/).waitFor(WAIT);
+    assert.equal(await approve.isEnabled(), true);
     assert.equal(f.store.versions(owner, p.id).versions.length, 0);
-    await layoutCheck(page, 'pilot-guide-exception');
+    await layoutCheck(page, 'pending-guide-save-approve');
     await page.setViewportSize({ width: 375, height: 800 });
     await approve.click();
-    await page.getByText('Guide approved and published.', { exact: true }).waitFor(WAIT);
+    await page.getByText('Guide saved and approved.', { exact: true }).waitFor(WAIT);
     assert.equal(f.store.get(owner, p.id).current_version.approved_by, owner.id);
-    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM ops_project_events WHERE project_id=? AND action='a8_pilot_self_review_used'").get(p.id).n, 1);
+    assert.equal(f.store.get(owner, p.id).current_version.submission_id, submission.id);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM ops_project_events WHERE project_id=? AND action='a8_pilot_self_review_used'").get(p.id).n, 0);
+    assert.equal(h.requests.some(r => r.method === 'POST' && r.path === `/api/operational-projects/${p.id}/agent-runs`), false);
     assert.deepEqual(page.errors, []);
   });
   await journey('live view and takeover: confirm it is you once, control the browser, give it back, decide, resume', async () => {

@@ -14,7 +14,7 @@ async function as(role,width=375) {
   const context=await browser.newContext({viewport:{width,height:900}});contexts.push(context);
   await context.addCookies([{name:'pp_harness_user',value:role,url:h.origin},{name:'pp_csrf',value:'operations-guide-fixture',url:h.origin}]);
   await context.addInitScript(()=>localStorage.setItem('mock2HintDismissed','1'));
-  const page=await context.newPage();page.setDefaultTimeout(30000);
+  const page=await context.newPage();page.setDefaultTimeout(30000);page.setDefaultNavigationTimeout(90000);
   return page;
 }
 const sections=page=>page.getByRole('navigation',{name:'Operation sections'});

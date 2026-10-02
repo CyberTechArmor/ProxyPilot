@@ -100,6 +100,20 @@ export function WebsiteReviews({ base, project, onChanged = async () => {} }) {
       if (gen === generation.current && !signal?.aborted) { if (e.status === 412) setStale(true); report(e); }
     } finally { locked.current = false; if (gen === generation.current) setBusy(false); }
   }
+  async function refreshReviews() {
+    if (locked.current) return;
+    locked.current = true;
+    const controller = new AbortController(), gen = ++generation.current;
+    request.current?.abort(); request.current = controller;
+    setBusy(true); setLoading(true); setError(''); setMessage('');
+    try {
+      await load(controller.signal, gen);
+      if (gen !== generation.current || controller.signal.aborted) return;
+      setLost(false); setTick(t => t + 1); setMessage('Website reviews refreshed.');
+      await onChanged();
+    } catch (e) { if (gen === generation.current && !controller.signal.aborted) report(e); }
+    finally { locked.current = false; if (gen === generation.current) { setBusy(false); setLoading(false); } }
+  }
   function edit(a) { setEditing(a); setForm({ name: a.name, url: a.url, objective: a.objective, limits: { ...a.limits } }); setStale(false); setError(''); }
   function showRun(value) { resultGeneration.current++; setRun(value); }
   async function openRun(id) {
@@ -110,7 +124,8 @@ export function WebsiteReviews({ base, project, onChanged = async () => {} }) {
     catch (e) { if (gen === generation.current && resultGen === resultGeneration.current && !signal?.aborted) report(e); }
     finally { if (gen === generation.current && resultGen === resultGeneration.current) setRunLoading(false); }
   }
-  return <Panel title="Public website reviews" icon={Globe} description="Review public page content against this project's approved guide." actions={<Action variant="outline" disabled={busy || loading} onClick={() => perform(async () => {}, 'Website reviews refreshed.')}>Refresh reviews</Action>}>
+  return <Panel title="Public website reviews" icon={Globe} description="Review public page content against this project's approved guide.">
+    <div className="flex flex-col sm:flex-row sm:justify-end gap-2"><Action variant="outline" disabled={busy || (loading && !lost)} onClick={refreshReviews}>Refresh reviews</Action></div>
     <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-sm">
       <p className="font-medium">Supported pages: public HTML or plain text over HTTP(S), on standard ports.</p>
       <p className="text-muted-foreground">Pages are read without browser JavaScript, login or website writes. Robots restrictions, paywalls and blocked pages produce an explicit outcome.</p>

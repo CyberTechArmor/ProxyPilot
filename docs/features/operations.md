@@ -5,6 +5,12 @@ work performed by people. The interface is at `/operational-projects`; Dev Studi
 retains `/projects`. No operation provisions a container, repository, worker,
 agent or credential. Recording a run is a human report, not a task launcher.
 
+The separately gated Agent runs features include the synthetic Demo sign-in
+pilot and [public website reviews](public-website-review.md). Public reviews use
+a saved approved guide and URL, owner model consent, explicit start/cancel and
+immutable cited evidence. They do not require synthetic hard-rules or a website
+credential connection. Installed runtime/provider readiness is checked separately.
+
 ## Feature gate and data
 
 Operations is off until an administrator turns it on in the dashboard:

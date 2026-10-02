@@ -782,6 +782,12 @@ class Broker:
             run = self.state['runs'].get(params.get('run_id'))
             if run is None or run.get('credential') is not None:
                 raise Refused('RUN_NOT_PINNED')
+            previous = self.state['calls'].get(params.get('call_id'))
+            if previous is not None and (previous.get('kind') != 'public_review' or
+                    previous.get('run_id') != params.get('run_id') or
+                    previous.get('prompt_sha256') != hashlib.sha256(str(params.get('prompt')).encode('utf-8')).hexdigest() or
+                    previous.get('max_output_tokens') != params.get('max_output_tokens')):
+                raise Refused('RUN_POLICY_MISMATCH')
         return dict(self._model_call(params, None, 1500, 10000), kind='public_review')
 
     def _model_call(self, params, proof, max_output, excerpt):

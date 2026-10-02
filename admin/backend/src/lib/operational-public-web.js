@@ -39,7 +39,7 @@ export function publicUrl(value, protectedHosts = []) {
 // No global fetch, proxy environment, cookie jar, auth header or user-supplied
 // headers. The screened address is used by the actual socket, not a second DNS
 // lookup. TLS retains the original hostname and certificate verification.
-export function createPublicFetcher({ resolve = host => dnsLookup(host,{all:true}), protectedHosts = [], protectedAddresses = [],
+export function createPublicFetcher({ resolve = host => dnsLookup(host,{family:4,all:true}), protectedHosts = [], protectedAddresses = [],
   request = (u,options,callback)=>(u.protocol==='https:'?https:http).request(u,options,callback) } = {}) {
   return async function fetchPublic(value, budget, { maxBytes = WEB_LIMITS.page_bytes, beforeHop = null } = {}) {
     let url = publicUrl(value, protectedHosts);
@@ -113,9 +113,9 @@ export function extractPage(response) {
   if (response.status < 200 || response.status >= 300) throw webError('HTTP_ERROR');
   if (!/^(?:text\/html|application\/xhtml\+xml|text\/plain)(?:;|$)/i.test(response.type)) throw webError('CONTENT_UNSUPPORTED');
   const html=/html/i.test(response.type), body=response.body;
-  const title=decode((html?body.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]:'')||'').replace(/<[^>]*>/g,'').trim().slice(0,200);
+  const title=decode((html?body.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]:'')||'').replace(/<[^>]*>/g,'').trim().slice(0,200).toWellFormed();
   const text=decode(html?body.replace(/<!--[\s\S]*?-->/g,' ').replace(/<(script|style|noscript|template|svg)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,' ')
-    .replace(/<[^>]*>/g,' '):body).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,'').replace(/\s+/g,' ').trim();
+    .replace(/<[^>]*>/g,' '):body).replace(/[\x00-\x08\x0b-\x1f\x7f]/g,'').replace(/\s+/g,' ').trim().toWellFormed();
   if (/just a moment|checking your browser|verify you are human|enable javascript.*(?:continue|view)|captcha challenge/i.test(`${title} ${text.slice(0,1200)}`)) throw webError('SITE_BLOCKED');
   if (/sign in to (?:continue|read)|subscribe to (?:continue|read)|this (?:article|content) is (?:only )?for subscribers/i.test(text.slice(0,1500))) throw webError('AUTH_OR_PAYWALL');
   if (text.length < 100) throw webError(html&&/<script\b/i.test(body)?'CLIENT_RENDER_REQUIRED':'CONTENT_EMPTY');

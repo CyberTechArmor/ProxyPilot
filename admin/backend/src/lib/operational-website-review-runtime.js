@@ -4,6 +4,14 @@ import { agentRunsConfiguration } from './operational-agent-runtime.js';
 import { createSupervisorClient } from './operational-worker-supervisor.js';
 import { createPublicFetcher, digest, webError } from './operational-public-web.js';
 import { createWebsiteReviewService } from './operational-website-review.js';
+import { effectiveToggles } from './operations-toggles.js';
+
+// Bind numeric limits byte-for-byte across Python/JavaScript JSON number
+// formatting (for example 1e-7 versus 1e-07) without exposing model secrets.
+export function reviewRequestDigest(request) {
+  const number=Buffer.alloc(8);number.writeDoubleBE(request.limits.max_usd);
+  return digest(JSON.stringify({...request,limits:{...request.limits,max_usd:number.toString('hex')}}));
+}
 
 export function createReviewModelBridge({client,publicKeyPem}) {
   const key=createPublicKey(publicKeyPem);
@@ -14,20 +22,27 @@ export function createReviewModelBridge({client,publicKeyPem}) {
         {available:false,code:['PRICE_UNKNOWN','PROVIDER_UNAVAILABLE','REVIEW_BRIDGE_UNAVAILABLE'].includes(r?.code)?r.code:'PROVIDER_UNAVAILABLE'};},
     async review(request,{signal}={}) {
       if(signal?.aborted)throw webError('CANCELLED');
-      const r=await client.request('public_review_model',request);
+      const r=await client.request('public_review_model',request,{signal});
       const parts=String(r?.attestation).split('.');
       if(parts.length!==3||parts[0]!=='ppr1')throw webError('PROVIDER_UNAVAILABLE');
       const body=Buffer.from(parts[1],'base64url');let p;
       try{p=JSON.parse(body.toString('utf8'));}catch{throw webError('PROVIDER_UNAVAILABLE');}
       if(!verify(null,body,key,Buffer.from(parts[2],'base64url'))||p.kind!=='public-website-review-model'
         ||p.run_id!==request.run_id||p.call_id!==request.call_id||p.task_hash!==request.task_hash
-        ||p.guide_hash!==request.guide_hash||p.request_hash!==digest(JSON.stringify(request))
-        ||p.response_hash!==digest(r.text)||JSON.stringify(p.usage)!==JSON.stringify(r.usage)
+        ||p.guide_hash!==request.guide_hash||p.request_hash!==reviewRequestDigest(request)
+        ||p.response_hash!==digest(r.text)||!sameUsage(p.usage,r.usage)
         ||p.settled_usd!==r.settled_usd||p.price_table_revision!==r.price_table_revision)throw webError('PROVIDER_UNAVAILABLE');
       return r;
     },
     cancel:run_id=>client.request('cancel_public_review',{run_id}),
   };
+}
+function sameUsage(signed,returned) {
+  const keys=['completion_tokens','prompt_tokens'];
+  return [signed,returned].every(value=>value&&typeof value==='object'&&!Array.isArray(value)
+    &&Object.keys(value).sort().join(',')===keys.join(',')
+    &&keys.every(key=>Number.isSafeInteger(value[key])&&value[key]>=0))
+    &&keys.every(key=>signed[key]===returned[key]);
 }
 export function createWebsiteReviewRuntime({db,store,env=process.env,readFile=readFileSync}={}) {
   const config=agentRunsConfiguration(env);let model=null;
@@ -45,5 +60,6 @@ export function createWebsiteReviewRuntime({db,store,env=process.env,readFile=re
     return current;
   };
   const addresses=[env.MOCK2_PUBLIC_IP,env.PUBLIC_IP].filter(Boolean).flatMap(s=>s.split(',').map(x=>x.trim()));
-  return createWebsiteReviewService({db,store,protectedHosts:currentProtectedHosts,fetchPage:createPublicFetcher({protectedHosts:currentProtectedHosts,protectedAddresses:addresses}),model});
+  return createWebsiteReviewService({db,store,protectedHosts:currentProtectedHosts,fetchPage:createPublicFetcher({protectedHosts:currentProtectedHosts,protectedAddresses:addresses}),model,
+    isEnabled:()=>effectiveToggles(db).agent_runs});
 }

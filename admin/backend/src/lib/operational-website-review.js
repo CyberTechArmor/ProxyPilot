@@ -9,7 +9,7 @@ const hash=z.string().regex(/^[a-f0-9]{64}$/),uuid=z.string().uuid();
 const limitsSchema=z.object({max_pages:z.number().int().min(1).max(3).default(3),
   max_seconds:z.number().int().min(10).max(180).default(120),max_tokens:z.number().int().min(1000).max(20000).default(20000),
   max_usd:z.number().finite().positive().max(0.10).default(0.05)}).strict();
-const fields={name:z.string().trim().min(1).max(200),url:z.string().max(2048),objective:z.string().trim().min(1).max(1000),
+const fields={name:z.string().trim().min(1).max(200),url:z.string().max(2048),objective:z.string().trim().min(1).max(1000).refine(v=>Buffer.byteLength(v)<=1000),
   guide_version_id:uuid,guide_hash:hash,limits:limitsSchema.default({})};
 const create=z.object(fields).strict(),patch=z.object(Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.optional()]))).strict().refine(v=>Object.keys(v).length);
 const consent=z.object({enabled:z.boolean(),reviewed_statement:z.literal(REVIEW_CONSENT).optional()}).strict().refine(v=>!v.enabled||!!v.reviewed_statement);
@@ -31,14 +31,26 @@ const MESSAGE={DESTINATION_DENIED:'Choose a public website outside private, meta
   DEADLINE:'The review reached its time limit.',CANCELLED:'The review was cancelled. No further website requests or review publication will occur.',
   STALE_CONFIGURATION:'The guide, agent, project or access changed. Inspect the saved settings and explicitly start a new run.',
   PROVIDER_UNAVAILABLE:'The existing model provider is unavailable. Check the configured A4 provider and reviewed supervisor support.',
+  REVIEW_BRIDGE_UNAVAILABLE:'The installed A3/A4 components do not support public review. The operator must update the reviewed runtime and refresh its A8 receipt-key pin.',
   MODEL_INVALID:'The provider did not return a complete cited review. No successful review was recorded.',
   INTERRUPTED:'The dashboard restarted during this review. Work was not resumed; explicitly start a new run.',
   BUDGET_EXHAUSTED:'The model call exceeded its reserved token or spending budget.',PRICE_UNKNOWN:'The existing provider price table is not configured.',
   GUIDE_TOO_LARGE:'This review strategy accepts approved guide documents up to 3500 UTF-8 bytes.',
   PROVIDER_ERROR:'The model call failed. Any uncertain spend remains reserved in the provider ledger.',
   USAGE_MISSING:'The provider usage was missing. The provider ledger retains the worst-case reservation.',
-  CALL_UNCERTAIN:'The model call outcome is uncertain. It will not be retried automatically.'};
+  CALL_UNCERTAIN:'The model call outcome is uncertain. It will not be retried automatically.',
+  PROMPT_TOO_LARGE:'The guide and extracted excerpts exceeded the model input limit. Shorten the guide or reduce the page budget.',
+  REVIEW_DISABLED:'Agent runs were turned off. Enable the reviewed capability before explicitly starting another review.'};
 const fail=(status,code)=>{throw Object.assign(new OperationsError(status,MESSAGE[code]||code.replaceAll('_',' ')),{code});};
+function abortable(promise,signal) {
+  return new Promise((resolve,reject)=>{
+    const abort=()=>finish(webError('CANCELLED'));let settled=false;
+    const finish=(error,value)=>{if(settled)return;settled=true;signal.removeEventListener('abort',abort);error?reject(error):resolve(value);};
+    signal.addEventListener('abort',abort,{once:true});
+    if(signal.aborted)abort();
+    Promise.resolve(promise).then(value=>finish(null,value),error=>finish(error));
+  });
+}
 
 export function websiteReviewMigration1116(db) {db.exec(`
   CREATE TABLE ops_website_review_agents (id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES ops_projects(id),
@@ -61,7 +73,7 @@ export function websiteReviewMigration1116(db) {db.exec(`
     BEGIN SELECT RAISE(ABORT,'Review evidence is immutable'); END;
 `);}
 
-export function createWebsiteReviewService({db,store,fetchPage=null,model=null,protectedHosts=[],clock=()=>Date.now(),schedule=fn=>setImmediate(fn)}={}) {
+export function createWebsiteReviewService({db,store,fetchPage=null,model=null,protectedHosts=[],clock=()=>Date.now(),schedule=fn=>setImmediate(fn),isEnabled=()=>true}={}) {
   const one=(sql,...a)=>db.prepare(sql).get(...a),all=(sql,...a)=>db.prepare(sql).all(...a),run=(sql,...a)=>db.prepare(sql).run(...a);
   const timestamp=()=>new Date(clock()).toISOString(),executing=new Map();
   const validatedUrl=value=>{try{return publicUrl(value,protectedHosts);}catch(e){fail(400,e.code);}};
@@ -89,6 +101,7 @@ export function createWebsiteReviewService({db,store,fetchPage=null,model=null,p
     let g;try{g=guide(p,a);add('guide',true);}catch(e){add('guide',false,e.code,'select_current_approved_guide');}
     add('consent',!!a.model_consent,'MODEL_CONSENT_REQUIRED','owner_model_consent');
     add('project',!p.archived_at,'PROJECT_ARCHIVED','restore_project');
+    add('feature',isEnabled(),'REVIEW_DISABLED','enable_agent_runs');
     add('access',['owner','operator','editor','reviewer'].includes(p.own_role),'RUN_ACCESS_DENIED','request_run_access');
     let provider;try{provider=await model?.readiness();}catch{provider=null;}
     add('provider',provider?.available===true,provider?.code||'PROVIDER_UNAVAILABLE','review_existing_provider_configuration');
@@ -110,28 +123,39 @@ export function createWebsiteReviewService({db,store,fetchPage=null,model=null,p
     const pins=JSON.parse(r.pins_json),control=new AbortController(),deadline=clock()+pins.limits.max_seconds*1000;
     executing.set(id,control);
     const check=()=>{if(control.signal.aborted||row(r.project_id,id).state==='cancelled')throw webError('CANCELLED');
+      if(!isEnabled())throw webError('REVIEW_DISABLED');
       if(clock()>=deadline)throw webError('DEADLINE');let p,a;
       try{p=access(actor,r.project_id,'run');a=agentRow(r.project_id,r.agent_id);guide(p,a);}catch{throw webError('STALE_CONFIGURATION');}
       if(p.revision!==pins.project_revision||p.owner_user_id!==pins.owner_user_id||p.own_role!==pins.actor_role||a.revision!==pins.agent_revision||!a.model_consent)throw webError('STALE_CONFIGURATION');};
     const budget={signal:control.signal,requests:0,bytes:0,check,remaining:()=>Math.max(1,deadline-clock())};
-    const timer=setTimeout(()=>control.abort(),pins.limits.max_seconds*1000);
+    const timer=setTimeout(()=>{control.abort();void model?.cancel?.(id).catch(()=>{});},pins.limits.max_seconds*1000);
     try {
       check();updateRun(id,{state:'extracting'});activity(id,'extraction_started');
       const pages=await gatherPublicPages({url:pins.url,maxPages:pins.limits.max_pages,budget,fetchPage,protectedHosts,onPage:page=>{
         activity(id,'page_extracted',{url:page.url,bytes:page.bytes,content_hash:page.content_hash});}});
       check();const sources=pages.map((p,i)=>({id:i+1,url:p.url,title:p.title,content_hash:p.content_hash,
-        excerpt:p.text.slice(0,3000),excerpt_hash:digest(p.text.slice(0,3000)),extracted_at:timestamp()}));
+        excerpt:p.text.slice(0,3000).toWellFormed(),excerpt_hash:digest(p.text.slice(0,3000).toWellFormed()),extracted_at:timestamp()}));
+      // JSON/UTF-8 bytes, rather than character count, bound multilingual or
+      // heavily escaped excerpts inside the existing provider prompt ceiling.
+      while(Buffer.byteLength(JSON.stringify(sources))>9000){
+        const largest=sources.reduce((a,b)=>Buffer.byteLength(a.excerpt)>=Buffer.byteLength(b.excerpt)?a:b);
+        largest.excerpt=largest.excerpt.slice(0,Math.floor(largest.excerpt.length*0.8)).toWellFormed();
+        if(!largest.excerpt)throw webError('PROMPT_TOO_LARGE');largest.excerpt_hash=digest(largest.excerpt);
+      }
       updateRun(id,{sources_json:JSON.stringify(sources)});
       check();const g=guide(access(actor,r.project_id),agentRow(r.project_id,r.agent_id));
       updateRun(id,{state:'reviewing'});activity(id,'model_reserved',{model:'gpt-6-luna',call_id:pins.call_id});
-      const output=await model.review({run_id:id,call_id:pins.call_id,task_hash:pins.task_hash,project_id:r.project_id,
+      const output=await abortable(model.review({run_id:id,call_id:pins.call_id,task_hash:pins.task_hash,project_id:r.project_id,
         agent_id:r.agent_id,agent_revision:pins.agent_revision,project_limits_revision:pins.project_limits_revision,
         guide:guideDocument(g.title,g.instructions),guide_hash:pins.guide_hash,objective:pins.objective,
-        sources,limits:{max_tokens:pins.limits.max_tokens,max_usd:pins.limits.max_usd},deadline_at:new Date(deadline).toISOString()}, {signal:control.signal});
+        sources,limits:{max_tokens:pins.limits.max_tokens,max_usd:pins.limits.max_usd},deadline_at:new Date(deadline).toISOString()}, {signal:control.signal}),control.signal);
       check();let parsed;try{parsed=modelReview.parse(JSON.parse(output.text));}catch{throw webError('MODEL_INVALID');}
       if(parsed.citations.some(n=>!sources.some(s=>s.id===n))||new Set(parsed.citations).size!==parsed.citations.length)throw webError('MODEL_INVALID');
       const total=output.usage?.prompt_tokens+output.usage?.completion_tokens;
-      if(!Number.isSafeInteger(total)||total<1||!Number.isFinite(Number(output.settled_usd)))throw webError('USAGE_MISSING');
+      if(!Number.isSafeInteger(total)||total<1||!Number.isSafeInteger(output.usage?.prompt_tokens)||output.usage.prompt_tokens<0
+        ||!Number.isSafeInteger(output.usage?.completion_tokens)||output.usage.completion_tokens<1
+        ||!Number.isFinite(Number(output.settled_usd))||Number(output.settled_usd)<0
+        ||!Number.isSafeInteger(output.price_table_revision)||output.price_table_revision<1)throw webError('USAGE_MISSING');
       if(total>pins.limits.max_tokens||Number(output.settled_usd)>pins.limits.max_usd)throw webError('BUDGET_EXHAUSTED');
       activity(id,'review_completed',{call_id:pins.call_id});
       finish(id,'completed',{review:{...parsed,citations:parsed.citations.map(n=>({source_id:n,url:sources[n-1].url}))},

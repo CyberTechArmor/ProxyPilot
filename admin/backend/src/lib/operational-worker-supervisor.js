@@ -24,26 +24,34 @@ const coded = (code) => { const error = new Error(code); error.code = code; retu
 export function createSupervisorClient(socketPath, { timeoutMs = 120_000 } = {}) {
   if (typeof socketPath !== 'string' || !socketPath.startsWith('/')) throw coded('BOUNDARY_UNVERIFIED');
   return {
-    request(method, params) {
+    request(method, params, { signal } = {}) {
       if (!METHODS.has(method)) return Promise.reject(coded('METHOD_NOT_ALLOWED'));
+      if (signal?.aborted) return Promise.reject(coded('CANCELLED'));
       return new Promise((resolve, reject) => {
         const socket = net.createConnection(socketPath);
         let buffer = '';
         let settled = false;
         let deadline;
-        const readTimeout = method === 'step_record' ? Math.min(timeoutMs, 2000) : timeoutMs;
+        const boundedRead = ['step_record', 'public_review_status'].includes(method);
+        const readTimeout = boundedRead ? Math.min(timeoutMs, 2000) : timeoutMs;
+        const abort = () => done(coded('CANCELLED'));
         const done = (error, value) => {
           if (settled) return;
           settled = true;
           clearTimeout(deadline);
+          signal?.removeEventListener('abort', abort);
           socket.destroy();
           if (error) reject(error); else resolve(value);
         };
         socket.setEncoding('utf8');
         socket.setTimeout(readTimeout, () => done(coded('SUPERVISOR_TIMEOUT')));
-        if (method === 'step_record') deadline = setTimeout(() => done(coded('SUPERVISOR_TIMEOUT')), readTimeout);
+        if (boundedRead) deadline = setTimeout(() => done(coded('SUPERVISOR_TIMEOUT')), readTimeout);
+        signal?.addEventListener('abort', abort, { once: true });
         socket.on('error', () => done(coded('SUPERVISOR_UNREACHABLE')));
-        socket.on('connect', () => socket.write(`${JSON.stringify({ method, params })}\n`));
+        socket.on('connect', () => {
+          if (signal?.aborted) return abort();
+          socket.write(`${JSON.stringify({ method, params })}\n`);
+        });
         socket.on('end', () => done(coded('SUPERVISOR_PROTOCOL')));
         socket.on('data', (chunk) => {
           buffer += chunk;

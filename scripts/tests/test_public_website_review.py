@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import unittest
 import importlib.util
+import shutil
+import subprocess
 
 spec = importlib.util.spec_from_file_location('public_review_model_fixture', Path(__file__).with_name('test_a5_model_step.py'))
 m = importlib.util.module_from_spec(spec)
@@ -85,6 +87,58 @@ class PublicReviewTests(unittest.TestCase):
         request['limits']['max_tokens'] = 1
         self.assertRefused('BUDGET_EXHAUSTED', self.sup.public_review_model, request)
         self.assertEqual(self.provider.requests, [])
+
+    def test_cancel_during_provider_settles_call_but_does_not_publish_or_replay(self):
+        provider = self.provider.provider
+        def cancel_then_answer(*args):
+            self.sup.cancel_public_review({'run_id': m.RUN})
+            return provider(*args)
+        self.provider.provider = cancel_then_answer
+        self.answer()
+        self.assertRefused('CANCELLED', self.sup.public_review_model, self.request())
+        self.assertEqual(self.broker.state['calls'][m.CALL]['state'], 'settled')
+        self.assertRefused('CANCELLED', self.sup.public_review_model, self.request())
+        self.assertEqual(len(self.provider.requests), 1)
+
+    def test_call_id_cannot_cross_task_identity(self):
+        self.answer()
+        self.sup.public_review_model(self.request())
+        request = self.request()
+        request['run_id'] = m.RUN2
+        self.assertRefused('RUN_POLICY_MISMATCH', self.sup.public_review_model, request)
+        self.assertEqual(len(self.provider.requests), 1)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node24 is needed for cross-language receipt verification')
+    def test_real_python_receipt_verifies_in_node_bridge_with_unicode(self):
+        request = self.request()
+        request['objective'] = 'Summarize café, 日本語 and 🎨 public content'
+        self.answer()
+        response = self.sup.public_review_model(request)
+        file = self.root / 'receipt-fixture.json'
+        file.write_text(json.dumps({'request': request, 'response': response, 'key': self.host.pub.read_text()}, ensure_ascii=False))
+        module = (Path(__file__).resolve().parents[2] / 'admin/backend/src/lib/operational-website-review-runtime.js').as_uri()
+        code = ("import fs from 'node:fs'; import {createReviewModelBridge} from '" + module + "'; "
+                "const f=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); "
+                "const bridge=createReviewModelBridge({publicKeyPem:f.key,client:{request:async()=>f.response}}); "
+                "await bridge.review(f.request); console.log('receipt_verified');")
+        result = subprocess.run(['node', '--input-type=module', '-e', code, str(file)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'receipt_verified')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node24 is needed for cross-language numeric pins')
+    def test_exponent_budget_has_exact_cross_language_request_hash(self):
+        request = self.request()
+        request['limits']['max_usd'] = 1e-7
+        normalized = dict(request, limits=dict(request['limits'], max_usd=s.struct.pack('!d', 1e-7).hex()))
+        expected = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+        file = self.root / 'request-fixture.json'
+        file.write_text(json.dumps(request))
+        module = (Path(__file__).resolve().parents[2] / 'admin/backend/src/lib/operational-website-review-runtime.js').as_uri()
+        code = ("import fs from 'node:fs'; import {reviewRequestDigest} from '" + module + "'; "
+                "console.log(reviewRequestDigest(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))));")
+        result = subprocess.run(['node', '--input-type=module', '-e', code, str(file)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), expected)
 
 
 if __name__ == '__main__':

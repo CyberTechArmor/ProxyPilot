@@ -27,8 +27,8 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
       evidence_enabled: ops && evidenceEnabled, agents_metadata_enabled: agentsOn(),
       agent_runs_enabled: runs, ...(runs ? { agent_execution_available: agentRuns.execution.available,
         agent_execution_message: agentRuns.execution.message } : {}),
-      website_review_enabled: agentsOn() && on(agentRunsEnabled) && !!websiteReviews,
-      website_review_contract: 'website-review.v1', website_review_strategy: 'http_extract_v1',
+      ...(websiteReviews ? { website_review_enabled: agentsOn() && on(agentRunsEnabled),
+        website_review_contract: 'website-review.v1', website_review_strategy: 'http_extract_v1' } : {}),
       // Only a hint for the sidebar; the settings routes check the role themselves.
       can_manage_settings: req.user?.role === 'admin' });
   });

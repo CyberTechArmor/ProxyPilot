@@ -15,6 +15,42 @@ test('robots chooses specific agent, most-specific allow, wildcard and anchored 
   assert.equal(robotsAllowed(rules,'https://example.org/private/x'),false);
   assert.equal(robotsAllowed(rules,'https://example.org/private/public'),true);
   assert.equal(robotsAllowed('User-agent: *\nDisallow: /\nUser-agent: ProxyPilotReview\nAllow: /','https://example.org/'),true);
+  assert.equal(robotsAllowed('User-agent: *\nDisallow: /*?secret=$','https://example.org/?secret='),false);
+  assert.equal(robotsAllowed(`User-agent: *\nDisallow: /${'*'.repeat(1000)}never$`,'https://example.org/a'),true);
+});
+test('DNS timeout/cancel and changed access before socket send cannot issue a request',async()=>{
+  let sends=0;const request=()=>{sends++;throw Error('must not send');};
+  const fetchPage=createPublicFetcher({resolve:()=>new Promise(()=>{}),request});
+  const short=budget();short.remaining=()=>25;await rejects(()=>fetchPage('http://example.org/',short),'FETCH_TIMEOUT');
+  const abort=new AbortController(),cancelled={...budget(),signal:abort.signal};const pending=fetchPage('http://example.org/',cancelled);abort.abort();await rejects(()=>pending,'CANCELLED');
+  let release;const waiting=createPublicFetcher({resolve:()=>new Promise(done=>release=done),request});
+  let changed=false;const b=budget();b.check=()=>{if(changed)throw Object.assign(Error('STALE_CONFIGURATION'),{code:'STALE_CONFIGURATION'});};
+  const resolving=waiting('http://example.org/',b);await new Promise(done=>setImmediate(done));changed=true;release([{address:'8.8.8.8',family:4}]);
+  await rejects(()=>resolving,'STALE_CONFIGURATION');assert.equal(sends,0);
+});
+test('real socket bounds stall/body/redirects, rechecks access before send, and checks redirect robots before reading content',async()=>{
+  const seen=[];const server=http.createServer((req,res)=>{
+    const host=req.headers.host;seen.push({host,path:req.url,method:req.method});
+    if(req.url==='/stall')return;
+    if(req.url==='/chunked'){res.writeHead(200,{'content-type':'text/plain'});res.write('x'.repeat(800));res.end('y'.repeat(800));return;}
+    if(req.url==='/loop'){res.writeHead(302,{location:'/loop'});res.end();return;}
+    if(req.url==='/start'){res.writeHead(302,{location:'http://garden.example.net/private'});res.end();return;}
+    if(req.url==='/robots.txt'){res.writeHead(200,{'content-type':'text/plain'});res.end(host==='garden.example.net'?'User-agent: *\nDisallow: /private':'User-agent: *\nAllow: /');return;}
+    res.writeHead(200,{'content-type':'text/plain'});res.end('Readable public page. '.repeat(20));
+  });
+  await new Promise(done=>server.listen(0,'127.0.0.1',done));const port=server.address().port;
+  const request=(u,opts,cb)=>http.request({hostname:'127.0.0.1',port,path:u.pathname,method:opts.method,headers:{...opts.headers,host:u.hostname},agent:false},cb);
+  const fetchPage=createPublicFetcher({resolve:async()=>[{address:'8.8.8.8',family:4}],request});
+  try{
+    const short=budget();short.remaining=()=>25;await rejects(()=>fetchPage('http://museum.example.org/stall',short),'FETCH_TIMEOUT');
+    await rejects(()=>fetchPage('http://museum.example.org/chunked',budget(),{maxBytes:1000}),'CONTENT_TOO_LARGE');
+    await rejects(()=>fetchPage('http://museum.example.org/loop',budget()),'REDIRECT_LIMIT');
+    let checks=0;const stale=budget();stale.check=()=>{if(++checks===3)throw Object.assign(Error('STALE_CONFIGURATION'),{code:'STALE_CONFIGURATION'});};
+    const before=seen.length;await rejects(()=>fetchPage('http://museum.example.org/no-send',stale),'STALE_CONFIGURATION');await new Promise(done=>setImmediate(done));assert.equal(seen.length,before);
+    await rejects(()=>gatherPublicPages({url:'http://museum.example.org/start',maxPages:1,budget:budget(),fetchPage}),'ROBOTS_DENIED');
+    assert(seen.some(r=>r.host==='garden.example.net'&&r.path==='/robots.txt'));assert(!seen.some(r=>r.host==='garden.example.net'&&r.path==='/private'));
+    assert(seen.every(r=>r.method==='GET'));
+  }finally{server.closeAllConnections();await new Promise(done=>server.close(done));}
 });
 test('extracts unrelated HTML/text fixtures and rejects deceptive HTTP200, scripts-only, login/paywall and non-text responses',()=>{
   for(const [url,title,body] of [['https://museum.example.org/','Museum','The museum houses ancient sculpture and runs family workshops. '.repeat(5)],['http://garden.example.net/','Garden','Native plants grow in a sunny garden with pollinator habitat. '.repeat(5)],['https://research.example.com/','Research','Research findings discuss ocean circulation and measurement uncertainty. '.repeat(5)]]) {

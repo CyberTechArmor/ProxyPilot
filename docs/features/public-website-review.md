@@ -1,4 +1,17 @@
-# Review a public website
+# Public website reviews
+
+Public website review is a separate read-only workflow in Operations. It accepts
+the current approved guide, a user-selected public HTTP(S) URL and a review
+objective. It does not use the Demo sign-in profile, synthetic hard-rules JSON,
+website credential bindings or the configured broker synthetic task ledger.
+
+An authorized guide save publishes its immutable approved version under the
+existing guide-save policy. Saving a project, guide or review agent never starts
+a run. The owner separately consents to sending the approved guide, objective
+and extracted public content to the existing model provider. Each run then
+requires an explicit Start action with the saved agent revision and guide pins.
+
+## Dashboard path
 
 In Operations, open a project and choose **Website reviews**. The **Agents** section also offers an **Open website reviews** action when this runtime is available.
 
@@ -14,6 +27,171 @@ Legacy profiles under **Existing synthetic sign-in agents** and **Agent runs** u
 
 Missing runtime bridge, provider or price configuration appears in readiness and disables Start. The reviewed runtime components must be installed before a live review can run; this UI does not enroll credentials, activate a broker or deploy those components.
 
-## Local verification
+
+## Supported scope
+
+The first strategy is `http_extract_v1`: GET requests for publicly accessible
+HTML, XHTML or plain text, ordinary redirects, and a bounded sample of ordinary
+same-origin hyperlinks. Server-rendered content is supported. Browser JavaScript
+is not executed. A script-only shell yields `CLIENT_RENDER_REQUIRED`; login,
+subscription, bot-blocked and robots-disallowed pages yield explicit unsuccessful
+outcomes. The runtime does not bypass protections. A status 200 without useful
+readable content is not success.
+
+The crawler uses IPv4 DNS answers and standard HTTP/HTTPS ports. IPv6-only sites,
+other ports, non-text files, unsupported encodings and inaccessible destinations
+are unsupported. A site can change or reveal a restriction after start; readiness
+reports runtime/configuration eligibility, not a promise that the site can be read.
+
+The destination policy refuses private, loopback, link-local, metadata, reserved
+and installation-managed addresses, vault hostnames and host-management paths.
+Every redirect is revalidated. Every IPv4 DNS answer is screened and a selected
+answer is pinned to the actual socket; no second resolver or environment proxy
+can redirect the connection. TLS certificate validation remains enabled. Robots
+policy is checked before a page request, including a new redirect origin. The
+crawler sends no cookies, authorization headers, forms or website writes.
+
+Limits are typed configuration, separate from freeform guide text:
+
+| Limit | Default | Ceiling |
+| --- | --- | --- |
+| Pages | 3 | 3 |
+| Run time | 120 seconds | 180 seconds |
+| Model tokens, input and output | 20,000 | 20,000 |
+| Model spend | USD 0.05 | USD 0.10 |
+| Model calls | 1 | 1 |
+| Model output | 1,500 tokens | 1,500 tokens |
+| Page response | 512 KiB | 512 KiB |
+| Total responses, including robots and redirects | 1 MiB | 1 MiB |
+| Requests, including robots and redirects | 20 | 20 |
+| Redirects per request | 5 | 5 |
+| DNS/request wait | 10 seconds | remaining run time, if shorter |
+| Robots response | 64 KiB | 64 KiB |
+
+Project agent limits reduce the selected ceilings. Approved guide documents are
+limited to 3,500 UTF-8 bytes and objectives to 1,000 UTF-8 bytes. At most one run
+per review agent, two per project and four per installation can be active.
+
+## Runtime and evidence
+
+The backend extracts content using the bounded HTTP transport. It sends only
+bounded source excerpts to the typed A3 `public_review_model` method. A3 builds
+the fixed review prompt, explicitly treats website content as untrusted data,
+and calls A4 `review_call` with no website credential. There are no model tools
+or browser actions. Page or model instructions cannot request another operation.
+The existing A4 provider key, operator-confirmed price table and reservation /
+settlement ledger are reused; no provider secret reaches the dashboard or page.
+
+A3 signs a `ppr1` Ed25519 receipt binding run/call/task/guide/request/response
+hashes, usage, settlement and price-table revision. Node verifies the receipt
+before accepting the review. JSON usage key order does not affect this comparison;
+the two exact nonnegative integer fields must match. The request hash normalizes
+the numeric USD limit as an IEEE-754 hex string to agree between Python and Node.
+
+A completed run contains the actual provider review, findings, limitations,
+citations resolved to sampled source URLs, model usage/cost and receipt. Evidence
+contains final source URLs, title, extracted-content hash, exact bounded excerpt
+and its hash, extraction time, activity and immutable guide/task/config pins.
+The full response body is not stored. The model response must be valid review
+JSON and cite sampled source IDs; malformed, empty, uncited or out-of-budget
+output is recorded as unsuccessful.
+
+Run states are `queued`, `extracting`, `reviewing`, `completed`, `blocked`,
+`failed`, `cancelled` and `interrupted`. Guide/config/project/access changes,
+withdrawn consent or feature disable stop the run before its next request or
+publication. Cancellation aborts further fetches and suppresses review publication.
+A model call already accepted by the provider may still settle; uncertain spend
+remains reserved. Restart interrupts active work without replay. Finished evidence
+and run identity/pins are immutable database records.
+
+## Access and API contract
+
+Owners/editors configure review agents. Only the owner changes model consent.
+Existing owner/operator/editor/reviewer roles explicitly start/cancel; project
+members inspect. An unrelated administrator has no project access bypass.
+Every route uses the central authenticated session, existing CSRF handling,
+project/account permissions and Operations/Agent metadata/Agent runs gates.
+No MCP tool exposes this workflow.
+
+All endpoints are relative to `/api/operational-projects/:id`:
+
+| Method | Path | Response / body |
+| --- | --- | --- |
+| GET / POST | `/website-review-agents` | `{agents}` / `{agent}`; create returns 201 |
+| GET / PATCH | `/website-review-agents/:agentId` | `{agent}`; PATCH requires quoted agent `If-Match` |
+| PUT | `/website-review-agents/:agentId/model-consent` | `{agent}`; owner + quoted `If-Match` |
+| GET | `/website-review-agents/:agentId/readiness` | `{readiness}` |
+| GET / POST | `/website-review-runs` | `{runs}` / `{run}`; explicit start returns 202 |
+| GET | `/website-review-runs/:runId` | `{run}` |
+| POST | `/website-review-runs/:runId/cancel` | body `{}`, response `{run}` |
+
+Agent create body: `{name,url,objective,guide_version_id,guide_hash,limits?}`.
+PATCH accepts these fields and resets earlier model consent. No credential,
+connection, headers, provider key or arbitrary actions are accepted.
+
+Consent body when enabling:
+
+```json
+{
+  "enabled": true,
+  "reviewed_statement": "Send this review agent's approved guide and public page content to the model provider"
+}
+```
+
+Withdraw with `{ "enabled": false }`. Consent changes increment agent revision.
+Explicit start body:
+
+```json
+{
+  "agent_id": "<saved review agent UUID>",
+  "agent_revision": 2,
+  "guide_version_id": "<current approved guide UUID>",
+  "guide_hash": "<approved guide SHA-256>"
+}
+```
+
+Readiness is `{contract_version:"website-review.v1",can_start,checks,pins,capabilities}`.
+Checks name the unmet guide, consent, project, feature, access, provider, extraction
+or concurrency condition and its next action. Capabilities explicitly declare
+`strategy:"http_extract_v1"`, `read_only:true`, `javascript_rendering:false`,
+`ipv6:false` and `credential_binding_required:false` plus effective limits.
+Operations capabilities advertises `website_review_enabled`,
+`website_review_contract` and `website_review_strategy` when the service is wired;
+provider readiness remains a separate requirement.
+
+## Installed component requirement
+
+This feature adds migration 1116 and changes the dashboard backend, installed A3
+supervisor and installed A4 broker. Existing A8 dashboard socket/public-key pins
+must be valid. No new upstream website connection or credential enrollment is
+needed, but the existing A4 provider / vault configuration and price table must
+already be healthy. An old bridge remains blocked instead of falling back to
+Demo sign-in or claiming execution availability.
+
+**A normal `update.sh` pull/build does not replace the installed A3/A4 copies.**
+It runs A8 `patch` for an already opted-in deployment, which verifies key equality
+but does not refresh a rotated supervisor key. Runtime activation therefore
+requires a separate, explicitly authorized operator maintenance step; repository
+development does not authorize it.
+
+For an already opted-in installation, the reviewed existing tools are A4
+`a4-install-broker.py reinstall` (preserves the existing AppRole config and state),
+A3 `a3-install-supervisor.py reinstall` (requires no live worker, rotates the
+receipt key and archives the previous public key), and A8
+`a8-wire-dashboard.py configure --install-dir /opt/proxypilot` (refreshes the
+public-key copy and the existing three pins/read-only mount block). Perform this
+only from the verified reviewed checkout, in an approved maintenance window,
+before the subsequent dashboard update/restart so its A8 `patch` check sees the
+refreshed key. Confirm installed digest readback, existing vault/provider/price
+health, wiring status and dashboard review readiness. These are component updates,
+not new credential configuration; do not use A4 `configure`, remove-only or a
+new A8 opt-in as a shortcut. No automatic privileged activation hook is added.
+
+No component installation, production review, provider enrollment or host change
+was performed in the development evidence. See the scoped
+[implementation and evidence tracker](../plans/public-website-review-evidence.md).
+
+## Local UI verification
+
 
 `admin/frontend/tests/website-review.browser.mjs` checks the component contract and responsive states. `website-review-integrated.browser.mjs` exercises the full dashboard with real session/CSRF middleware, Operations routes/store and the public extraction service; DNS/HTTP and model responses are scripted fixtures. Its `--service-only` mode checks the real HTTP journey without Chromium. These fixtures do not establish live public-network, provider or deployment proof.

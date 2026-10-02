@@ -1,7 +1,11 @@
 {
   "source_commit": "d47cbf32f4f54fc9199063b9ff4a2863dfa58cd7",
-  "checked_at_utc": "2026-10-02 17:20 UTC",
-  "command": ".tools/verify-ui-polish-source.sh",
+  "recorded_at_utc": "2026-10-02 17:19:38 UTC",
+  "commands": [
+    "node .tools/parse-ui-polish.mjs",
+    "cd proxypilot-ui/admin/frontend && node --check tests/ui-alignment.browser.mjs && node --check tests/agent-runs.browser.mjs",
+    "cd proxypilot-ui/admin/frontend && node --test tests/connection-ui-logic.test.mjs tests/run-readiness.test.mjs ../backend/src/__tests__/agent-run-deck.test.js"
+  ],
   "exit_code": 0,
   "jsx_files_parsed": 6,
   "browser_scripts_syntax_checked": 2,

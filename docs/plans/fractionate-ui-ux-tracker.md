@@ -3,6 +3,10 @@
 Owner: Thomas · implementation on Duo · started 2026-10-02.
 Branch: `ui/mockup-alignment-20261002`. Publication/merge remains pending explicit instruction.
 
+Checkpoint 2026-10-02 15:40 UTC: GitHub main verified at `56c881be051e2699abac1977bfa0162cd8536183` and merged locally without dropping either UI or guide tests. Current UI code is `96eed9c3fc9115e28076a9480dca91880ac53da3`. Full UI and website branches remain unpublished. Guide PR720 was separately authorized, merged and deployed; the parent verified its successful update receipt and healthy state. This executor performed no production actions.
+
+Website UI ownership is isolated to `ui-website-review`: `WebsiteReviews.jsx` is implemented locally (24,482 bytes), not yet committed or accepted. The existing generic Operations API supplies requests; the root owns project-route integration, while the separate runtime task owns backend and supervisor/broker changes. The agreed contract is public HTTP(S) HTML/text extraction, with explicit owner consent, exact guide/config pins, readiness, Start, Cancel, and cited results. It does not use the legacy synthetic sign-in runner.
+
 Delivery priority updated by Thomas: **first authorized guide Save-to-approved plus public read-only website review end-to-end**, then finish full visual alignment. A separate runtime worker owns the website capability and will provide its contract before UI integration. General login, credentials, writes, private-network access and bypassing site protections are outside that slice. Other expanded broker/guide/storage items remain in the original backlog.
 
 ## Verified baseline and backlog
@@ -19,12 +23,12 @@ Delivery priority updated by Thomas: **first authorized guide Save-to-approved p
 | UX01 | Reference inventory, route/state/viewport mapping and contract gaps | Mapping recorded; visual acceptance pending | Actual reference pixels inspected on Duo; see reference map; all supplied Library bytes now readable | c4cc81a8 (tracker start) |
 | UX02 | Shared type, icons, spacing, controls, border/radius tokens | Implemented; frozen-state geometry passed | Same measured geometry in Midnight/Latte/Office; actual screenshots inspected; final accessibility gate pending | bf9b241e |
 | UX03 | Operations shell, persistent project list and overview cards; short creation | Implemented; integrated browser passed | List/detail screenshots inspected; private creation, cancel/reopen and separate Details verified; exact precreate lookup gap below | b35ac7bd, 608e47a7 |
-| UX04 | Work/Connections/Controls/Review agent setup | Implemented; local fixture journeys passed | Bounded cards, 208px summary at xl; Save draft on every step, no assignments or execution; screenshot comparison in progress | 6bfde28a |
+| UX04 | Work/Connections/Controls/Review agent setup | Implemented; density refined and browser passed | Removed nested Connections outline/padding to align the reference; 208px summary; Save draft remains separate from assignment/run; final screenshots in sibling verification/ui-alignment | 6bfde28a, 234703bf |
 | UX05 | Connection picker, centered Add dialog, catalogue/readiness actions | Implemented; 13 connection journeys passed | Exact-agent authority denial, revoked/use-only states, draft/assignment separation; 18 theme/viewport checks plus contrast; final integrated rerun pending | 6bfde28a |
-| UX06 | Run hierarchy and browser/activity balance | Implemented; run journeys in progress | Historical states, pinned guide and approvals retained; desktop/mobile run screenshots pending final review | 0a88e924 |
+| UX06 | Run hierarchy and browser/activity balance | Implemented; final rerun in progress | Prior 20 A6 journeys/96 layout checks and 6 A7 journeys/42 checks passed; final A6 source rerun under way | 0a88e924, 96eed9c3 |
 | UX07 | Final aggregate checks, browser journeys and visual review | In progress; environment blockers recorded | Backend 201 passed; frontend build and 9 unit tests passed; UI flow/seven-width audit passed; Docker integration and final accessibility remain open | Final ledger pending |
-| G01 | User-directed authorized guide save/approval policy | Implemented; backend and real browser passed | 11 guide regressions plus integrated 201 suite; private creation, atomic save, immutable versions, explicit pending approval, viewer restrictions, no run starts | 1ded124d, b35ac7bd |
-| W01 | Public read-only website review entry and end-to-end flow | First-priority; runtime contract pending | Separate capability, public site validation, no login/credentials/writes; review output and browser/activity flow; no capability claims before integration tests | Pending separate runtime worker |
+| G01 | Guide UI dependency: authorized save/approval | PR720 merged; deployment confirmed by parent | Release head 4962c695; merge 56c881be. Merged UI guide browser assertions passed at 96eed9c3 (16 layout audits); local wrapper newline exit issue being corrected | 4962c695, 56c881be |
+| W01 | Public read-only website review UI and flow | Contract agreed; component implemented, tests pending | Separate component in isolated website branch. Explicit consent, readiness, pins, Start/Cancel and cited result display; no completion claim until browser/runtime integration | Uncommitted component; runtime checkpoint 5c55b8ee |
 
 No completion percentage is assigned. A milestone is accepted only when its evidence is linked and limitations are stated.
 
@@ -56,6 +60,7 @@ Excluded: production shell/SSH/MCP mutation, deployment, credential enrollment, 
 - AGENTS.md and .agents/skills are absent from current repository; CLAUDE.md, LEARNINGS.md, MOBILE_FIRST.md and relevant design-reference instructions were inspected.
 - Local evidence lives in sibling `../verification/`: `final-dashboard.log`, `final-build.log`, `operations-guide.log`, `ui-alignment/ui-alignment-report.json`, and `connections/broker-ui-report.json`. Reports identify disposable/frozen fixtures; no production proof is inferred.
 - The user-facing tracker PDF is Library file `libfile_e940e43282948191b79f8d07093b9e22`; future updates replace this identity.
+- Current code 96eed9c3: build and 9 frontend unit tests passed; frozen UI suite passed 8 journeys and 28 overflow audits at seven widths. Released guide suite assertions passed against the combined layout. A connection-suite rerun encountered an empty initial page while multiple Vite/browser processes ran; its prior 13 journeys/18 theme checks remain evidence for a35260b, and a serialized rerun is required. Lighthouse previous gates scored 96-100, with contrast/heading findings recorded rather than hidden.
 
 ## Blockers and decisions
 

@@ -25,8 +25,9 @@ export default function OperationalProjects() {
   useEffect(()=>{if(enabled)load();else if(enabled===false){setRows([]);setCursor(null);setDirectory([]);}},[enabled,state]);
   async function loadDirectory(after=null) {try {const data=await api.get(`/directory${after?`?after=${after}`:''}`);setDirectory(old=>after?[...old,...data.projects]:data.projects);setDirectoryCursor(data.next_cursor);}catch(e){setError(e.message);setDirectory([]);setDirectoryCursor(null);}}
   useEffect(()=>{if(agentCapability)loadDirectory();},[agentCapability]);
-  return <div className="operations-ui w-full max-w-screen-2xl mx-auto space-y-6 min-w-0">
+  return <div className="operations-ui operations-shell w-full max-w-screen-2xl mx-auto gap-4 min-w-0">
     <ProjectPageHeader>{enabled&&<NewProjectButton/>}</ProjectPageHeader>
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain space-y-6" data-operations-content>
     {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
     {enabled===null?<p role="status">Loading Operations.</p>:!enabled?<p>Operations is not turned on for this installation.{canManage?' Turn it on in Operations settings below.':' An administrator turns it on in Operations settings.'}</p>:<>
       <div className="flex flex-col sm:flex-row sm:items-end gap-3"><div className="w-full sm:w-40"><Choice label="Show projects" value={state} onChange={e=>setState(e.target.value)}><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></Choice></div><Action variant="outline" disabled={busy} onClick={()=>load()}>Refresh projects</Action></div>
@@ -47,5 +48,6 @@ export default function OperationalProjects() {
     </>}
     {/* Keep settings mounted when toggles change, with a compact entry point. */}
     {canManage&&<details className="operations-card rounded-md border bg-card p-4"><summary className="min-h-11 flex items-center cursor-pointer font-semibold">Operations settings</summary><div className="pt-4"><OperationsSettings onChanged={loadCapabilities}/></div></details>}
+    </div>
   </div>;
 }

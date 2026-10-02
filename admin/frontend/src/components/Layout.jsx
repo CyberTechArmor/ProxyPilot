@@ -498,7 +498,7 @@ export default function Layout() {
                     The Mock2 dev/build module ships with this version but is
                     turned off on this host. To enable it, run:
                   </p>
-                  <code className="mt-2 block overflow-x-auto rounded bg-background px-2 py-1 font-mono text-[11px] text-foreground">
+                  <code tabIndex={0} className="mt-2 block overflow-x-auto rounded bg-background px-2 py-1 font-mono text-[11px] text-foreground">
                     sudo /opt/proxypilot/update.sh --enable-mock2
                   </code>
                   <p className="mt-1 text-[11px] text-muted-foreground">
@@ -676,7 +676,8 @@ export default function Layout() {
           // descendants (sr-only labels, popovers) — without it they are
           // placed against the document, land below the fold and give the
           // page a second, outer scrollbar.
-          "relative flex-1 flex flex-col min-h-0 overflow-y-auto",
+          "relative flex-1 flex flex-col min-h-0",
+          operationsSurface ? "overflow-hidden" : "overflow-y-auto",
           operationsSurface ? "md:p-6" : "md:p-8",
           chromeless ? "p-0" : "p-4",
         )}>

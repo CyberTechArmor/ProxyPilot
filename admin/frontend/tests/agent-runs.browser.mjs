@@ -10,6 +10,7 @@ import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { createRunCoordinator } from '../../backend/src/lib/operational-run-coordinator.js';
 import { guideWith, baseRules, pngFrame } from '../../backend/src/__tests__/helpers/agent-runs-world.js';
 import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs';
+import { settleHarnessRuns } from './agent-runs-cleanup.mjs';
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
@@ -43,21 +44,14 @@ function resetScenario(extra = {}) {
   Object.assign(h.world.supervisor.scenario, { outcome: 'signed_in', choices: [], modelError: null, actionErrors: {},
     holds: new Set(), takeover: null, delayMs: 350, ...extra });
 }
-const activeRun = () => h.world.f.db.prepare(`SELECT id FROM ops_agent_runs WHERE state IN ('prepared','starting','running','cancelling') ORDER BY started_at DESC LIMIT 1`).get()?.id;
 const latestRun = () => h.world.f.db.prepare('SELECT id FROM ops_agent_runs ORDER BY started_at DESC LIMIT 1').get()?.id;
-async function settleAll() {
-  const id = activeRun();
-  if (id) await h.world.service.settled(id);
-  const end = Date.now() + 20000;
-  while (activeRun() && Date.now() < end) await new Promise(done => setTimeout(done, 50));
-  assert.equal(activeRun(), undefined, 'a run is still active');
-}
+const settleAll = options => settleHarnessRuns(h.world, options);
 async function journey(name, fn) {
   if (journeyFilter && !journeyFilter.test(name)) { report.skipped.push(name); return; }
   const started = Date.now();
   try { await fn(); report.journeys.push({ name, passed: true, seconds: Math.round((Date.now() - started) / 100) / 10 }); console.log(`ok - ${name}`); }
   catch (error) { report.journeys.push({ name, passed: false, error: error.message }); console.log(`not ok - ${name}\n  ${error.stack}`); throw error; }
-  finally { for (const ctx of contexts.splice(0)) await ctx.close(); resetScenario(); await settleAll().catch(() => {}); }
+  finally { for (const ctx of contexts.splice(0)) await ctx.close(); resetScenario(); await settleAll({ stopActive: true }); }
 }
 async function startFromUi(page) {
   await page.goto(runsUrl());
@@ -72,6 +66,12 @@ const panelButton = (page, name) => page.getByRole('navigation', { name: 'Run pa
 const views = runId => h.world.supervisor.calls.filter(c => c.method === 'view' && c.params?.run_id === runId).length;
 const feedEnd = page => page.getByTestId('activity-scroller').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight);
 const approvalCard = page => page.getByRole('region', { name: 'Approval needed' });
+async function approvalFeedback(page) {
+  // Run metadata and command feedback now live below the Browser viewport.
+  // Phones keep the chosen panel, including Details after a reconnect.
+  if (page.viewportSize().width < 1024) await panelButton(page, 'Browser').click();
+  await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
+}
 async function digestShown(page) { return (await page.getByRole('dialog').getByTestId('approval-digest').innerText()).replace(/\s+/g, ''); }
 async function sudoIfAsked(page) {
   const sudo = page.getByRole('dialog').filter({ hasText: 'Confirm with password' });
@@ -89,7 +89,7 @@ async function approveInUi(page, { prefix = 12 } = {}) {
   await page.getByRole('button', { name: 'Approve submit' }).click();
   await page.waitForTimeout(300);
   await sudoIfAsked(page);
-  await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
+  await approvalFeedback(page);
   return digest;
 }
 const showPanel = async (page, name) => {
@@ -217,7 +217,7 @@ try {
     await page.locator('#sudo-password').fill(SUDO_PASSWORD);
     await page.locator('#sudo-totp').fill(SUDO_TOTP);
     await page.getByRole('button', { name: 'Confirm', exact: true }).click();
-    await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
+    await approvalFeedback(page);
     await result(page, 'Signed in and verified');
     await page.getByText(`Teardown receipt: verified · key ${h.world.supervisor.keyId.slice(0, 8)}`).waitFor(WAIT);
     await showPanel(page,'Activity');
@@ -247,12 +247,15 @@ try {
       const viewport = { top: 0, left: 0, bottom: innerHeight, right: innerWidth };
       const inside = (r, c) => r.top >= c.top - 1 && r.bottom <= c.bottom + 1 && r.left >= c.left - 1 && r.right <= c.right + 1;
       const column = document.querySelector('[data-testid="activity-scroller"]');
+      const content = document.querySelector('main > .overflow-hidden');
+      if (!content) throw new Error('The Operations viewport container is missing');
       const items = [...column.querySelectorAll('ol > li')].slice(-4).map(li => li.getBoundingClientRect());
       return { frame: inside(document.querySelector('[data-testid="browser-frame"]').getBoundingClientRect(), viewport),
         items: items.map(r => inside(r, viewport) && inside(r, column.getBoundingClientRect())),
-        pageScrolled: document.querySelector('main > .overflow-y-auto').scrollTop };
+        pageScrolled: content.scrollTop, documentScrolled: document.scrollingElement.scrollTop,
+        documentFits: document.scrollingElement.scrollHeight <= innerHeight };
     });
-    assert.deepEqual(fit, { frame: true, items: [true, true, true, true], pageScrolled: 0 });
+    assert.deepEqual(fit, { frame: true, items: [true, true, true, true], pageScrolled: 0, documentScrolled: 0, documentFits: true });
     report.deck_fit = fit;
     const railPlacement = await page.evaluate(() => {
       const approval = document.querySelector('[data-run-approval]').getBoundingClientRect();
@@ -577,7 +580,7 @@ try {
     await page.getByRole('button', { name: 'Approve submit' }).click();
     await page.getByRole('dialog').filter({ hasText: 'Confirm with password' }).waitFor(WAIT);
     await sudoIfAsked(page);
-    await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
+    await approvalFeedback(page);
     await result(page, 'Signed in and verified');
     assert.equal(new URL(page.url()).searchParams.get('run'), runId);
   });
@@ -619,7 +622,7 @@ try {
     await page.keyboard.press('Tab');
     await page.keyboard.type(SUDO_TOTP);
     await page.keyboard.press('Enter');
-    await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
+    await approvalFeedback(page);
     await result(page, 'Signed in and verified');
   });
 

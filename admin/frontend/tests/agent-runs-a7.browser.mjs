@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs';
+import { settleHarnessRuns } from './agent-runs-cleanup.mjs';
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
@@ -76,18 +77,12 @@ function resetScenario(extra = {}) {
   Object.assign(h.world.supervisor.scenario, { outcome: 'signed_in', choices: [], modelError: null, actionErrors: {},
     holds: new Set(), takeover: null, delayMs: 250, liveError: null, takeoverError: null, summaryError: null, ...extra });
 }
-const activeRun = () => h.world.f.db.prepare(`SELECT id FROM ops_agent_runs WHERE state IN ('prepared','starting','running','cancelling') ORDER BY started_at DESC LIMIT 1`).get()?.id;
-async function settleAll() {
-  const id = activeRun();
-  if (id) await h.world.service.settled(id);
-  const end = Date.now() + 20000;
-  while (activeRun() && Date.now() < end) await new Promise(done => setTimeout(done, 50));
-}
+const settleAll = options => settleHarnessRuns(h.world, options);
 async function journey(name, fn) {
   const started = Date.now();
   try { await fn(); report.journeys.push({ name, passed: true, seconds: Math.round((Date.now() - started) / 100) / 10 }); console.log(`ok - ${name}`); }
   catch (error) { report.journeys.push({ name, passed: false, error: error.message }); console.log(`not ok - ${name}\n  ${error.stack}`); throw error; }
-  finally { for (const ctx of contexts.splice(0)) await ctx.close(); resetScenario(); await settleAll().catch(() => {}); }
+  finally { for (const ctx of contexts.splice(0)) await ctx.close(); resetScenario(); await settleAll({ stopActive: true }); }
 }
 async function startFromUi(page) {
   await page.goto(runsUrl());

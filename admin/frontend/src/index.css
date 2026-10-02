@@ -221,6 +221,16 @@
   border-radius: var(--operations-radius, 6px);
   box-shadow: none;
 }
+.operations-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.operations-shell > header {
+  flex-shrink: 0;
+}
 .operations-tabs {
   display: flex;
   overflow-x: auto;

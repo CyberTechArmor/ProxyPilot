@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { AlertTriangle, AppWindow, BookOpen, CheckCircle2, Globe, Hand, Info, Maximize2, MessageSquare, RotateCcw, Square } from 'lucide-react';
+import { AlertTriangle, AppWindow, BookOpen, CheckCircle2, Globe, Hand, Info, Maximize2, Minimize2, MessageSquare, RotateCcw, Square } from 'lucide-react';
 import { operationsApi as api } from '@/lib/api';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -11,10 +11,11 @@ import { ACTION_TEXT, CLAIM_TEXT, DECK_TEXT, HELP_DECISION, KIND_TEXT, LIVE_TEXT
 import { callSummary, firstStepFinishedAt } from './run-deck-logic';
 import { LiveBrowser } from './LiveBrowser';
 import { matchesPinnedGuide } from './run-readiness';
+import { createBrowserFullscreen } from './browser-fullscreen';
 
 // The run deck: one run's detail laid out like Flightdeck. On a laptop the
-// Browser pane and the Activity column share a fixed-height deck under the run
-// bar and the approval banner, with Details below; on a phone one panel shows
+// Browser pane and the Activity column fill the available viewport below the
+// compact run bar; each pane scrolls internally. On a phone one panel shows
 // at a time behind the shared MobilePanelBar. A layout over the run detail and
 // the view frames the server already returns: frames stay in this page's memory.
 // A7 adds the live video (and takeover) in the Browser pane, the decisions a
@@ -157,24 +158,17 @@ function OriginBadges({ origin, onOpenRun }) {
   </>;
 }
 
-function RunBar({ data, busy, message, statusId, onBack, onStop, onResume, onOpenRun }) {
+function RunBar({ data, active, busy, statusId, stopHint, resumeHint, onBack, onStop, onResume }) {
   const { run, controls } = data;
-  const resumeHint = useId();
   const needsPerson = !!data.result?.needs_human;
-  const stopHint = useId();
-  const hint = !controls.stop.enabled ? DECK_TEXT.stopUnavailable(controls.stop.reason)
-    : controls.stop.retry ? DECK_TEXT.stopRetry : DECK_TEXT.stopHint;
   return <section aria-labelledby={`${run.id}-title`} className="space-y-3 min-w-0 pb-1" data-run-header>
     <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 min-w-0">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 min-w-0">
           <h1 id={`${run.id}-title`} className="operations-title !text-[28px] sm:!text-[32px] break-words [overflow-wrap:anywhere]">{run.profile_name ?? 'Demo sign-in run'}</h1>
-          <StateBadge run={run}/>{run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}
+          <StateBadge run={run}/>{active && run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}
         </div>
-        <p className="mt-2 text-sm text-muted-foreground break-words">Demo sign-in · Run {shortId(run.id)} · Step {run.action_count} of at most {run.max_actions}</p>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><OriginBadges origin={data.origin} onOpenRun={onOpenRun}/>
-          {data.origin?.practice && data.origin.expected_result && <span className="text-sm text-muted-foreground">{ORIGIN_TEXT.expected(data.origin.expected_result)}</span>}</div>
-        <p className="text-xs text-muted-foreground break-words">Started by {run.started_by.username ?? run.started_by.id} · {whenShort(run.started_at)} · Guide v{run.guide_version_number ?? '?'}</p>
+
       </div>
       <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">
         <Action variant="outline" onClick={onBack}>{DECK_TEXT.back}</Action>
@@ -187,12 +181,35 @@ function RunBar({ data, busy, message, statusId, onBack, onStop, onResume, onOpe
           <span className="sm:hidden">{DECK_TEXT.stopShort}</span><span className="hidden sm:inline">{DECK_TEXT.stop}</span></Action>
       </div>
     </div>
+
+  </section>;
+}
+
+function RunInformation({data,active,busy,message,statusId,stopHint,resumeHint,onOpenRun,expanded=false}) {
+  const {run,controls,steps}=data,needsPerson=!!data.result?.needs_human;
+  const hint=!controls.stop.enabled?DECK_TEXT.stopUnavailable(controls.stop.reason):controls.stop.retry?DECK_TEXT.stopRetry:DECK_TEXT.stopHint;
+  return <div className={`border-t pt-4 space-y-3 ${expanded?'hidden':''}`} data-testid="run-overview">
+      <div className="space-y-2" data-run-information>
+        <p className="mt-2 text-sm text-muted-foreground break-words">Demo sign-in · Run {shortId(run.id)} · Step {run.action_count} of at most {run.max_actions}</p>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1"><OriginBadges origin={data.origin} onOpenRun={onOpenRun}/>
+          {data.origin?.practice && data.origin.expected_result && <span className="text-sm text-muted-foreground">{ORIGIN_TEXT.expected(data.origin.expected_result)}</span>}</div>
+        <p className="text-xs text-muted-foreground break-words">Started by {run.started_by.username ?? run.started_by.id} · {whenShort(run.started_at)} · Guide v{run.guide_version_number ?? '?'}</p>
     <p id={stopHint} className={controls.stop.enabled && !controls.stop.retry ? 'sr-only' : 'text-xs text-muted-foreground break-words'}>{hint}</p>
     {needsPerson && controls.resume && <p id={resumeHint} className="text-xs text-muted-foreground break-words">
         {controls.resume.enabled ? ORIGIN_TEXT.resumeHint : ORIGIN_TEXT.resumeUnavailable(controls.resume.reason)}</p>
     }
     <p id={statusId} role="status" aria-live="polite" className={busy || message ? 'text-sm' : 'sr-only'}>{busy ? 'Working…' : message}</p>
-  </section>;
+      </div>
+      <div className="flex items-start gap-2"><Info aria-hidden="true" className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground"/>
+        <div className="min-w-0"><p className="text-sm font-semibold">{data.result ? 'Run outcome' : 'Current task'}</p>
+          <p className="text-sm text-muted-foreground break-words">{data.result ? RESULT_TEXT[data.result.result_class]?.[1]
+            : active && data.run.awaiting_approval ? 'The agent is waiting for approval before submitting the bound demo credential.'
+              : active ? 'Follow the approved synthetic sign-in guide and verify the account before signing out.' : 'This browser session ended. Review its recorded activity and outcome.'}</p></div></div>
+      <ol aria-label="Recent steps" className="flex flex-col sm:flex-row sm:flex-wrap gap-2">{steps.slice(-3).map(s =>
+        <li key={s.ordinal} className="inline-flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs min-w-0">
+          {s.state === 'done' && <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400"/>}
+          <span className="break-words">{s.ordinal}. {ACTION_TEXT[s.action] ?? s.action} · {s.state === 'reserved' ? 'in progress' : s.state}</span></li>)}</ol>
+    </div>;
 }
 
 // A7 decision 3: what a person records about each uncertain item of a finished
@@ -229,9 +246,8 @@ export function ReconcilePanel({ data, busy, onDecide }) {
 // that dialog, the digest confirmation and sudo.
 function ApprovalBanner({ approval, compact, onReview }) {
   const action = ACTION_TEXT[approval.action] ?? approval.action;
-  // Sticky under the app bar on a phone or tablet: the padding strip covers the
-  // layout scroller's own padding, and the negative margin keeps the flow gap.
-  return <section aria-label={DECK_TEXT.approvalNeeded} className="sticky -top-4 z-20 -mt-4 bg-background pt-4 md:-top-8 md:-mt-8 md:pt-8 lg:static lg:col-start-2 lg:row-start-1 lg:mt-0 lg:pt-0" data-run-approval>
+  // The viewport shell keeps this above the internally scrolling phone pane.
+  return <section aria-label={DECK_TEXT.approvalNeeded} className="shrink-0 z-20 bg-background lg:col-start-2 lg:row-start-1" data-run-approval>
     <div className={`operations-card flex gap-2 rounded-md border border-amber-500/70 bg-amber-500/10 p-3 lg:flex-col lg:items-stretch ${compact ? 'flex-row items-center' : 'flex-col'}`}>
       <div className={`min-w-0 flex-1 ${compact ? 'hidden lg:block' : ''}`}>
         <h2 className="text-lg font-semibold flex items-center gap-2"><AlertTriangle aria-hidden="true" className="hidden lg:block h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400"/>{DECK_TEXT.approvalNeeded}</h2>
@@ -277,21 +293,27 @@ function TakeoverBar({ data, live, me, busy, onTakeover, onEndTakeover }) {
   </div>;
 }
 
-function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, viewNote, className, liveView, me, busy,
+function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, viewNote, className, liveView, me, busy, information,
   onTakeover, onEndTakeover }) {
   const { controls, steps } = data;
-  const headingId = useId();
+  const headingId = useId(),box=useRef(null),full=useRef(null),[expanded,setExpanded]=useState(false);
+  useEffect(()=>{full.current=createBrowserFullscreen({element:box.current,onChange:setExpanded});return()=>{full.current?.close();full.current=null;};},[]);
+  const surface=expanded?'fixed inset-0 z-[60] h-viewport w-full flex flex-col border-0 rounded-none bg-background p-4 min-w-0 min-h-0 overflow-hidden gap-3':`${className} operations-card flex-1 flex-col gap-4 rounded-md border bg-card p-4 min-w-0 min-h-0 overflow-y-auto`;
+  const fullscreenButton=<Action variant="outline" size={expanded?'default':'icon'} className={`gap-2 shrink-0 min-h-11 ${expanded?'':'w-11'}`} title={expanded?'Exit fullscreen browser':'Open fullscreen browser'} aria-label={expanded?'Exit fullscreen browser':'Open fullscreen browser'} data-exit-browser-fullscreen={expanded?'':undefined} onClick={()=>expanded?full.current?.exit():full.current?.enter()}>{expanded?<Minimize2 aria-hidden="true" className="h-4 w-4"/>:<Maximize2 aria-hidden="true" className="h-4 w-4"/>}{expanded&&'Exit fullscreen'}</Action>;
   const video = !!liveView && liveView.mode === 'live' && controls.live?.enabled;
-  if (video) return <section aria-labelledby={headingId} className={`${className} operations-card flex-col gap-4 rounded-md border bg-card p-4 min-w-0 lg:min-h-0 lg:overflow-y-auto`} data-browser-pane>
+  const beforeDialog=callback=>async event=>{const trigger=event?.currentTarget;if(expanded)await full.current?.exit();trigger?.focus();callback?.();};
+  if (video) return <section ref={box} aria-labelledby={headingId} tabIndex={expanded?-1:undefined} className={surface} data-browser-pane data-browser-fullscreen={expanded}>
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h2 id={headingId} className="text-base font-semibold flex items-center gap-2"><Globe aria-hidden="true" className="h-5 w-5 text-muted-foreground"/>Live browser</h2>
       {liveView.state === 'live' && <LivePill state="live"/>}
       <span className="text-xs text-muted-foreground">{liveView.control?.mine ? 'You have control' : 'View only'}</span>
+      <div className="ml-auto">{fullscreenButton}</div>
     </div>
     <LiveBrowser base={liveView.base} runId={data.run.id} onState={liveView.onState} onControl={liveView.onControl}
-      onViewer={liveView.onViewer}/>
-    <TakeoverBar data={data} live={liveView} me={me} busy={busy} onTakeover={onTakeover} onEndTakeover={onEndTakeover}/>
+      onViewer={liveView.onViewer} expanded={expanded}/>
+    <TakeoverBar data={data} live={liveView} me={me} busy={busy} onTakeover={beforeDialog(onTakeover)} onEndTakeover={beforeDialog(onEndTakeover)}/>
     <p className="text-xs text-muted-foreground">{DECK_TEXT.liveNote}</p>
+    <RunInformation data={data} active={active} busy={busy} expanded={expanded} {...information}/>
   </section>;
   const live = frame;
   const firstDone = firstStepFinishedAt(steps) !== null;
@@ -300,17 +322,18 @@ function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, vie
   const step = live ? steps.find(s => s.ordinal === at) : null;
   const placeholder = !active ? DECK_TEXT.noBrowser : !firstDone ? DECK_TEXT.starting
     : !controls.view.enabled ? DECK_TEXT.noBrowser : !watch ? DECK_TEXT.watchingPaused : DECK_TEXT.firstFrame;
-  return <section aria-labelledby={headingId} className={`${className} operations-card flex-col gap-4 rounded-md border bg-card p-4 min-w-0 lg:min-h-0 lg:overflow-y-auto`} data-browser-pane>
+  return <section ref={box} aria-labelledby={headingId} tabIndex={expanded?-1:undefined} className={surface} data-browser-pane data-browser-fullscreen={expanded}>
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h2 id={headingId} className="text-base font-semibold flex items-center gap-2"><Globe aria-hidden="true" className="h-5 w-5 text-muted-foreground"/>{active ? 'Live browser' : DECK_TEXT.browser}</h2>
       {pill && <LivePill state={pill}/>}
       <div className="ml-auto flex items-center gap-2">
         {controls.view.enabled && <WatchSwitch checked={watch} onChange={onWatch}/>}
-        {live && <Action variant="outline" size="icon" className="w-11 shrink-0" aria-label={DECK_TEXT.enlarge} onClick={() => onEnlarge(live)}>
-          <Maximize2 aria-hidden="true" className="h-4 w-4"/></Action>}
+        {live && <Action variant="outline" size="icon" className="w-11 shrink-0" aria-label={DECK_TEXT.enlarge} onClick={async() => {if(expanded)await full.current?.exit();onEnlarge(live);}}>
+          <AppWindow aria-hidden="true" className="h-4 w-4"/></Action>}
+        {fullscreenButton}
       </div>
     </div>
-    <div className={`relative w-full shrink-0 overflow-hidden rounded-md ${live || active ? 'aspect-[16/10] bg-zinc-950' : 'border bg-muted/30 p-6 sm:p-8'}`} data-testid="browser-frame">
+    <div className={`relative w-full ${expanded?'flex-1 min-h-0':'shrink-0'} overflow-hidden rounded-md ${live || active ? `${expanded?'':'aspect-[16/10]'} bg-zinc-950` : 'border bg-muted/30 p-6 sm:p-8'}`} data-testid="browser-frame">
       {live ? <img src={`data:image/png;base64,${live.png_base64}`} alt={active ? DECK_TEXT.liveAlt(at) : DECK_TEXT.lastAlt(at)}
         className="absolute inset-0 h-full w-full object-contain"/>
         : active ? <p role="status" className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-zinc-300">{placeholder}</p>
@@ -329,19 +352,9 @@ function BrowserPane({ data, active, live: frame, watch, onWatch, onEnlarge, vie
       <p className="min-w-0 flex-1 text-sm break-words" role="status">{liveView.note}</p>
       {liveView.retry && <Action variant="outline" onClick={liveView.onRetry}>{LIVE_TEXT.retry}</Action>}</div>}
     {controls.takeover?.holder && <TakeoverBar data={data} live={liveView ?? { control: {}, state: 'off' }} me={me} busy={busy}
-      onTakeover={onTakeover} onEndTakeover={onEndTakeover}/>}
+      onTakeover={beforeDialog(onTakeover)} onEndTakeover={beforeDialog(onEndTakeover)}/>}
     <p className="text-xs text-muted-foreground">{active ? DECK_TEXT.viewNote : 'This is a historical run. No browser session is active.'}</p>
-    <div className="border-t pt-4 space-y-3" data-testid="run-overview">
-      <div className="flex items-start gap-2"><Info aria-hidden="true" className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground"/>
-        <div className="min-w-0"><p className="text-sm font-semibold">{data.result ? 'Run outcome' : 'Current task'}</p>
-          <p className="text-sm text-muted-foreground break-words">{data.result ? RESULT_TEXT[data.result.result_class]?.[1]
-            : data.run.awaiting_approval ? 'The agent is waiting for approval before submitting the bound demo credential.'
-              : 'Follow the approved synthetic sign-in guide and verify the account before signing out.'}</p></div></div>
-      <ol aria-label="Recent steps" className="flex flex-col sm:flex-row sm:flex-wrap gap-2">{steps.slice(-3).map(s =>
-        <li key={s.ordinal} className="inline-flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs min-w-0">
-          {s.state === 'done' && <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400"/>}
-          <span className="break-words">{s.ordinal}. {ACTION_TEXT[s.action] ?? s.action} · {s.state === 'reserved' ? 'in progress' : s.state}</span></li>)}</ol>
-    </div>
+    <RunInformation data={data} active={active} busy={busy} expanded={expanded} {...information}/>
   </section>;
 }
 
@@ -442,13 +455,13 @@ function ActivityColumn({ feed, data, thumbs, visible, onFrame, className }) {
   }, [visible]);
   const jump = () => { follow.current = true; toEnd(); setUnseen(0); };
   const open = data.approvals.some(a => a.open);
-  return <section aria-labelledby={headingId} className={`${className} relative flex-col min-w-0 lg:min-h-0 lg:flex-1`}>
+  return <section aria-labelledby={headingId} className={`${className} relative flex-col min-w-0 min-h-0 flex-1`}>
     <div className="flex flex-wrap items-baseline gap-x-2 border-b px-3 py-2 lg:sr-only lg:border-0 lg:p-0">
       <h3 id={headingId} className="font-semibold">{DECK_TEXT.activity}</h3>
       <span className="text-sm text-muted-foreground">{DECK_TEXT.events(feed.length)}</span>
     </div>
     <p id={noteId} className="sr-only">{DECK_TEXT.activityNote}</p>
-    <div ref={box} className="space-y-2 p-3 lg:flex-auto lg:min-h-0 lg:overflow-y-auto" data-testid="activity-scroller">
+    <div ref={box} tabIndex={0} role="region" aria-label="Scrollable run activity" className="space-y-2 p-3 flex-auto min-h-0 overflow-y-auto overscroll-contain" data-testid="activity-scroller">
       <ol className="space-y-2" aria-label="Run activity" aria-describedby={noteId}>{feed.map(item =>
         <FeedItem key={item.key} item={item} data={data} thumb={item.step ? thumbs.get(item.step.ordinal) : null} onFrame={onFrame}/>)}</ol>
       <p aria-live="polite" className="flex items-center gap-2 px-1 text-sm text-amber-700 dark:text-amber-300">{open && <>
@@ -509,10 +522,10 @@ function RunDetails({ base, data, tab, onTab, busy, statusId, onRefresh, classNa
 export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, onTab, watch, onWatch, viewNote, busy, message,
   error, announce, onBack, onStop, onRefresh, onReview, onFrame, liveView = null, me = null, onTakeover, onEndTakeover,
   onResume, onOpenRun, onDecide }) {
-  const statusId = useId();
+  const statusId = useId(),stopHint=useId(),resumeHint=useId();
   const railId = useId(), railNav = useRef(null);
   const [railTab, setRailTab] = useState(active ? 'activity' : 'details');
-  const open = data.approvals.find(a => a.open) ?? null;
+  const open = active ? data.approvals.find(a => a.open) ?? null : null;
   const shown = key => `${panel === key ? 'flex' : 'hidden'} ${railTab === key ? 'lg:flex' : 'lg:hidden'}`;
   const railTabs = [['activity', 'Activity'], ['guide', 'Guide'], ['details', 'Details']];
   const selectRail = key => setRailTab(key);
@@ -528,18 +541,17 @@ export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, o
     { key: 'activity', label: <span>{DECK_TEXT.activity} <span className="rounded-full bg-muted px-1.5 text-[10px] text-foreground">{feed.length}</span></span>, icon: MessageSquare },
     { key: 'details', label: DECK_TEXT.details, icon: Info },
   ];
-  return <div className="flex flex-col gap-3 min-w-0 pb-[calc(4.5rem+env(safe-area-inset-bottom))] md:pb-0">
+  return <div className="flex flex-col flex-1 min-h-0 gap-3 min-w-0 overflow-hidden" data-run-deck>
     <p className="sr-only" role="status" aria-live="polite">{announce}</p>
-    <RunBar data={data} busy={busy} message={message} statusId={statusId} onBack={onBack} onStop={onStop} onResume={onResume}
-      onOpenRun={onOpenRun}/>
+    <div className="shrink-0 max-h-[35%] overflow-y-auto overscroll-contain"><RunBar data={data} active={active} busy={busy} statusId={statusId} stopHint={stopHint} resumeHint={resumeHint} onBack={onBack} onStop={onStop} onResume={onResume}/></div>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
-    <div className={`min-w-0 space-y-4 lg:space-y-0 lg:grid lg:h-[calc(100dvh-11rem)] lg:min-h-[32rem] lg:grid-cols-[minmax(0,1.65fr)_minmax(320px,1fr)] ${open ? 'lg:grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-rows-[minmax(0,1fr)]'} lg:gap-4`} data-run-workspace>
+    <div className={`min-w-0 min-h-0 flex-1 flex flex-col gap-3 overflow-hidden lg:grid lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)] ${open ? 'lg:grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-rows-[minmax(0,1fr)]'} lg:gap-4`} data-run-workspace>
       {open && <ApprovalBanner approval={open} compact={panel !== 'browser'} onReview={() => onReview(open.id)}/>}
       <BrowserPane className={`${panel === 'browser' ? 'flex' : 'hidden'} lg:flex lg:col-start-1 lg:row-start-1 ${open ? 'lg:row-span-2' : ''}`} data={data} active={active} live={view.live} watch={watch} onWatch={onWatch}
         onEnlarge={onFrame} viewNote={viewNote} liveView={liveView} me={me} busy={busy} onTakeover={onTakeover}
-        onEndTakeover={onEndTakeover}/>
-      <aside aria-label="Run context" className={`operations-card ${panel === 'browser' && !data.run.help && !data.reconciliation?.items?.length ? 'hidden lg:flex' : 'flex'} flex-col rounded-md border bg-card min-w-0 lg:min-h-0 lg:col-start-2 ${open ? 'lg:row-start-2' : 'lg:row-start-1'}`} data-run-context>
-        {(data.run.help || data.reconciliation?.items?.length > 0) && <div className="space-y-3 p-4 border-b lg:max-h-[45%] lg:overflow-y-auto">
+        onEndTakeover={onEndTakeover} information={{message,statusId,stopHint,resumeHint,onOpenRun}}/>
+      <aside aria-label="Run context" className={`operations-card ${panel === 'browser' && !data.run.help && !data.reconciliation?.items?.length ? 'hidden lg:flex' : 'flex'} flex-col rounded-md border bg-card min-w-0 min-h-0 flex-1 overflow-hidden lg:col-start-2 ${open ? 'lg:row-start-2' : 'lg:row-start-1'}`} data-run-context>
+        {(data.run.help || data.reconciliation?.items?.length > 0) && <div role="region" aria-label="Run review decisions" tabIndex={0} data-run-review-decisions className={`space-y-3 p-4 border-b min-h-0 shrink-0 overflow-y-auto overscroll-contain ${panel==='browser'?'max-h-full':'max-h-[45%]'} lg:max-h-[45%]`}>
           <HelpBanner help={data.run.help}/>
           <ReconcilePanel data={data} busy={busy} onDecide={onDecide}/>
         </div>}
@@ -549,19 +561,19 @@ export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, o
             onClick={() => selectRail(key)} className={`min-h-11 flex flex-1 items-center justify-center gap-2 border-b-2 px-3 text-sm font-medium ${railTab === key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>{label}
             {key === 'activity' && <span aria-hidden="true" className="rounded-full bg-muted px-1.5 text-xs text-foreground">{feed.length}</span>}</button>)}
         </div>
-        <div id={`${railId}-activity`} role="tabpanel" aria-labelledby={`${railId}-activity-tab`} className={`${shown('activity')} flex-col min-w-0 lg:flex-1 lg:min-h-0`}>
+        <div id={`${railId}-activity`} role="tabpanel" aria-labelledby={`${railId}-activity-tab`} className={`${shown('activity')} flex-col min-w-0 flex-1 min-h-0`}>
           <ActivityColumn className="flex" feed={feed} data={data} thumbs={view.thumbs} visible={`${panel}:${railTab}`} onFrame={onFrame}/>
         </div>
         <div id={`${railId}-guide`} role="tabpanel" aria-labelledby={`${railId}-guide-tab`} className={`${railTab === 'guide' ? 'hidden lg:block' : 'hidden'} p-4 min-w-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto`}>
           {railTab === 'guide' && <PinnedGuide base={base} run={data.run}/>}
         </div>
-        <div id={`${railId}-details`} role="tabpanel" aria-labelledby={`${railId}-details-tab`} className={`${shown('details')} flex-col p-4 min-w-0 lg:flex-1 lg:min-h-0 lg:overflow-y-auto`}>
+        <div id={`${railId}-details`} role="tabpanel" aria-labelledby={`${railId}-details-tab`} className={`${shown('details')} flex-col p-4 min-w-0 flex-1 min-h-0 overflow-y-auto overscroll-contain`}>
           <RunDetails base={base} className="block" data={data} tab={tab} onTab={onTab} busy={busy}
             statusId={statusId} onRefresh={onRefresh}/>
         </div>
       </aside>
     </div>
-    <nav aria-label={DECK_TEXT.panels} className="fixed inset-x-0 bottom-0 z-30 md:sticky lg:hidden">
+    <nav aria-label={DECK_TEXT.panels} className="shrink-0 lg:hidden">
       <MobilePanelBar panels={panels} current={panel} onSelect={onPanel}/>
     </nav>
   </div>;

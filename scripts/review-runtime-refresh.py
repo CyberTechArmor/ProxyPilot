@@ -66,7 +66,7 @@ def idle(supervisor, broker):
     if (any(a.get('state') not in LIVE | {'stopped', 'lost', 'refused'}
             for a in supervisor.get('attempts', {}).values()) or
             any(c.get('state') not in {'reserved', 'sent', 'uncertain', 'refused', 'abandoned',
-                                      'settled', 'settled_at_reservation'}
+                                      'settled', 'settled_at_reservation', 'provider_error'}
                 for c in broker.get('calls', {}).values()) or
             any(v.get('state') not in {'reserved', 'completed', 'cancelled'}
                 for v in supervisor.get('public_reviews', {}).values())):

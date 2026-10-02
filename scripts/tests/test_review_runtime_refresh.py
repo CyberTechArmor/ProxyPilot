@@ -218,6 +218,9 @@ class RefreshTests(unittest.TestCase):
         self.refresh.apply()
         self.refresh.rollback()
         self.assert_preserved()
+        broker['calls']['c']['state'] = 'provider_error'
+        self.host.write(self.host.ledgers[1], r.encoded(broker), 0o600)
+        self.assertFalse(self.refresh.preflight()['skipped'])
         supervisor['public_reviews']['r']['call_id'] = 'unknown'
         self.host.write(self.host.ledgers[0], r.encoded(supervisor), 0o600)
         with self.assertRaisesRegex(ValueError, 'Unverifiable'):

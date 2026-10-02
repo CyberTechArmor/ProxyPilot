@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'vite';
+import tailwindcss from 'tailwindcss';
+import loadTailwindConfig from 'tailwindcss/loadConfig.js';
+import autoprefixer from 'autoprefixer';
 import express from '../../backend/node_modules/express/index.js';
 import { csrfProtection } from '../../backend/src/middleware/csrf.js';
 import { createOperationsRouter } from '../../backend/src/routes/operational-projects.js';
@@ -98,7 +101,11 @@ export async function startWebsiteReviewHarness({ useVite = true } = {}) {
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown integration fixture endpoint' }));
   if (useVite) {
     const root = fileURLToPath(new URL('..', import.meta.url));
-    server = await createServer({ root, configFile: `${root}/vite.config.js`, cacheDir: join(tmpdir(), `pp-website-review-vite-${process.pid}`), logLevel: 'error', server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{ name: 'website-review-real-api', configureServer(vite) { vite.middlewares.use((req, res, next) => req.url?.startsWith('/api/') ? app(req, res, next) : next()); } }] });
+    // Resolve the actual frontend stylesheet configuration even when the test
+    // is invoked from the repository root. Content globs also need that root.
+    const tailwind = loadTailwindConfig(`${root}/tailwind.config.js`);
+    tailwind.content = tailwind.content.map(glob => join(root, glob).replaceAll('\\', '/'));
+    server = await createServer({ root, configFile: `${root}/vite.config.js`, css: { postcss: { plugins: [tailwindcss(tailwind), autoprefixer()] } }, cacheDir: join(tmpdir(), `pp-website-review-vite-${process.pid}`), logLevel: 'error', server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{ name: 'website-review-real-api', configureServer(vite) { vite.middlewares.use((req, res, next) => req.url?.startsWith('/api/') ? app(req, res, next) : next()); } }] });
     await server.listen();
   } else server = await new Promise(done => { const http = app.listen(0, '127.0.0.1', () => done(http)); });
   const port = (useVite ? server.httpServer : server).address().port;

@@ -109,7 +109,7 @@ try {
     await result.getByText(SUMMARY, { exact: true }).waitFor(); await result.getByText('$0.001000', { exact: true }).waitFor();
     assert.equal(await result.locator('dt').filter({ hasText: /^Input tokens$/ }).locator('..').locator('dd').textContent(), '800');
     assert.equal(await result.locator('dt').filter({ hasText: /^Output tokens$/ }).locator('..').locator('dd').textContent(), '150');
-    await result.getByText('Sources and extraction evidence (2)', { exact: true }).click(); await result.getByText('Museum learning', { exact: false }).waitFor();
+    await result.getByText('Sources and extraction evidence (2)', { exact: true }).click(); await result.getByRole('heading', { name: /Source 2.*Museum learning/ }).waitFor();
     for (const source of run.sources) { await result.getByText(`Content SHA-256: ${source.content_hash}`, { exact: true }).waitFor(); assert.equal(await result.getByRole('link', { name: source.url, exact: true }).first().getAttribute('href'), source.url); }
     await result.getByText('Immutable run guide and agent pins', { exact: true }).click(); await result.getByText(h.version.id, { exact: true }).waitFor(); await result.getByText(h.version.content_hash, { exact: true }).waitFor();
     await audit(page, 'completed-evidence'); report.journeys.push('Exact-pin Start traverses real routes/service/extraction and renders cited completion, source hashes, usage and settled cost');

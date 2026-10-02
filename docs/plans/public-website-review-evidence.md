@@ -115,8 +115,6 @@ Retained artifacts are explicitly fixture evidence, not a live provider review:
 [phone](assets/public-website-review/runtime-review-375.png),
 [desktop](assets/public-website-review/runtime-review-1280.png).
 
-## Deferred backlog
-
 ## Key-preserving updater refresh
 
 The separately reviewable updater change adds a fixed-path paired transaction
@@ -134,7 +132,26 @@ environment skips and zero failures. A final CLI no-op test was then added to
 prove no lock/backup creation for non-opted-in installations. Final source-specific
 results follow after convergence onto frozen website/UI release `444cc2fe`.
 
-### Deferred backlog (unchanged)
+Final combined checks: on updater integration source
+`1d57201827d0766e0369d9fdd0c011ade2a33a5d`, the full Python aggregate passed
+308 tests / 33 environment skips / zero failures (77.510 seconds), root updater
+selection passed 81/81 / zero skips (14.571 seconds), and Operations passed 197/197
+(18.782 seconds). Fresh Windows CRLF bytes initially failed two unchanged Linux
+fixture assertions (systemd unit exact line; A7 pinned patch digest). Normalizing
+those local fixture files to committed LF bytes resolved both without any product
+diff, pin rewrite or weakened assertion.
+
+Final code source `10446cf9d9369c89667a40b389019b77908a5415` additionally recognizes
+the broker's existing terminal `provider_error` state without changing its ledger.
+Its entire refresh selection passed 15/15 as root, zero skips (0.916 seconds).
+Other script/backend sources are identical to the aggregate-tested integration
+source. The unchanged frontend, website backend/runtime and browser fixture blobs
+exactly match `444cc2fe`; their retained UI proof above remains applicable. No
+cosmetic redesign, Relay work or unrelated feature was added. The final CI will
+run the combined source again. [Updater verification manifest](assets/public-website-review/release/updater-verification.json)
+records exact sources and local log hashes.
+
+## Deferred backlog (unchanged)
 
 - Authenticated browsing; passwords, OAuth, MFA and CAPTCHA handling.
 - Website writes: forms, uploads, purchases, account changes and other actions.
@@ -150,7 +167,7 @@ permission. No dependency on completing the cosmetic redesign is introduced.
 
 ## Frozen converged release evidence - 2026-10-02
 
-The sole proposed release branch is `ui/website-review-integration-20261002`. Frozen tested source is `da6630b83ff01e392be058557784ccc531492142`. Its product tree is identical to `60bf9968`; backend/scripts match runtime proof `fb5d4bb3`. Subsequent evidence-only commits do not change those tested products. The separate full mockup alignment and original backlog commits are excluded from this branch.
+The website/UI slice was frozen on `ui/website-review-integration-20261002`. Its tested source is `da6630b83ff01e392be058557784ccc531492142`; product tree matches `60bf9968` and backend/scripts match runtime proof `fb5d4bb3`. Website evidence-only commits do not change those tested products. The separate full mockup alignment and original backlog commits are excluded. The combined branch is `feat/website-review-updater-release-20261002`, based on frozen slice `444cc2fe` with the separately reviewed updater commit `1d572018`.
 
 - Repository CI backend selection: 223 passed, zero failures/cancellations/skips.
 - Cross-language website-review Python: 9 passed. Frontend selection: 4 passed. Production build passed, retaining existing import/chunk-size warnings.
@@ -162,4 +179,4 @@ The sole proposed release branch is `ui/website-review-integration-20261002`. Fr
 
 Two first wrapper attempts stopped before component/dashboard startup because WSL could not follow a Windows Git worktree pointer. The wrapper now receives the verified Windows commit explicitly. Both restarted suites exited zero. The already successful signed-runtime suite was not repeated. No failure was counted as a completed journey.
 
-Repository implementation of the separately owned key-preserving updater refresh was authorized through the parent at 16:27 UTC. It is not part of this frozen evidence and needs targeted integration verification. Host actions and public publication remain unauthorized for this executor.
+Repository implementation of the key-preserving updater refresh was authorized through the parent at 16:27 UTC. Its affected checks are recorded below separately from the unchanged website/UI fixtures. Thomas subsequently explicitly authorized publishing the combined draft PR, with parent review/CI before merge and production Update performed by Thomas. No production action was performed by this executor.

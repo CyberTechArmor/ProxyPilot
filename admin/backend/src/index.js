@@ -7,6 +7,7 @@ import { ssoRouter } from './routes/sso.js';
 import { recoveryBoundary } from './lib/sso/sessions.js';
 import express from 'express';
 import { createOperationsRouter } from './routes/operational-projects.js';
+import { createWebsiteReviewRuntime } from './lib/operational-website-review-runtime.js';
 import { createOperationsStore } from './lib/operational-projects-store.js';
 import { effectiveToggles } from './lib/operations-toggles.js';
 import { createOperationsSettingsRouter } from './routes/operations-settings.js';
@@ -628,6 +629,7 @@ const agentRuns = createAgentRunRuntime(agentRunsConfig, { db: getDb(),
   log: entry => console.log('[agent-runs]', JSON.stringify(entry)),
   audit: (actor, action, details) => logAudit(actor?.id ?? null, action, 'operational_agent_run', details?.run_id ?? null, details, null) });
 const operationsToggle = name => () => effectiveToggles(getDb())[name];
+const websiteReviews = createWebsiteReviewRuntime({db:getDb(),store:operationsStore});
 const connectionBridge = configuredBrokerBridge();
 const brokerTaskWorker = await configuredBrokerWorker();
 const brokerTaskDispatch = createBrokerTaskDispatch({db:getDb(),store:operationsStore,runner:brokerTaskWorker,authoritySource:configuredAuthoritySource()});
@@ -644,6 +646,7 @@ app.use('/api/operational-projects', authenticateToken, blockPendingRole, create
   brokerTasks: brokerTaskDispatch, brokerTaskProposals,
   configurationConnections: configurationConnectionReader(connectionBridge),
   agentRuns,
+  websiteReviews,
   requireSudo,
   controlVerified: req => hasControlGrant(getDb(), { sessionId: req.user?.jti, userId: req.user?.id }),
   evidenceEnabled: evidenceConfig.enabled,

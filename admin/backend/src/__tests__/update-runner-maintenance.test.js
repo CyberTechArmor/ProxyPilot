@@ -23,12 +23,15 @@ const lift = (name) => {
 };
 const maintenance = SOURCE.slice(SOURCE.indexOf('        # Do not enter maintenance'), SOURCE.indexOf('        $DC_CMD up -d') + '        $DC_CMD up -d'.length);
 assert.ok(maintenance.includes('migrate_db_layout'));
+const dockerCompletionStart = SOURCE.indexOf('        pp_complete_update || exit 1', SOURCE.indexOf('        # Do not enter maintenance'));
+const dockerCompletion = SOURCE.slice(dockerCompletionStart, SOURCE.indexOf('        exit 0', dockerCompletionStart) + '        exit 0'.length);
+assert.ok(dockerCompletion.includes('trap - EXIT ERR INT TERM'), 'real Docker early-exit completion');
 const nativeStartup = SOURCE.slice(SOURCE.indexOf('    # Check if PM2 is available', SOURCE.indexOf('    # Non-Docker deployment:')), SOURCE.indexOf('    # Second gate:'));
 assert.ok(nativeStartup.includes('pm2 start src/index.js'));
 const traps = SOURCE.match(/^trap 'on_error' EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM/m)?.[0];
 assert.ok(traps, 'the production exit/signal handlers');
 
-function harness(t, { legacy = false, refuseStop = false, falseStop = false, queryFail = false, absent = false, failBuild = false, failDown = false, restartFail = false, staleSidecars = false, failEnvWrite = false, nativeStop = 'stopped', nativeMode = 'pm2' } = {}) {
+function harness(t, { runtime = false, runtimeFailure = '', legacy = false, refuseStop = false, falseStop = false, queryFail = false, absent = false, failBuild = false, failDown = false, restartFail = false, staleSidecars = false, failEnvWrite = false, nativeStop = 'stopped', nativeMode = 'pm2' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pp-maintenance-'));
   const install = join(root, 'opt/proxypilot');
   const bin = join(root, 'bin');
@@ -109,6 +112,25 @@ function harness(t, { legacy = false, refuseStop = false, falseStop = false, que
   }, 5);
   const bridge = `request() { rm -f "$FAKE_STATE/ack"; printf '%s' "$1" > "$FAKE_STATE/request"; for i in $(seq 1 500); do if [ -f "$FAKE_STATE/ack" ]; then return "$(cat "$FAKE_STATE/ack")"; fi; /bin/sleep 0.01; done; exit 98; }\n`;
   const writeExe = (name, body) => writeFileSync(join(bin, name), '#!/bin/bash\nset -e\n' + body, { mode: 0o755 });
+  if (runtime) {
+    mkdirSync(join(install, 'scripts'), { recursive: true });
+    writeFileSync(join(install, 'scripts/review-runtime-refresh.py'), '# simulated service adapter\n');
+    writeExe('python3', `
+test "$1" = ${quote(join(install, 'scripts/review-runtime-refresh.py'))}
+echo "runtime $2 $*" >> "$FAKE_STATE/calls"
+if [ "$2" = apply ] || [ "$2" = rollback ]; then
+ test ! -f "$FAKE_STATE/backend-active" || exit 94
+ test ! -f "$FAKE_STATE/active" || exit 95
+fi
+test "$2" != ${quote(runtimeFailure)} || exit 29
+case "$2" in
+ preflight) if [ -f "$FAKE_STATE/runtime-phase" ]; then test "$(cat "$FAKE_STATE/runtime-phase")" != applied || exit 28; fi ;;
+ apply) echo applied > "$FAKE_STATE/runtime-phase" ;;
+ commit) test "$(cat "$FAKE_STATE/runtime-phase")" = applied; echo committed > "$FAKE_STATE/runtime-phase" ;;
+ rollback) echo rolled_back > "$FAKE_STATE/runtime-phase" ;;
+esac
+`);
+  }
   writeExe('systemctl', bridge + `echo "systemctl $*" >> "$FAKE_STATE/calls"
 case "$1" in
  show)
@@ -174,7 +196,7 @@ exec /bin/${name} "$@"
 `);
   // Inject a failure after the DB moved but before its .env was rewritten.
   if (failEnvWrite) writeExe('awk', `if [[ "$*" == *DATABASE_PATH* ]]; then exit 27; fi\nexec /usr/bin/awk "$@"\n`);
-  const functions = ['log', 'log_verbose', 'backup_db', 'stop_setup_runner', 'stop_native_backend', 'stop_update_writers', 'migrate_db_layout', 'restore_db', 'on_error', 'install_setup_runner'].map(lift).join('\n')
+  const functions = ['log', 'log_verbose', 'backup_db', 'stop_setup_runner', 'stop_native_backend', 'stop_update_writers', 'migrate_db_layout', 'restore_db', 'on_error', 'review_runtime_refresh', 'install_setup_runner'].map(lift).join('\n')
     .replaceAll('/opt/proxypilot', install)
     .replaceAll('/etc/systemd/system', join(root, 'etc/systemd/system'))
     .replaceAll('/usr/local/bin/proxypilot', join(bin, 'proxypilot'))
@@ -191,6 +213,8 @@ RED='' GREEN='' YELLOW='' BLUE='' NC=''
 DB_BACKUP_FILE='' DB_BACKUP_SOURCE='' BACKUPS_TO_KEEP=5
 DB_MAINTENANCE_STARTED=false DB_LAYOUT_NEW_PATH='' DB_LAYOUT_ENV_BACKUP='' DB_LAYOUT_ENV_PATH=''
 NATIVE_BACKEND_MODE=''
+EXPECTED_UPDATE_SHA=${quote('a'.repeat(40))}
+REVIEW_RUNTIME_REFRESH_STARTED=false
 DC_CMD='docker compose'
 ${functions}
 `;
@@ -210,11 +234,69 @@ ${functions}
     closeRunner(); closeBackend(); rmSync(root, { recursive: true, force: true });
   });
   return { root, original, current, env, originalEnv, run, snapshot, trace, rows, openRunner,
+    runtimePhase: () => existsSync(join(state, 'runtime-phase')) ? readFileSync(join(state, 'runtime-phase'), 'utf8').trim() : null,
     mutate: () => runner.exec("INSERT INTO changes VALUES ('post-backup');"),
     runnerOpen: () => runner !== null,
     calls: () => existsSync(join(state, 'calls')) ? readFileSync(join(state, 'calls'), 'utf8') : '',
   };
 }
+
+test('Update refresh runs only after writers stop and paired rollback precedes recovery startup', { skip }, async (t) => {
+  const h = harness(t, { runtime: true, failBuild: true }); h.openRunner();
+  const result = await h.run(h.snapshot + traps + '\n' + maintenance);
+  assert.equal(result.status, 23, result.stdout + result.stderr);
+  const calls = h.calls();
+  assert.ok(calls.indexOf('docker compose down') < calls.indexOf('runtime apply'));
+  assert.ok(calls.indexOf('runtime apply') < calls.indexOf('docker compose build'));
+  assert.ok(calls.indexOf('runtime rollback') < calls.indexOf(`systemctl restart ${UNIT}`));
+  assert.ok(calls.indexOf('runtime rollback') < calls.indexOf('docker compose up'));
+  assert.match(calls, /--source-sha a{40} --database /);
+  assert.doesNotMatch(calls, /runtime commit/);
+  assert.deepEqual(h.rows(), ['backup-state']);
+});
+
+test('Docker success commits its refresh before the early exit and permits the next preflight', { skip }, async (t) => {
+  for (const legacy of [false, true]) {
+    const h = harness(t, { runtime: true, legacy }); h.openRunner();
+    const completion = `pp_complete_update() { echo complete >> "$FAKE_STATE/calls"; }\npp_report_update_completion() { echo report >> "$FAKE_STATE/calls"; }\n`;
+    const result = await h.run(completion + h.snapshot + traps + '\n' + maintenance + '\n' + dockerCompletion);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(h.runtimePhase(), 'committed');
+    assert.ok(h.calls().indexOf('runtime commit') < h.calls().indexOf('report'));
+    assert.doesNotMatch(h.calls(), /runtime rollback/);
+    const next = await h.run('review_runtime_refresh preflight');
+    assert.equal(next.status, 0, next.stdout + next.stderr);
+  }
+});
+
+test('Docker completion retains paired recovery when refresh commit fails', { skip }, async (t) => {
+  const h = harness(t, { runtime: true, runtimeFailure: 'commit' }); h.openRunner();
+  const completion = `pp_complete_update() { echo complete >> "$FAKE_STATE/calls"; }\npp_report_update_completion() { echo report >> "$FAKE_STATE/calls"; }\n`;
+  const result = await h.run(completion + h.snapshot + traps + '\n' + maintenance + '\n' + dockerCompletion);
+  assert.equal(result.status, 29, result.stdout + result.stderr);
+  assert.equal(h.runtimePhase(), 'rolled_back');
+  assert.match(h.calls(), /runtime rollback/);
+  assert.doesNotMatch(h.calls(), /^report$/m);
+  assert.ok(h.calls().lastIndexOf('runtime rollback') < h.calls().lastIndexOf('docker compose up'));
+});
+
+test('An unverifiable runtime rollback leaves the dashboard stopped and does not report success', { skip }, async (t) => {
+  const h = harness(t, { runtime: true, runtimeFailure: 'rollback', failBuild: true }); h.openRunner();
+  const result = await h.run(h.snapshot + traps + '\n' + maintenance);
+  assert.equal(result.status, 23);
+  assert.match(result.stdout, /Paired runtime recovery refused/);
+  assert.doesNotMatch(h.calls(), /docker compose up|systemctl restart|runtime commit/);
+});
+
+test('A refresh apply failure enters paired recovery and completion cannot precede refresh commit', { skip }, async (t) => {
+  const h = harness(t, { runtime: true, runtimeFailure: 'apply' }); h.openRunner();
+  const result = await h.run(h.snapshot + traps + '\n' + maintenance);
+  assert.equal(result.status, 29);
+  assert.match(h.calls(), /runtime rollback/);
+  assert.doesNotMatch(h.calls(), /docker compose build|runtime commit/);
+  const final = SOURCE.slice(SOURCE.lastIndexOf('pp_complete_update || exit 1'));
+  assert.ok(final.indexOf('review_runtime_refresh commit') < final.indexOf('pp_report_update_completion'));
+});
 
 test('U1: failed PM2/native startup restores the backup only after its database writer stops', { skip }, async (t) => {
   for (const [nativeMode, nativeStop] of [['pm2', 'stopped'], ['pm2', 'refused'], ['pm2', 'still-running'], ['nohup', 'stopped']]) {

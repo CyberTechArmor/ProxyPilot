@@ -69,10 +69,14 @@ external browser session or controller-only credential privacy.
 
 ## Release and activation boundaries
 
-PR725 is the independent browser-view presentation slice. Its exact-head CI and
-independent review must pass before merge. After merge, Thomas can use the
-existing Settings → Update now flow and reload the Operations page. That update
-changes viewport/fullscreen behavior; it does not activate selected websites.
+PR725 merged after independent review and both exact-head workflows passed.
+Remote main is `863ed48caa2ec9fff212b9e9a76ea0fc8e04d7c7`. Thomas can use
+the existing Settings → Update now flow and reload Operations. That update changes
+viewport/fullscreen behavior; it does not activate selected websites. The broader
+implementation is draft PR726, based on that main commit. Its first CI pass
+exposed test portability assumptions: a hardcoded checkout path and undeclared
+PDF fixture utilities. The follow-up derives the path and installs/verifies the
+real bounded extraction tools on disposable CI; production source is unchanged.
 
 The broader selected-browser implementation must not be merged as an ordinary
 installed-host refresh without resolving its packaging contract. The current

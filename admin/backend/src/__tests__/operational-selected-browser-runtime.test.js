@@ -4,6 +4,7 @@ import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setImmediate as immediate } from 'node:timers/promises';
 import { operationsFixture } from './helpers/operations-fixture.js';
 import { operationalSelectedBrowserMigration1118 } from '../lib/operational-selected-browser-schema.js';
@@ -474,7 +475,10 @@ test('artifact configuration needs dedicated path, finite quota and independent 
   assert.deepEqual(browserArtifactsConfiguration({}), { available: false });
   const env = { OPERATIONS_BROWSER_ARTIFACT_BOUNDARY_REVIEWED: 'true', OPERATIONS_BROWSER_ARTIFACT_DIR: '/var/lib/proxypilot/browser-private', OPERATIONS_BROWSER_ARTIFACT_QUOTA_BYTES: '268435456' };
   const c = browserArtifactsConfiguration(env); assert.equal(c.available, true); assert.equal(c.pdfRunner, null); assert.equal(c.imageRunner, null);
-  assert.equal(browserArtifactsConfiguration({ ...env, OPERATIONS_BROWSER_ARTIFACT_DIR: '/workspace/ProxyPilot/admin/private' }).available, false);
+  const checkout = path.resolve(fileURLToPath(new URL('../../../../', import.meta.url)));
+  for (const root of [checkout, path.join(checkout, 'admin/private'), path.dirname(checkout)]) {
+    assert.equal(browserArtifactsConfiguration({ ...env, OPERATIONS_BROWSER_ARTIFACT_DIR: root }).available, false);
+  }
   assert.equal(browserArtifactsConfiguration({ ...env, OPERATIONS_BROWSER_ARTIFACT_QUOTA_BYTES: 'Infinity' }).available, false);
 });
 

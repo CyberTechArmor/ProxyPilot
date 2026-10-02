@@ -7,6 +7,10 @@
     "sha256": "5f1fff2b6b852e302fae24e45ffdee7884d38007af4b75fbd2b4288602a33502",
     "bytes": 839
   },
+  "ci-portability.json": {
+    "sha256": "e3b835a87cb77d2a9845daaad09d43671c811ca424fa5432faed8f7942b88409",
+    "bytes": 885
+  },
   "integrated-viewport.json": {
     "sha256": "6ca10ff38f79dd8433e50ffb8026c9f7ef93a710d72fdbad371e70bd8820388e",
     "bytes": 6057

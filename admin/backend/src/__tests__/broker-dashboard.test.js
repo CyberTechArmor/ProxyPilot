@@ -53,9 +53,7 @@ test('configuration routes use existing access and expose ETag',async()=>{
 });
 test('existing approved guide reused and withdrawal immediately invalidates readiness',()=>{
  const f=operationsFixture();try{const a=f.addUser(),reviewer=f.addUser();const p=f.store.create(a,{name:'Project',members:[{user_id:reviewer.id,role:'reviewer'}]});
- f.store.saveDraft(a,p.id,1,{title:'Guide',instructions:'Use only approved API resources'});
- const submission=f.store.submit(a,p.id,2,{}).submission;
- const version=f.store.review(reviewer,p.id,submission.id,1,{decision:'approve'}).version;
+ const version=f.store.saveDraft(a,p.id,1,{title:'Guide',instructions:'Use only approved API resources'}).version;
  const {agent,readiness}=f.store.createConfiguration(a,p.id,{workflow_type:'typed_api_v1',work:{name:'Reusable',guide_ref:{id:version.id,hash:version.content_hash}}});
  assert.equal(readiness.checks.find(c=>c.kind==='guide').state,'ready');
  f.store.withdraw(reviewer,p.id,version.id,f.store.get(a,p.id).revision,{reason:'Changed'});

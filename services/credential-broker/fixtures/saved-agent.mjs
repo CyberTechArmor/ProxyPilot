@@ -35,8 +35,7 @@ export async function withSavedAgentFixture(t,onReady=null){
   const proxyPath=join(dir,'proxy.db');ops=operationsFixture({path:proxyPath});brokerTaskMigration1114(ops.adapter);brokerTaskProposalsMigration1115(ops.adapter);
   const owner={id:f.owner,role:'user'};ops.db.prepare('INSERT INTO users(id,username,role) VALUES(?,?,?)').run(owner.id,'owner','user');const reviewer=ops.addUser();
   const project=ops.store.create(owner,{name:'Disposable saved-agent project'});f.project=project.id;ops.store.grant(owner,project.id,reviewer.id,project.revision,{role:'reviewer'});
-  ops.store.saveDraft(owner,project.id,1,{title:'Bounded ledger',instructions:'Read or set only the assigned synthetic ledger item.'});const submission=ops.store.submit(owner,project.id,ops.store.draft(owner,project.id).revision,{}).submission;
-  const guide=ops.store.review(reviewer,project.id,submission.id,submission.revision,{decision:'approve'}).version,environment=randomUUID(),output=randomUUID();
+  const guide=ops.store.saveDraft(owner,project.id,1,{title:'Bounded ledger',instructions:'Read or set only the assigned synthetic ledger item.'}).version,environment=randomUUID(),output=randomUUID();
   const {agent:saved}=ops.store.createConfiguration(owner,project.id,{workflow_type:'typed_api_v1',work:{name:'Saved API agent',guide_ref:{id:guide.id,hash:guide.content_hash},environment_ref:environment},controls:{operations:['item.read','item.set_state'],resources:[f.resource],max_seconds:60,max_actions:2,output_ref:output}});f.agent=saved.id;assert.equal(saved.execution_enabled,false);assert.equal(f.effects,0);
 
   const keys=generateKeyPairSync('ed25519'),privateKey=keys.privateKey.export({type:'pkcs8',format:'pem'}),clients={},pins=[],workload=randomUUID();

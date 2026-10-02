@@ -6,7 +6,7 @@ import { pilotSelfReviewAuthorization, PILOT_REVIEW_USED } from './operational-p
 export const guideHash = (title, instructions) => createHash('sha256').update(JSON.stringify({format:1,title,instructions}), 'utf8').digest('hex');
 
 // Receives the same locked authorization/audit primitives as the foundation store.
-export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,uuid,evidence}) {
+export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,uuid,user,evidence}) {
   const guideEvidence=createGuideEvidence({one,all,run,evidence});
   const state = id => one('SELECT * FROM ops_guide_state WHERE project_id=?',id);
   const pending = id => one("SELECT * FROM ops_guide_submissions WHERE project_id=? AND state='pending'",id);
@@ -22,7 +22,9 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
   function submission(id,sid) {
     const s=validId(sid) && one('SELECT * FROM ops_guide_submissions WHERE project_id=? AND id=?',id,sid);
     if(!s) fail(404,'Submission not found');
-    return {...s,contributors:JSON.parse(s.contributors_json),evidence:guideEvidence.submission(id,s.id),
+    const contributors=JSON.parse(s.contributors_json);
+    return {...s,contributors,contributor_names:contributors.map(name),submitted_by_name:name(s.submitted_by),
+      decided_by_name:s.decided_by?name(s.decided_by):null,evidence:guideEvidence.submission(id,s.id),
       pilot_self_review:pilotSelfReviewAuthorization({one,all,now},s)};
   }
   function version(id,vid) {
@@ -31,8 +33,11 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
       FROM ops_guide_versions v JOIN ops_guide_submissions s ON s.id=v.submission_id AND s.project_id=v.project_id
       LEFT JOIN ops_version_withdrawals w ON w.version_id=v.id WHERE v.project_id=? AND v.id=?`,id,vid);
     if(!v) fail(404,'Version not found');
-    return {...v,contributors:JSON.parse(v.contributors_json),evidence:guideEvidence.submission(id,v.submission_id)};
+    const contributors=JSON.parse(v.contributors_json);
+    return {...v,contributors,contributor_names:contributors.map(name),submitted_by_name:name(v.submitted_by),
+      approved_by_name:name(v.approved_by),evidence:guideEvidence.submission(id,v.submission_id)};
   }
+  const name = id => user(id)?.username ?? 'Deleted account';
   const latest = id => one('SELECT id FROM ops_guide_versions WHERE project_id=? ORDER BY version_number DESC LIMIT 1',id)?.id;
   function current(id) { const vid=latest(id); const v=vid?version(id,vid):null; return v?.withdrawn_at?null:v; }
   function transition(actor,s,next,reason) {
@@ -42,6 +47,24 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
     const s=submission(id,sid); assertRevision(expected,s.revision);
     if(s.state!=='pending') fail(409,'Submission is no longer pending');
     return s;
+  }
+  function freezeDraft(actor,id,d) {
+    if(!d.title.trim() || !d.instructions.trim()) fail(400,'A title and instructions are required to approve a guide');
+    const sid=uuid(), contributors=all('SELECT user_id FROM ops_draft_contributors WHERE project_id=? ORDER BY user_id',id).map(r=>r.user_id);
+    guideEvidence.freeze(id,sid);
+    run(`INSERT INTO ops_guide_submissions(id,project_id,draft_revision,base_version_id,title,instructions,content_hash,contributors_json,submitted_by,submitted_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`,sid,id,d.revision,state(id).base_version_id,d.title,d.instructions,guideHash(d.title,d.instructions),JSON.stringify(contributors),actor.id,now());
+    event(actor,id,'guide_submitted',sid);
+    return submission(id,sid);
+  }
+  function publish(actor,id,s,{independentReview=false}={}) {
+    if(!s.title.trim() || !s.instructions.trim()) fail(400,'A title and instructions are required to approve a guide');
+    if(s.content_hash!==guideHash(s.title,s.instructions)) fail(409,'Submitted content failed integrity validation');
+    guideEvidence.approve(id,s,actor,{independentReview});
+    const vid=uuid(), number=one('SELECT COALESCE(MAX(version_number),0)+1 AS n FROM ops_guide_versions WHERE project_id=?',id).n;
+    run('INSERT INTO ops_guide_versions VALUES(?,?,?,?,?,?,?,?)',vid,id,number,s.id,actor.id,now(),s.content_hash,latest(id)||null);
+    run("UPDATE ops_guide_state SET phase='published' WHERE project_id=?",id);
+    return version(id,vid);
   }
   function getRun(id,rid) {
     const r=validId(rid) && one('SELECT * FROM ops_manual_runs WHERE project_id=? AND id=?',id,rid);
@@ -72,6 +95,37 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
   return {
     draftState, editable, current,
     methods: {
+      // Explicit save is also the approval. All bytes, provenance, permission
+      // checks and audit records commit under the same immediate transaction.
+      saveDraft(actor,id,expected,input) {
+        const v=parse(schemas.draft,input);
+        return tx(()=>{
+          access(actor,id,'edit');
+          const d=one('SELECT * FROM ops_guide_drafts WHERE project_id=?',id);assertRevision(expected,d.revision);
+          editable(id);
+          const saved={...d,title:v.title ?? d.title,instructions:v.instructions ?? d.instructions,revision:d.revision+1};
+          if(!saved.title.trim() || !saved.instructions.trim()) fail(400,'A title and instructions are required to approve a guide');
+          run('UPDATE ops_guide_drafts SET title=?,instructions=?,revision=revision+1,updated_by=?,updated_at=? WHERE project_id=?',saved.title,saved.instructions,actor.id,now(),id);
+          run('INSERT OR IGNORE INTO ops_draft_contributors(project_id,user_id) VALUES (?,?)',id,actor.id);
+          event(actor,id,'draft_saved',null,{draft_revision:saved.revision,fields:Object.keys(v)});
+          const s=freezeDraft(actor,id,saved),published=publish(actor,id,s);
+          transition(actor,s,'approved','');
+          event(actor,id,'guide_approved',s.id,{version_id:published.id,approval_method:'save'});bump(id);
+          return {revision:saved.revision,status:'published',submission:submission(id,s.id),version:published};
+        });
+      },
+      // A legacy pending snapshot needs a deliberate action, never migration
+      // approval or recreation from the mutable draft.
+      approveSubmission(actor,id,sid,expected,input) {
+        parse(schemas.empty,input);
+        return tx(()=>{
+          access(actor,id,'edit');const s=pendingChecked(id,sid,expected);
+          const published=publish(actor,id,s);
+          transition(actor,s,'approved','');
+          event(actor,id,'guide_approved',s.id,{version_id:published.id,approval_method:'pending_save'});bump(id);
+          return {revision:s.revision+1,status:'published',submission:submission(id,s.id),version:published};
+        });
+      },
       replaceDraftEvidence(actor,id,expected,input) {
         return tx(()=>{
           access(actor,id,'edit');editable(id);
@@ -87,13 +141,8 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
         return tx(()=>{
           access(actor,id,'edit'); editable(id);
           const d=one('SELECT * FROM ops_guide_drafts WHERE project_id=?',id); assertRevision(expected,d.revision);
-          if(!d.title.trim() || !d.instructions.trim()) fail(400,'A title and instructions are required for review');
-          const sid=uuid(), contributors=all('SELECT user_id FROM ops_draft_contributors WHERE project_id=? ORDER BY user_id',id).map(r=>r.user_id);
-          guideEvidence.freeze(id,sid);
-          run(`INSERT INTO ops_guide_submissions(id,project_id,draft_revision,base_version_id,title,instructions,content_hash,contributors_json,submitted_by,submitted_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)`,sid,id,d.revision,state(id).base_version_id,d.title,d.instructions,guideHash(d.title,d.instructions),JSON.stringify(contributors),actor.id,now());
-          event(actor,id,'guide_submitted',sid); bump(id);
-          return {submission:submission(id,sid),revision:1};
+          const s=freezeDraft(actor,id,d);bump(id);
+          return {submission:s,revision:1};
         });
       },
       submission(actor,id,sid) {access(actor,id); return {submission:submission(id,sid)};},
@@ -107,11 +156,7 @@ export function createOperationsWorkflow({one,all,run,tx,access,event,bump,now,u
           let published=null;
           if(v.decision==='approve') {
             if(selfReview) event(actor,id,PILOT_REVIEW_USED,sid,{authorization_event_id:s.pilot_self_review.authorization_event_id,content_hash:s.content_hash});
-            guideEvidence.approve(id,s,actor);
-            const vid=uuid(), number=one('SELECT COALESCE(MAX(version_number),0)+1 AS n FROM ops_guide_versions WHERE project_id=?',id).n;
-            run('INSERT INTO ops_guide_versions VALUES(?,?,?,?,?,?,?,?)',vid,id,number,s.id,actor.id,now(),s.content_hash,latest(id)||null);
-            run("UPDATE ops_guide_state SET phase='published' WHERE project_id=?",id);
-            published=version(id,vid);
+            published=publish(actor,id,s,{independentReview:true});
           }
           transition(actor,s,v.decision==='approve'?'approved':'changes_requested',v.reason);
           event(actor,id,v.decision==='approve'?'guide_approved':'guide_changes_requested',sid,{version_id:published?.id || null}); bump(id);

@@ -23,9 +23,7 @@ function setup(actions = ['navigate','click','type','read','logout']) {
   const created = f.store.createProfile(owner, p.id, f.store.get(owner, p.id).revision,
     { display_name: 'Synthetic', workflow_type: 'synthetic_sign_in', proposed_actions: actions,
       proposed_origins: [origin] }).profile;
-  f.store.saveDraft(owner, p.id, 1, { title: 'Guide', instructions: 'Synthetic only' });
-  const submitted = f.store.submit(owner, p.id, 2, {}).submission;
-  const version = f.store.review(reviewer, p.id, submitted.id, 1, { decision: 'approve' }).version;
+  const version = f.store.saveDraft(owner, p.id, 1, { title: 'Guide', instructions: 'Synthetic only' }).version;
   const profile = f.store.assignProfile(owner, p.id, created.id, created.revision, { guide_version_id: version.id }).profile;
   const project = f.store.get(owner, p.id);
   const config = { project_id: p.id, profile_id: profile.id, profile_revision: profile.revision, site_origin: origin,

@@ -13,13 +13,13 @@ function setup(f) {
   f.store.grant(owner,p.id,operator.id,pr(),{role:'operator'});
   const draft=()=>f.store.draft(owner,p.id);
   const submit=()=>f.store.submit(owner,p.id,draft().revision,{}).submission;
-  const publish=()=>{const s=submit();return f.store.review(reviewer,p.id,s.id,s.revision,{decision:'approve'}).version;};
-  f.store.saveDraft(owner,p.id,1,{title:'Guide',instructions:'Exact bytes\nα <script>inert</script>\n'});
+  const publish=()=>f.store.saveDraft(owner,p.id,draft().revision,{title:draft().title,instructions:draft().instructions}).version;
+  f.seedLegacyDraft(owner,p.id,{title:'Guide',instructions:'Exact bytes\nα <script>inert</script>\n'});
   return {owner,reviewer,operator,p,pr,draft,submit,publish};
 }
 const runInput=version=>({version_id:version.id,idempotency_key:randomUUID(),started_at:'2026-01-01T00:00:00.000Z',ended_at:'2026-01-01T01:00:00.000Z',outcome:'completed',notes:'Human report'});
 
-test('independent review, exact snapshot, publication locking and new iteration provenance',fixture(f=>{
+test('legacy independent review retains exact snapshot, locking and iteration provenance',fixture(f=>{
   const {owner,reviewer,p,pr,draft,submit}=setup(f),s=submit();
   refused(409,()=>f.store.saveDraft(owner,p.id,draft().revision,{title:'Mutate pending'}));
   refused(403,()=>f.store.review(owner,p.id,s.id,1,{decision:'approve'}));
@@ -31,7 +31,7 @@ test('independent review, exact snapshot, publication locking and new iteration 
   refused(409,()=>f.store.saveDraft(owner,p.id,draft().revision,{title:'No implicit revision'}));
   f.store.startRevision(owner,p.id,draft().revision,{version_id:v.id,discard_draft:true});
   assert.deepEqual(draft().contributors,[]);assert.equal(draft().base_version_id,v.id);
-  f.store.saveDraft(owner,p.id,draft().revision,{instructions:'Version two'});
+  f.seedLegacyDraft(owner,p.id,{instructions:'Version two'});
   const s2=submit(),v2=f.store.review(reviewer,p.id,s2.id,1,{decision:'approve'}).version;
   assert.equal(v2.version_number,2);assert.equal(v2.predecessor_id,v.id);
   assert.equal(v2.base_version_id,v.id);
@@ -42,7 +42,7 @@ test('independent review, exact snapshot, publication locking and new iteration 
 test('contributors cannot approve after transfer/removal; pending or revoked reviewer loses authority',fixture(f=>{
   const {owner,reviewer,p,pr,submit}=setup(f);
   f.store.grant(owner,p.id,reviewer.id,pr(),{role:'editor'});
-  f.store.saveDraft(reviewer,p.id,2,{title:'Contributed'});
+  f.seedLegacyDraft(reviewer,p.id,{title:'Contributed'});
   f.store.grant(owner,p.id,reviewer.id,pr(),{role:'reviewer'});
   const s=submit();refused(403,()=>f.store.review(reviewer,p.id,s.id,1,{decision:'approve'}));
   const independent=f.addUser();f.store.grant(owner,p.id,independent.id,pr(),{role:'reviewer'});
@@ -57,7 +57,7 @@ test('changes requested/cancel resume editing; archive blocks decisions and stal
   const {owner,reviewer,p,pr,draft,submit}=setup(f);let s=submit();
   refused(400,()=>f.store.review(reviewer,p.id,s.id,1,{decision:'changes_requested'}));
   f.store.review(reviewer,p.id,s.id,1,{decision:'changes_requested',reason:'Clarify step two'});
-  f.store.saveDraft(owner,p.id,draft().revision,{instructions:'Clearer'});s=submit();
+  f.seedLegacyDraft(owner,p.id,{instructions:'Clearer'});s=submit();
   f.store.archive(owner,p.id,pr(),{reason:'Pause'});
   refused(409,()=>f.store.review(reviewer,p.id,s.id,1,{decision:'approve'}));
   f.store.restore(owner,p.id,pr());

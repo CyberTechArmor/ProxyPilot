@@ -1,6 +1,6 @@
 # Operations
 
-Operations stores private instructions, independent guide approvals and records of
+Operations stores private instructions, approved guide versions and records of
 work performed by people. The interface is at `/operational-projects`; Dev Studio
 retains `/projects`. No operation provisions a container, repository, worker,
 agent or credential. Recording a run is a human report, not a task launcher.
@@ -51,7 +51,7 @@ pending requests. Account and membership state is rechecked on each read or
 write.
 
 Profiles use opaque UUIDs and a project foreign key. Owners and editors can
-create, update, soft-delete and assign the current independently approved guide
+create, update, soft-delete and assign the current approved guide
 by exact version ID and SHA-256 hash. Profile and project writes use quoted
 numeric `If-Match` revisions and transactional project audit. A guide that is
 withdrawn or superseded makes its assignment stale. Profiles stay disabled for
@@ -63,13 +63,17 @@ change. Run authority and effective policy enforcement belong to later sections.
 
 Existing active `user` and `admin` accounts may create an operation and become
 its owner. There is no platform-admin bypass. All members can read its full
-history and drafts. Editors and owners can edit and submit instructions;
-reviewers and owners can review and withdraw versions. Operators, editors,
+history and drafts. Editors and owners can save and approve instructions;
+reviewers and owners can use the legacy review endpoint and withdraw versions. Operators, editors,
 reviewers and owners can record their own work. Viewers can only read.
 
-Approval requires a different person from the submitter and every contributor
-to that iteration. Owner/admin status never waives this rule. A sole owner
-needs an independent reviewer to publish.
+An explicit guide save is approval (Thomas's decision, 2026-10-02). Editors and
+owners can publish their own contributions without a separate submission,
+second person or pilot exception. Reviewer-only access does not grant editing
+or publication through Save and approve. Existing project, account and archive
+checks still apply. The historical explicit submit/decision endpoints retain
+their independent-review contract for compatibility; the interface uses the
+direct save contract.
 
 Only the owner sees and manages the roster. Grants use existing eligible
 accounts, found by exact username or UUID. Lookup is limited to 30 requests per
@@ -87,11 +91,21 @@ surviving grants. No hard-delete or purge endpoint is provided.
 
 ## Guide and work lifecycle
 
-Save a plain-text draft, then submit it. Submission freezes exact title/body,
-hash, submitter and contributor IDs; editing is locked while pending. The
-reviewer approves those exact bytes or requests changes with a reason. An
-editor/owner can cancel with a reason. Approval creates one immutable numbered
-version. Duplicate/stale approval cannot publish another version.
+Select **Save and approve** to validate a nonempty plain-text title and
+instructions and atomically save and publish one immutable numbered version.
+The same immediate transaction retains exact title/body bytes, SHA-256,
+author, approval actor/time, contributors, evidence and base/predecessor chain,
+along with the save and publication audit. Invalid input, stale revision,
+unavailable evidence or audit failure rolls back the whole save.
+
+An existing **Awaiting review** snapshot is published only when an editor or
+owner explicitly selects **Save and approve**. This uses the immutable pending
+snapshot's actual bytes and revision, preserving its author/time and evidence;
+it never recreates content from the draft or autoapproves during a migration.
+An editor/owner can still cancel with a reason. Duplicate or stale approval
+cannot publish another version. Saving a guide starts no run, enrolls no
+connection and supplies no credential-write approval. Run start, connection
+rights, site allowlists and run-action approvals retain their own checks.
 
 After publication, explicitly start a revision from an approved same-operation
 version. The interface requires confirmation that this replaces the draft.
@@ -120,10 +134,11 @@ unknown fields. All writes and domain events share an immediate transaction.
 |---|---|
 | GET / POST `/` | Paginated accessible list / create private operation |
 | GET / PATCH `/:id` | Summary / rename and description; project revision |
-| GET / PATCH `/:id/draft` | Read / explicit save; draft revision |
-| POST `/:id/submissions` | Submit saved draft; draft revision, empty body |
+| GET / PATCH `/:id/draft` | Read / atomically save and approve `{title,instructions}`; draft revision, editor/owner |
+| POST `/:id/submissions/:s/approve` | Explicitly approve the existing pending snapshot; submission revision, empty body, editor/owner |
+| POST `/:id/submissions` | Legacy explicit submit of an unpublished draft; draft revision, empty body |
 | GET `/:id/submissions/:s` | Exact snapshot and terminal decision |
-| POST `/:id/submissions/:s/decision` | `decision: approve\|changes_requested`, `reason`; submission revision |
+| POST `/:id/submissions/:s/decision` | Legacy independent review: `decision: approve\|changes_requested`, `reason`; submission revision |
 | POST `/:id/submissions/:s/cancel` | Required `reason`; submission revision |
 | POST `/:id/draft/start-revision` | `version_id`, `discard_draft: true`; draft revision |
 | GET `/:id/versions`, `/:id/versions/:v` | Immutable version/provenance and withdrawal details |
@@ -141,10 +156,18 @@ unknown fields. All writes and domain events share an immediate transaction.
 
 Revision-controlled writes use quoted numeric `If-Match: "N"`. Missing is 428;
 stale is 412. Incompatible workflow state is 409. Draft saves increment both
-draft and project revisions but return the new draft revision. Submission
-decisions return the submission revision. Refresh the appropriate resource
+draft and project revisions but return the new draft revision, `status: published`,
+the approved `submission` and its immutable `version`. Pending approvals return
+the new submission revision, the same published status and snapshot/version.
+Submission decisions return the submission revision. Refresh the appropriate resource
 before a different kind of write. The interface preserves unsaved input on
 conflict and supports explicit refresh, comparison and discard/reload.
+
+Draft/snapshot/version projections retain the immutable account IDs and add
+readable `updated_by_name`, `submitted_by_name`, `decided_by_name`,
+`approved_by_name` where applicable, and `contributor_names` in contributor ID
+order. Names reflect current account metadata; deleted accounts display
+`Deleted account` while the original provenance IDs remain intact.
 
 Manual writes instead use a UUID idempotency key scoped to operation/recorder.
 Identical retries return the existing record; different content with that key
@@ -321,7 +344,9 @@ Files are checked only after scoped authorization and metadata validation.
 The iteration contributor union includes guide editors, every selector, and the
 selected publication's authors, uploaders, annotation actors and publishers.
 Detaching evidence, removing a grant or deleting an account does not remove this
-history. These people cannot approve that iteration. Starting a revision is an
+history. Editors and owners may approve their own contributions using Save and
+approve; contributor exclusion remains part of the legacy independent-review
+endpoint only. Starting a revision is an
 explicit reset: it clears both contributors and draft references; it never copies
 evidence from the base version. Explicit reattachment adds provenance again.
 
@@ -329,10 +354,10 @@ Submission freezes exact reference identities, derivative checksums, annotation
 hashes, publication hashes, selector and provenance IDs in the existing immediate
 transaction. The separate manifest hash covers canonical UTF-8 JSON
 `{format:1,references}` in selection order. Annotation/summary text is not copied
-into the immutable manifest or audit. Approval checks the seal, independence and
+into the immutable manifest or audit. Save and approve checks the seal and
 current availability again under the same immediate transaction as publication
 and audit. Restriction or missing/corrupt media blocks approval with 409; request
-changes or cancel, fix the draft selection, and resubmit. A newer demonstration
+changes or cancel, fix the draft selection, and save again. A newer demonstration
 revision or derivative never replaces the submitted reference automatically.
 
 Draft, submission and version reads include `evidence` with `manifest_hash` and
@@ -351,7 +376,7 @@ evidence disabled, the selection route returns 404. Existing identities and seal
 remain readable with `capability_disabled` tombstones and no media filesystem
 access. Evidence-bearing drafts cannot be submitted and evidence-bearing pending
 submissions cannot be approved (409). Cancel/request-changes remain available.
-Draft text can still be saved, but disabling evidence cannot silently drop its
+Evidence-bearing text cannot be saved and approved while disabled; disabling evidence cannot silently drop its
 references. Re-enable the reviewed capability to change the selection or publish.
 Evidence-free guides continue to work while evidence is disabled. An explicit
 start-revision action still resets the iteration and its references as described
@@ -399,11 +424,15 @@ chunk resume. An expired or cancelled lease cannot revive. Cancellation is expli
 interruption only stops the client request, so check the server receipt. Original
 filenames, operation content and images are not persisted by this workflow.
 
-Draft text and evidence share the existing draft If-Match revision. Save or
-discard guide edits before saving a selection; unsaved selections also block
-submission. A 412 preserves local guide/annotation/selection input in memory and
+Draft text and evidence share the existing draft If-Match revision. Choose and
+save evidence while the draft is editable, before Save and approve publishes it.
+Saving a selection retains entered guide text in memory and adopts only the
+successful conditional selection response's exact new draft revision. The
+selection endpoint leaves stored title/instructions untouched and publishes no
+guide. Unsaved selections block approval. A 412 preserves local
+guide/annotation/selection input in memory and
 offers explicit comparison and revision adoption/reload. Detachment never removes
-contributor exclusion. An explicit start-revision clears evidence references.
+contributor history. An explicit start-revision clears evidence references.
 
 Pending snapshots, approved versions and manual records' pinned versions display
 only exact retained references and the matching publication item/annotation.

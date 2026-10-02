@@ -14,6 +14,8 @@ The UI/UX task owns shared frontend components and navigation.
   `feat/public-website-review-integrated-20261002`, created from verified main
   `56c881be051e2699abac1977bfa0162cd8536183` after guide-only PR #720.
   Its preserved local checkpoint is `8fbcf2204235b7622fb4ea4cbec5087c1fac0e34`.
+  The verified runtime implementation commit is
+  `9e02012fee0feb56ce40e66663c601228e093a8e`.
 - Runtime task owns HTTP extraction, review service/routes/migration,
   A3/A4 model bridge, safety/regression tests and these documents.
 - UI task owns `WebsiteReviews.jsx`, browser journeys and project navigation in
@@ -37,7 +39,7 @@ or supplying demo hard-rules would not implement this capability.
 | Signed model provenance and settlement binding | Implemented | real OpenSSL Python receipt verified by Node |
 | Owner/role/config/guide/account checks | Implemented | stale, revocation, wrong-owner and unrelated-admin tests |
 | Durable immutable output, cancellation, restart no replay | Implemented | SQLite triggers and service/bridge tests |
-| Minimal discoverable frontend review journey | UI owner in progress | Separate component/navigation/browser worktree |
+| Minimal frontend review component | UI owner committed | `f81857fb`, `902581ff`, `e355f5c0`; navigation remains UI-owned |
 | Installed A3/A4 activation and A8 refreshed key | Not performed; separate operator gate | `update.sh` does not reinstall these components |
 | Live external provider/website review | Not performed | No production pilot or secret access authorized |
 
@@ -52,7 +54,8 @@ installing or mutating the UI owner's packages. Logs are retained locally in
 | --- | --- |
 | Operations + Agent runs + toggles aggregate | 197 passed, 0 failed (15.155 seconds), including bounded model wait/socket cancellation |
 | Public-review A3/A4 Python suite | 9 passed, 0 failed (2.945 seconds) |
-| Full backend aggregate | 3,590 tests: 3,536 passed, 10 failed, 4 cancelled, 40 skipped (279.496 seconds); unaffected baseline/environment cases under verification |
+| Full backend aggregate | 3,590 tests: 3,536 passed, 10 failed, 4 cancelled, 40 skipped (279.496 seconds); baseline/environment cases below |
+| Verified-main reproduction of failing files | 26 tests: 15 passed, same 10 failed, 1 cancelled (49.608 seconds) on detached main `56c881be` |
 | Full script Python aggregate | 293 tests ran, 33 skipped, 0 failures (96.254 seconds); initial CRLF-only checkout failures resolved by local LF normalization |
 | UI build/browser journey | Owned by UI task; integrated evidence pending |
 
@@ -81,6 +84,17 @@ do not claim a live model quality evaluation or a successful production review.
 Actual completed results are accepted only from the configured provider's signed
 response. No production request, host mutation, credential enrollment, push,
 merge, un-draft or history rewrite was performed for website review.
+
+The full backend failures are outside changed code. Four browser probes cannot
+find Playwright's default `chromium_headless_shell-1228` (the explicitly configured
+Chromium used for review journeys is available); five bootstrap cases require a
+canonical root-owned credential directory; the containment acceptance case needs
+a writable cgroup tree. All ten reproduce on verified current main with the same
+dependencies/environment. Four runner-startup cases timed out under the full
+aggregate load; one also reproduces on main's isolated failing-file run, while the
+other three pass there. No containment, ownership, credential or test assertion
+was weakened to make the aggregate green. Logs: `backend-aggregate.log` and
+`backend-main-baseline.log` in the local verification directory.
 
 ## Deferred backlog
 

@@ -89,7 +89,11 @@ async function approveInUi(page, { prefix = 12 } = {}) {
   await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
   return digest;
 }
-const result = (page, label) => page.getByTestId('run-result').filter({ hasText: label }).waitFor(WAIT);
+const result = async (page, label) => {
+  const context = page.getByRole('tablist', { name: 'Run context panels' });
+  if (await context.isVisible()) await context.getByRole('tab', { name: 'Details', exact: true }).click();
+  await page.getByTestId('run-result').filter({ hasText: label }).waitFor(WAIT);
+};
 // Every visible disabled control must say why: aria-describedby naming visible text.
 async function deadControls(page, scope = 'main') {
   return page.locator(scope).evaluate(root => [...root.querySelectorAll('button:disabled')].filter(b => b.offsetParent).map(b => {
@@ -148,6 +152,29 @@ try {
     await outsider.goto(runsUrl());
     await outsider.getByText('Operational record not found').waitFor(WAIT);
     assert.equal(await outsider.getByRole('heading', { name: 'Agent runs' }).count(), 0);
+  });
+
+  await journey('desktop context tabs use keyboard navigation and show the run\'s immutable pinned guide', async () => {
+    resetScenario({ holds: new Set(['open_login']) });
+    const page = await as('operator');
+    await startFromUi(page);
+    await page.getByTestId('step-1').waitFor(WAIT);
+    const context = page.getByRole('tablist', { name: 'Run context panels' });
+    await context.getByRole('tab', { name: 'Activity', exact: true }).focus();
+    await page.keyboard.press('ArrowRight');
+    await context.getByRole('tab', { name: 'Guide', selected: true }).waitFor(WAIT);
+    const guide = page.getByTestId('pinned-guide');
+    await guide.getByRole('heading', { name: h.world.version.title, exact: true }).waitFor(WAIT);
+    assert.equal(await guide.locator('pre').innerText(), h.world.version.instructions);
+    await guide.getByText('Guide hash', { exact: true }).click();
+    await guide.getByText(h.world.version.content_hash, { exact: true }).waitFor(WAIT);
+    await context.getByRole('tab', { name: 'Guide', exact: true }).focus();
+    await page.keyboard.press('End');
+    await context.getByRole('tab', { name: 'Details', selected: true }).waitFor(WAIT);
+    await page.getByRole('tab', { name: 'Result', exact: true }).waitFor(WAIT);
+    await page.getByRole('button', { name: 'Stop run' }).click();
+    await result(page, 'Stopped');
+    assert.deepEqual(page.errors, []);
   });
 
   await journey('start, rule steps, live browser, approval with sudo and the digest, verified result', async () => {
@@ -591,8 +618,8 @@ try {
       await startFromUi(page);
       if (approve) await approveInUi(page);
       await result(page, label);
-      if (help) await page.getByRole('note').filter({ hasText: `A person needs to decide: ${label}` }).waitFor(WAIT);
-      else assert.equal(await page.getByRole('note').filter({ hasText: 'A person needs to decide' }).count(), 0, label);
+      if (help) await page.getByRole('note').filter({ hasText: `Review needed: ${label}` }).waitFor(WAIT);
+      else assert.equal(await page.getByRole('note').filter({ hasText: 'Review needed' }).count(), 0, label);
       report.result_classes.push({ label, help });
       await settleAll();
       if (label === 'Timed out') {
@@ -614,7 +641,7 @@ try {
     // The reader chose Activity, so it stays; the result is its last item, the summary is in Details.
     await page.getByTestId('feed-result').filter({ hasText: 'Result: Interrupted' }).waitFor(WAIT);
     await page.getByText('Error: COORDINATOR_RESTART').waitFor(WAIT);
-    await page.getByRole('note').filter({ hasText: 'A person needs to decide: Interrupted' }).waitFor(WAIT);
+    await page.getByRole('note').filter({ hasText: 'Review needed: Interrupted' }).waitFor(WAIT);
     await panelButton(page, 'Details').click();
     await result(page, 'Interrupted');
     report.result_classes.push({ label: 'Interrupted', help: true });
@@ -645,7 +672,7 @@ try {
       await page.getByText('Pending approvals (1)').waitFor(WAIT);
       await layoutCheck(page, `inbox-${theme}`);
       await page.goto(runsUrl());
-      await page.getByText('Runs').first().waitFor(WAIT);
+      await page.getByRole('heading', { name: 'Run history' }).waitFor(WAIT);
       await layoutCheck(page, `overview-${theme}`);
       await page.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
       await page.getByText('Hard rules enforced by code').click();

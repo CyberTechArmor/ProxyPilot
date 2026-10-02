@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { Activity, ArrowRight, Bot, Play } from 'lucide-react';
 import { operationsApi as api } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -8,6 +9,8 @@ import { ACTION_TEXT, ACTIVE_STATES, DECK_TEXT, FIXTURE_TEXT, LIVE_TEXT, ORIGIN_
   shortId, when } from './agent-run-text';
 import { ApprovalFields, Badge, FrameDialog, HelpBanner, RunDeck, StateBadge } from './RunDeck';
 import { EMPTY_VIEW, acceptFrame, feedOf, firstStepFinishedAt, panelFor } from './run-deck-logic';
+import { SupportedWorkflowNotice } from './Agents';
+import { operationSectionUrl, readinessNextStep } from './run-readiness';
 
 // A6 supervision UI. Everything shown comes from durable server state except the
 // live browser frames (pixels only, held in this page's memory and gone on
@@ -242,7 +245,7 @@ export function AgentRunDetail({ base, runId, onBack, onOpenRun }) {
     <p role={refusal ? 'alert' : 'status'} className={refusal ? 'text-destructive break-words' : ''}>{refusal ? `This run is not available to you: ${refusal}` : error || 'Loading the run…'}</p>
   </div>;
   return <>
-    <RunDeck data={data} feed={feed} view={view} active={active} panel={panel} onPanel={choosePanel} tab={tab} onTab={setTab}
+    <RunDeck base={base} data={data} feed={feed} view={view} active={active} panel={panel} onPanel={choosePanel} tab={tab} onTab={setTab}
       watch={watch} onWatch={setWatch} viewNote={viewNote} busy={busy} message={message} error={error} announce={announce}
       onBack={onBack} onStop={stop} onRefresh={() => load()} onReview={setApproving} onFrame={setEnlarged}
       liveView={data.controls.live?.enabled ? liveView : null} me={me} onTakeover={() => setConfirming('take')}
@@ -295,26 +298,27 @@ export function AgentRunsPanel({ base, project, runId, onOpenRun, onCloseRun }) 
     try { const page = await api.get(`${base}/agent-runs?before=${encodeURIComponent(before)}`); setOlder(o => [...o, ...page.runs]); }
     catch (e) { setError(e.message); }
   }
-  return <Panel title="Agent runs">
-    <p className="text-sm">One supervised run of the synthetic sign-in workflow at a time per profile. Starting, stopping and approving are human actions; the agent submits the bound credential only after a person approves.</p>
+  return <Panel title="Agent runs" icon={Activity} description="Start a supported workflow, follow its browser, and review each action that needs your approval.">
+    <SupportedWorkflowNotice projectId={project.id} compact/>
+    <p className="text-sm text-muted-foreground">One supervised synthetic sign-in per profile at a time. The bound demo credential is submitted only after a person approves the exact action.</p>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
     {activeLink && <Action variant="outline" onClick={() => onOpenRun(activeLink)}>Open that run</Action>}
     <p role="status" aria-live="polite" className="text-sm">{busy ? 'Working…' : message}</p>
     {refusal ? <p role="alert" className="break-words">Agent runs are not available to you: {refusal}</p> : !list ? <p role="status">Loading agent runs…</p> : <>
       {!list.execution.available && <p className="rounded-md border border-amber-500/70 p-3 text-sm break-words" role="note">{list.execution.message} Runs already recorded stay readable.</p>}
       <section className="space-y-3" aria-labelledby="agent-profiles-heading">
-        <h3 id="agent-profiles-heading" className="font-semibold">Start a run</h3>
-        {!list.profiles.length && <p className="text-sm">No agent profiles. Create one in Agents.</p>}
-        <ul className="space-y-3">{list.profiles.map(profile => <ProfileStart key={profile.profile_id} profile={profile} busy={busy}
+        <h3 id="agent-profiles-heading" className="text-base font-semibold flex items-center gap-2"><Play aria-hidden="true" className="h-4 w-4 text-muted-foreground"/>Start a run</h3>
+        {!list.profiles.length && <p className="text-sm">No agent profiles. <Link className="inline-flex min-h-11 items-center underline underline-offset-4" to={operationSectionUrl(project.id,'Agents')}>Create a synthetic sign-in profile in Agents</Link>.</p>}
+        <ul className="space-y-3">{list.profiles.map(profile => <ProfileStart key={profile.profile_id} projectId={project.id} profile={profile} busy={busy}
           onStart={practice => start(profile, practice)} onOpenRun={onOpenRun}/>)}</ul>
       </section>
       <section className="space-y-3" aria-labelledby="agent-runs-heading">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <h3 id="agent-runs-heading" className="font-semibold">Runs</h3>
+          <h3 id="agent-runs-heading" className="text-base font-semibold">Run history</h3>
           <Action variant="outline" onClick={() => load()}>Refresh runs</Action>
         </div>
         {!list.runs.length && <p className="text-sm">No agent runs yet.</p>}
-        <ul className="space-y-3">{[...list.runs, ...older].map(r => <RunRow key={r.id} run={r} onOpen={() => onOpenRun(r.id)}/>)}</ul>
+        <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3">{[...list.runs, ...older].map(r => <RunRow key={r.id} run={r} onOpen={() => onOpenRun(r.id)}/>)}</ul>
         {list.next_before && !older.length && <Action variant="outline" onClick={loadOlder}>Load older runs</Action>}
       </section>
     </>}
@@ -348,15 +352,16 @@ function PracticeDialog({ profile, busy, onStart, onClose }) {
   </Dialog>;
 }
 
-function ProfileStart({ profile, busy, onStart, onOpenRun }) {
+function ProfileStart({ projectId, profile, busy, onStart, onOpenRun }) {
   const reasons = useId(), practiceReasons = useId();
   const [practicing, setPracticing] = useState(false);
-  return <li className="rounded-md border p-3 space-y-2 min-w-0">
+  return <li className="operations-card rounded-md border p-4 space-y-3 min-w-0">
     <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
       <div className="min-w-0 space-y-1">
-        <h4 className="font-medium break-words">{profile.display_name}</h4>
-        <p className="text-sm break-all">Credential: {profile.binding ? `${profile.binding.username} · binding ${shortId(profile.binding.binding_id)} · revision ${profile.binding.revision}` : 'no active binding'}</p>
-        <p className="text-sm">Model provider consent: {profile.model_guide_consent ? 'given' : 'not given'} · model summaries: {profile.model_summary_consent ? 'allowed' : 'not allowed'}</p>
+        <div className="flex flex-wrap items-center gap-2"><h4 className="text-base font-semibold break-words">{profile.display_name}</h4><Badge tone={profile.ready?'good':'warn'}>{profile.ready?'Ready to start':'Setup needed'}</Badge></div>
+        <p className="text-sm text-muted-foreground break-all">Synthetic sign-in · Credential: {profile.binding ? `${profile.binding.username} · revision ${profile.binding.revision}` : 'no active binding'}</p>
+        <p className="text-xs text-muted-foreground">Model provider consent: {profile.model_guide_consent ? 'given' : 'not given'} · model summaries: {profile.model_summary_consent ? 'allowed' : 'not allowed'}</p>
+        {profile.binding && <p className="text-xs text-muted-foreground break-all">Binding {shortId(profile.binding.binding_id)}</p>}
       </div>
       <div className="flex flex-col sm:flex-row gap-2 shrink-0">
         <Action disabled={!profile.ready || busy} aria-describedby={reasons} onClick={() => onStart(null)}>Start run</Action>
@@ -365,7 +370,11 @@ function ProfileStart({ profile, busy, onStart, onOpenRun }) {
       </div>
     </div>
     {profile.ready ? <p id={reasons} className="text-sm text-muted-foreground">Ready. Start pins this profile, its guide, the site and the binding revision for the run.</p>
-      : <div id={reasons} className="text-sm space-y-1"><p className="font-medium">Start is not available:</p><ul className="list-disc pl-5 space-y-1">{profile.reasons.map(r => <li key={r} className="break-words">{r}</li>)}</ul></div>}
+      : <div id={reasons} className="text-sm space-y-2 border-t pt-3"><p className="font-medium">Before this profile can run</p><ul className="space-y-3">{profile.reasons.map(r => {
+        const next = readinessNextStep(r);
+        return <li key={r} className="break-words border-l-2 border-amber-500/60 pl-3"><p>{r}</p>
+          {next && <p className="text-xs text-muted-foreground mt-1">{next.text}{next.section && <>{' '}<Link className="inline-flex min-h-11 items-center gap-1 text-foreground underline underline-offset-4" to={operationSectionUrl(projectId,next.section)}>{next.label}<ArrowRight aria-hidden="true" className="h-3 w-3"/></Link></>}</p>}</li>;
+      })}</ul></div>}
     {profile.practice_ready ? <p id={practiceReasons} className="sr-only">{ORIGIN_TEXT.practiceBody}</p>
       : <details id={practiceReasons} className="text-sm"><summary className="cursor-pointer min-h-11 py-2">{ORIGIN_TEXT.practiceUnavailable}</summary>
         <ul className="list-disc pl-5 space-y-1">{!profile.ready && <li className="break-words">{ORIGIN_TEXT.practiceSameReasons}</li>}
@@ -378,16 +387,16 @@ function ProfileStart({ profile, busy, onStart, onOpenRun }) {
 }
 
 function RunRow({ run, onOpen }) {
-  return <li className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0">
+  return <li className={`operations-card rounded-md border p-4 flex flex-col gap-3 min-w-0 ${run.awaiting_approval || run.needs_human ? 'border-amber-500/70 bg-amber-500/5' : 'bg-card'}`}>
     <div className="min-w-0 space-y-1">
-      <p className="font-medium break-words flex flex-wrap items-center gap-2"><span>{run.profile_name ?? 'Profile'} · run {shortId(run.id)}</span><StateBadge run={run}/>
+      <p className="font-semibold break-words flex flex-wrap items-center gap-2"><Bot aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground"/><span>{run.profile_name ?? 'Profile'}</span><StateBadge run={run}/>
         {run.awaiting_approval && <Badge tone="warn">Awaiting approval</Badge>}{run.needs_human && <Badge tone="warn">Needs a person</Badge>}
         {run.origin?.practice && <Badge tone="warn">{ORIGIN_TEXT.practice(run.origin.fixture_mode)}</Badge>}
         {run.origin?.resumed_from_run_id && <Badge>{ORIGIN_TEXT.resumedFrom(run.origin.resumed_from_run_id)}</Badge>}</p>
-      <p className="text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1"><span>Started by {run.started_by.username ?? run.started_by.id}</span><span>{when(run.started_at)}</span>
+      <p className="text-xs text-muted-foreground flex flex-wrap gap-x-4 gap-y-1"><span>Run {shortId(run.id)} · Started by {run.started_by.username ?? run.started_by.id}</span><span>{when(run.started_at)}</span>
         {run.result_class && <span>Result: {resultLabel(run.result_class)}</span>}</p>
     </div>
-    <Action variant="outline" onClick={onOpen} aria-label={`Open run ${shortId(run.id)}`}>Open run</Action>
+    <Action variant="outline" className="self-start gap-2" onClick={onOpen} aria-label={`Open run ${shortId(run.id)}`}>Open run<ArrowRight aria-hidden="true" className="h-4 w-4"/></Action>
   </li>;
 }
 

@@ -236,6 +236,7 @@ try {
     await page.getByTestId('reconcile-run').getByText('Decided').waitFor(WAIT);
     assert.equal(await page.getByRole('dialog').filter({ hasText: 'Confirm it is you' }).count(), 0);
     // Review: the takeover is counted, never what was typed.
+    await page.getByRole('tablist', { name: 'Run context panels' }).getByRole('tab', { name: 'Details', exact: true }).click();
     await page.getByRole('tab', { name: 'Review' }).click();
     const review = await page.getByTestId('run-review').innerText();
     assert.match(review, /omar-operator took over/);

@@ -113,6 +113,11 @@ const shot = async (page, name, { full = true, maxHeight = 3200 } = {}) => {
   console.log(`${out}/${name}.jpg`);
 };
 const liveFrame = page => page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
+async function runResult(page, label) {
+  const context = page.getByRole('tablist', { name: 'Run context panels' });
+  if (await context.isVisible()) await context.getByRole('tab', { name: 'Details', exact: true }).click();
+  await page.getByTestId('run-result').filter({ hasText: label }).waitFor(WAIT);
+}
 async function startRun(page) {
   await page.goto(runsUrl());
   await page.getByRole('button', { name: 'Start run' }).click();
@@ -155,12 +160,12 @@ try {
   await openApproval(page);
   await shot(page, '02-approval-dialog-desktop', { full: false });
   await approve(page);
-  await page.getByTestId('run-result').filter({ hasText: 'Signed in and verified' }).waitFor(WAIT);
+  await runResult(page, 'Signed in and verified');
   await page.waitForTimeout(600);
   await page.getByTestId('run-result').scrollIntoViewIfNeeded();
   await shot(page, '03-run-result-desktop', { full: false });
   await page.goto(runsUrl());
-  await page.getByText('Runs').first().waitFor(WAIT);
+  await page.getByRole('heading', { name: 'Run history' }).waitFor(WAIT);
   await shot(page, '04-runs-overview-desktop');
   await done();
 
@@ -177,7 +182,7 @@ try {
   await admin.getByText('Needs a person\'s approval').waitFor(WAIT);
   await shot(admin, '06-profile-consent-and-rules-desktop');
   await page.getByRole('button', { name: 'Stop run' }).click();
-  await page.getByTestId('run-result').filter({ hasText: 'Stopped' }).waitFor(WAIT);
+  await runResult(page, 'Stopped');
   await done();
 
   // Phone (375 px), dark: one panel at a time; Browser first; the dialog is full-screen.
@@ -205,7 +210,7 @@ try {
   Object.assign(h.world.supervisor.scenario, { takeover: 'open_login' });
   page = await as('operator', { width: 768 });
   await startRun(page);
-  await page.getByRole('note').filter({ hasText: 'A person needs to decide: Taken over' }).waitFor(WAIT);
+  await page.getByRole('note').filter({ hasText: 'Review needed: Taken over' }).waitFor(WAIT);
   await shot(page, '09-help-taken-over-tablet');
   Object.assign(h.world.supervisor.scenario, { takeover: null });
   await done();
@@ -218,7 +223,7 @@ try {
   await page.waitForTimeout(2600);
   await shot(page, '10-run-live-light-desktop', { full: false });
   await page.getByRole('button', { name: 'Stop run' }).click();
-  await page.getByTestId('run-result').filter({ hasText: 'Stopped' }).waitFor(WAIT);
+  await runResult(page, 'Stopped');
   await done();
   await h.close();
 

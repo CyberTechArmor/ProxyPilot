@@ -68,7 +68,7 @@ def idle(supervisor, broker):
             any(c.get('state') not in {'reserved', 'sent', 'uncertain', 'refused', 'abandoned',
                                       'settled', 'settled_at_reservation', 'provider_error'}
                 for c in broker.get('calls', {}).values()) or
-            any(v.get('state') not in {'reserved', 'completed', 'cancelled'}
+            any(v.get('state') not in {'reserved', 'completed', 'cancelled', 'failed'}
                 for v in supervisor.get('public_reviews', {}).values())):
         raise ValueError('Unknown runtime work state; inspect it before Update')
     if supervisor.get('active') is not None or any(

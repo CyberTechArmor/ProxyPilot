@@ -2134,6 +2134,9 @@ PYEOF
         log "${GREEN}========================================${NC}"
         log ""
         pp_complete_update || exit 1
+        if [ "${REVIEW_RUNTIME_REFRESH_STARTED:-false}" = true ]; then
+            review_runtime_refresh commit
+        fi
         pp_report_update_completion
         # Disarm the trap before the early exit (the trap-disarm at
         # the bottom of the script is unreachable on the Docker path).

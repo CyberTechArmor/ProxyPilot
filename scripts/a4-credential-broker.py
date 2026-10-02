@@ -32,6 +32,7 @@ sends again, so a retry can never spend twice.
 import argparse
 import base64
 import decimal
+import datetime
 import hashlib
 import json
 import os
@@ -49,6 +50,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 
 HERE = Path(__file__).resolve().parent
 VM = 'pp-agents-a3-debian13-proof-20260927'
@@ -778,7 +780,24 @@ class Broker:
         supervisor builds the bounded data-only prompt and independently pins
         task provenance; all existing reservation/settlement rules still apply.
         """
+        fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens', 'prompt', 'deadline_at')
+        if (not exact(params, fields) or not uuid_ok(params['run_id']) or not uuid_ok(params['call_id'])
+                or not isinstance(params['deadline_at'], str)):
+            raise Refused('INVALID_REQUEST')
+        try:
+            parsed = datetime.datetime.fromisoformat(params['deadline_at'].replace('Z', '+00:00'))
+            if parsed.utcoffset() is None:
+                raise ValueError('timezone required')
+            deadline = parsed.timestamp()
+        except (ValueError, TypeError, OverflowError):
+            raise Refused('INVALID_REQUEST')
+        remaining = deadline - self.clock()
+        if not 0 < remaining <= 180:
+            raise Refused('DEADLINE')
+        control = {'run_id': params['run_id'], 'deadline': deadline,
+                   'deadline_at': params['deadline_at'], 'monotonic_deadline': time.monotonic() + remaining}
         with self.lock:
+            self._review_allowed(control)
             run = self.state['runs'].get(params.get('run_id'))
             if run is None or run.get('credential') is not None:
                 raise Refused('RUN_NOT_PINNED')
@@ -786,11 +805,59 @@ class Broker:
             if previous is not None and (previous.get('kind') != 'public_review' or
                     previous.get('run_id') != params.get('run_id') or
                     previous.get('prompt_sha256') != hashlib.sha256(str(params.get('prompt')).encode('utf-8')).hexdigest() or
-                    previous.get('max_output_tokens') != params.get('max_output_tokens')):
+                    previous.get('max_output_tokens') != params.get('max_output_tokens') or
+                    previous.get('deadline_at') != params['deadline_at']):
                 raise Refused('RUN_POLICY_MISMATCH')
-        return dict(self._model_call(params, None, 1500, 10000), kind='public_review')
+        request = {k: v for k, v in params.items() if k != 'deadline_at'}
+        return dict(self._model_call(request, None, 1500, 10000, control), kind='public_review')
 
-    def _model_call(self, params, proof, max_output, excerpt):
+    def cancel_review(self, params):
+        if not exact(params, ('run_id',)) or not uuid_ok(params['run_id']):
+            raise Refused('INVALID_REQUEST')
+        with self.lock:
+            # A tombstone also covers cancellation that arrives before pin_run
+            # or a queued review RPC. It never changes legacy model/credential
+            # methods, releases an accepted call, or authorizes replay.
+            self.state.setdefault('review_cancellations', {})[params['run_id']] = stamp(self.clock())
+            accepted = any(c.get('kind') == 'public_review' and c.get('run_id') == params['run_id']
+                           and c.get('state') not in ('reserved', 'refused')
+                           for c in self.state['calls'].values())
+            self._save()
+        return {'cancelled': True, 'provider_already_accepted': accepted}
+
+    def _review_allowed(self, control, call=None):
+        if control is None:
+            return
+        code = 'CANCELLED' if control['run_id'] in self.state.get('review_cancellations', {}) else (
+            'DEADLINE' if self.clock() >= control['deadline'] or time.monotonic() >= control['monotonic_deadline'] else None)
+        if code:
+            if call is not None and call['state'] == 'reserved':
+                # No provider admission occurred, so only this unsent call's
+                # reservation can be released. Accepted calls still settle.
+                self._release(call, 'refused', code)
+                self._save()
+            raise Refused(code)
+
+    @contextmanager
+    def _model_admission(self, control):
+        if control is None:
+            with self.model_lock:
+                yield
+            return
+        while True:
+            with self.lock:
+                self._review_allowed(control)
+            remaining = min(control['deadline'] - self.clock(), control['monotonic_deadline'] - time.monotonic())
+            if self.model_lock.acquire(timeout=max(0, min(0.1, remaining))):
+                try:
+                    with self.lock:
+                        self._review_allowed(control)
+                    yield
+                finally:
+                    self.model_lock.release()
+                return
+
+    def _model_call(self, params, proof, max_output, excerpt, review_control=None):
         fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens', 'prompt')
         if (not exact(params, fields) or not uuid_ok(params['run_id']) or not uuid_ok(params['call_id'])
                 or not safe_int(params['project_limits_revision']) or not isinstance(params['model'], str)
@@ -800,8 +867,9 @@ class Broker:
         prompt_bytes = len(params['prompt'].encode('utf-8'))
         if not 0 < prompt_bytes <= MAX_PROMPT_BYTES:
             raise Refused('INVALID_REQUEST', 'prompt size')
-        with self.model_lock:
+        with self._model_admission(review_control):
             with self.lock:
+                self._review_allowed(review_control)
                 existing = self.state['calls'].get(params['call_id'])
                 if existing is not None:
                     # Single-use call IDs: a retry returns the record and never sends.
@@ -815,6 +883,8 @@ class Broker:
                         'max_output_tokens': params['max_output_tokens'], 'prompt_bytes': prompt_bytes,
                         'prompt_sha256': hashlib.sha256(params['prompt'].encode('utf-8')).hexdigest(),
                         'started_at': stamp(self.clock()), 'price_table_revision': self.state['prices']['revision']}
+                if review_control is not None:
+                    call['deadline_at'] = review_control['deadline_at']
                 run = self.state['runs'].get(params['run_id'])
                 if run is None:
                     self._refuse_call(call, 'RUN_NOT_PINNED')
@@ -854,6 +924,8 @@ class Broker:
                 status, answer = proof_answer(proof, params['call_id'], params['model'], prompt_bytes)
             else:
                 key = None
+                with self.lock:
+                    self._review_allowed(review_control, call)
                 try:
                     key = self._vault().read(provider['vault_key'], provider['vault_version'])
                 except Refused as error:
@@ -864,17 +936,22 @@ class Broker:
                 body = {'model': params['model'], 'messages': [{'role': 'user', 'content': params['prompt']}],
                         'max_completion_tokens': output_tokens, 'reasoning_effort': 'none',
                         'service_tier': route['service_tier'], 'store': False, 'n': 1}
-                with self.lock:
-                    call['state'] = 'sent'
-                    self._save()
                 try:
-                    status, answer = self.host.provider(route['url'], key, body)
-                except (OSError, ValueError, TimeoutError) as error:
                     with self.lock:
-                        call.update(state='uncertain', refusal='PROVIDER_ERROR', finished_at=stamp(self.clock()),
-                                    error=type(error).__name__)
+                        # This durable send admission is serialized against
+                        # cancellation. Only already admitted work may settle
+                        # after cancellation/deadline; queued work cannot send.
+                        self._review_allowed(review_control, call)
+                        call['state'] = 'sent'
                         self._save()
-                    raise Refused('PROVIDER_ERROR', 'uncertain; reservation kept') from error
+                    try:
+                        status, answer = self.host.provider(route['url'], key, body)
+                    except (OSError, ValueError, TimeoutError) as error:
+                        with self.lock:
+                            call.update(state='uncertain', refusal='PROVIDER_ERROR', finished_at=stamp(self.clock()),
+                                        error=type(error).__name__)
+                            self._save()
+                        raise Refused('PROVIDER_ERROR', 'uncertain; reservation kept') from error
                 finally:
                     wipe(key)
             with self.lock:
@@ -936,6 +1013,7 @@ class Broker:
         return {'broker': {'version': 1, 'broker_sha256': self.state.get('broker_sha256')},
                 'vm_uuid': VM_UUID, 'origin': ORIGIN, 'routes': sorted(MODEL_ROUTES), 'vault_healthy': vault,
                 'bindings': bindings, 'prices': prices, 'public_review': True,
+                'public_review_control_version': 'website-review-control.v1',
                 'provider': None if provider is None else {k: provider[k] for k in ('vault_key', 'vault_version',
                                                                                      'revision')}}
 
@@ -945,7 +1023,8 @@ class Broker:
         handler = {'status': self.status, 'bind': self.bind, 'rotate': self.rotate, 'revoke': self.revoke,
                    'bindings': self.bindings, 'pin_run': self.pin_run, 'check': self.check, 'deliver': self.deliver,
                    'provider_bind': self.provider_bind, 'price_set': self.price_set, 'price_clear': self.price_clear,
-                   'model_call': self.model_call, 'summary_call': self.summary_call, 'review_call': self.review_call, 'ledger': self.ledger}.get(method)
+                   'model_call': self.model_call, 'summary_call': self.summary_call, 'review_call': self.review_call,
+                   'cancel_review': self.cancel_review, 'ledger': self.ledger}.get(method)
         if handler is None:
             raise Refused('METHOD_NOT_ALLOWED')
         return handler(params)

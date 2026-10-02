@@ -23,6 +23,9 @@ const lift = (name) => {
 };
 const maintenance = SOURCE.slice(SOURCE.indexOf('        # Do not enter maintenance'), SOURCE.indexOf('        $DC_CMD up -d') + '        $DC_CMD up -d'.length);
 assert.ok(maintenance.includes('migrate_db_layout'));
+const dockerCompletionStart = SOURCE.indexOf('        pp_complete_update || exit 1', SOURCE.indexOf('        # Do not enter maintenance'));
+const dockerCompletion = SOURCE.slice(dockerCompletionStart, SOURCE.indexOf('        exit 0', dockerCompletionStart) + '        exit 0'.length);
+assert.ok(dockerCompletion.includes('trap - EXIT ERR INT TERM'), 'real Docker early-exit completion');
 const nativeStartup = SOURCE.slice(SOURCE.indexOf('    # Check if PM2 is available', SOURCE.indexOf('    # Non-Docker deployment:')), SOURCE.indexOf('    # Second gate:'));
 assert.ok(nativeStartup.includes('pm2 start src/index.js'));
 const traps = SOURCE.match(/^trap 'on_error' EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM/m)?.[0];
@@ -120,6 +123,12 @@ if [ "$2" = apply ] || [ "$2" = rollback ]; then
  test ! -f "$FAKE_STATE/active" || exit 95
 fi
 test "$2" != ${quote(runtimeFailure)} || exit 29
+case "$2" in
+ preflight) if [ -f "$FAKE_STATE/runtime-phase" ]; then test "$(cat "$FAKE_STATE/runtime-phase")" != applied || exit 28; fi ;;
+ apply) echo applied > "$FAKE_STATE/runtime-phase" ;;
+ commit) test "$(cat "$FAKE_STATE/runtime-phase")" = applied; echo committed > "$FAKE_STATE/runtime-phase" ;;
+ rollback) echo rolled_back > "$FAKE_STATE/runtime-phase" ;;
+esac
 `);
   }
   writeExe('systemctl', bridge + `echo "systemctl $*" >> "$FAKE_STATE/calls"
@@ -225,6 +234,7 @@ ${functions}
     closeRunner(); closeBackend(); rmSync(root, { recursive: true, force: true });
   });
   return { root, original, current, env, originalEnv, run, snapshot, trace, rows, openRunner,
+    runtimePhase: () => existsSync(join(state, 'runtime-phase')) ? readFileSync(join(state, 'runtime-phase'), 'utf8').trim() : null,
     mutate: () => runner.exec("INSERT INTO changes VALUES ('post-backup');"),
     runnerOpen: () => runner !== null,
     calls: () => existsSync(join(state, 'calls')) ? readFileSync(join(state, 'calls'), 'utf8') : '',
@@ -243,6 +253,31 @@ test('Update refresh runs only after writers stop and paired rollback precedes r
   assert.match(calls, /--source-sha a{40} --database /);
   assert.doesNotMatch(calls, /runtime commit/);
   assert.deepEqual(h.rows(), ['backup-state']);
+});
+
+test('Docker success commits its refresh before the early exit and permits the next preflight', { skip }, async (t) => {
+  for (const legacy of [false, true]) {
+    const h = harness(t, { runtime: true, legacy }); h.openRunner();
+    const completion = `pp_complete_update() { echo complete >> "$FAKE_STATE/calls"; }\npp_report_update_completion() { echo report >> "$FAKE_STATE/calls"; }\n`;
+    const result = await h.run(completion + h.snapshot + traps + '\n' + maintenance + '\n' + dockerCompletion);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(h.runtimePhase(), 'committed');
+    assert.ok(h.calls().indexOf('runtime commit') < h.calls().indexOf('report'));
+    assert.doesNotMatch(h.calls(), /runtime rollback/);
+    const next = await h.run('review_runtime_refresh preflight');
+    assert.equal(next.status, 0, next.stdout + next.stderr);
+  }
+});
+
+test('Docker completion retains paired recovery when refresh commit fails', { skip }, async (t) => {
+  const h = harness(t, { runtime: true, runtimeFailure: 'commit' }); h.openRunner();
+  const completion = `pp_complete_update() { echo complete >> "$FAKE_STATE/calls"; }\npp_report_update_completion() { echo report >> "$FAKE_STATE/calls"; }\n`;
+  const result = await h.run(completion + h.snapshot + traps + '\n' + maintenance + '\n' + dockerCompletion);
+  assert.equal(result.status, 29, result.stdout + result.stderr);
+  assert.equal(h.runtimePhase(), 'rolled_back');
+  assert.match(h.calls(), /runtime rollback/);
+  assert.doesNotMatch(h.calls(), /^report$/m);
+  assert.ok(h.calls().lastIndexOf('runtime rollback') < h.calls().lastIndexOf('docker compose up'));
 });
 
 test('An unverifiable runtime rollback leaves the dashboard stopped and does not report success', { skip }, async (t) => {

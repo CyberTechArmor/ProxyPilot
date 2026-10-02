@@ -7,6 +7,7 @@ import unittest
 import importlib.util
 import shutil
 import subprocess
+import threading
 
 spec = importlib.util.spec_from_file_location('public_review_model_fixture', Path(__file__).with_name('test_a5_model_step.py'))
 m = importlib.util.module_from_spec(spec)
@@ -14,8 +15,24 @@ spec.loader.exec_module(m)
 s, b = m.s, m.b
 
 
+class HeldModelQueue:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.lock.acquire()
+        self.waiting = threading.Event()
+
+    def acquire(self, timeout):
+        self.waiting.set()
+        return self.lock.acquire(timeout=timeout)
+
+    def release(self):
+        self.lock.release()
+
+
 class PublicReviewTests(unittest.TestCase):
-    setUp = m.ModelStepTests.setUp
+    def setUp(self):
+        m.ModelStepTests.setUp(self)
+        self.broker.clock = self.sup.clock
     tearDown = m.ModelStepTests.tearDown
     assertRefused = m.ModelStepTests.assertRefused
 
@@ -99,6 +116,132 @@ class PublicReviewTests(unittest.TestCase):
         self.assertEqual(self.broker.state['calls'][m.CALL]['state'], 'settled')
         self.assertRefused('CANCELLED', self.sup.public_review_model, self.request())
         self.assertEqual(len(self.provider.requests), 1)
+
+    def queued_review(self):
+        held, errors = HeldModelQueue(), []
+        self.broker.model_lock = held
+        request = self.request()
+        def review():
+            try:
+                self.sup.public_review_model(request)
+            except s.Refused as error:
+                errors.append(error.code)
+        thread = threading.Thread(target=review)
+        thread.start()
+        self.assertTrue(held.waiting.wait(2), 'review reached the held model queue')
+        return held, thread, errors
+
+    def assert_never_admitted(self):
+        self.assertEqual(self.provider.requests, [])
+        self.assertEqual(self.broker.vault.reads, 0)
+        self.assertNotIn(m.CALL, self.broker.state['calls'])
+        run = self.broker.state['runs'][m.RUN]
+        self.assertEqual(run['tokens'], {'reserved': 0, 'settled': 0})
+        self.assertEqual(run['nano_usd'], {'reserved': 0, 'settled': 0})
+
+    def test_cancel_queued_review_exits_while_other_call_holds_lock_without_key_reservation_or_send(self):
+        held, thread, errors = self.queued_review()
+        try:
+            reply = self.sup.cancel_public_review({'run_id': m.RUN})
+            self.assertTrue(reply['broker_confirmed'])
+            self.assertFalse(reply['provider_already_accepted'])
+            thread.join(2)
+            self.assertFalse(thread.is_alive(), 'cancel must not wait for the model lock')
+            self.assertEqual(errors, ['CANCELLED'])
+            self.assert_never_admitted()
+        finally:
+            held.release()
+            thread.join(2)
+        self.assertEqual(self.provider.requests, [])
+
+    def test_expired_queued_review_exits_while_other_call_holds_lock_without_key_reservation_or_send(self):
+        held, thread, errors = self.queued_review()
+        try:
+            self.sup.clock.value += 121
+            thread.join(2)
+            self.assertFalse(thread.is_alive(), 'deadline must bound model queue admission')
+            self.assertEqual(errors, ['DEADLINE'])
+            self.assert_never_admitted()
+        finally:
+            held.release()
+            thread.join(2)
+        self.assertEqual(self.provider.requests, [])
+
+    def test_cancel_or_deadline_during_vault_read_releases_only_unsent_reservation_and_wipes_key(self):
+        for code in ('CANCELLED', 'DEADLINE'):
+            with self.subTest(code=code):
+                request = self.request()
+                request['run_id'] = m.RUN if code == 'CANCELLED' else m.RUN2
+                request['call_id'] = m.CALL if code == 'CANCELLED' else m.CALL2
+                def interrupt():
+                    if code == 'CANCELLED':
+                        self.sup.cancel_public_review({'run_id': request['run_id']})
+                    else:
+                        self.sup.clock.value += 121
+                self.broker.vault.on_read = interrupt
+                self.assertRefused(code, self.sup.public_review_model, request)
+                self.assertEqual(self.provider.requests, [])
+                call = self.broker.state['calls'][request['call_id']]
+                self.assertEqual((call['state'], call['refusal']), ('refused', code))
+                run = self.broker.state['runs'][request['run_id']]
+                self.assertEqual(run['tokens'], {'reserved': 0, 'settled': 0})
+                self.assertEqual(run['nano_usd'], {'reserved': 0, 'settled': 0})
+                self.assertTrue(all(not any(key) for key in self.broker.vault.handed_out))
+
+    def test_socket_timeout_cancels_the_still_queued_broker_handler_without_replay(self):
+        held, errors, threads = HeldModelQueue(), [], []
+        self.broker.model_lock = held
+        original = self.host.broker
+        def timeout(method, params, timeout=30):
+            if method != 'review_call':
+                return original(method, params, timeout)
+            def queued():
+                try:
+                    original(method, params, timeout)
+                except s.Refused as error:
+                    errors.append(error.code)
+            thread = threading.Thread(target=queued)
+            threads.append(thread)
+            thread.start()
+            self.assertTrue(held.waiting.wait(2))
+            raise s.Refused('CREDENTIAL_BROKER_UNAVAILABLE')
+        self.host.broker = timeout
+        try:
+            self.assertRefused('CREDENTIAL_BROKER_UNAVAILABLE', self.sup.public_review_model, self.request())
+            threads[0].join(2)
+            self.assertFalse(threads[0].is_alive())
+            self.assertEqual(errors, ['CANCELLED'])
+            self.assert_never_admitted()
+            self.assertEqual(self.sup.state['public_reviews'][m.RUN]['state'], 'failed')
+            self.assertRefused('CALL_UNCERTAIN', self.sup.public_review_model, self.request())
+        finally:
+            held.release()
+            for thread in threads:
+                thread.join(2)
+
+    def test_cancel_before_pin_is_durable_and_does_not_disable_legacy_model_methods(self):
+        self.broker.cancel_review({'run_id': m.RUN})
+        self.broker = b.Broker(host=self.provider, vault=self.broker.vault,
+                              journal=self.root / 'broker.json', clock=self.sup.clock)
+        self.host.broker_object = self.broker
+        self.assertRefused('CANCELLED', self.sup.public_review_model, self.request())
+        self.assert_never_admitted()
+        self.provider.responses.append(m.reply('read_workspace'))
+        result = self.broker.model_call({'run_id': m.RUN, 'call_id': m.CALL2,
+            'project_limits_revision': 1, 'model': s.MODEL_ROUTE, 'max_output_tokens': 8, 'prompt': 'Legacy model step'})
+        self.assertEqual(result['state'], 'settled')
+        self.assertEqual(len(self.provider.requests), 1)
+        self.sup.state['runs'][m.RUN] = {'workflow': 'synthetic_sign_in'}
+        self.assertRefused('RUN_POLICY_MISMATCH', self.sup.cancel_public_review, {'run_id': m.RUN})
+
+    def test_old_broker_control_contract_is_not_advertised_as_ready(self):
+        original = self.broker.status
+        def old_status(params=None):
+            result = original(params)
+            result.pop('public_review_control_version')
+            return result
+        self.broker.status = old_status
+        self.assertEqual(self.sup.public_review_status({})['code'], 'REVIEW_BRIDGE_UNAVAILABLE')
 
     def test_call_id_cannot_cross_task_identity(self):
         self.answer()

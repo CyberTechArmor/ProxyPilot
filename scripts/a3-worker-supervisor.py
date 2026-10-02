@@ -1957,7 +1957,8 @@ class Supervisor:
             provider = status.get('provider') is not None and status.get('vault_healthy') is True
             price = MODEL_ROUTE in status.get('prices', {}).get('models', {})
             # The A4 revision advertises review_call separately from old routes.
-            bridge = status.get('public_review') is True
+            bridge = (status.get('public_review') is True and
+                      status.get('public_review_control_version') == 'website-review-control.v1')
         except (Refused, AttributeError):
             provider = price = bridge = False
         return {'contract_version': 'website-review.v1', 'available': provider and price and bridge,
@@ -1968,13 +1969,17 @@ class Supervisor:
         if not exact(params, ('run_id',)) or not uuid_ok_review(params['run_id']):
             raise Refused('INVALID_REQUEST')
         with self.lock:
+            if params['run_id'] in self.state['runs']:
+                raise Refused('RUN_POLICY_MISMATCH')
             reviews = self.state.setdefault('public_reviews', {})
             review = reviews.setdefault(params['run_id'], {'state': 'cancelled'})
             review['state'] = 'cancelled'
             self._save()
         # Accepted provider calls may still settle. Cancellation never refunds
         # a reservation or authorizes replay, and suppresses result publication.
-        return {'cancelled': True}
+        result = self.host.broker('cancel_review', {'run_id': params['run_id']}, 5)
+        return {'cancelled': True, 'broker_confirmed': result.get('cancelled') is True,
+                'provider_already_accepted': result.get('provider_already_accepted', False)}
 
     def public_review_model(self, params):
         fields = ('run_id', 'call_id', 'task_hash', 'project_id', 'agent_id', 'agent_revision',
@@ -2048,9 +2053,23 @@ class Supervisor:
                 raise Refused('CANCELLED')
         if self.clock() >= deadline:
             raise Refused('DEADLINE')
-        result = self.host.broker('review_call', {'run_id': params['run_id'], 'call_id': params['call_id'],
-            'project_limits_revision': params['project_limits_revision'], 'model': MODEL_ROUTE,
-            'max_output_tokens': 1500, 'prompt': prompt}, MODEL_STEP_SECONDS)
+        try:
+            result = self.host.broker('review_call', {'run_id': params['run_id'], 'call_id': params['call_id'],
+                'project_limits_revision': params['project_limits_revision'], 'model': MODEL_ROUTE,
+                'max_output_tokens': 1500, 'prompt': prompt, 'deadline_at': params['deadline_at']},
+                min(MODEL_STEP_SECONDS, max(1, deadline - self.clock() + 2)))
+        except Refused as error:
+            with self.lock:
+                if reviews[params['run_id']]['state'] != 'cancelled':
+                    reviews[params['run_id']].update(state='failed', refusal=error.code)
+                    self._save()
+            # A timed-out A3 socket is not proof that the A4 handler stopped.
+            # Cancel its queued admission; never retry the provider request.
+            try:
+                self.host.broker('cancel_review', {'run_id': params['run_id']}, 5)
+            except Refused:
+                pass  # Unknown/accepted spend remains in the broker ledger.
+            raise
         if not isinstance(result, dict) or result.get('finish_reason') != 'stop':
             raise Refused('MODEL_INVALID')
         text = result.get('untrusted_response_excerpt')

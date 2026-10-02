@@ -1,0 +1,47 @@
+{
+  "base_commit": "f5a8509b9fb1a931d174fcbe1e531190c8c691ab",
+  "branch": "fix/review-runtime-input-diagnostics-20261002",
+  "observed_a3_bytes": 2998598,
+  "observed_a4_bytes": 556188,
+  "max_code_config_bytes": 2097152,
+  "max_runtime_ledger_bytes": 16777216,
+  "production_actions": false,
+  "source_sha256": {
+    "scripts/review-runtime-refresh.py": "8e86fba9104ff0bf612ce95c4bbe7b1c2ca7492e832150f0249ddbe1c4fe2a3c",
+    "scripts/tests/test_review_runtime_refresh.py": "78a879c428a608ae0d953cdde1f8cae6045d37a8530bf86dc4bbd37e9713d0be"
+  },
+  "checks": [
+    {
+      "skipped": 0,
+      "expectation": "pre-fix large-ledger refusal reproduced",
+      "failures": 2,
+      "cases": 17,
+      "log": "review-ledger-before-fix.log",
+      "sha256": "4d888ebbe490204a60ac30fcc7cd893028419d2dfe3a44f45f4bef8ec62ffe68"
+    },
+    {
+      "skipped": 0,
+      "command": "sudo python3 -m unittest discover -s scripts/tests -p test_review_runtime_refresh.py",
+      "failures": 0,
+      "cases": 21,
+      "log": "review-ledger-refresh.log",
+      "sha256": "f02a1f43b364e2337a958bb74584f4264e31e5b2fec6a15c1bfa44e63256df8c"
+    },
+    {
+      "skipped": 33,
+      "command": "python3 -m unittest discover -s scripts/tests -p test_*.py",
+      "failures": 0,
+      "cases": 321,
+      "log": "review-ledger-python.log",
+      "sha256": "3b044bf7a31fe48d9ceb9359f7a91e095c756c00bea161928794863e680ba375"
+    },
+    {
+      "skipped": 0,
+      "command": "node --test src/__tests__/update*.test.js src/__tests__/self-update*.test.js (root, admin/backend)",
+      "failures": 0,
+      "cases": 83,
+      "log": "review-ledger-updater.log",
+      "sha256": "57831f2381d23cd1f328e0a13afbdf29d045f679ce63fbd038228bed86b8264b"
+    }
+  ]
+}

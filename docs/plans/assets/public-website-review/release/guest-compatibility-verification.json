@@ -1,0 +1,55 @@
+{
+  "base_commit": "35c2e9d4eb657f92e1499d8d56035217b04f7ae6",
+  "branch": "fix/review-guest-compatibility-20261002",
+  "installed_guest_sha256": "d0724e5fb5573a18095a8e906cd9bb9c2542c17c494184ca15cbc65d345331f9",
+  "candidate_guest_sha256": "54302e5ee880470480d9b4de3d30616b263c7213d9eb08712b1ef3f50c5c0d21",
+  "production_actions": false,
+  "source_sha256": {
+    "scripts/review-runtime-refresh.py": "5ca975a071c3194ba95e0c6109787b89390d351728fc22e59b8571239c606db1",
+    "scripts/tests/test_review_runtime_refresh.py": "eee7e99d61d584768e51259d6ad81d093a9ea3d77cd1fc5af6d56d903626b38b",
+    "scripts/tests/test_public_website_review.py": "64c2cb006257d33153453af503750bf219661ff17e7f0c0b85b55ec7ad088db4",
+    "scripts/tests/guest_compatibility_fixture.py": "cc5d60a565722add63ca7801ce417bc9a7a3247b0449e7fb0090e90c8f133df5"
+  },
+  "checks": [
+    {
+      "skipped": 0,
+      "cases": 16,
+      "log": "guest-compatibility-before-fix.log",
+      "expectation": "pre-fix refusal reproduced",
+      "failures": 2,
+      "sha256": "93bbd8e2c5c11e406fa7b74f2e4dcbc3999389c7c8490bc48cde9a838dec4c4c"
+    },
+    {
+      "skipped": 0,
+      "cases": 16,
+      "log": "guest-compatibility-refresh.log",
+      "sha256": "3f064b565fd046d255900d8c36ba4594bb48a932c43c8ebd5a38e5971a8c39f6",
+      "failures": 0,
+      "command": "sudo python3 -m unittest discover -s scripts/tests -p test_review_runtime_refresh.py"
+    },
+    {
+      "skipped": 0,
+      "cases": 16,
+      "log": "guest-compatibility-review.log",
+      "sha256": "c91921d09e0f0f5a05e9e709acd4a0850812402697d6044829357c0a292905ee",
+      "failures": 0,
+      "command": "python3 -m unittest discover -s scripts/tests -p test_public_website_review.py"
+    },
+    {
+      "skipped": 33,
+      "cases": 316,
+      "log": "guest-compatibility-python.log",
+      "sha256": "bfb025ff9933fca663aa065da9dff135ee100519609d747caf3fe2a887875204",
+      "failures": 0,
+      "command": "python3 -m unittest discover -s scripts/tests -p test_*.py"
+    },
+    {
+      "skipped": 0,
+      "cases": 83,
+      "log": "guest-compatibility-updater.log",
+      "sha256": "b2f8d2317691e30bfcb1636dad8bf730fafe6647c416e46622213ca34c0c4628",
+      "failures": 0,
+      "command": "node --test src/__tests__/update*.test.js src/__tests__/self-update*.test.js (root, admin/backend)"
+    }
+  ]
+}

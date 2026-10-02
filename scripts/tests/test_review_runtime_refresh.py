@@ -9,13 +9,29 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 from contextlib import redirect_stdout
+from guest_compatibility_fixture import legacy_guest_source, LEGACY_GUEST_SHA, CURRENT_GUEST_SHA
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('refresh_test', ROOT / 'review-runtime-refresh.py')
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+
+
+def grown_supervisor_ledger(vm):
+    """Retained terminal history accepted by the existing supervisor loader."""
+    data = {'version': 1, 'vm_uuid': vm, 'active': None, 'runs': {}, 'attempts': {}}
+    for index in range(500):
+        identity = str(uuid.UUID(int=index + 1, version=4))
+        data['attempts'][identity] = {
+            'attempt_id': identity, 'run_id': identity, 'workspace_id': identity,
+            'state': 'stopped', 'fence': 1, 'workload': 'browser', 'actions': [],
+            'unit': 'pp-a3-worker-' + identity,
+            'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+        }
+    return r.encoded(data)
 
 
 class FixtureHost:
@@ -141,6 +157,67 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(self.refresh.apply()['skipped'])
         self.assertFalse(self.refresh.directory.exists())
         self.assertEqual(self.host.events, [])
+
+    def test_grown_ledger_keeps_activity_identity_and_unknown_state_denials(self):
+        path = self.host.ledgers[0]
+        data = json.loads(grown_supervisor_ledger(self.host.vm))
+        self.assertGreater(len(r.encoded(data)), 2998598)
+        attempt = next(iter(data['attempts'].values()))
+        for state, message in (('running', 'Active Demo'), ('unreviewed-state', 'Unknown runtime')):
+            attempt['state'] = state
+            self.host.write(path, r.encoded(data), 0o600)
+            with self.assertRaisesRegex(ValueError, message):
+                self.refresh.preflight()
+            self.assertNotIn(('stop',), self.host.events)
+        attempt['state'] = 'stopped'
+        data['vm_uuid'] = 'unknown-vm'
+        self.host.write(path, r.encoded(data), 0o600)
+        with self.assertRaisesRegex(ValueError, 'ledger identity.*' + str(path)):
+            self.refresh.preflight()
+
+    def test_both_ledger_reads_use_the_separate_cap_and_never_treat_absence_as_empty(self):
+        for path in self.host.ledgers:
+            original = path.read_bytes()
+            path.write_bytes(original + b' ' * (3 * 1024 * 1024))
+            self.assertFalse(self.refresh.preflight()['skipped'])
+            with path.open('wb') as stream:
+                stream.truncate(r.MAX_LEDGER + 1)
+            with self.assertRaisesRegex(ValueError, f'exceeds {r.MAX_LEDGER}-byte limit: {path}'):
+                self.refresh.preflight()
+            path.unlink()
+            with self.assertRaisesRegex(ValueError, 'file is missing: ' + str(path)):
+                self.refresh.preflight()
+            path.write_bytes(b'not JSON or ledger data')
+            with self.assertRaisesRegex(ValueError, 'not valid UTF-8 JSON: ' + str(path)):
+                self.refresh.preflight()
+            path.write_bytes(original.decode().encode('utf-16'))
+            with self.assertRaisesRegex(ValueError, 'not valid UTF-8 JSON: ' + str(path)):
+                self.refresh.preflight()
+            path.write_bytes(original)
+        self.assertNotIn(('stop',), self.host.events)
+
+    def test_large_ledger_provider_work_and_foreign_mutation_still_refuse(self):
+        path = self.host.ledgers[0]
+        self.host.write(path, grown_supervisor_ledger(self.host.vm), 0o600)
+        broker = json.loads(self.host.ledgers[1].read_bytes())
+        broker['calls']['active-call'] = {'state': 'sent'}
+        self.host.write(self.host.ledgers[1], r.encoded(broker), 0o600)
+        with self.assertRaisesRegex(ValueError, 'Active provider'):
+            self.refresh.preflight()
+        broker['calls'] = {}
+        self.host.write(self.host.ledgers[1], r.encoded(broker), 0o600)
+        self.refresh.apply()
+        before = path.read_bytes()
+        data = json.loads(before)
+        next(iter(data['attempts'].values()))['log'].append(['2026-10-02T18:00:00Z', 'foreign-change'])
+        path.write_bytes(r.encoded(data))
+        self.host.events.clear()
+        with self.assertRaisesRegex(ValueError, 'runtime ledger changed'):
+            self.refresh.rollback()
+        self.assertNotIn(('stop',), self.host.events)
+        path.write_bytes(before)
+        self.refresh.rollback()
+        self.assertEqual(path.read_bytes(), before)
 
     def test_success_keeps_exact_keys_configuration_permissions_and_journal_identity(self):
         result = self.refresh.apply()
@@ -294,6 +371,55 @@ class RefreshTests(unittest.TestCase):
 
 
 class HostContractTests(unittest.TestCase):
+    def test_required_input_errors_distinguish_missing_nonregular_and_code_limit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'input'
+            with self.assertRaisesRegex(ValueError, 'file is missing: ' + str(path)):
+                r.bounded(path)
+            path.mkdir()
+            with self.assertRaisesRegex(ValueError, 'not a regular file: ' + str(path)):
+                r.bounded(path)
+            path.rmdir()
+            path.symlink_to(Path(temp))
+            with self.assertRaisesRegex(ValueError, 'not a regular file: ' + str(path)):
+                r.bounded(path)
+            path.unlink()
+            with path.open('wb') as stream:
+                stream.truncate(r.MAX_FILE + 1)
+            with self.assertRaisesRegex(ValueError, f'exceeds {r.MAX_FILE}-byte limit: {path}'):
+                r.bounded(path)
+            path.write_bytes(b'bounded input')
+            self.assertEqual(r.bounded(path), b'bounded input')
+            with patch.object(r.os, 'open', side_effect=PermissionError('sensitive error detail')):
+                with self.assertRaisesRegex(ValueError, 'cannot be read: ' + str(path) + r' \(PermissionError\)') as caught:
+                    r.bounded(path)
+            self.assertNotIn('sensitive error detail', str(caught.exception))
+
+    def test_descriptor_read_stays_bounded_if_file_grows_after_stat(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'input'
+            path.write_bytes(b'x')
+            real_fdopen = r.os.fdopen
+            reader = io.BytesIO(b'x' * 9)
+            seen = []
+            def fdopen(fd, mode):
+                actual = real_fdopen(fd, mode)
+                class GrowingFile:
+                    def __enter__(self):
+                        return self
+                    def __exit__(self, *args):
+                        actual.close()
+                    def fileno(self):
+                        return actual.fileno()
+                    def read(self, size):
+                        seen.append(size)
+                        return reader.read(size)
+                return GrowingFile()
+            with patch.object(r.os, 'fdopen', fdopen):
+                with self.assertRaisesRegex(ValueError, 'grew beyond 8-byte limit: ' + str(path)):
+                    r.bounded(path, 8)
+            self.assertEqual(seen, [9])
+
     def test_cli_never_creates_lock_or_backup_for_unconfigured_installs(self):
         with tempfile.TemporaryDirectory() as temp:
             host = FixtureHost(Path(temp))
@@ -362,6 +488,8 @@ class HostContractTests(unittest.TestCase):
                 afiles = a.plan_files(root / 'scripts')
                 afiles[a.PUBLIC_KEY] = a.PUBLIC_KEY.read_bytes()
                 afiles[host.targets[0]] += b'\n# previously installed source\n'
+                guest = a.TARGET / 'a3-worker-guest.py'
+                afiles[guest] = legacy_guest_source()
                 bfiles = {b.TARGET: (root / 'scripts/a4-credential-broker.py').read_bytes() + b'\n# previous source\n',
                           b.UNIT: b.UNIT_TEXT.encode()}
                 for files, journal in ((afiles, a.JOURNAL), (bfiles, b.JOURNAL)):
@@ -372,6 +500,13 @@ class HostContractTests(unittest.TestCase):
                 fixture = FixtureHost(root / 'fixture')
                 for destination, source in zip(host.ledgers, fixture.ledgers):
                     host.write(destination, source.read_bytes(), 0o600)
+                large_history = grown_supervisor_ledger(host.vm)
+                self.assertGreater(len(large_history), 2998598)
+                host.write(host.ledgers[0], large_history, 0o600)
+                supervisor = r.load('a3-worker-supervisor', ROOT)
+                supervisor.installer.secure = lambda _: None
+                loaded = supervisor.Supervisor(host=object(), journal=host.ledgers[0], runner_source='# fixture')
+                self.assertEqual(loaded.state, json.loads(large_history))
                 host.write(b.broker.CONFIG, b'{"role_id":"existing-role","secret_id":"existing-secret"}\n', 0o600)
                 host.write(root / '.env', ''.join(f'{k}={v}\n' for k, v in w.SETTINGS.items()).encode(), 0o600)
                 compose = 'services:\n  proxypilot:\n    privileged: true\n    pid: host\n    env_file:\n      - .env\n    volumes:\n      - /data:/data\n'
@@ -389,17 +524,85 @@ class HostContractTests(unittest.TestCase):
                 a.call = lambda *_a, **_k: {'ok': True, 'result': {'contract_version': 'website-review.v1',
                                            'available': False, 'code': 'PROVIDER_UNAVAILABLE'}}
                 refresh = r.Refresh(host, root / 'transaction')
-                before = {p: (p.read_bytes(), p.stat().st_mode & 0o777) for p in host.targets + host.protected}
+                preserved = host.protected + tuple(afiles.keys() - {host.targets[0]}) + (b.UNIT,) + host.ledgers
+                before = {p: (p.read_bytes(), p.stat().st_mode & 0o777) for p in host.targets + preserved}
                 self.assertEqual(host.identity(), key)
+                self.assertEqual(r.sha(guest.read_bytes()), LEGACY_GUEST_SHA)
+                self.assertEqual(r.sha((root / 'scripts/a3-worker-guest.py').read_bytes()), CURRENT_GUEST_SHA)
                 refresh.apply()
                 self.assertEqual(host.identity(), key)
-                for p in host.protected:
+                self.assertEqual(a.read_journal()['files'][str(guest)], LEGACY_GUEST_SHA)
+                self.assertEqual(set(refresh.read()['files'][n]['path'] for n in range(4)),
+                                 set(str(p) for p in host.targets))
+                for p in preserved:
                     self.assertEqual((p.read_bytes(), p.stat().st_mode & 0o777), before[p])
                 refresh.rollback()
-                for p in host.targets + host.protected:
+                self.assertEqual(a.read_journal()['files'][str(guest)], LEGACY_GUEST_SHA)
+                for p in host.targets + preserved:
                     self.assertEqual((p.read_bytes(), p.stat().st_mode & 0o777), before[p])
             finally:
                 listener.close()
+
+    def test_guest_exception_is_exact_and_every_other_adjacent_mismatch_names_its_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            host = r.Host.__new__(r.Host)
+            host.a3 = r.load('a3-install-supervisor', ROOT)
+            host.a4 = r.load('a4-install-broker', ROOT)
+            host.install, host.source, host.source_sha = root, root, 'a' * 40
+            host.targets = (root / 'supervisor/a3-worker-supervisor.py', root / 'broker/a4-credential-broker.py')
+            host.a3.TARGET, host.a3.UNIT = root / 'supervisor', root / 'systemd/a3.service'
+            host.a3.RENEW_SERVICE, host.a3.RENEW_TIMER = root / 'systemd/renew.service', root / 'systemd/renew.timer'
+            host.a4.UNIT = root / 'systemd/a4.service'
+            host.secure = lambda _: None
+            host.execute = lambda *_: host.source_sha
+            (root / 'scripts').mkdir()
+            for name in host.a3.SOURCES + ('a4-credential-broker.py',):
+                shutil.copyfile(ROOT / name, root / 'scripts' / name)
+            files = host.a3.plan_files(root / 'scripts')
+            guest = host.a3.TARGET / 'a3-worker-guest.py'
+            files[guest] = legacy_guest_source()
+            for path, data in files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            recorded = {str(p): r.sha(data) for p, data in files.items()}
+            host.a3.read_journal = lambda: {'files': recorded}
+            broker_unit = {str(host.a4.UNIT): r.sha(host.a4.UNIT_TEXT.encode())}
+            host.a4.read_journal = lambda: {'files': broker_unit}
+            def committed(argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, (ROOT / argv[-1].split(':scripts/')[1]).read_bytes())
+            with patch.object(r.subprocess, 'run', committed):
+                self.assertEqual(set(host.candidates()), set(host.targets))
+                candidate = root / 'scripts/a3-worker-guest.py'
+                guest.write_bytes(candidate.read_bytes())
+                recorded[str(guest)] = CURRENT_GUEST_SHA
+                self.assertEqual(set(host.candidates()), set(host.targets))
+                candidate.write_bytes(legacy_guest_source())
+                with self.assertRaisesRegex(ValueError, str(guest)):
+                    host.candidates()
+                candidate.write_bytes((ROOT / candidate.name).read_bytes())
+                guest.write_bytes(legacy_guest_source())
+                recorded[str(guest)] = LEGACY_GUEST_SHA
+                for victim in files.keys() - {host.targets[0]}:
+                    old = recorded[str(victim)]
+                    recorded[str(victim)] = r.sha(b'unknown but journal-recorded installation')
+                    original = victim.read_bytes()
+                    victim.write_bytes(b'unknown but journal-recorded installation')
+                    with self.assertRaisesRegex(ValueError, str(victim)):
+                        host.candidates()
+                    recorded[str(victim)] = old
+                    victim.write_bytes(original)
+                guest.write_bytes(b'foreign bytes with the allowed old journal pin')
+                with self.assertRaisesRegex(ValueError, str(guest)):
+                    host.candidates()
+                guest.write_bytes(legacy_guest_source())
+                candidate.write_bytes(candidate.read_bytes() + b'\n# unknown candidate\n')
+                with self.assertRaisesRegex(ValueError, str(guest)):
+                    host.candidates()
+                candidate.write_bytes((ROOT / candidate.name).read_bytes())
+                broker_unit[str(host.a4.UNIT)] = 'b' * 64
+                with self.assertRaisesRegex(ValueError, str(host.a4.UNIT)):
+                    host.candidates()
 
     def test_real_candidate_commit_pin_and_compile_not_just_shebang(self):
         with tempfile.TemporaryDirectory() as temp:

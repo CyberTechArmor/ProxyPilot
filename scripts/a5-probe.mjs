@@ -187,17 +187,15 @@ export function seed(world) {
   return world;
 }
 
-// Owner drafts, an independent reviewer approves, and every profile of the
-// project is assigned the new version (the existing review path, no shortcut).
+// The owner explicitly saves and approves, then assigns every profile of the
+// project to that immutable version through the normal publication path.
 export function approveGuide(world, key, note = '') {
-  const { store, owner, reviewer } = world;
+  const { store, owner } = world;
   const project = world.projects[key];
   if (project.latest) store.startRevision(owner, project.id, store.draft(owner, project.id).revision,
     { version_id: project.latest.id, discard_draft: true });
-  store.saveDraft(owner, project.id, store.draft(owner, project.id).revision,
-    { title: GUIDES[key].title, instructions: guideInstructions(GUIDES[key], note) });
-  const submitted = store.submit(owner, project.id, store.draft(owner, project.id).revision, {}).submission;
-  project.latest = store.review(reviewer, project.id, submitted.id, 1, { decision: 'approve' }).version;
+  project.latest = store.saveDraft(owner, project.id, store.draft(owner, project.id).revision,
+    { title: GUIDES[key].title, instructions: guideInstructions(GUIDES[key], note) }).version;
   for (const profileId of Object.values(project.profiles)) {
     const profile = store.profile(owner, project.id, profileId).profile;
     store.assignProfile(owner, project.id, profileId, profile.revision, { guide_version_id: project.latest.id });

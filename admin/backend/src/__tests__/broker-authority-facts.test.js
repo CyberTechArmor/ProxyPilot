@@ -6,7 +6,7 @@ test('authority facts project current eligibility and withdrawn guide without re
  const f=operationsFixture();try{
  const owner=f.addUser(),reviewer=f.addUser(),p=f.store.create(owner,{name:'Metadata'});f.store.grant(owner,p.id,reviewer.id,p.revision,{role:'reviewer'});
  f.db.exec("ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT 'SECRET';");brokerTaskMigration1114(f.adapter);
- f.store.saveDraft(owner,p.id,1,{title:'Private title',instructions:'PRIVATE_GUIDE'});const s=f.store.submit(owner,p.id,f.store.draft(owner,p.id).revision,{}).submission,v=f.store.review(reviewer,p.id,s.id,s.revision,{decision:'approve'}).version;
+ const v=f.store.saveDraft(owner,p.id,1,{title:'Private title',instructions:'PRIVATE_GUIDE'}).version;
  const {agent}=f.store.createConfiguration(owner,p.id,{workflow_type:'typed_api_v1',work:{name:'PRIVATE_NAME',task:'PRIVATE_TASK',guide_ref:{id:v.id,hash:v.content_hash}},controls:{}});
  let facts=readLocalFacts(f.db);assert.equal(facts.projects[0].current_guide.id,v.id);assert.equal(facts.agents[0].id,agent.id);assert.equal(facts.agents[0].work.guide_ref.hash,v.content_hash);
  assert.equal(/SECRET|PRIVATE_/.test(JSON.stringify(facts)),false);assert.equal(facts.projects[0].members[0].user_id,reviewer.id);

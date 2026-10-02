@@ -46,9 +46,7 @@ function setup({ rules = baseRules, consent = true, actions = ['navigate', 'clic
     if (latest) f.store.startRevision(owner, p.id, f.store.draft(owner, p.id).revision,
       { version_id: latest.id, discard_draft: true });
     const draft = f.store.draft(owner, p.id);
-    f.store.saveDraft(owner, p.id, draft.revision, { title: 'Sign-in guide', instructions });
-    const submitted = f.store.submit(owner, p.id, f.store.draft(owner, p.id).revision, {}).submission;
-    latest = f.store.review(reviewer, p.id, submitted.id, 1, { decision: 'approve' }).version;
+    latest = f.store.saveDraft(owner, p.id, draft.revision, { title: 'Sign-in guide', instructions }).version;
     return latest;
   };
   const version = approveGuide(guideWith(rules));

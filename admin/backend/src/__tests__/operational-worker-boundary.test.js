@@ -107,9 +107,7 @@ test('durable single profile run, attempt fence, action quota, launch failure an
     const created=f.store.createProfile(owner,p.id,f.store.get(owner,p.id).revision,
       {display_name:'Synthetic',workflow_type:'synthetic_sign_in',proposed_actions:['navigate','read'],
         proposed_origins:['https://demo.fractionate.ai']}).profile;
-    f.store.saveDraft(owner,p.id,1,{title:'Guide',instructions:'Synthetic only'});
-    const submitted=f.store.submit(owner,p.id,2,{}).submission;
-    const version=f.store.review(reviewer,p.id,submitted.id,1,{decision:'approve'}).version;
+    const version=f.store.saveDraft(owner,p.id,1,{title:'Guide',instructions:'Synthetic only'}).version;
     const profile=f.store.assignProfile(owner,p.id,created.id,created.revision,{guide_version_id:version.id}).profile;
     const project=f.store.get(owner,p.id);
     let now=new Date('2026-09-25T00:00:00Z');

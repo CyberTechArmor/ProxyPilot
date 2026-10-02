@@ -121,6 +121,42 @@ an already available feature. If the first sign-in pilot uses only the public
 fixture, it may proceed through A2–A8 without P3/P4 after the user approves a
 smaller credential scope; the broader vault backlog remains visible.
 
+## Broker boundary and expanded capabilities backlog - 2026-10-02
+
+Thomas requested that boundary confirmation and the expanded capabilities remain
+visible backlog. **Boundary confirmation is not accepted; no broker activation,
+credential enrollment, host deployment or real-service pilot is authorized by
+this record.** The successful dashboard update is not broker acceptance. The
+earlier A1/P0-P6 plan above is retained as historical scope; the current broker
+implementation and its limits are described in the
+[implementation reference](fractionate-openbao-broker-implementation-reference.md).
+
+| ID | Deferred item | Required decision and completion evidence | Status |
+|---|---|---|---|
+| CB-01 | Confirm the credential-use trust boundary | Choose protection from an agent/VM only with explicit backend/host-root trust, or protection from a compromised backend/host. Record exact broker/vault/identity/authority placement, administrators, key/bootstrap custody and access paths. The implemented `local_backend_authority` source trusts backend metadata and host root; its signature is not independence. A stronger boundary needs separately controlled custody, signing and current project/task/policy authority outside the backend's root/hypervisor domain. Demonstrate backend policy/grant/task forgery denial, actor/certificate mismatch denial, current eligibility/revocation/lease expiry, restricted vault ACLs, secret-free outputs and restored-policy quarantine. Same-host containers/VMs, TLS, a checkbox or deployment assertion alone are not acceptance. S6/SEC-01 remain open. | Backlog; not confirmed or accepted |
+| CB-02 | Configured broker/worker installation and bounded activation | Select exact Keycloak issuer/client/subject mapping and fresh-proof level; broker-owned intake/approval origins; TLS/mTLS identities; restricted enrollment/read AppRoles and opaque slots; registered worker and source; private state/retention/recovery. Verify compatible components and live readiness before enabling intake/use. Existing Keycloak/OpenBao and the Go host agent do not install the new Node broker/worker. Present a reviewed scoped rollout/rollback after those decisions; preserve existing A4, routes, custody and evidence. | Backlog; no activation paste selected |
+| CB-03 | First real typed API adapter and pilot | Only `synthetic-ledger-v1` exists. GitHub Issues read-only on one disposable repository remains a candidate, not an implemented adapter or selected live resource. Decide exact service/resource, minimal credential permissions, typed operation/result schemas, TLS/egress policy and owner. Prove allow/deny, leak/echo, revocation, uncertainty and recovery behavior before a separately approved real-key pilot. Broader API/provider adapters require individual scope and review. | Backlog; real adapter/pilot absent |
+| CB-04 | Broader browser, website-password and OAuth connection support | Define provider-specific authorization, human consent/account binding, refresh/revocation/MFA and browser isolation contracts. Do not equate broker OIDC human login with an upstream OAuth adapter. The existing bounded A4 synthetic browser sign-in remains separate; it does not authorize general browser/password/OAuth enrollment. | Backlog; preserve existing pilot |
+| CB-05 | Real consumer migration and legacy-authority retirement | Plan exact live human authorization, transfer, verification, revoke/denial, cutover and rollback; no uncertain write replay. Disposable migration mechanics are not live migration acceptance. Actual Infisical authentication/MFA integration, per-destination consistency and retirement need separate implementation/review; preserve P3/P4 feasibility and ownership decisions. | Backlog; no live migration |
+| CB-06 | Multiple instances, entities, workers and concurrent work | Define multi-instance leases, isolation, queue fairness, budgets, per-run cancellation, and per-entity identity/custody/routing. Current dashboard configuration selects one broker and one worker; there is no fleet router, central registry or hard shared-tenant boundary. Keep the optional future management platform separate from self-contained ProxyPilot. | Backlog; link F5/F6 |
+| CB-07 | Additional credential classes and integration breadth | Separately assess dynamic database credentials, transparent interception, broad SDK compatibility, personal-vault imports/organization ownership and wider provider support. Do not promise use-without-reveal for an identity that can fetch the value, capture personal vault keys, or treat whole-Infisical retirement as delivered. | Backlog; feasibility and consent required |
+| CB-08 | Production recovery, retention and audit guarantees | Map protected broker/worker/source state and private identity/custody backups, off-host encrypted transport, isolated restore/revalidation, uncertain-operation handling, retention and verified erasure. Existing durable events are administrator-modifiable; append-only or immutable audit claims need a defined threat model and independent tamper evidence/custody. A8 deferred proofs and outstanding SEC/INF findings remain visible. | Backlog; production guarantees unaccepted |
+
+Boundary implementation contracts:
+[configured service](../../services/credential-broker/CONFIGURED.md),
+[independent authority](../../services/credential-broker/authority-contract.md),
+[local source trust](../../services/credential-broker/LOCAL_AUTHORITY_SOURCE.md),
+[worker](../../services/credential-broker/RUNNER.md), and
+[deployment compatibility](fractionate-openbao-broker-deployment-options.md).
+Recording CB-01 does not select either trust option, provision a service or close
+the host-root finding. Reconfirm current deployment facts when that work is scoped.
+
+The separate guide ingestion/AI conversion and durable run-history architecture
+request is recorded as F8/F9 in the
+[official follow-on plan](fractionate-follow-on-plan.md#guide-ingestion-and-run-history-architecture---2026-10-02).
+It must preserve permission boundaries and provenance rather than turning a
+knowledge index, uploaded document or generated guide into credential authority.
+
 ## Source notes
 
 - Local `docs/features/operations.md` and

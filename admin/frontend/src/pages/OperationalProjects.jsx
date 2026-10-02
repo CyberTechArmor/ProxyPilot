@@ -30,7 +30,7 @@ export default function OperationalProjects() {
     {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
     {enabled===null?<p role="status">Loading Operations.</p>:!enabled?<p>Operations is not turned on for this installation.{canManage?' Turn it on in Operations settings below.':' An administrator turns it on in Operations settings.'}</p>:<>
       <div className="flex flex-col sm:flex-row sm:items-end gap-3"><div className="w-full sm:w-40"><Choice label="Show projects" value={state} onChange={e=>setState(e.target.value)}><option value="active">Active</option><option value="archived">Archived</option><option value="all">All</option></Choice></div><Action variant="outline" disabled={busy} onClick={()=>load()}>Refresh projects</Action></div>
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)] gap-4 min-w-0" data-project-workspace>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)] gap-4 min-w-0" data-project-workspace>
         <ProjectBrowser projects={rows} loading={busy} cursor={cursor} onMore={()=>load(cursor)}/>
         <section className="operations-card rounded-md border bg-card p-4 sm:p-6 min-w-0 space-y-6" data-selected-project>
           <header className="space-y-3"><FolderOpen className="h-8 w-8 text-primary" aria-hidden="true"/><h2 className="operations-heading">{rows.length?'Choose a project':'Give repeatable work a home'}</h2><p className="text-muted-foreground">{rows.length?'Open a project to see its guide, readiness, agents and recent activity.':'Create a project, save its guide, then decide who can use it.'}</p></header>

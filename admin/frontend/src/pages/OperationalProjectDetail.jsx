@@ -97,7 +97,7 @@ function Operation({id}) {
   </div>;
   return <div className="operations-ui w-full max-w-screen-2xl mx-auto space-y-6 min-w-0">
     <ProjectPageHeader><NewProjectButton/></ProjectPageHeader>
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,0.36fr)_minmax(0,0.64fr)] gap-4 min-w-0" data-project-workspace>
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)] gap-4 min-w-0" data-project-workspace>
     <ProjectBrowser projects={projectList.some(item=>item.id===p.id)?projectList.map(item=>item.id===p.id?p:item):[p,...projectList]} selectedId={id} section={section} collapsible/>
     <div className="operations-card space-y-4 min-w-0 rounded-md border bg-card p-4 sm:p-6" data-selected-project>
     <header className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
@@ -107,32 +107,31 @@ function Operation({id}) {
     {section==='Overview'&&<>
       <p className="whitespace-pre-wrap break-words text-muted-foreground">{p.description||'Add a purpose in Details to explain the work this project supports.'}</p>
       {p.archived_at&&<p className="rounded-md border bg-muted p-3 text-sm break-words">Archived: {p.archive_reason}</p>}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Panel title="Guide & material" icon={FileText}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4" data-overview-summary>
+        <Panel title="Guide & material" icon={FileText} className="!space-y-2 sm:!p-4">
           <div className="flex items-start gap-3"><FileText className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div className="min-w-0"><p className="font-medium break-words">{p.current_version?.title||d.title||'No guide yet'}</p><p className="text-sm text-muted-foreground mt-1">{p.current_version?'Approved procedure · v'+p.current_version.version_number:pending?'Saved snapshot ready to approve':'Write instructions, then save an approved version.'}</p></div></div>
-          {capability&&<p className="text-sm text-muted-foreground">Demonstrations and supporting evidence are available in Guide.</p>}
+          <p className="text-xs text-muted-foreground">Saving a guide starts no run.{capability?' Evidence is in Guide.':''}</p>
           <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Guide')}>{editable?'Open guide':'Read guide'}<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
         </Panel>
-        <Panel title="Version & readiness" icon={CheckCircle2}>
-          <ul className="space-y-3 text-sm"><li className="flex items-start gap-2"><span className={'mt-1 h-2 w-2 shrink-0 rounded-full '+(p.current_version?'bg-primary':'bg-muted-foreground')} aria-hidden="true"/><span>{p.current_version?'Approved guide v'+p.current_version.version_number:'Save a guide to create an approved version'}</span></li><li className="flex items-start gap-2"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true"/><span>{pending?'Pending snapshot requires Save and approve':d.status==='draft'?'Draft changes are separate from the current version':'Guide history is preserved'}</span></li><li className="text-muted-foreground">{r.runs.length} manual work record{r.runs.length===1?'':'s'}{r.next_cursor?' on this page':''}</li></ul>
+        <Panel title="Version & readiness" icon={CheckCircle2} className="!space-y-2 sm:!p-4">
+          <ul className="space-y-2 text-sm"><li className="flex items-start gap-2"><span className={'mt-1 h-2 w-2 shrink-0 rounded-full '+(p.current_version?'bg-primary':'bg-muted-foreground')} aria-hidden="true"/><span>{p.current_version?'Approved guide v'+p.current_version.version_number:'Save a guide to create an approved version'}</span></li><li className="flex items-start gap-2"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true"/><span>{pending?'Pending snapshot requires Save and approve':d.status==='draft'?'Draft changes are separate from the current version':'Guide history is preserved'}</span></li><li className="text-muted-foreground">{r.runs.length} manual work record{r.runs.length===1?'':'s'}{r.next_cursor?' on this page':''}</li></ul>
           <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Versions')}>View versions<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
         </Panel>
-        {agentCapability&&<Panel title="Agents" icon={Bot}>
-          <p className="text-sm text-muted-foreground">Configure work, permitted connections and limits for this project.</p>
-          <p className="text-sm text-muted-foreground">A configured task is not a runnable workflow. Execution requires a supported workflow and runtime, an approved guide and permitted connections.</p>
-          <p className="text-sm text-muted-foreground">The synthetic sign-in pilot is limited to demo.fractionate.ai.</p>
-          {runsCapability&&!execution.available&&execution.message&&<p className="text-sm text-muted-foreground">{execution.message}</p>}
+        {agentCapability&&<Panel title="Agents" icon={Bot} className="!space-y-2 sm:!p-4">
+          <p className="text-sm text-muted-foreground">Runs need an approved guide, permitted connections and operator authority.</p>
+          <p className="text-xs text-muted-foreground">Synthetic pilot: demo.fractionate.ai only.</p>
+          <details><summary className="min-h-11 cursor-pointer py-3 text-sm">Execution requirements</summary><div className="space-y-2 pb-2"><p className="text-sm text-muted-foreground">A configured task describes intended work. Execution needs a supported workflow and runtime, permitted connections and limits. Check readiness in Agents before starting work.</p>{runsCapability&&!execution.available&&execution.message&&<p className="text-sm text-muted-foreground">{execution.message}</p>}</div></details>
           <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Agents')}>Open agents<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
         </Panel>}
-        <Panel title="Recent activity" icon={Activity}>
-          {e.events.length?<ul className="divide-y">{e.events.slice(0,4).map(row=><li key={row.id} className="py-2 first:pt-0 text-sm break-words"><p className="font-medium">{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>:<p className="text-sm text-muted-foreground">No activity recorded yet.</p>}
+        <Panel title="Recent activity" icon={Activity} className="!space-y-2 sm:!p-4">
+          {e.events.length?<ul className="divide-y">{e.events.slice(0,3).map(row=><li key={row.id} className="py-2 first:pt-0 last:pb-0 text-sm break-words"><p className="font-medium">{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>:<p className="text-sm text-muted-foreground">No activity recorded yet.</p>}
           <div className="flex flex-wrap gap-2"><Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Runs')}>View work records<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action></div>
-          {(e.events.length>4||e.next_cursor)&&<details className="border-t pt-2"><summary className="cursor-pointer min-h-11 py-3 text-sm">View activity history</summary><ul className="divide-y">{e.events.map(row=><li key={row.id} className="py-2 text-sm break-words"><p>{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>{e.next_cursor&&<Action disabled={busy} variant="outline" onClick={()=>loadMore('e')}>Load older activity</Action>}</details>}
+          {(e.events.length>3||e.next_cursor)&&<details className="border-t pt-2"><summary className="cursor-pointer min-h-11 py-3 text-sm">View activity history</summary><ul className="divide-y">{e.events.map(row=><li key={row.id} className="py-2 text-sm break-words"><p>{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>{e.next_cursor&&<Action disabled={busy} variant="outline" onClick={()=>loadMore('e')}>Load older activity</Action>}</details>}
         </Panel>
       </div>
-      <Panel title="Access & connections" icon={KeyRound} actions={<Action variant="ghost" className="text-primary gap-2" onClick={()=>openSection('Access')}>Manage access<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>}>
+      <div data-overview-access><Panel title="Access & connections" icon={KeyRound} className="!space-y-2 sm:!p-4" actions={<Action variant="ghost" className="text-primary gap-2" onClick={()=>openSection('Access')}>Manage access<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>}>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div className="flex items-start gap-3"><Users className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">People</p><p className="text-sm text-muted-foreground">{a?1+a.members.length+' people with project access':'Your role: '+p.own_role}</p></div></div><div className="flex items-start gap-3"><KeyRound className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">Connection permissions</p><p className="text-sm text-muted-foreground">Granted separately from project membership.</p></div></div></div>
-      </Panel>
+      </Panel></div>
     </>}
     {section==='Details'&&<Panel title="Project details" icon={Settings2}>
       <p className="text-sm text-muted-foreground">Owner: {p.owner_name}. {p.archived_at?'Archived':'Active'} project.</p>

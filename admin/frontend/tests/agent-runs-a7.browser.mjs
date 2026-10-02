@@ -1,8 +1,8 @@
 // A7 browser journeys against the UI harness (agent-runs-harness.mjs): the live
 // view and dashboard takeover, the agent-control prompt, decisions after a run,
 // resume, practice runs, the Review tab with the model summary, and layout at
-// six widths. The signalling path is real (the dashboard's own Neko client â†’
-// the live WebSocket route â†’ the A7 service â†’ the launcher â†’ the scripted
+// six widths. The signalling path is real (the dashboard's own Neko client →
+// the live WebSocket route → the A7 service → the launcher → the scripted
 // supervisor's relay); only the browser's WebRTC is stubbed (a canvas video
 // and an open data channel that records the bytes it is given). Run from
 // admin/frontend:   node tests/agent-runs-a7.browser.mjs
@@ -41,7 +41,7 @@ function stubWebRtc() {
         const g = canvas.getContext('2d');
         let n = 0;
         const draw = () => { g.fillStyle = '#1e3a8a'; g.fillRect(0, 0, 1280, 720); g.fillStyle = '#f8fafc'; g.fillRect(360, 200, 560, 360);
-          g.fillStyle = '#0f172a'; g.font = '40px sans-serif'; g.fillText(`demo.fractionate.ai Â· frame ${n += 1}`, 380, 260); };
+          g.fillStyle = '#0f172a'; g.font = '40px sans-serif'; g.fillText(`demo.fractionate.ai · frame ${n += 1}`, 380, 260); };
         draw(); setInterval(draw, 250);
         const stream = canvas.captureStream(8);
         this.ontrack?.({ track: stream.getVideoTracks()[0], streams: [stream] });
@@ -284,7 +284,7 @@ try {
     await owner.getByText('Model summaries of finished runs: allowed').waitFor(WAIT);
     const page = await as('operator', { width: 375, height: 800, live: false });
     await page.goto(runsUrl());
-    await page.getByRole('button', { name: 'Practice runâ€¦' }).click();
+    await page.getByRole('button', { name: 'Practice run…' }).click();
     const dialog = page.getByRole('dialog').filter({ hasText: 'Start a practice run' });
     await dialog.waitFor(WAIT);
     await layoutCheck(page, 'practice-dialog', { dialog: true });

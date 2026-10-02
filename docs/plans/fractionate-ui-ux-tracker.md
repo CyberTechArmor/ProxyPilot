@@ -2,12 +2,12 @@
 
 Owner: Thomas. Started 2026-10-02; repository implementation and verification on Duo.
 Branch: `ui/mockup-alignment-20261002`. Frozen product source: `00b5c68d0816cb0921a2caee71a11adcf8d71ec7`.
-Local implementation and evidence are ready for review. Full UI publication/merge requires explicit instruction; this branch is unpublished.
+Thomas authorized draft PR publication on 2026-10-02. Final demo labels/navigation are being verified before publication; merge and deployment remain pending separate decisions.
 
 ## Baseline, dependencies and preserved backlog
 
-- Original GitHub main was verified and fetched at `0f1b48f33fe31723100b8c758c717899bb7b3f1d`. Latest independently verified integrated main is `35c2e9d4eb657f92e1499d8d56035217b04f7ae6`, merged locally as `38a14238d9de2c5d12eec99365e095cefc73a0a3`.
-- Original docs-only backlog `ac62d45dba876b248b687679268a8d165ed221fd` is preserved unchanged as an ancestor. Its clean original worktree remains `C:/Users/thoma/Documents/Codex/2026-10-01/task-3/proxypilot-backlog-docs`.
+- Original GitHub main was verified and fetched at `0f1b48f33fe31723100b8c758c717899bb7b3f1d`. Main `35c2e9d4eb657f92e1499d8d56035217b04f7ae6` was merged locally as `38a14238d9de2c5d12eec99365e095cefc73a0a3`. Before draft publication, current GitHub main was independently verified at `ed87dd059b9dafb9c34f19098416cb3870bf3ec1` and cleanly integrated as `e5066256b409314d8bbb73fb156b054052f45467`; the intervening compatibility/updater changes do not change UI product files.
+- Original docs-only backlog `ac62d45dba876b248b687679268a8d165ed221fd` is preserved unchanged as an ancestor. Its clean original `proxypilot-backlog-docs` worktree is preserved on Duo.
 - [CB01-08](fractionate-project-credentials-backlog.md) and [F8/F9](fractionate-follow-on-plan.md) own unaccepted custody/trust confirmation, broker deployment/activation, independent isolation, real adapters/pilot, browser/OAuth, expanded credentials/migration, ingestion retaining originals with AI guide drafts and human approval, and relational state/S3 artifacts/optional vector retrieval/event ledger with permitted outcomes/comments. These remain backlog planning: no stack choice, implementation or trust acceptance.
 - Guide PR720 was separately authorized, merged and successfully updated according to the parent. Its guide-only Save-to-approved policy is preserved below.
 - Website/updater PR721 was separately reviewed and merged at main 35c2e9d4. Parent reports compatibility-only repair PR722 merged at `f5a8509b9fb1a931d174fcbe1e531190c8c691ab` and successful website deployment to `ed87dd05`; the first live pilot is pending Thomas. Recovery/deployment were separately owned. This executor performed no production actions; local tests remain attributed to the integrated main 35c product.
@@ -31,7 +31,7 @@ No completion percentage is assigned. Local evidence does not imply Thomas's vis
 
 ## Final evidence and comparison
 
-All new build/browser/visual evidence below uses frozen product `00b5c68d0816cb0921a2caee71a11adcf8d71ec7` unless explicitly attributed otherwise. Final documentation and PNG retention do not change product bytes.
+The retained build/browser/visual evidence below uses frozen product `00b5c68d0816cb0921a2caee71a11adcf8d71ec7` unless explicitly attributed otherwise. Final documentation and PNG retention do not change product bytes.
 
 - Final production build and JSX parsing passed; nine frontend unit tests passed. The 224 dashboard/backend contracts passed at merge 38a14238; backend bytes are unchanged in the final frozen source.
 - UI alignment: 8 journeys/28 layouts; Connections: 13/18; A6: 20/96; A7: 6/42; typed tasks: 7/6. All recorded assertions passed on the final product source. Guide checks passed with 16 layouts, immutable approval, stale-evidence CAS and no run starts.

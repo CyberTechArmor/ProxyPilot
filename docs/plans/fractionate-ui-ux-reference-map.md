@@ -1,6 +1,6 @@
 # UI/UX reference and acceptance map
 
-All references were materialized and inspected on Duo on 2026-10-02. Images live in `C:/Users/thoma/Documents/Codex/2026-10-02/task/references`; originals live in `C:/Users/thoma/Fractionate/OpenAI/outputs/agent-platform-setup`. Library identity and version metadata remain associated with each local image.
+All references were materialized and inspected on Duo on 2026-10-02. Materialized images and original setup assets remain in their local Duo evidence directories; absolute host paths are omitted from this public review. Library identity and version metadata remain associated with each local image.
 
 ## Approved references
 

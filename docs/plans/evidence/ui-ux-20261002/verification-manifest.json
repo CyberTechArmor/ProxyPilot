@@ -110,14 +110,14 @@
     },
     {
       "name": "broker-integrated.browser--browser.log",
-      "bytes": 2639,
-      "sha256": "287f64cd7fb0c19ae9c4d3126c3bcb047f88af9d3d9cc7e928aa7534a14b6f39",
+      "bytes": 2175,
+      "sha256": "c8e3860e0bda1a18fdf586400784982ecc3374c057b1b6990287e4bbc9b0095a",
       "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
     },
     {
       "name": "broker-saved-agent.integrated.browser--browser.log",
-      "bytes": 2574,
-      "sha256": "d09181482ac055a0d273adea462b36812df5560639328438cef56bcefe0ff857",
+      "bytes": 2110,
+      "sha256": "1b8fa113a159d4ebfc8086d25ba8c3ae2d271d4366d6e31601e8ba330c81ddaf",
       "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
     },
     {
@@ -128,8 +128,8 @@
     },
     {
       "name": "build.log",
-      "bytes": 14702,
-      "sha256": "5fc3681b09e088c0ca27b14dd75ff863971823677211391a1a4059fb3dd8917a",
+      "bytes": 8032,
+      "sha256": "07c7a370f316b12596471951cfb47a35d765b7230590a6eded9578c71a7d796f",
       "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
     },
     {
@@ -192,5 +192,6 @@
       "sha256": "ed0a5b5dd540fc355dc5078ff4ea349de4edf9d7afb23dc6542c512bcceb0dbe",
       "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
     }
-  ]
+  ],
+  "publication_note": "Public logs replace the absolute Duo repository prefix with <repo>; raw local logs remain retained. Outcome lines and source attribution are unchanged. Hashes below describe the published sanitized copies."
 }

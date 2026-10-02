@@ -251,7 +251,19 @@ try {
     });
     assert.deepEqual(fit, { frame: true, items: [true, true, true, true], pageScrolled: 0 });
     report.deck_fit = fit;
-    // The banner is one row; its nine fields stay in the dialog.
+    const railPlacement = await page.evaluate(() => {
+      const approval = document.querySelector('[data-run-approval]').getBoundingClientRect();
+      const browser = document.querySelector('[data-browser-pane]').getBoundingClientRect();
+      const context = document.querySelector('[data-run-context]').getBoundingClientRect();
+      return { rightOfBrowser: approval.left >= browser.right,
+        alignedWithBrowser: Math.abs(approval.top - browser.top) <= 1,
+        aboveContext: approval.bottom <= context.top,
+        alignedWithContext: Math.abs(approval.left - context.left) <= 1 && Math.abs(approval.right - context.right) <= 1 };
+    });
+    assert.deepEqual(railPlacement, { rightOfBrowser: true, alignedWithBrowser: true, aboveContext: true, alignedWithContext: true });
+    assert.equal(await approvalCard(page).count(), 1, 'one approval card across responsive layouts');
+    report.approval_rail_placement = railPlacement;
+    // The right-rail card stays before Browser in the DOM; nine fields remain in the dialog.
     assert.equal(await approvalCard(page).getByTestId('approval-digest').count(), 0);
     await approvalCard(page).getByText(/digest [0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4} …/).waitFor(WAIT);
     assert.deepEqual(await deadControls(page), []);
@@ -283,10 +295,13 @@ try {
     const page = await as('operator', { width: 375, height: 812 });
     const runId = await startFromUi(page);
     await approvalCard(page).waitFor(WAIT);
+    assert.equal(await approvalCard(page).count(), 1);
+    assert.equal(await page.getByRole('button', { name: 'Review and approve' }).count(), 1);
     // Browser is the default while the run is running: the full banner form.
     assert.equal(await panelButton(page, 'Browser').getAttribute('aria-pressed'), 'true');
     assert.equal((await page.getByRole('button', { name: 'Review and approve' }).innerText()).trim(), 'Review and approve');
     await panelButton(page, 'Activity').click();
+    assert.equal(await approvalCard(page).isVisible(), true, 'approval remains outside the Activity panel');
     assert.equal(new URL(page.url()).searchParams.get('panel'), 'activity');
     await page.getByTestId('step-1').waitFor(WAIT);
     assert.equal(await page.getByTestId('browser-frame').isVisible(), false);
@@ -297,6 +312,7 @@ try {
     assert.equal(await page.getByTestId('browser-frame').isVisible(), false);
     assert.equal(new URL(page.url()).searchParams.get('run'), runId);
     await panelButton(page, 'Details').click();
+    assert.equal(await approvalCard(page).isVisible(), true, 'approval remains outside the Details panel');
     await page.getByRole('button', { name: 'Refresh run' }).waitFor(WAIT);
     await page.reload();
     await page.getByRole('tab', { name: 'Result' }).waitFor(WAIT);
@@ -304,6 +320,7 @@ try {
     assert.deepEqual(await deadControls(page), []);
     await shot(page, 'phone-details');
     await panelButton(page, 'Browser').click();
+    assert.equal(await approvalCard(page).isVisible(), true, 'approval remains visible above the default Browser panel');
     await page.getByTestId('browser-frame').waitFor(WAIT);
     assert.equal(new URL(page.url()).searchParams.get('panel'), 'browser');
     // The reader chose Browser, so it stays after the run ends: Ended, with the last frame.

@@ -93,7 +93,7 @@ function Thumb({ frame, onFrame }) {
 function FeedItem({ item, data, thumb, onFrame }) {
   const head = (tone, extra = null) => <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
     <KindChip kind={item.kind} tone={tone}/><time dateTime={item.at}>{clock(item.at)}</time>{extra}</p>;
-  const box = 'flex gap-3 border-b border-border/70 pb-3 pt-1 min-w-0';
+  const box = 'flex gap-3 border-b border-border/70 pb-2 min-w-0';
   if (item.step) {
     const { step: s, call } = item;
     return <li className={box} data-testid={`step-${s.ordinal}`}>
@@ -117,7 +117,7 @@ function FeedItem({ item, data, thumb, onFrame }) {
       </div>
     </li>;
   }
-  return <li className={`${box} ${item.open ? 'rounded-md border border-amber-500/70 bg-amber-500/10 p-3' : ''}`}>
+  return <li className={`${box} ${item.open ? 'rounded-md border border-amber-500/70 bg-amber-500/10 p-2' : ''}`}>
     <div className="min-w-0 flex-1 space-y-0.5">{head()}
       <p className="text-sm font-medium break-words">{item.title}</p>
       {item.body && <p className="text-[13px] text-muted-foreground break-words">{item.body}</p>}
@@ -223,22 +223,23 @@ export function ReconcilePanel({ data, busy, onDecide }) {
   </section>;
 }
 
-// Compact: the nine digest fields stay in the dialog and the inbox; approving
-// still needs the dialog. On a phone the Activity and Details panels get a
-// one-row form.
+// One approval card, before Browser in the DOM. The desktop grid places it
+// above the context rail; on phones it stays visible before every panel.
+// The nine digest fields stay in the dialog and inbox. Approval still requires
+// that dialog, the digest confirmation and sudo.
 function ApprovalBanner({ approval, compact, onReview }) {
   const action = ACTION_TEXT[approval.action] ?? approval.action;
   // Sticky under the app bar on a phone or tablet: the padding strip covers the
   // layout scroller's own padding, and the negative margin keeps the flow gap.
-  return <section aria-label={DECK_TEXT.approvalNeeded} className="sticky -top-4 z-20 -mt-4 bg-background pt-4 md:-top-8 md:-mt-8 md:pt-8 lg:static lg:mt-0 lg:pt-0">
-    <div className={`flex gap-3 rounded-lg border-2 border-amber-500/70 bg-amber-500/10 p-3 lg:flex-row lg:items-center lg:gap-4 lg:py-2 ${compact ? 'flex-row items-center' : 'flex-col'}`}>
-      <AlertTriangle aria-hidden="true" className="hidden lg:block h-6 w-6 shrink-0 text-amber-600 dark:text-amber-400"/>
+  return <section aria-label={DECK_TEXT.approvalNeeded} className="sticky -top-4 z-20 -mt-4 bg-background pt-4 md:-top-8 md:-mt-8 md:pt-8 lg:static lg:col-start-2 lg:row-start-1 lg:mt-0 lg:pt-0" data-run-approval>
+    <div className={`operations-card flex gap-2 rounded-md border border-amber-500/70 bg-amber-500/10 p-3 lg:flex-col lg:items-stretch ${compact ? 'flex-row items-center' : 'flex-col'}`}>
       <div className={`min-w-0 flex-1 ${compact ? 'hidden lg:block' : ''}`}>
-        <p className="font-semibold break-words">{DECK_TEXT.approvalTitle(action)}</p>
-        <p className="text-sm break-words">{DECK_TEXT.approvalLine(clock(approval.requested_at), grouped(approval.digest.slice(0, 12)))}</p>
+        <h2 className="text-lg font-semibold flex items-center gap-2"><AlertTriangle aria-hidden="true" className="hidden lg:block h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400"/>{DECK_TEXT.approvalNeeded}</h2>
+        <p className="mt-1 text-sm font-medium break-words">{action}</p>
+        <p className="mt-1 text-xs text-muted-foreground break-words">{DECK_TEXT.approvalLine(clock(approval.requested_at), grouped(approval.digest.slice(0, 12)))}</p>
       </div>
       {compact && <p className="min-w-0 flex-1 font-semibold lg:hidden">{DECK_TEXT.approvalNeeded}</p>}
-      <Action aria-label={DECK_TEXT.review} className={`shrink-0 ${compact ? '' : 'w-full lg:w-auto'}`} onClick={onReview}>
+      <Action aria-label={DECK_TEXT.review} className={`shrink-0 lg:w-full ${compact ? '' : 'w-full'}`} onClick={onReview}>
         {compact ? <><span className="lg:hidden">{DECK_TEXT.reviewShort}</span><span className="hidden lg:inline">{DECK_TEXT.review}</span></> : DECK_TEXT.review}</Action>
     </div>
   </section>;
@@ -447,7 +448,7 @@ function ActivityColumn({ feed, data, thumbs, visible, onFrame, className }) {
       <span className="text-sm text-muted-foreground">{DECK_TEXT.events(feed.length)}</span>
     </div>
     <p id={noteId} className="sr-only">{DECK_TEXT.activityNote}</p>
-    <div ref={box} className="space-y-3 p-4 lg:flex-auto lg:min-h-0 lg:overflow-y-auto" data-testid="activity-scroller">
+    <div ref={box} className="space-y-2 p-3 lg:flex-auto lg:min-h-0 lg:overflow-y-auto" data-testid="activity-scroller">
       <ol className="space-y-2" aria-label="Run activity" aria-describedby={noteId}>{feed.map(item =>
         <FeedItem key={item.key} item={item} data={data} thumb={item.step ? thumbs.get(item.step.ordinal) : null} onFrame={onFrame}/>)}</ol>
       <p aria-live="polite" className="flex items-center gap-2 px-1 text-sm text-amber-700 dark:text-amber-300">{open && <>
@@ -532,12 +533,12 @@ export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, o
     <RunBar data={data} busy={busy} message={message} statusId={statusId} onBack={onBack} onStop={onStop} onResume={onResume}
       onOpenRun={onOpenRun}/>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
-    {open && <ApprovalBanner approval={open} compact={panel !== 'browser'} onReview={() => onReview(open.id)}/>}
-    <div className="min-w-0 space-y-4 lg:space-y-0 lg:grid lg:h-[calc(100dvh-15rem)] lg:min-h-[32rem] lg:grid-cols-[minmax(0,1.65fr)_minmax(320px,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:gap-4" data-run-workspace>
-      <BrowserPane className={`${panel === 'browser' ? 'flex' : 'hidden'} lg:flex`} data={data} active={active} live={view.live} watch={watch} onWatch={onWatch}
+    <div className={`min-w-0 space-y-4 lg:space-y-0 lg:grid lg:h-[calc(100dvh-12rem)] lg:min-h-[32rem] lg:grid-cols-[minmax(0,1.65fr)_minmax(320px,1fr)] ${open ? 'lg:grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-rows-[minmax(0,1fr)]'} lg:gap-4`} data-run-workspace>
+      {open && <ApprovalBanner approval={open} compact={panel !== 'browser'} onReview={() => onReview(open.id)}/>}
+      <BrowserPane className={`${panel === 'browser' ? 'flex' : 'hidden'} lg:flex lg:col-start-1 lg:row-start-1 ${open ? 'lg:row-span-2' : ''}`} data={data} active={active} live={view.live} watch={watch} onWatch={onWatch}
         onEnlarge={onFrame} viewNote={viewNote} liveView={liveView} me={me} busy={busy} onTakeover={onTakeover}
         onEndTakeover={onEndTakeover}/>
-      <aside aria-label="Run context" className={`operations-card ${panel === 'browser' && !data.run.help && !data.reconciliation?.items?.length ? 'hidden lg:flex' : 'flex'} flex-col rounded-md border bg-card min-w-0 lg:min-h-0`} data-run-context>
+      <aside aria-label="Run context" className={`operations-card ${panel === 'browser' && !data.run.help && !data.reconciliation?.items?.length ? 'hidden lg:flex' : 'flex'} flex-col rounded-md border bg-card min-w-0 lg:min-h-0 lg:col-start-2 ${open ? 'lg:row-start-2' : 'lg:row-start-1'}`} data-run-context>
         {(data.run.help || data.reconciliation?.items?.length > 0) && <div className="space-y-3 p-4 border-b lg:max-h-[45%] lg:overflow-y-auto">
           <HelpBanner help={data.run.help}/>
           <ReconcilePanel data={data} busy={busy} onDecide={onDecide}/>

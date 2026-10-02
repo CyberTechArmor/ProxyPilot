@@ -1,0 +1,22 @@
+{
+  "browser-agents-lighthouse.json": {
+    "sha256": "3dd2c553600b5fe87df6242082f62e645584a891af501644417071a58857fc36",
+    "bytes": 144834
+  },
+  "browser-agents.json": {
+    "sha256": "5f1fff2b6b852e302fae24e45ffdee7884d38007af4b75fbd2b4288602a33502",
+    "bytes": 839
+  },
+  "integrated-viewport.json": {
+    "sha256": "6ca10ff38f79dd8433e50ffb8026c9f7ef93a710d72fdbad371e70bd8820388e",
+    "bytes": 6057
+  },
+  "proxy-install-plan.json": {
+    "sha256": "6e7e3d45e85ed8b8ab5c9196ea8bb241bff322aa6e240cdf98b0735ce398e35c",
+    "bytes": 1890
+  },
+  "verification.json": {
+    "sha256": "f8f745b8c57229213a0b1f50f90042514fe5cfb613fb0abaff17bb8638cde9e1",
+    "bytes": 994
+  }
+}

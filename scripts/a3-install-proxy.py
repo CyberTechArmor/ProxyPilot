@@ -70,6 +70,29 @@ def source_and_unit():
     return source, UNIT_TEXT
 
 
+def selected_profile_plan(source_dir=None):
+    """Reviewable optional activation plan; performs NO install/host command.
+
+    Installing these bytes alone never creates selected-browser acceptance.
+    A suitable authorized host still needs actual Incus/nft/Chromium/gateway
+    lifecycle proof and the separate root-reviewed acceptance marker.
+    """
+    source_dir = Path(source_dir or Path(__file__).resolve().parent)
+    files = {INSTALLED: (source_dir / 'a3-origin-proxy.py').read_bytes()}
+    for name in ('selected_browser_gateway.py', 'selected_browser_policy.py'):
+        files[i.CONFIG / name] = (source_dir / name).read_bytes()
+        compile(files[i.CONFIG / name].decode('utf-8'), name, 'exec')
+    unit = UNIT_TEXT.replace('--serve\n', '--serve --selected-control\n').replace(
+        'ProtectSystem=strict\n', 'ProtectSystem=strict\nRuntimeDirectory=proxypilot-a3\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n'
+        'ReadWritePaths=/run/proxypilot-a3 /var/lib/proxypilot-a3-proof/selected-gateway\n')
+    files[UNIT] = unit.encode()
+    return dict(contract_version='selected-browser-install-plan.v1', installed=False, acceptance_created=False,
+                fixed_guest=i.fence.PROOF_UUID, proxy_listen=list(p.LISTEN),
+                directories=[dict(path='/var/lib/proxypilot-a3-proof/selected-gateway', mode='0700', owner='root')],
+                files={str(path): dict(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data)) for path, data in files.items()},
+                unit=unit, notice='Apply only on an authorized proof host; verify acceptance separately')
+
+
 def validate_target():
     status = i.status()
     if status['vm_status'] != 'Running' or status['tap'] != i.fence.TAP:
@@ -277,9 +300,14 @@ def renew(force=False, attempt=live_attempt):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('action', choices=('install', 'status', 'remove', 'reinstall', 'renew'))
+    parser.add_argument('action', choices=('install', 'status', 'remove', 'reinstall', 'renew', 'plan-selected'))
     parser.add_argument('--force', action='store_true', help='renew: re-issue even when not due')
     args = parser.parse_args()
+    if args.action == 'plan-selected':
+        if args.force:
+            parser.error('--force applies to renew only')
+        print(json.dumps(selected_profile_plan(), indent=2))
+        return
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
     if args.force and args.action != 'renew':

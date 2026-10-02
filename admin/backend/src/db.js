@@ -1,4 +1,9 @@
 import { websiteReviewMigration1116 } from './lib/operational-website-review.js';
+import { operationalBrowserDraftMigration1117 } from './lib/operational-browser-agent-configurations.js';
+import { operationalSelectedBrowserMigration1118 } from './lib/operational-selected-browser-schema.js';
+import { operationalBrowserArtifactsMigration1119 } from './lib/operational-browser-artifacts-schema.js';
+import { operationalBrowserConversionMigration1120 } from './lib/operational-browser-conversion.js';
+import { operationalSelectedBrowserRuntimeMigration1121 } from './lib/operational-selected-browser-runtime.js';
 import { brokerTaskProposalsMigration1115 } from './lib/broker-task-proposals.js';
 import { brokerTaskMigration1114 } from './lib/broker-task-dispatch.js';
 import { operationalConfigurationsMigration1113 } from './lib/operational-configurations.js';
@@ -166,6 +171,7 @@ export function getDb() {
 //   1110 Operations — A4 credential binding metadata (vault path/version, never a value) and run pins.
 //   1111 Operations — A5 run policy pins, typed steps, model calls, approvals and results.
 //   1112 Operations — A7 practice/resume origins, reconciliations, control grants, takeovers, fixture state, summaries.
+//   1117 Operations — non-executable selected-browser drafts and immutable configuration/source versions.
 //   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
@@ -2056,6 +2062,11 @@ export function initDatabase() {
   runMigration(db, 1114, 'broker_task_dispatch', brokerTaskMigration1114);
   runMigration(db, 1115, 'broker_task_proposals', brokerTaskProposalsMigration1115);
   runMigration(db, 1116, 'public_website_reviews', websiteReviewMigration1116);
+  runMigration(db, 1117, 'browser_agent_draft_configurations', operationalBrowserDraftMigration1117);
+  runMigration(db, 1118, 'selected_browser_runs', operationalSelectedBrowserMigration1118);
+  runMigration(db, 1119, 'private_browser_artifacts', operationalBrowserArtifactsMigration1119);
+  runMigration(db, 1120, 'browser_agent_conversions', operationalBrowserConversionMigration1120);
+  runMigration(db, 1121, 'selected_browser_host_pins', operationalSelectedBrowserRuntimeMigration1121);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

@@ -333,3 +333,21 @@ paths and privileged fallbacks, and test a disposable installation with:
 
 Use [the deployment runbook](security-remediation-runbook.md) for Stage A and the
 partial S6 changes. Runtime acceptance remains a distinct gate.
+
+
+## Selected-browser private parser candidates — 2026-10-02
+
+This source review accepts the following static inventory additions. It does not
+accept installed parser isolation, activate a wrapper, or close S6/SEC-01–03.
+
+| Owner / caller | Fixed source contract | Remaining installed requirement |
+| --- | --- | --- |
+| Browser artifact screenshot redaction (`operational-browser-artifacts-image-decoder.js`, image worker) | Authorized private artifact service supplies at most32 validated rectangles and8MiB PNG input. Explicit capability and absolute configured wrapper; fixed Node/worker argv, shell disabled, empty environment, ignored stderr, detached process group, one child slot,5s deadline,8MiB framed output,8192-edge/16MP checks. Failure kills the process group and refuses output. No HTTP-selected executable. Pixel-redaction and cancellation/race tests establish local correctness only. | Reviewed wrapper must enforce low privilege, no network, bounded accessible files/CPU/RSS/processes, trusted ownership and descendant teardown. Heap cap/path/capability strings do not establish these boundaries. No broad filesystem or credentials. |
+| Browser artifact PDF text extraction (`operational-browser-artifacts-pdf-decoder.js`) | Authorized private source service passes PDF bytes over stdin to configured wrapper with fixed `/usr/bin/pdftotext -enc UTF-8 -nopgbrk - -`; shell disabled, empty environment, ignored stderr, process group teardown, one slot,5s timeout and16KiB UTF-8/nonempty/no-NUL output cap. F1 input caps/hash/MIME/leases precede decode; source authority is rechecked after await. Real local parser fixtures are correctness evidence. | Independently reviewed wrapper must enforce the same low-privilege/network/filesystem/resource boundaries. Parser installation or test injection is not production readiness. |
+
+The selected-browser runtime defaults private storage and every wrapper to
+unavailable. A finite reviewed dedicated root receives a read-only owner/mode,
+ancestor/symlink and directory-identity preflight; each file operation repeats
+checks. Browser host readiness independently requires signed installed
+Incus/nft/gateway/managed-policy/Neko acceptance. None of these changes remove
+existing backend root-equivalent access or authorize deployment.

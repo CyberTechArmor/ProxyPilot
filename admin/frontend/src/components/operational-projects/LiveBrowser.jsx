@@ -12,7 +12,7 @@ import { encodeButton, encodeKey, encodeMove, encodeScroll, keysymFor, screenPoi
 // data channel, and nothing else: no clipboard, no files, no chat. What is
 // typed never leaves this page except as key events to that browser; only the
 // count of keys, clicks and scrolls is recorded (by the runner in the VM).
-export function LiveBrowser({ base, runId, expanded=false, onState, onControl, onViewer }) {
+export function LiveBrowser({ base, runId, endpoint, expanded = false, onState, onControl, onViewer }) {
   const box = useRef(null), video = useRef(null), typing = useRef(null), client = useRef(null);
   const [state, setState] = useState('connecting'), [control, setControl] = useState({ hasHost: false, mine: false });
   const screen = useRef({ width: 1280, height: 800 }), pressed = useRef(new Set()), moving = useRef(null);
@@ -25,7 +25,7 @@ export function LiveBrowser({ base, runId, expanded=false, onState, onControl, o
     // that ended by itself makes the page fall back to still frames.
     let disposed = false;
     const live = createLiveClient({
-      url: liveUrl(base, runId),
+      url: endpoint ?? liveUrl(base, runId),
       onState: (name, detail) => {
         if (disposed) return;
         setState(name);
@@ -43,7 +43,7 @@ export function LiveBrowser({ base, runId, expanded=false, onState, onControl, o
     client.current = live;
     live.start();
     return () => { disposed = true; live.close(); client.current = null; };
-  }, [base, runId]);
+  }, [base, runId, endpoint]);
 
   const send = useCallback(buffer => client.current?.input(buffer) ?? false, []);
   const point = useCallback((event) => {
@@ -117,10 +117,10 @@ export function LiveBrowser({ base, runId, expanded=false, onState, onControl, o
     event.target.value = '';
   };
 
-  return <div className={expanded?'flex flex-col flex-1 min-h-0 gap-2':'space-y-2'}>
+  return <div className={expanded ? 'flex min-h-0 flex-1 flex-col gap-2' : 'space-y-2'}>
     <div ref={box} tabIndex={control.mine ? 0 : -1} {...handlers}
       aria-label={control.mine ? LIVE_TEXT.controlArea : LIVE_TEXT.videoArea} role={control.mine ? 'application' : undefined}
-      className={`relative w-full ${expanded?'flex-1 min-h-0':'aspect-[16/10] shrink-0'} overflow-hidden rounded-md bg-zinc-950 touch-none focus-visible:outline-none ${control.mine ? 'ring-2 ring-emerald-500 cursor-default' : ''}`}
+      className={`relative w-full ${expanded ? 'min-h-0 flex-1' : 'aspect-[16/10] shrink-0'} overflow-hidden rounded-md bg-zinc-950 touch-none focus-visible:outline-none ${control.mine ? 'ring-2 ring-emerald-500 cursor-default' : ''}`}
       data-testid="live-browser" data-live-state={state} data-control={control.mine ? 'mine' : control.hasHost ? 'held' : 'none'}>
       <video ref={video} muted playsInline autoPlay aria-label={LIVE_TEXT.videoLabel}
         className="absolute inset-0 h-full w-full object-contain pointer-events-none"/>

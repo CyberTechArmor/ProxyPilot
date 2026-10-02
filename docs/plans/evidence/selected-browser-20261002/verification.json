@@ -1,0 +1,40 @@
+{
+  "base_commit": "9b88f8f03925ee4c4cf097e40429897be9195e2f",
+  "environment": "saved ProxyPilot cloud workspace",
+  "operations_backend": {
+    "tests": 333,
+    "passed": 333
+  },
+  "python_all": {
+    "tests": 412,
+    "passed": 379,
+    "skipped": 33,
+    "failed": 0
+  },
+  "python_selected": {
+    "tests": 90,
+    "passed": 90
+  },
+  "proposal": {
+    "tests": 10,
+    "passed": 10
+  },
+  "runtime_composition": {
+    "tests": 28,
+    "passed": 28
+  },
+  "frontend_build": "passed",
+  "host_inventory_files": 99,
+  "limits": [
+    "No installed Incus/nft acceptance",
+    "Neko transport/provider fixtures only",
+    "No external task/deployment/broad credentials",
+    "Expanded host package refused by ordinary refresh; separate installation contract required"
+  ],
+  "security_extra": {
+    "initial_passed": 60,
+    "root_recovery_passed": 28,
+    "bootstrap_root_cases": 5,
+    "bootstrap_status": "Local environment lacks UID0 and sudo; existing CI root-only gate retained"
+  }
+}

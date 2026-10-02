@@ -30,12 +30,15 @@ function rejectUpgrade(socket, status, reason) {
 // `enabled()` is the three Operations toggles (read per check); `actorOf(user)`
 // is the Operations store's eligibility check; `agentRuns` the A6/A7 service.
 export function attachAgentLiveServer(httpServer, { agentRuns, enabled = () => false, actorOf = user => user,
-  verify = verifyWsUpgrade, recheckMs = 10_000, heartbeatMs = 20_000, pingMs = 25_000 } = {}) {
+  verify = verifyWsUpgrade, recheckMs = 10_000, heartbeatMs = 20_000, pingMs = 25_000,
+  pathKind = 'agent-runs' } = {}) {
+  if(!['agent-runs','browser-agent-runs'].includes(pathKind))throw new Error('Unsupported live route');
+  const route=pathKind==='agent-runs'?PATH:/^\/api\/operational-projects\/([0-9a-f-]{36})\/browser-agent-runs\/([0-9a-f-]{36})\/live$/;
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES + 1024 });
   const perUser = new Map();
 
   httpServer.on('upgrade', (req, socket, head) => {
-    const match = (req.url || '').split('?')[0].match(PATH);
+    const match = (req.url || '').split('?')[0].match(route);
     if (!match) return;
     const [, projectId, runId] = match;
     let user, actor;

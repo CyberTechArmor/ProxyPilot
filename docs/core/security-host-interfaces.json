@@ -154,6 +154,12 @@
       "host_files: export const AGENT_DIR = process.env.PROXYPILOT_MIGRATION_AGENT_DIR || '/var/lib/proxypilot/agent';": 1,
       "host_files: export const WORK_DIR = process.env.PROXYPILOT_MIGRATION_WORK_DIR || '/var/lib/proxypilot/migration';": 1
     },
+    "admin/backend/src/lib/operational-browser-artifacts-image-decoder.js": {
+      "process_api: import { spawn } from 'node:child_process';": 1
+    },
+    "admin/backend/src/lib/operational-browser-artifacts-pdf-decoder.js": {
+      "process_api: import { spawn } from 'node:child_process';": 1
+    },
     "admin/backend/src/lib/operational-demo-fixtures.js": {
       "host_command: // `runHostCapture(bin, args, { input, timeoutMs })` is lib/lxc-zip.js's (host": 1,
       "host_command: const read = await runHostCapture('incus', ['exec', instance, '--', 'sha256sum', DEMO_FIXTURE], { timeoutMs });": 1,

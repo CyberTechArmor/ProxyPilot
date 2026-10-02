@@ -179,6 +179,19 @@ class Handler(socketserver.BaseRequestHandler):
     def handle(self):
         if self.client_address[0] != PEER:
             return
+        # The opt-in installed selected gateway uses this SAME fenced port and
+        # exact guest peer. A revoked/recovered selected attempt stays denied;
+        # it never falls back to synthetic sign-in before verified teardown.
+        registry = getattr(self.server, 'selected_registry', None)
+        if registry is not None:
+            selected, gateway = registry.selected()
+            if selected:
+                if gateway is None:
+                    send_error(self.request.makefile('wb'), 403)
+                    return
+                from selected_browser_gateway import serve_selected_socket
+                serve_selected_socket(self.request, gateway, self.server.tls)
+                return
         self.request.settimeout(10)
         reader = self.request.makefile('rb')
         try:
@@ -281,6 +294,8 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serve', action='store_true', required=True)
+    parser.add_argument('--selected-control', action='store_true',
+                        help='Installed selected-browser root control; demo mode remains the default')
     args = parser.parse_args()
     if not args.serve or not CERT.is_file() or not KEY.is_file():
         parser.error('Host certificate/key missing')
@@ -290,7 +305,17 @@ def main():
     tls.load_cert_chain(str(CERT), str(KEY))
     with Server(LISTEN, Handler) as server:
         server.tls = tls
-        server.serve_forever(poll_interval=0.5)
+        control = None
+        if args.selected_control:
+            from selected_browser_gateway import SelectedGatewayRegistry, start_control
+            server.selected_registry = SelectedGatewayRegistry('/var/lib/proxypilot-a3-proof/selected-gateway', proxy_source=__file__)
+            control = start_control(server.selected_registry, '/run/proxypilot-a3/selected-proxy.sock')
+        try:
+            server.serve_forever(poll_interval=0.5)
+        finally:
+            if control is not None:
+                control.shutdown()
+                control.server_close()
 
 
 if __name__ == '__main__':

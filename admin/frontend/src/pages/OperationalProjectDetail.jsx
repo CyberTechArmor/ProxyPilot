@@ -13,6 +13,7 @@ import { AccessPolicy } from '@/components/operational-projects/AccessPolicy';
 import { AgentRunsPanel } from '@/components/operational-projects/AgentRuns';
 import { NewProjectButton, ProjectBrowser, ProjectPageHeader, ProjectStatus } from '@/components/operational-projects/ProjectSurface';
 import { WebsiteReviews } from '@/components/operational-projects/WebsiteReviews';
+import { BrowserAgents } from '@/components/operational-projects/BrowserAgents';
 import { operationSectionLabel, operationSectionUrl, websiteReviewAvailable } from '@/components/operational-projects/run-readiness';
 
 const blankRun={started_at:'',ended_at:'',outcome:'completed',notes:'',reason:''};
@@ -24,13 +25,14 @@ export default function OperationalProjectDetail() {
 }
 function Operation({id}) {
   const {user}=useAuth(),navigate=useNavigate(),base=`/${id}`;
-  const [data,setData]=useState(null),[section,setSection]=useState(()=>{const value=new URLSearchParams(window.location.search).get('section');return ['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Details'].includes(value)?value:'Overview';}),[busy,setBusy]=useState(false);
+  const [data,setData]=useState(null),[section,setSection]=useState(()=>{const value=new URLSearchParams(window.location.search).get('section');return ['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Browser agents','Details'].includes(value)?value:'Overview';}),[busy,setBusy]=useState(false);
   const [error,setError]=useState(''),[message,setMessage]=useState(''),[draft,setDraft]=useState(null),[meta,setMeta]=useState(null);
   const [reason,setReason]=useState(''),[identifier,setIdentifier]=useState(''),[candidate,setCandidate]=useState(null),[grantRole,setGrantRole]=useState('viewer');
   const [transfer,setTransfer]=useState(''),[discard,setDiscard]=useState(false),[selectedVersion,setSelectedVersion]=useState(null);
   const [runForm,setRunForm]=useState(blankRun),[runVersion,setRunVersion]=useState(null),[correcting,setCorrecting]=useState(null),[relatedRun,setRelatedRun]=useState(null);
   const [capability,setCapability]=useState(false),[evidenceTick,setEvidenceTick]=useState(0),[selectionDirty,setSelectionDirty]=useState(false);
   const [agentCapability,setAgentCapability]=useState(false),[runsCapability,setRunsCapability]=useState(false),[websiteCapability,setWebsiteCapability]=useState(false);
+  const [browserCapability,setBrowserCapability]=useState(false);
   const [execution,setExecution]=useState({available:false,message:''});
   const [params,setParams]=useSearchParams(),openRun=params.get('run');
   const sectionNav=useRef(null);
@@ -43,7 +45,7 @@ function Operation({id}) {
   },[section,!!data]);
   const [projectList,setProjectList]=useState([]),[brokerSetupActive,setBrokerSetupActive]=useState(false);
   useEffect(()=>{const c=new AbortController();api.get('',c.signal).then(r=>{if(!c.signal.aborted)setProjectList(r.projects);}).catch(()=>setProjectList([]));return()=>c.abort();},[user?.id]);
-  useEffect(()=>{const target=params.get('section');if(['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Details'].includes(target))setSection(target);},[params]);
+  useEffect(()=>{const target=params.get('section');if(['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Browser agents','Details'].includes(target))setSection(target);},[params]);
   const openSection=tab=>{setSection(tab);setError('');setParams({section:tab},{replace:true});};
   const requests=useRef(null),generation=useRef(0);
   const retry=useRef(null),alive=useRef(true),errorRef=useRef(null);
@@ -57,6 +59,7 @@ function Operation({id}) {
     setCapability(caps.enabled&&caps.evidence_enabled);setAgentCapability(caps.enabled&&caps.agents_metadata_enabled);setRunsCapability(!!caps.agent_runs_enabled);setEvidenceTick(t=>t+1);
     setExecution({available:caps.agent_execution_available===true,message:caps.agent_execution_message||''});
     setWebsiteCapability(websiteReviewAvailable(caps));
+    setBrowserCapability(caps.enabled&&caps.browser_draft_configuration_available===true&&caps.browser_draft_contract==='browser-agent-draft.v1');
     setData({p:project,d:d.draft,v,r,e,a});
     if(replace===true||replace==='draft')setDraft({title:d.draft.title,instructions:d.draft.instructions,revision:d.draft.revision});
     if(replace===true||replace==='meta')setMeta({name:project.name,description:project.description,revision:project.revision});
@@ -116,7 +119,7 @@ function Operation({id}) {
     <header className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}
-    <nav ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{operationSectionLabel(tab)}</Action>)}</nav>
+    <nav ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(browserCapability?['Browser agents']:[]),...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{operationSectionLabel(tab)}</Action>)}</nav>
     {section==='Overview'&&<>
       <p className="whitespace-pre-wrap break-words text-muted-foreground">{p.description||'Add a purpose in Details to explain the work this project supports.'}</p>
       {p.archived_at&&<p className="rounded-md border bg-muted p-3 text-sm break-words">Archived: {p.archive_reason}</p>}
@@ -211,6 +214,7 @@ function Operation({id}) {
     </Panel>}
     {section==='Access'&&<Panel title="Access · Connections"><ConnectionCatalogue projectId={id}/></Panel>}
     {section==='Website reviews'&&(websiteCapability?<WebsiteReviews base={base} project={p} onChanged={()=>refresh(false)}/>:<Panel title="Website reviews"><p>Public website reviews are unavailable on this installation. This workflow requires the reviewed website review runtime.</p></Panel>)}
+    {section==='Browser agents'&&(browserCapability?<BrowserAgents base={base} project={p} onChanged={()=>refresh(false)}/>:<Panel title="Browser agents"><p>The browser-agent configuration API is unavailable on this installation. Check the installed version and Operations settings.</p></Panel>)}
     {section==='Agents'&&agentCapability&&<>{!brokerSetupActive&&<div className="rounded-md border bg-muted/20 p-4 space-y-2"><h3 className="font-semibold">Execution capability</h3><p className="text-sm text-muted-foreground">A configured task describes intended work. Running it requires a supported workflow and runtime, an approved guide, permitted connections and limits.</p><p className="text-sm text-muted-foreground">The synthetic sign-in pilot supports only demo.fractionate.ai. Check the agent readiness before starting work.</p></div>}{websiteCapability&&!brokerSetupActive&&<Panel title="Review a public website"><p className="text-sm">Use the separate public HTML/text workflow with your approved guide. It requires no website credential and does not use synthetic sign-in.</p><Action variant="outline" onClick={()=>{setSection('Website reviews');setParams({section:'Website reviews'},{replace:true});}}>Open website reviews</Action></Panel>}<BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Demo sign-in profiles</summary><p className="text-sm text-muted-foreground mb-4">Demo sign-in at demo.fractionate.ai. Profiles and supervised runs remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} websiteAvailable={websiteCapability} onChanged={()=>refresh(false)}/></details></>}
     {section==='Agent runs'&&runsCapability&&runsPanel}
   </div></div></div>;

@@ -1,5 +1,6 @@
 import { assessConfigurationConnections } from '../lib/operational-configuration-readiness.js';
 import { randomUUID } from 'node:crypto';
+import { registerBrowserRoutes } from './operational-browser.js';
 import { OperationsError, parse, revision, schemas } from '../lib/operational-projects-logic.js';
 
 // Sudo is injected (middleware/auth.js requireSudo in the server). Without it
@@ -15,7 +16,8 @@ const noSudo = (_req, res) => res.status(401).json({ error: 'sudo_required', sud
 // once-per-session agent-control verification (lib/operational-control-grants.js);
 // without it nothing is verified, so takeover and reconciliation are refused.
 export function createOperationsRouter({ Router, store, enabled = false, agentsEnabled = false, lookupLimiter, evidenceRouter, evidenceEnabled = false,
-  brokerTasks = null, brokerTaskProposals = null, configurationConnections = null, agentRuns = null, websiteReviews = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
+  brokerTasks = null, brokerTaskProposals = null, configurationConnections = null, agentRuns = null, websiteReviews = null,
+  browserRuntime = null, browserAssetBodyParser = null, agentRunsEnabled = true, requireSudo = noSudo, controlVerified = () => false }) {
   const router = Router();
   const on = value => (typeof value === 'function' ? value() : value) === true;
   const opsOn = () => on(enabled), agentsOn = () => opsOn() && on(agentsEnabled);
@@ -29,6 +31,12 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
         agent_execution_message: agentRuns.execution.message } : {}),
       ...(websiteReviews ? { website_review_enabled: agentsOn() && on(agentRunsEnabled),
         website_review_contract: 'website-review.v1', website_review_strategy: 'http_extract_v1' } : {}),
+      browser_draft_configuration_available: agentsOn(), browser_draft_contract: 'browser-agent-draft.v1',
+      // Configuration is not installed execution proof. Each exact draft's
+      // readiness verifies the host's current signed acceptance independently.
+      selected_browser_execution_available: false,
+      ...(browserRuntime ? { selected_browser_runtime_configured: agentsOn() && on(agentRunsEnabled) && browserRuntime.execution.configured,
+        selected_browser_contract: 'selected-browser.v1' } : {}),
       // Only a hint for the sidebar; the settings routes check the role themselves.
       can_manage_settings: req.user?.role === 'admin' });
   });
@@ -78,6 +86,36 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   if (evidenceRouter) router.use('/:id/demonstrations', evidenceRouter);
   const empty = req => parse(schemas.empty, req.body ?? {});
   const agentsOnly = (_req,res,next) => agentsOn() ? next() : res.status(404).json({error:'Not found'});
+  const selectedRunsOnly=(_req,res,next)=>agentsOn()&&on(agentRunsEnabled)&&browserRuntime?next():res.status(404).json({error:'Not found'});
+  if(browserRuntime)registerBrowserRoutes(router,{runtime:browserRuntime,store,agentsOnly,runsOnly:selectedRunsOnly,expected,
+    requireSudo,controlVerified,assetBodyParser:browserAssetBodyParser});
+  // Draft-only import/review surface. No start/action/credential route exists.
+  const browserDraftHandle = (fn, status = 200, denialAction = 'browser_draft_read') => (req, res) => {
+    try {
+      const data = fn(req, req.operationsActor);
+      if (data.configuration?.revision) res.set('ETag', `"${data.configuration.revision}"`);
+      return res.status(status).json(data);
+    } catch (err) {
+      const known = err instanceof OperationsError;
+      if (known && [401, 403, 404].includes(err.status)) {
+        try { store.auditDenied(req.operationsActor, req.params?.id, denialAction, err.status); } catch { /* preserve refusal */ }
+      }
+      return res.status(known ? err.status : 500).json({ error: known ? err.message : 'Unable to complete browser draft request',
+        ...(known && err.code ? { code: err.code } : {}) });
+    }
+  };
+  router.get('/:id/browser-agent-configurations', agentsOnly,
+    browserDraftHandle((r,a)=>store.browserConfigurations(a,r.params.id,r.query)));
+  router.post('/:id/browser-agent-configurations/validate', agentsOnly,
+    browserDraftHandle((r,a)=>store.validateBrowserConfiguration(a,r.params.id,r.body),200,'browser_draft_validate'));
+  router.post('/:id/browser-agent-configurations', agentsOnly,
+    browserDraftHandle((r,a)=>store.createBrowserConfiguration(a,r.params.id,expected(r),r.body),201,'browser_draft_save'));
+  router.get('/:id/browser-agent-configurations/:configurationId', agentsOnly,
+    browserDraftHandle((r,a)=>store.browserConfiguration(a,r.params.id,r.params.configurationId)));
+  router.patch('/:id/browser-agent-configurations/:configurationId', agentsOnly,
+    browserDraftHandle((r,a)=>store.updateBrowserConfiguration(a,r.params.id,r.params.configurationId,expected(r),r.body),200,'browser_draft_save'));
+  router.get('/:id/browser-agent-configurations/:configurationId/readiness', agentsOnly,
+    browserDraftHandle((r,a)=>({readiness:store.browserConfiguration(a,r.params.id,r.params.configurationId).readiness})));
   const reviewOnly=(_req,res,next)=>agentsOn()&&on(agentRunsEnabled)&&websiteReviews?next():res.status(404).json({error:'Not found'});
   router.get('/:id/website-review-agents',reviewOnly,agentHandle((r,a)=>websiteReviews.listAgents(a,r.params.id),200,'website_review_agents_read'));
   router.post('/:id/website-review-agents',reviewOnly,agentHandle((r,a)=>websiteReviews.createAgent(a,r.params.id,r.body),201,'website_review_agent_save'));

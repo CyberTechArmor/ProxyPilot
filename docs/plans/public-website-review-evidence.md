@@ -57,7 +57,7 @@ installing or mutating the UI owner's packages. Logs are retained locally in
 | Full backend aggregate | 3,590 tests: 3,536 passed, 10 failed, 4 cancelled, 40 skipped (279.496 seconds); baseline/environment cases below |
 | Verified-main reproduction of failing files | 26 tests: 15 passed, same 10 failed, 1 cancelled (49.608 seconds) on detached main `56c881be` |
 | Full script Python aggregate | 293 tests ran, 33 skipped, 0 failures (96.254 seconds); initial CRLF-only checkout failures resolved by local LF normalization |
-| UI build/browser journey | Owned by UI task; integrated evidence pending |
+| UI/runtime integration journey | Passed with real API/CSRF/store/extraction/service/signed bridge, scripted session/site/provider; 4 journeys, 375/1280 layouts |
 
 The implementation defects found and fixed during verification were an
 order-sensitive usage JSON comparison in the cross-language receipt bridge and
@@ -95,6 +95,25 @@ aggregate load; one also reproduces on main's isolated failing-file run, while t
 other three pass there. No containment, ownership, credential or test assertion
 was weakened to make the aggregate green. Logs: `backend-aggregate.log` and
 `backend-main-baseline.log` in the local verification directory.
+
+The separate integration branch `test/public-website-review-e2e-20261002` combines
+runtime `9e02012f` and the UI owner's `f81857fb`, `902581ff`, `e355f5c0` commits.
+`admin/frontend/tests/website-review-runtime.browser.mjs` uses the real component,
+central API client, Express Operations router, CSRF middleware, approved-guide
+store, public extractor, review service and Ed25519 verifier. Only authentication,
+the public-site socket dial mapping and the provider answer are scripted fixtures.
+It proves the TAG Armor / Summarize flow through the actual guide-save endpoint,
+inert configuration and consent, explicit start, cited output/evidence, cancel
+during provider wait, client-render-only refusal, missing CSRF and wrong-owner
+denial. There are three explicit starts, two model calls and eight read-only
+website requests; no website authorization/cookie header or browser external
+request occurs. The result is visually inspected at 375 and 1280 pixels, without
+horizontal overflow. Shared production project navigation remains UI-owner work.
+
+Retained artifacts are explicitly fixture evidence, not a live provider review:
+[journey report](assets/public-website-review/runtime-review-report.json),
+[phone](assets/public-website-review/runtime-review-375.png),
+[desktop](assets/public-website-review/runtime-review-1280.png).
 
 ## Deferred backlog
 

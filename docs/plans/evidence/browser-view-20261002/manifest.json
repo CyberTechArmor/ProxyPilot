@@ -17,7 +17,7 @@
     "admin/frontend/src/components/operational-projects/browser-fullscreen.js": "ae80064e28c582e345b7f63d78c7ad6cf659b0f08bf87435420e5c133ee998d4",
     "admin/frontend/tests/fixtures/operations-viewport.html": "0427a75bfb70b2b18b6a3fcff294995d9f9a4fc21eea20b4d847613ec7cddf76",
     "admin/frontend/tests/fixtures/operations-viewport.jsx": "6a9ab44064e31a7cdfb7696e418cf5ce18b5becacf12ac28233062c8aea87773",
-    "admin/frontend/tests/operations-viewport-check.mjs": "2997f8e3e75028fda757f821ef1d84382a09bc78fd43381b4fe3925b5e02f48d",
+    "admin/frontend/tests/operations-viewport-check.mjs": "7752d78c6b1c9a3d635790b2d46ecbfd9bce4446d3daf21e07788f2a0de8347b",
     "admin/frontend/src/components/operational-projects/AgentRuns.jsx": "ba42fc5265a7bcf11770d434d0e0f529ed004a922ed9e889ca88e547e9481a23"
   },
   "artifacts": {
@@ -38,16 +38,16 @@
       "bytes": 160201
     },
     "give-back-375x640.png": {
-      "sha256": "0bf1ce0ec25ba98574931b02581759335ac6db2575307b5ee2f994c7b4bd585a",
-      "bytes": 47009
+      "sha256": "26f47d50f41c838ee422486f5502ef077d3d30a19f28c0248fdceae5442dca4d",
+      "bytes": 20242
     },
     "phone-375.png": {
       "sha256": "c46ab164de1f578d382c1b2209143e81b1b5f68f9ef92bd947631c7048321452",
       "bytes": 51148
     },
     "populated-review-375x640.png": {
-      "sha256": "9548ef192dcfa721bd6a99f6fd1041489cfc383e1e9635cac5f588bdf21ff390",
-      "bytes": 40063
+      "sha256": "3f3b3658c1e6ea5cddadfb25379909533aa92fb0caca149dac06134b60960ea6",
+      "bytes": 32611
     },
     "verification-superseded.json": {
       "sha256": "2756e32e133f498a45511ca4a5039bbade5efa64ba698970e8f5a677ddb48ade",
@@ -63,7 +63,7 @@
     "Lighthouse report timestamps retained; numerical audits preceded final metadata relocation; final viewport/media behavior checks use frozen source"
   ],
   "evidence_revision": 2,
-  "previous_candidate": "16c9c78afeb2382f36a77834858a991151723fd4",
+  "previous_candidate": "e48542f4b8b72d11d1ee42c165be1197b9838028",
   "superseded_evidence": {
     "verification-superseded.json": "Initial checker reset purported short viewport measurements to900px; use verification.json for current height proof."
   }

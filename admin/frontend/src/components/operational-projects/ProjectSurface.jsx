@@ -67,4 +67,3 @@ export function ProjectBrowser({projects,selectedId,section='Overview',collapsib
 export function ProjectPageHeader({children}) {
   return <header className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4"><div className="min-w-0"><h1 className="operations-title">Projects &amp; SOPs</h1><p className="mt-2 text-muted-foreground">Shared procedures. Human or agent.</p></div>{children}</header>;
 }
-

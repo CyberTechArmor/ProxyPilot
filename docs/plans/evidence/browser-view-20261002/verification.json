@@ -1,0 +1,185 @@
+{
+  "measurements": [
+    {
+      "surface": "deck",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "deck",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "deck",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "deck",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "deck",
+      "width": 1920,
+      "document_scroll": false
+    },
+    {
+      "surface": "deck",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "project",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "project",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "project",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "project",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "project",
+      "width": 1920,
+      "document_scroll": false
+    },
+    {
+      "surface": "project",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "projects",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "projects",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "projects",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "projects",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "projects",
+      "width": 1920,
+      "document_scroll": false
+    },
+    {
+      "surface": "projects",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 360,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 375,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 768,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "fullscreen-resize",
+      "width": 1280,
+      "document_scroll": false
+    },
+    {
+      "surface": "frame-modal",
+      "width": 375,
+      "document_scroll": false
+    }
+  ],
+  "fullscreen_repeated": true,
+  "escape_and_focus": true,
+  "same_media_node": true,
+  "frame_modal": true,
+  "internal_activity_scroll": true,
+  "page_errors": []
+}

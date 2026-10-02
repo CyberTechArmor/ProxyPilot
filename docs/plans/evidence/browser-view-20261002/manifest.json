@@ -1,0 +1,52 @@
+{
+  "base_commit": "9b88f8f03925ee4c4cf097e40429897be9195e2f",
+  "environment": "saved ProxyPilot cloud workspace",
+  "reference_library_ids": [
+    "libfile_33e5e8600c40819182a180c7e7092eaa",
+    "libfile_f7cf482195ac81919f850674c968cff3"
+  ],
+  "reference_pixel_review": "parent inspected authorized originals; worker signed transfer download failed; root inspected actual local rendered fixture screenshots",
+  "product_files": {
+    "admin/frontend/src/components/Layout.jsx": "a163f583f53c604cdd16fb97675deb484987aaefd17a1d146f94617fb973f0b6",
+    "admin/frontend/src/components/operational-projects/LiveBrowser.jsx": "290ea0efc3e6742d1f019b52c8e922c37f444ad20f5e05f574259e86cb36968e",
+    "admin/frontend/src/components/operational-projects/ProjectSurface.jsx": "7430a7582410755eed4a76ef151d631253c373f8af5de33e454bfc4ab64fbf4e",
+    "admin/frontend/src/components/operational-projects/RunDeck.jsx": "18d998f58bb1743e2129797a519425812f1d03f09f385d6558fecb648c1bfae5",
+    "admin/frontend/src/index.css": "c05ccfc52f5369076445f90dbb83a90efda9ef5acec12d62b391d34b070a0633",
+    "admin/frontend/src/pages/OperationalProjectDetail.jsx": "c4e9b169adbc0c63fe116f4cf87e1eaf4674d37e77e5be15f2a36044e1396399",
+    "admin/frontend/src/pages/OperationalProjects.jsx": "6b6dfceb44430044f9c834b6441fe06af619c7b9f8fc94dbbe7f62d8a26c1bad",
+    "admin/frontend/src/components/operational-projects/browser-fullscreen.js": "ae80064e28c582e345b7f63d78c7ad6cf659b0f08bf87435420e5c133ee998d4",
+    "admin/frontend/tests/fixtures/operations-viewport.html": "0427a75bfb70b2b18b6a3fcff294995d9f9a4fc21eea20b4d847613ec7cddf76",
+    "admin/frontend/tests/fixtures/operations-viewport.jsx": "d6bba5a835a5a9a2001d25a0df2f85dbf18243df8f47b3900d8b31f5e98580cb",
+    "admin/frontend/tests/operations-viewport-check.mjs": "8c8cb00b2d14e93a99d2ce87edd85b4792720560efe2351004aa6d19a13750d6"
+  },
+  "artifacts": {
+    "accessibility-projects.json": {
+      "sha256": "6292e92bd89c2dc194d71b324ea495e5c7c8e46d11acd9fd2a1dcb8d07f55fad",
+      "bytes": 109
+    },
+    "desktop-1280.png": {
+      "sha256": "c30b737de7e70851ef247d50c2d1885522a55fcd9292717aacfa5dc1b0340d42",
+      "bytes": 160201
+    },
+    "accessibility-project.json": {
+      "sha256": "836e4bce965ca82c218b7d1c5905ceac9c86f69550cc3849281c27cc02513d0c",
+      "bytes": 108
+    },
+    "phone-375.png": {
+      "sha256": "c46ab164de1f578d382c1b2209143e81b1b5f68f9ef92bd947631c7048321452",
+      "bytes": 51148
+    },
+    "verification.json": {
+      "sha256": "2756e32e133f498a45511ca4a5039bbade5efa64ba698970e8f5a677ddb48ade",
+      "bytes": 3519
+    },
+    "accessibility-deck.json": {
+      "sha256": "49744ba34f8b02e5e60a575132da98ff6019c93263b3e633f225cbf6f53bba70",
+      "bytes": 105
+    }
+  },
+  "limitations": [
+    "Scripted fixture frame and mock Neko viewer; no production/live WebRTC target proof",
+    "Lighthouse report timestamps retained; numerical audits preceded final metadata relocation; final viewport/media behavior checks use frozen source"
+  ]
+}

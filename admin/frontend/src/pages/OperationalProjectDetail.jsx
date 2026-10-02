@@ -99,7 +99,7 @@ function Operation({id}) {
   }
   const runsPanel=<AgentRunsPanel base={base} project={p} runId={openRun} websiteAvailable={websiteCapability} onOpenRun={run=>setParams({section:'Agent runs',run})} onCloseRun={()=>setParams({section:'Agent runs'})}/>;
   // An open agent run is a deck of its own (RunDeck.jsx): a breadcrumb instead of the page header and sections, and the layout's own gutters.
-  if(section==='Agent runs'&&runsCapability&&openRun)return <div className="operations-ui max-w-screen-2xl mx-auto w-full flex flex-col gap-3 min-w-0">
+  if(section==='Agent runs'&&runsCapability&&openRun)return <div className="operations-ui max-w-screen-2xl mx-auto w-full h-full flex flex-col gap-3 min-w-0 min-h-0 overflow-hidden">
     <nav aria-label="Breadcrumb" className="hidden lg:block"><ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
       <li><Link className="hover:text-foreground hover:underline" to="/operational-projects">Operations</Link></li><li aria-hidden="true">›</li>
       <li className="min-w-0 [overflow-wrap:anywhere]"><Link className="hover:text-foreground hover:underline" to={`/operational-projects/${id}`} onClick={()=>setSection('Overview')}>{p.name}</Link></li><li aria-hidden="true">›</li>
@@ -108,11 +108,11 @@ function Operation({id}) {
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {runsPanel}
   </div>;
-  return <div className="operations-ui w-full max-w-screen-2xl mx-auto space-y-6 min-w-0">
+  return <div className="operations-ui operations-shell w-full max-w-screen-2xl mx-auto gap-4 min-w-0">
     <ProjectPageHeader><NewProjectButton/></ProjectPageHeader>
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)] gap-4 min-w-0" data-project-workspace>
+    <div className="grid grid-cols-1 grid-rows-[auto_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)] gap-4 min-w-0 min-h-0 flex-1 overflow-hidden" data-project-workspace>
     <ProjectBrowser projects={projectList.some(item=>item.id===p.id)?projectList.map(item=>item.id===p.id?p:item):[p,...projectList]} selectedId={id} section={section} collapsible/>
-    <div className="operations-card space-y-4 min-w-0 rounded-md border bg-card p-4 sm:p-6" data-selected-project>
+    <div className="operations-card space-y-4 min-w-0 min-h-0 overflow-y-auto overscroll-contain rounded-md border bg-card p-4 sm:p-6" data-selected-project>
     <header className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}

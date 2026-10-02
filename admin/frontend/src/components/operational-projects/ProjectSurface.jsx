@@ -60,7 +60,7 @@ export function ProjectBrowser({projects,selectedId,section='Overview',collapsib
     {!rows.length&&<div className="space-y-2 p-6 text-center text-muted-foreground"><FolderOpen className="mx-auto h-6 w-6" aria-hidden="true"/><p>{loading?'Loading projects…':search||filter!=='all'?'No matching projects.':'No projects yet.'}</p></div>}
     <footer className="border-t p-4 space-y-3"><p className="text-xs text-muted-foreground">{rows.length} permitted project{rows.length===1?'':'s'}</p>{cursor&&<Action variant="outline" disabled={loading} onClick={onMore}>Load more projects</Action>}</footer>
   </>;
-  return <aside className="operations-card min-w-0 self-start rounded-md border bg-card lg:sticky lg:top-0" data-project-browser>
+  return <aside className={`operations-card min-w-0 rounded-md border bg-card ${collapsible?'min-h-0 max-h-[35dvh] overflow-y-auto overscroll-contain lg:max-h-none lg:h-full':'self-start'}`} data-project-browser>
     {collapsible?<><div className="hidden lg:block">{list}</div><details className="lg:hidden"><summary className="flex min-h-11 cursor-pointer items-center gap-2 px-4 py-3 font-medium"><FolderOpen className="h-4 w-4" aria-hidden="true"/>Browse or switch project</summary>{list}</details></>:list}
   </aside>;
 }

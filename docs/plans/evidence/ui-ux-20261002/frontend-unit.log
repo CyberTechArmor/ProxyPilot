@@ -1,0 +1,17 @@
+✔ exactly three named themes, dark default and legacy preference migration (10.098823ms)
+✔ blocked storage still applies historical dark palette before paint (1.004994ms)
+✔ Midnight retains baseline colors; palettes have no typography or geometry overrides (9.229667ms)
+✔ broker functional roles reuse existing Midnight colors without changing global tokens (4.780397ms)
+✔ visible catalogue states never imply assignment authority from use access or verification (0.902033ms)
+✔ catalogue refresh removes inaccessible selections and never widens a chosen scope (1.400392ms)
+✔ pilot scope refusal gives an actual site route without implying research is runnable (1.424724ms)
+✔ missing guide directs saving and assignment; credential binding remains operator managed (7.410389ms)
+✔ a historical guide is accepted only with the exact run version and content hash (0.236397ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 186.704399

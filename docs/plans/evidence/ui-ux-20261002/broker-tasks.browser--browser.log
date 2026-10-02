@@ -1,0 +1,8 @@
+2:44:58 PM [vite] (client) Re-optimizing dependencies because vite config has changed
+ok - only compatible configured capability mounts task controls
+ok - saving configuration and opening readiness never starts a task
+ok - failed independent preflight cannot expose start
+ok - expired independent readiness cannot start a saved agent
+ok - typed review emits bounded fields and starts only after explicit authentication
+ok - pending approval displays exact request and continuation uses issued reference
+ok - refresh observes status and cancellation is explicit

@@ -1,0 +1,11 @@
+{
+  "frozen_product_source": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "a6_node_report_finished_at": "2026-10-02T18:42:43.329Z",
+  "a6_node_report_passed": true,
+  "a6_journeys": 20,
+  "a6_layout_checks": 96,
+  "wrapper_exit": 1,
+  "wrapper_failure": "The active shell reread its locally edited helper, causing a duplicate A6 invocation and an unexpected fi after the completed successful node command/report.",
+  "recovery": "Fresh helper bash -n succeeded. Remaining checks resumed sequentially from A7; build/alignment/Connections/A6 were not repeated again. No product source changed.",
+  "discipline": "No passing aggregate-wrapper claim. Product assertions and wrapper result are recorded separately. Helpers were then left unchanged while active."
+}

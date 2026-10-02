@@ -1,0 +1,274 @@
+{
+  "synthetic": true,
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "generated_at": "2026-10-02T18:30:54.164Z",
+  "journeys": [
+    "project without guide or credentials",
+    "four sections guide reuse draft then explicit assignment and failure recovery",
+    "saved draft can be edited",
+    "save draft on every setup section creates no assignment or execution",
+    "use-only revoked and quarantined connections stay visible without selection authority",
+    "saved-agent catalogue preserves the exact-agent assignment decision",
+    "no secret input or unsupported auth; no replay; keyboard focus",
+    "synthetic intake opens only trusted broker origin and status refresh does not resubmit",
+    "rotation uses broker intake and observes committed version",
+    "unassign versus connection revoke and stale sessions",
+    "restored policy quarantine is explicit and blocks test and rotation",
+    "permission filtering clears hidden metadata",
+    "three color-only themes preserve structure, persist choice and support keyboard selection"
+  ],
+  "layout": [
+    {
+      "theme": "midnight",
+      "width": 360
+    },
+    {
+      "theme": "midnight",
+      "width": 375
+    },
+    {
+      "theme": "midnight",
+      "width": 390
+    },
+    {
+      "theme": "midnight",
+      "width": 768
+    },
+    {
+      "theme": "midnight",
+      "width": 1280
+    },
+    {
+      "theme": "midnight",
+      "width": 1920
+    },
+    {
+      "theme": "latte",
+      "width": 360
+    },
+    {
+      "theme": "latte",
+      "width": 375
+    },
+    {
+      "theme": "latte",
+      "width": 390
+    },
+    {
+      "theme": "latte",
+      "width": 768
+    },
+    {
+      "theme": "latte",
+      "width": 1280
+    },
+    {
+      "theme": "latte",
+      "width": 1920
+    },
+    {
+      "theme": "office",
+      "width": 360
+    },
+    {
+      "theme": "office",
+      "width": 375
+    },
+    {
+      "theme": "office",
+      "width": 390
+    },
+    {
+      "theme": "office",
+      "width": 768
+    },
+    {
+      "theme": "office",
+      "width": 1280
+    },
+    {
+      "theme": "office",
+      "width": 1920
+    }
+  ],
+  "screenshots": [
+    "new-project.png",
+    "project-agents.png",
+    "project-overview.png",
+    "agent-work.png",
+    "agent-selected-scope.png",
+    "agent-edit-scope.png",
+    "agent-controls.png",
+    "agent-review.png",
+    "catalogue-detail-lifecycle.png",
+    "work-midnight-390.png",
+    "work-footer-midnight-390.png",
+    "scope-summary-midnight-390.png",
+    "scope-card-summary-midnight-390.png",
+    "scope-edit-midnight-390.png",
+    "scope-card-edit-midnight-390.png",
+    "controls-midnight-390.png",
+    "controls-footer-midnight-390.png",
+    "review-midnight-390.png",
+    "catalogue-midnight-390.png",
+    "rotation-midnight-390.png",
+    "work-midnight-1536.png",
+    "work-footer-midnight-1536.png",
+    "scope-summary-midnight-1536.png",
+    "scope-card-summary-midnight-1536.png",
+    "scope-edit-midnight-1536.png",
+    "scope-card-edit-midnight-1536.png",
+    "controls-midnight-1536.png",
+    "controls-footer-midnight-1536.png",
+    "review-midnight-1536.png",
+    "catalogue-midnight-1536.png",
+    "rotation-midnight-1536.png",
+    "work-latte-390.png",
+    "work-footer-latte-390.png",
+    "scope-summary-latte-390.png",
+    "scope-card-summary-latte-390.png",
+    "scope-edit-latte-390.png",
+    "scope-card-edit-latte-390.png",
+    "controls-latte-390.png",
+    "controls-footer-latte-390.png",
+    "review-latte-390.png",
+    "catalogue-latte-390.png",
+    "rotation-latte-390.png",
+    "work-latte-1536.png",
+    "work-footer-latte-1536.png",
+    "scope-summary-latte-1536.png",
+    "scope-card-summary-latte-1536.png",
+    "scope-edit-latte-1536.png",
+    "scope-card-edit-latte-1536.png",
+    "controls-latte-1536.png",
+    "controls-footer-latte-1536.png",
+    "review-latte-1536.png",
+    "catalogue-latte-1536.png",
+    "rotation-latte-1536.png",
+    "work-office-390.png",
+    "work-footer-office-390.png",
+    "scope-summary-office-390.png",
+    "scope-card-summary-office-390.png",
+    "scope-edit-office-390.png",
+    "scope-card-edit-office-390.png",
+    "controls-office-390.png",
+    "controls-footer-office-390.png",
+    "review-office-390.png",
+    "catalogue-office-390.png",
+    "rotation-office-390.png",
+    "work-office-1536.png",
+    "work-footer-office-1536.png",
+    "scope-summary-office-1536.png",
+    "scope-card-summary-office-1536.png",
+    "scope-edit-office-1536.png",
+    "scope-card-edit-office-1536.png",
+    "controls-office-1536.png",
+    "controls-footer-office-1536.png",
+    "review-office-1536.png",
+    "catalogue-office-1536.png",
+    "rotation-office-1536.png",
+    "broker-modal-midnight-360.png",
+    "broker-modal-midnight-375.png",
+    "broker-modal-midnight-390.png",
+    "broker-modal-midnight-768.png",
+    "broker-modal-midnight-1280.png",
+    "broker-modal-midnight-1920.png",
+    "broker-modal-latte-360.png",
+    "broker-modal-latte-375.png",
+    "broker-modal-latte-390.png",
+    "broker-modal-latte-768.png",
+    "broker-modal-latte-1280.png",
+    "broker-modal-latte-1920.png",
+    "broker-modal-office-360.png",
+    "broker-modal-office-375.png",
+    "broker-modal-office-390.png",
+    "broker-modal-office-768.png",
+    "broker-modal-office-1280.png",
+    "broker-modal-office-1920.png"
+  ],
+  "accessibility": [
+    {
+      "name": "Project Agents",
+      "score": 100,
+      "failures": []
+    },
+    {
+      "name": "Midnight Add connection mobile dialog",
+      "score": 96,
+      "failures": [
+        "color-contrast"
+      ]
+    },
+    {
+      "name": "Latte Add connection mobile dialog",
+      "score": 100,
+      "failures": []
+    },
+    {
+      "name": "Office Add connection mobile dialog",
+      "score": 100,
+      "failures": []
+    }
+  ],
+  "contrast": [
+    {
+      "theme": "midnight",
+      "body": 16.63455033819627,
+      "helper": 9.770946762476395,
+      "action": 4.948795453345502
+    },
+    {
+      "theme": "latte",
+      "body": 12.151659189765185,
+      "helper": 6.108596087590177,
+      "action": 9.129581999876926
+    },
+    {
+      "theme": "office",
+      "body": 19.121122795349486,
+      "helper": 5.839100567485114,
+      "action": 9.751479668555318
+    }
+  ],
+  "functionalContrast": [
+    {
+      "theme": "midnight",
+      "focusVisible": true,
+      "focusShadow": true,
+      "focus": 5.280865997357438,
+      "inputBorder": 9.770946762476395,
+      "status": 11.207165493662702,
+      "decorativeCardBorder": 1.6022769748455838,
+      "error": 16.63455033819627,
+      "limitations": [],
+      "roleScope": "New broker/setup controls; existing Midnight palette tokens unchanged",
+      "decorativeBorderNote": "Card grouping outlines are decorative; excluded from functional boundary threshold"
+    },
+    {
+      "theme": "latte",
+      "focusVisible": true,
+      "focusShadow": true,
+      "focus": 5.716384802175959,
+      "inputBorder": 3.2415913441537856,
+      "status": 10.445587174283864,
+      "decorativeCardBorder": 1.4896204358050629,
+      "error": 6.55268384735724,
+      "limitations": [],
+      "roleScope": "New broker/setup controls; existing Midnight palette tokens unchanged",
+      "decorativeBorderNote": "Card grouping outlines are decorative; excluded from functional boundary threshold"
+    },
+    {
+      "theme": "office",
+      "focusVisible": true,
+      "focusShadow": true,
+      "focus": 6.458249459450031,
+      "inputBorder": 3.7010806119277238,
+      "status": 17.427374605947662,
+      "decorativeCardBorder": 1.2839326380408276,
+      "error": 4.585304856899093,
+      "limitations": [],
+      "roleScope": "New broker/setup controls; existing Midnight palette tokens unchanged",
+      "decorativeBorderNote": "Card grouping outlines are decorative; excluded from functional boundary threshold"
+    }
+  ]
+}

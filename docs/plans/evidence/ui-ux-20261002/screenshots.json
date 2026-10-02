@@ -1,48 +1,209 @@
 {
-  "source_commit": "96eed9c3fc9115e28076a9480dca91880ac53da3",
-  "fixture_only": true,
-  "files": [
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "screenshots": [
     {
-      "file": "overview-office-1536.png",
-      "sha256": "92cbe6b77812c3dd4789d7af76f95e160eb3458a674085de3f1639331ea4243e",
-      "bytes": 170121,
-      "source_suite": "ui-alignment"
+      "name": "overview-office-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 167259,
+      "sha256": "5e27c7cdb91c97dfb11ad43476d5b63b9c4d2a181243766f3988d0f6bed98a85",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/overview-office-1536.png"
     },
     {
-      "file": "overview-office-375.png",
-      "sha256": "38730ab8e4a91be0a70ee89568bcc657544d1504f6dea7a7647b228f466d00ae",
-      "bytes": 50395,
-      "source_suite": "ui-alignment"
+      "name": "overview-office-375.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 52580,
+      "sha256": "949b933ae6ebe3ee2bb73b2933e06a246b88c46aba3ca6f257cfb33b1e7c7ace",
+      "canvas": [
+        375,
+        812
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/overview-office-375.png"
     },
     {
-      "file": "setup-connections-office-1536.png",
-      "sha256": "fd126c224fac7a14f858e69cb8e19b0152eda12480ec1e4d6da94bd3d109d587",
-      "bytes": 176724,
-      "source_suite": "ui-alignment"
+      "name": "overview-latte-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 167492,
+      "sha256": "8fac28cbb8f54dbdaa17d568564ad008ad0884104d944c2e73f278acfb7ed3d2",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/overview-latte-1536.png"
     },
     {
-      "file": "add-connection-office-1536.png",
-      "sha256": "ac3d77f057cf520021bec50d70c50e3485353526a3c5bafc3d07fcfb6a6f7397",
-      "bytes": 167598,
-      "source_suite": "ui-alignment"
+      "name": "overview-midnight-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 164247,
+      "sha256": "a9da1d9b760e153f5dccef0ceed11674e2a00a971cd31acf0719c41fd48a5917",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/overview-midnight-1536.png"
     },
     {
-      "file": "add-connection-office-375.png",
-      "sha256": "b416927c546580e652d20997dc8019c54229df96b6483e16df83684bb2bb6493",
-      "bytes": 54605,
-      "source_suite": "ui-alignment"
+      "name": "setup-work-office-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 150472,
+      "sha256": "6544144e066b30d708e0136bac8f738caee316f561d5ff17cab3d8bb9af14d06",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/setup-work-office-1536.png"
     },
     {
-      "file": "deck-1280x800.png",
-      "sha256": "2d3ffd55d068db4d29cb994c9e6ac335b838fc615c8f823d2d0227b416bb85c1",
-      "bytes": 136313,
-      "source_suite": "agent-runs"
+      "name": "setup-connections-office-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 168539,
+      "sha256": "3cbe6ff7c3f776cdab966217d411d12aa3f67dbb1051b91d2613147de7e43c7e",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/setup-connections-office-1536.png"
     },
     {
-      "file": "flow-result.png",
-      "sha256": "03166df04fbcc8d9f2900917fa8aaf885cfe25d0b1fb803187f4853c3fbb05be",
-      "bytes": 144187,
-      "source_suite": "agent-runs"
+      "name": "setup-connections-office-375.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 57266,
+      "sha256": "f8baaadf06a3a07f34eb9aca17451fd9e63db0ed7539c99e60eda080df02cdc9",
+      "canvas": [
+        375,
+        812
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/setup-connections-office-375.png"
+    },
+    {
+      "name": "setup-controls-office-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 154177,
+      "sha256": "3f016b4bc83c14d5c9885f27f8155e2b551cfc89806d79fc5882c76d3f54bf50",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/setup-controls-office-1536.png"
+    },
+    {
+      "name": "setup-review-office-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 151657,
+      "sha256": "b10adb5b0d8463bdea00177013c205cdffc94e6b89b0489358bf254f3278a94a",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/setup-review-office-1536.png"
+    },
+    {
+      "name": "add-connection-office-1536.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 158415,
+      "sha256": "24c23a49884fa18a9b6b5468a46b305c62d7a3f426b832b33cd294d825e103eb",
+      "canvas": [
+        1536,
+        1024
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/add-connection-office-1536.png"
+    },
+    {
+      "name": "add-connection-office-375.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 51249,
+      "sha256": "d86305c5ec1bcd86e78e8a93bf19bce121cc28aaab14d834491fa9e1fcd0d8d4",
+      "canvas": [
+        375,
+        812
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/add-connection-office-375.png"
+    },
+    {
+      "name": "new-project-office-375.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 29540,
+      "sha256": "808235a9968b0d7e205761c642a5c7d703267f52ea50d7ff4d703f40aa9c2738",
+      "canvas": [
+        375,
+        812
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/ui-alignment.browser/new-project-office-375.png"
+    },
+    {
+      "name": "deck-1280x800.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 140724,
+      "sha256": "dc2b17df42ffe04ee231a60e5f76e06af3f098aa6ce10534769bca64193c4741",
+      "canvas": [
+        1280,
+        800
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/agent-runs.browser/deck-1280x800.png"
+    },
+    {
+      "name": "flow-result.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 161743,
+      "sha256": "6542eecb92876d808fafdc997f59e007f6c2cc8c44455e4dec7d5d8b92e20753",
+      "canvas": [
+        1280,
+        900
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/agent-runs.browser/flow-result.png"
+    },
+    {
+      "name": "phone-details.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 45361,
+      "sha256": "8eb2410febefd8c0ad848116a5e99ece1b20f7ef441b77121ecccccca47088fa",
+      "canvas": [
+        375,
+        812
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/agent-runs.browser/phone-details.png"
+    },
+    {
+      "name": "broker-modal-footer-office-375.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 61759,
+      "sha256": "2ba4fe413b3e2fc56b8b9545e38f2bb0a1bfa659efa0ba989decd477867b0a44",
+      "canvas": [
+        375,
+        1000
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/broker-connections.browser/broker-modal-footer-office-375.png"
+    },
+    {
+      "name": "website-review-completed-evidence-mobile.png",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "bytes": 57279,
+      "sha256": "054d8424ab962560a1b7cb87d2328472a6ec6adf9674681aab11441672fac8a2",
+      "canvas": [
+        375,
+        900
+      ],
+      "fixture_only": true,
+      "origin": "verification/ui-final/website-review-lighthouse/website-review-completed-evidence-mobile.png"
     }
   ]
 }

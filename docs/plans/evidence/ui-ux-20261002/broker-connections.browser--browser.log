@@ -1,0 +1,13 @@
+ok - project without guide or credentials
+ok - four sections guide reuse draft then explicit assignment and failure recovery
+ok - saved draft can be edited
+ok - save draft on every setup section creates no assignment or execution
+ok - use-only revoked and quarantined connections stay visible without selection authority
+ok - saved-agent catalogue preserves the exact-agent assignment decision
+ok - no secret input or unsupported auth; no replay; keyboard focus
+ok - synthetic intake opens only trusted broker origin and status refresh does not resubmit
+ok - rotation uses broker intake and observes committed version
+ok - unassign versus connection revoke and stale sessions
+ok - restored policy quarantine is explicit and blocks test and rotation
+ok - permission filtering clears hidden metadata
+ok - three color-only themes preserve structure, persist choice and support keyboard selection

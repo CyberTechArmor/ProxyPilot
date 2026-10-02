@@ -1,0 +1,196 @@
+{
+  "frozen_product_source": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "reports": [
+    {
+      "name": "ui-alignment.browser--ui-alignment-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 15689,
+      "sha256": "32b90ae205428380d02650eaaeaa8d1230be2010cd8185eefa35a39d5890486e"
+    },
+    {
+      "name": "broker-connections.browser--broker-ui-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 7810,
+      "sha256": "a3789ebcedc78cac92c82856197155bd5f943117380cd343486b767817356138"
+    },
+    {
+      "name": "agent-runs.browser--report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": false,
+      "bytes": 16213,
+      "sha256": "efa90224631708c14a0a52a532867073b0a6e0cbf4604f0726b197930c3c2e67"
+    },
+    {
+      "name": "agent-runs-a7.browser--report-a7.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": false,
+      "bytes": 5977,
+      "sha256": "8f5a9ac4c04a8a4128082331e460f128d9bbfc0c684bece47fbc371cc6bc85fc"
+    },
+    {
+      "name": "broker-tasks.browser--broker-tasks-ui-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 1109,
+      "sha256": "aaba7856a8eafa41ef0a28023599f0239ffde36c09cafbad6c1f3e291b9ecd57"
+    },
+    {
+      "name": "guide-save-approved.browser--report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 1891,
+      "sha256": "08c8e154f3d45db29ef745458205e3078af4fab00c18313da03369295a0b7d50"
+    },
+    {
+      "name": "website-review.browser--website-review-ui-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 3025,
+      "sha256": "96dd098d9259a05a0b01f45ae298c0a73d942a5d9fcc6a761b1ab189d111a61a"
+    },
+    {
+      "name": "website-review-integrated.browser--website-review-integrated-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 3418,
+      "sha256": "2f628a86260550ce408a08995de3935736350024fea1cd86f6aa8191fda75908"
+    },
+    {
+      "name": "website-review-runtime.browser--runtime-review-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": false,
+      "bytes": 1023,
+      "sha256": "5b82147cac5d2e9ee3c2bdbc467555970d2ea24486a3f8d136ef25d985159331"
+    },
+    {
+      "name": "website-review-lighthouse--website-review-lighthouse-report.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "self_reports_source": true,
+      "bytes": 770,
+      "sha256": "f14874f72eea8183627f2d2724d259215e9fcc5991fb0e6a2c70a13261c7615a"
+    },
+    {
+      "name": "backend.log",
+      "source_commit": "38a14238d9de2c5d12eec99365e095cefc73a0a3",
+      "note": "224 contract tests. Backend source is unchanged between tested merge and final frozen UI source."
+    },
+    {
+      "name": "wrapper-recovery.json",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+      "note": "A6 node assertions/report completed successfully; active wrapper reread then exited1. Fresh wrapper syntax check and sequential remaining checks are recorded separately."
+    }
+  ],
+  "note": "Executed on Duo using disposable local fixtures. No production/provider evidence. Reports without native source fields are attributed by the serialized controller SOURCE_COMMIT freeze.",
+  "logs": [
+    {
+      "name": "agent-runs-a7.browser--browser.log",
+      "bytes": 732,
+      "sha256": "0257914e17793de6cc0179c2cc9a858cf49b375574f2bb3d80622ffaa8781184",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "agent-runs.browser--browser.log",
+      "bytes": 2067,
+      "sha256": "df9b5f9f0aae787408ded65c3224c6f1e15a11993ff08b5459e374028f778022",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "backend.log",
+      "bytes": 28116,
+      "sha256": "82bff5f04d9ed238ff1bcd263572cbaace19ed8e999bfc3c8658f927dd3d33cc",
+      "source_commit": "38a14238d9de2c5d12eec99365e095cefc73a0a3"
+    },
+    {
+      "name": "broker-connections.browser--browser.log",
+      "bytes": 893,
+      "sha256": "fb46980cb2395ae2957ba0ce87964aa6c816b48e5ba2c9fc601b31e2a6c0f211",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "broker-integrated.browser--browser.log",
+      "bytes": 2639,
+      "sha256": "287f64cd7fb0c19ae9c4d3126c3bcb047f88af9d3d9cc7e928aa7534a14b6f39",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "broker-saved-agent.integrated.browser--browser.log",
+      "bytes": 2574,
+      "sha256": "d09181482ac055a0d273adea462b36812df5560639328438cef56bcefe0ff857",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "broker-tasks.browser--browser.log",
+      "bytes": 561,
+      "sha256": "17dc11366047da2bf2a9cfffbfef3a099544299c8e0a1882a7b64b9c7b9e5592",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "build.log",
+      "bytes": 14702,
+      "sha256": "5fc3681b09e088c0ca27b14dd75ff863971823677211391a1a4059fb3dd8917a",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "frontend-unit.log",
+      "bytes": 1005,
+      "sha256": "d5cfb058abdc81326fb5b95dfd9da56ce21f14b80e6aee3ae907cec02c20b87f",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "guide-save-approved.browser--browser.log",
+      "bytes": 312,
+      "sha256": "94dcdcdf81ce896f95c53ae234f1142111c5e7782e3426fc086baca6473e0fce",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "operations-guide.browser--browser.log",
+      "bytes": 290,
+      "sha256": "c4fdaf23adc5a5735e706949f0db7507849e4e3c9662797d943f5739b01dd15a",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "run-accessibility.log",
+      "bytes": 787,
+      "sha256": "12cd973991c47010071ebb04ccaa59c10ba2ae46c60e9527c507fc06b0187fbe",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "syntax.log",
+      "bytes": 58,
+      "sha256": "627394bcaea150886857390d8cd469aad1ade2efe187751b0a4ae8481b350ac2",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "ui-alignment.browser--browser.log",
+      "bytes": 597,
+      "sha256": "f7d5be170a6aeeb027fdca395c7a829e101cee15212fb357a819029899a80bdb",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "website-review-integrated.browser--browser.log",
+      "bytes": 585,
+      "sha256": "c395aabb43e7ca512d353be9360a65b64a46f4f83c03c81caf523b667326017e",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "website-review-lighthouse--browser.log",
+      "bytes": 363,
+      "sha256": "e341c1c36c3f5d5df0416d563d0aa608f110d441a31877ea53c623c021742cc2",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "website-review-runtime.browser--browser.log",
+      "bytes": 1352,
+      "sha256": "b5943fca27a254f8e3db75554c369a78aad186b7c5cad58005b5a1772b9d8d90",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    },
+    {
+      "name": "website-review.browser--browser.log",
+      "bytes": 3146,
+      "sha256": "ed0a5b5dd540fc355dc5078ff4ea349de4edf9d7afb23dc6542c512bcceb0dbe",
+      "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7"
+    }
+  ]
+}

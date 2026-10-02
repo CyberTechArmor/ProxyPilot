@@ -1,0 +1,772 @@
+{
+  "journeys": [
+    {
+      "name": "roles: run roles may start; a viewer is told why not; an outsider gets 404",
+      "passed": true,
+      "seconds": 29.8
+    },
+    {
+      "name": "desktop context tabs use keyboard navigation and show the run's immutable pinned guide",
+      "passed": true,
+      "seconds": 1.9
+    },
+    {
+      "name": "start, rule steps, live browser, approval with sudo and the digest, verified result",
+      "passed": true,
+      "seconds": 7.4
+    },
+    {
+      "name": "run deck at 1280×800: the whole frame and the latest activity are in view while an approval is open",
+      "passed": true,
+      "seconds": 3.5
+    },
+    {
+      "name": "phone panels: one at a time, the choice survives a refresh (&panel=), the banner follows the panel",
+      "passed": true,
+      "seconds": 4.8
+    },
+    {
+      "name": "follow-latest: new items keep the feed at the bottom; a reader who scrolled up sees Jump to latest and is not moved",
+      "passed": true,
+      "seconds": 6.2
+    },
+    {
+      "name": "frames: none before step 1 has finished (no blank first frame); an identical frame is not attached again",
+      "passed": true,
+      "seconds": 10.6
+    },
+    {
+      "name": "browser state: LIVE, Paused (no frames), Ended with \"Last frame · at step N\"; Details tabs by keyboard",
+      "passed": true,
+      "seconds": 7.1
+    },
+    {
+      "name": "stop mid-run: the run is fenced and says why Stop is gone",
+      "passed": true,
+      "seconds": 3.1
+    },
+    {
+      "name": "stale approval: a rotated binding closes the control with the reason",
+      "passed": true,
+      "seconds": 4.9
+    },
+    {
+      "name": "stale approval: a newly approved guide, then the profile is not ready until reassigned",
+      "passed": true,
+      "seconds": 5.5
+    },
+    {
+      "name": "owner consent: withdrawing it makes Start say why; giving it needs the reviewed statement",
+      "passed": true,
+      "seconds": 2.6
+    },
+    {
+      "name": "an approval racing a stop: the open dialog closes itself with the reason",
+      "passed": true,
+      "seconds": 4.1
+    },
+    {
+      "name": "a revoked grant while viewing: the next poll shows the refusal and the live view stops",
+      "passed": true,
+      "seconds": 9.3
+    },
+    {
+      "name": "refresh and reconnect during an approval at 360px: durable state returns, then approve",
+      "passed": true,
+      "seconds": 12
+    },
+    {
+      "name": "keyboard only: start, open the approval, type the digest, confirm sudo, finish",
+      "passed": true,
+      "seconds": 5.9
+    },
+    {
+      "name": "each result class and help banner; the inbox lists the open help request",
+      "passed": true,
+      "seconds": 39.2
+    },
+    {
+      "name": "layout: overview, run detail with a pending approval, and the inbox at six widths in both themes",
+      "passed": true,
+      "seconds": 25.8
+    },
+    {
+      "name": "toggles: off until an administrator turns them on with sudo; everyone sees the result",
+      "passed": true,
+      "seconds": 16.5
+    },
+    {
+      "name": "execution unavailable: Start says why; the inbox says so; nothing launches",
+      "passed": true,
+      "seconds": 14.1
+    }
+  ],
+  "layout": [
+    {
+      "label": "approval-dialog",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "approval-dialog",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "approval-dialog",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "approval-dialog",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "approval-dialog",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "approval-dialog",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-light",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-light",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-light",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-light",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-light",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-light",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-light",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-light",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-light",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-light",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-light",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-light",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-light",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-light",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-light",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-light",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-light",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-light",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-light",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-light",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-light",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-light",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-light",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-light",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-light",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-light",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-light",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-light",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-light",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-light",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-light",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-light",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-light",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-light",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-light",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-light",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-dark",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-dark",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-dark",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-dark",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-dark",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-detail-dark",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-dark",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-dark",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-dark",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-dark",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-dark",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-activity-dark",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-dark",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-dark",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-dark",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-dark",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-dark",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "run-details-dark",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-dark",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-dark",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-dark",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-dark",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-dark",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "inbox-dark",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-dark",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-dark",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-dark",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-dark",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-dark",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "overview-dark",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-dark",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-dark",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-dark",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-dark",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-dark",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agents-dark",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-off",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-off",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-off",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-off",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-off",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-off",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-on",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-on",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-on",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-on",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-on",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "settings-on",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "unavailable",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "unavailable",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "unavailable",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "unavailable",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "unavailable",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "unavailable",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    }
+  ],
+  "started_at": "2026-10-02T18:39:06.124Z",
+  "flow_run": "76794335-c761-4393-a1af-f5d81c28e689",
+  "deck_fit": {
+    "frame": true,
+    "items": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "pageScrolled": 0
+  },
+  "approval_rail_placement": {
+    "rightOfBrowser": true,
+    "alignedWithBrowser": true,
+    "aboveContext": true,
+    "alignedWithContext": true
+  },
+  "focus_order": [
+    "run bar",
+    "approval",
+    "browser",
+    "context tabs"
+  ],
+  "follow_latest": {
+    "jump": "Jump to latest (1 new)"
+  },
+  "tabs_keyboard": true,
+  "keyboard_focus": [
+    {
+      "control": "Start run",
+      "visible": true,
+      "shadow": "rgb(26, 26, 26) 0px 0px 0px 2px, rgb(22, 163, 74) 0px 0px 0px 4px, rgba(0, 0, 0, 0) 0px 0px 0px 0px",
+      "outline": "solid"
+    },
+    {
+      "control": "Review and approve",
+      "visible": true,
+      "shadow": "rgb(26, 26, 26) 0px 0px 0px 2px, rgb(22, 163, 74) 0px 0px 0px 4px, rgba(0, 0, 0, 0) 0px 0px 0px 0px",
+      "outline": "solid"
+    }
+  ],
+  "result_classes": [
+    {
+      "label": "Credential rejected",
+      "help": false
+    },
+    {
+      "label": "Rate limited",
+      "help": false
+    },
+    {
+      "label": "Challenge required",
+      "help": true
+    },
+    {
+      "label": "Unexpected origin",
+      "help": false
+    },
+    {
+      "label": "Timed out",
+      "help": true
+    },
+    {
+      "label": "Account not verified",
+      "help": false
+    },
+    {
+      "label": "Budget exhausted",
+      "help": false
+    },
+    {
+      "label": "Uncertain model call",
+      "help": true
+    },
+    {
+      "label": "Uncertain step",
+      "help": true
+    },
+    {
+      "label": "Taken over",
+      "help": true
+    },
+    {
+      "label": "Interrupted",
+      "help": true
+    }
+  ],
+  "passed": true,
+  "finished_at": "2026-10-02T18:42:43.329Z"
+}

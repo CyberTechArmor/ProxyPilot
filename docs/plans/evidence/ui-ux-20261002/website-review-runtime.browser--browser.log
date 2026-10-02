@@ -1,0 +1,46 @@
+(node:1852) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Failed to load resource: the server responded with a status of 404 (Not Found)
+journey: guide save
+journey: explicit start
+journey: cancel
+journey: unsupported
+{
+  "fixture_only": true,
+  "real_layers": [
+    "UI",
+    "API client",
+    "Express router",
+    "CSRF",
+    "approved-guide store",
+    "HTTP extraction",
+    "review service",
+    "signed model bridge"
+  ],
+  "scripted_layers": [
+    "authenticated session",
+    "public DNS/socket dial mapping",
+    "provider answer"
+  ],
+  "journeys": [
+    "Real approved-guide save -> inert agent save -> inert owner consent -> explicit start -> cited review, signed receipt and extracted source evidence.",
+    "Cancellation during a provider wait records a terminal outcome and suppresses late publication, retaining spending uncertainty.",
+    "JavaScript-only content is honestly unsupported; no model call or fabricated review.",
+    "Real CSRF and unrelated-owner denials remain enforced."
+  ],
+  "layout": [
+    {
+      "width": 375,
+      "no_horizontal_overflow": true
+    },
+    {
+      "width": 1280,
+      "no_horizontal_overflow": true
+    }
+  ],
+  "requests": {
+    "website": 8,
+    "model": 2,
+    "starts": 3
+  }
+}

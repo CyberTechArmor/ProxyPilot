@@ -1,0 +1,106 @@
+{
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "real_router": true,
+  "layout": [
+    {
+      "width": 360,
+      "state": "pending",
+      "scroll": 360
+    },
+    {
+      "width": 375,
+      "state": "pending",
+      "scroll": 375
+    },
+    {
+      "width": 390,
+      "state": "pending",
+      "scroll": 390
+    },
+    {
+      "width": 768,
+      "state": "pending",
+      "scroll": 768
+    },
+    {
+      "width": 1280,
+      "state": "pending",
+      "scroll": 1280
+    },
+    {
+      "width": 360,
+      "state": "viewer",
+      "scroll": 360
+    },
+    {
+      "width": 360,
+      "state": "edit",
+      "scroll": 360
+    },
+    {
+      "width": 375,
+      "state": "viewer",
+      "scroll": 375
+    },
+    {
+      "width": 375,
+      "state": "edit",
+      "scroll": 375
+    },
+    {
+      "width": 390,
+      "state": "viewer",
+      "scroll": 390
+    },
+    {
+      "width": 390,
+      "state": "edit",
+      "scroll": 390
+    },
+    {
+      "width": 768,
+      "state": "viewer",
+      "scroll": 768
+    },
+    {
+      "width": 768,
+      "state": "edit",
+      "scroll": 768
+    },
+    {
+      "width": 1280,
+      "state": "viewer",
+      "scroll": 1280
+    },
+    {
+      "width": 1280,
+      "state": "edit",
+      "scroll": 1280
+    },
+    {
+      "width": 375,
+      "state": "stale-evidence",
+      "scroll": 375
+    }
+  ],
+  "screenshots": [
+    "guide-pending-360.png",
+    "guide-pending-375.png",
+    "guide-pending-390.png",
+    "guide-pending-768.png",
+    "guide-pending-1280.png",
+    "guide-viewer-360.png",
+    "guide-edit-360.png",
+    "guide-viewer-375.png",
+    "guide-edit-375.png",
+    "guide-viewer-390.png",
+    "guide-edit-390.png",
+    "guide-viewer-768.png",
+    "guide-edit-768.png",
+    "guide-viewer-1280.png",
+    "guide-edit-1280.png",
+    "guide-stale-evidence-375.png"
+  ],
+  "controlled_evidence_cas": true,
+  "errors": []
+}

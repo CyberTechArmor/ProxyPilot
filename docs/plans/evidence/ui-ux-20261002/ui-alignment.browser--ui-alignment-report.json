@@ -1,0 +1,682 @@
+{
+  "synthetic": true,
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "generated_at": "2026-10-02T18:29:22.601Z",
+  "journeys": [
+    {
+      "name": "short private creation with cancel/reopen and no raw account IDs",
+      "passed": true
+    },
+    {
+      "name": "overview summary hierarchy and separate Details actions",
+      "passed": true
+    },
+    {
+      "name": "pending guide has explicit save-to-approved action with no reviewer blocker",
+      "passed": true
+    },
+    {
+      "name": "stale guide save retains entered text and makes no run request",
+      "passed": true
+    },
+    {
+      "name": "viewer sees guide without publishing controls",
+      "passed": true
+    },
+    {
+      "name": "evidence save after remount never rebases stale local guide text",
+      "passed": true
+    },
+    {
+      "name": "same frozen project state has identical theme geometry",
+      "passed": true
+    },
+    {
+      "name": "setup geometry, draft save separation and unsupported capability",
+      "passed": true
+    }
+  ],
+  "layout": [
+    {
+      "width": 360,
+      "state": "overview",
+      "scroll": 360,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 360,
+      "state": "new-project",
+      "scroll": 360,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 360,
+      "state": "setup-connections",
+      "scroll": 360,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 360,
+      "state": "add-connection",
+      "scroll": 360,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 375,
+      "state": "overview",
+      "scroll": 375,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 375,
+      "state": "new-project",
+      "scroll": 375,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 375,
+      "state": "setup-connections",
+      "scroll": 375,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 375,
+      "state": "add-connection",
+      "scroll": 375,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 390,
+      "state": "overview",
+      "scroll": 390,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 390,
+      "state": "new-project",
+      "scroll": 390,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 390,
+      "state": "setup-connections",
+      "scroll": 390,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 390,
+      "state": "add-connection",
+      "scroll": 390,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 768,
+      "state": "overview",
+      "scroll": 768,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 768,
+      "state": "new-project",
+      "scroll": 768,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 768,
+      "state": "setup-connections",
+      "scroll": 768,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 768,
+      "state": "add-connection",
+      "scroll": 768,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 1280,
+      "state": "overview",
+      "scroll": 1280,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 1280,
+      "state": "new-project",
+      "scroll": 1280,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 1280,
+      "state": "setup-connections",
+      "scroll": 1280,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 1280,
+      "state": "add-connection",
+      "scroll": 1280,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 1536,
+      "state": "overview",
+      "scroll": 1536,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 1536,
+      "state": "new-project",
+      "scroll": 1536,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 1536,
+      "state": "setup-connections",
+      "scroll": 1536,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 1536,
+      "state": "add-connection",
+      "scroll": 1536,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 1920,
+      "state": "overview",
+      "scroll": 1920,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 1920,
+      "state": "new-project",
+      "scroll": 1920,
+      "active_section": "Overview",
+      "active_section_visible": true
+    },
+    {
+      "width": 1920,
+      "state": "setup-connections",
+      "scroll": 1920,
+      "active_section": "Agents",
+      "active_section_visible": true
+    },
+    {
+      "width": 1920,
+      "state": "add-connection",
+      "scroll": 1920,
+      "active_section": "Agents",
+      "active_section_visible": true
+    }
+  ],
+  "screenshots": [
+    "new-project-office-1536.png",
+    "overview-office-1536.png",
+    "guide-pending-office-1536.png",
+    "overview-office-1536.png",
+    "overview-latte-1536.png",
+    "overview-midnight-1536.png",
+    "setup-work-office-1536.png",
+    "setup-connections-office-1536.png",
+    "add-connection-office-1536.png",
+    "setup-controls-office-1536.png",
+    "setup-review-office-1536.png",
+    "overview-office-375.png",
+    "new-project-office-375.png",
+    "setup-connections-office-375.png",
+    "add-connection-office-375.png",
+    "overview-office-768.png",
+    "setup-connections-office-768.png",
+    "add-connection-office-768.png",
+    "overview-office-1920.png",
+    "setup-connections-office-1920.png",
+    "add-connection-office-1920.png"
+  ],
+  "geometry": [
+    {
+      "theme": "office",
+      "geometry": [
+        {
+          "tag": "H1",
+          "text": "Projects & SOPs",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "40px",
+          "rect": [
+            248,
+            24,
+            340.984375,
+            46
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            248,
+            123,
+            1264,
+            831
+          ]
+        },
+        {
+          "tag": "ASIDE",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            248,
+            123,
+            499.1875,
+            517
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            763.1875,
+            123,
+            748.8125,
+            831
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Reconcile invoices",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "22px",
+          "rect": [
+            788.1875,
+            173.25,
+            217.75,
+            27.5
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Guide & material",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            355,
+            200.171875,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Version & readiness",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            1162.59375,
+            355,
+            231.0625,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Agents",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            561,
+            99.15625,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Recent activity",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            1162.59375,
+            561,
+            180.46875,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Access & connections",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            807,
+            247.359375,
+            28
+          ]
+        }
+      ]
+    },
+    {
+      "theme": "latte",
+      "geometry": [
+        {
+          "tag": "H1",
+          "text": "Projects & SOPs",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "40px",
+          "rect": [
+            248,
+            24,
+            340.984375,
+            46
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            248,
+            123,
+            1264,
+            831
+          ]
+        },
+        {
+          "tag": "ASIDE",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            248,
+            123,
+            499.1875,
+            517
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            763.1875,
+            123,
+            748.8125,
+            831
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Reconcile invoices",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "22px",
+          "rect": [
+            788.1875,
+            173.25,
+            217.75,
+            27.5
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Guide & material",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            355,
+            200.171875,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Version & readiness",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            1162.59375,
+            355,
+            231.0625,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Agents",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            561,
+            99.15625,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Recent activity",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            1162.59375,
+            561,
+            180.46875,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Access & connections",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            807,
+            247.359375,
+            28
+          ]
+        }
+      ]
+    },
+    {
+      "theme": "midnight",
+      "geometry": [
+        {
+          "tag": "H1",
+          "text": "Projects & SOPs",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "40px",
+          "rect": [
+            248,
+            24,
+            340.984375,
+            46
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            248,
+            123,
+            1264,
+            831
+          ]
+        },
+        {
+          "tag": "ASIDE",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            248,
+            123,
+            499.1875,
+            517
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": null,
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "14px",
+          "rect": [
+            763.1875,
+            123,
+            748.8125,
+            831
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Reconcile invoices",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "22px",
+          "rect": [
+            788.1875,
+            173.25,
+            217.75,
+            27.5
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Guide & material",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            355,
+            200.171875,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Version & readiness",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            1162.59375,
+            355,
+            231.0625,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Agents",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            561,
+            99.15625,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Recent activity",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            1162.59375,
+            561,
+            180.46875,
+            28
+          ]
+        },
+        {
+          "tag": "H2",
+          "text": "Access & connections",
+          "font": "Inter, system-ui, -apple-system, sans-serif",
+          "size": "18px",
+          "rect": [
+            805.1875,
+            807,
+            247.359375,
+            28
+          ]
+        }
+      ]
+    }
+  ],
+  "reference_fit": {
+    "overview": {
+      "width": 1536,
+      "height": 1024,
+      "list_width": 499.1875,
+      "detail_width": 748.8125,
+      "list_fraction": 0.399989983974359,
+      "access_bottom": 929
+    },
+    "work": {
+      "viewport": {
+        "width": 1536,
+        "height": 1024
+      },
+      "footer_action": {
+        "x": 1326.703125,
+        "y": 965.5,
+        "width": 160.296875,
+        "height": 38
+      }
+    },
+    "connections": {
+      "viewport": {
+        "width": 1536,
+        "height": 1024
+      },
+      "selected_card": {
+        "top": 557.5,
+        "bottom": 664.5,
+        "height": 107
+      },
+      "footer_action": {
+        "x": 1355.3125,
+        "y": 859.5,
+        "width": 131.6875,
+        "height": 38
+      }
+    }
+  },
+  "theme_palettes": [
+    "rgb(248, 250, 252)",
+    "rgb(247, 244, 238)",
+    "rgb(26, 26, 26)"
+  ],
+  "errors": []
+}

@@ -54,3 +54,5 @@ Acceptance compares actual browser screenshots to reference pixels and documente
 - agent-flightdeck: `bb07278b834a51c9ecf7e3a3669c740a526020de299f92fa6ff9d08b8a7eba2b`
 - agent;s-mockup: `506ab3f00a39b91a10cfd37671bd608133b8ccc91ca95d2115edc96cb6f26ea3`
 - Projects-mockup: `a7d9415fc2dc114aa97abb8d99fb8c7120a4f2247590d42920c099c936a6f7b8`
+
+Original Duo design-and-prompts.json identifies the source title "Fractionate Agent Vison Plan and Review" and thread `01a0d3b8-06f8-7fb2-9c6f-02ad48e753a9`. No chat URL was supplied or invented.

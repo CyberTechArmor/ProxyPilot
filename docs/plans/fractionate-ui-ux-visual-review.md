@@ -23,3 +23,46 @@ Review source: `96eed9c3fc9115e28076a9480dca91880ac53da3`, locally integrated wi
 - Docker/iptables are unavailable locally. Two real OpenBao cases failed with Docker ENOENT, while 83 other broker tests passed. A local Linux security aggregate passed 312/313; the unchanged MCP file failed a source snapshot comparison due to CRLF/LF. No unrelated security repair is included.
 
 Visual acceptance requires reviewing these actual rendered screens and the documented differences. Functional success and color themes alone do not establish mockup fidelity. The remaining density difference, unavailable runtime concepts, and local integration limits are deliberately visible in the [tracker](fractionate-ui-ux-tracker.md).
+
+## Final visible differences for review
+
+These observations compare the retained source `96eed9c3` pixels with the approved
+Projects, setup, Add and Flightdeck references. They are acceptance gaps, not a
+proposal to add unsupported capabilities or redesign the reviewed website flow.
+
+- **Overview fold and proportions:** the current Overview adds separate Agents
+  and Recent activity cards. Capability explanation makes the Agents card tall
+  and leaves Access only partly visible at 1024px; the Projects reference fits
+  Access in its initial canvas. Its project list is also proportionally wider:
+  approximately 41% of list/detail width versus 36% in the current Overview.
+  The supplied canvases differ (1586px versus 1536px), so this is a proportional
+  comparison rather than an equal-viewport pixel claim.
+- **Setup fold:** beyond the selected-row 130px versus 104px difference, explicit
+  model-provider, broker and Browser/OAuth availability explanations add vertical
+  space. Current navigation buttons reach below the 1024px fold; the approved
+  setup puts its footer in the first screen. The narrow assignment summary is
+  present, but correctly labels saved-draft selections as pending assignments.
+- **Dialog treatment and capabilities:** the centered 600px shell follows the
+  reference. Its content differs visibly: metadata-only save, external broker
+  intake or an unavailable-intake panel, disabled Browser/OAuth/link-existing
+  types, and a separate assignment step replace the concept's secret field and
+  Save securely & assign action. These are current contract boundaries, not
+  missing styling acceptance evidence.
+- **Run composition:** the implemented deck places a full-width digest/sudo
+  approval banner above Browser and Activity/Guide/Details. The Flightdeck
+  reference places its help card in the right rail and includes task/recent-
+  activity cards under the browser plus Direct the agent. Those latter arbitrary
+  instruction/training-video concepts have no implemented contract. The retained
+  screenshot contains a scripted frame and lacks live video, so it cannot prove
+  the reference's realistic browser content or takeover video treatment.
+- **Navigation and state vocabulary:** existing Operations/infrastructure routes
+  and Guide/Versions/Runs/Agents/Access/Details remain available. The reference's
+  Projects/Applications/Knowledge/Flightdeck navigation, Training labels,
+  project/agent toggles and fabricated running/training/help states are not
+  duplicated. Current guide/readiness/access states use actual API data. The
+  precreation people picker also remains deferred to named lookup after creation
+  because its permission-safe API requires an existing project ID.
+
+No further product or website changes were made for this comparison. Library
+delivery remains the earlier tracker identity/version; the latest screenshot
+deliverables are local because the required preparation action was unavailable.

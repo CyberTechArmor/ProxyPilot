@@ -771,6 +771,19 @@ class Broker:
         result = self._model_call(params, None, SUMMARY_MAX_OUTPUT_TOKENS, SUMMARY_TEXT_CHARS)
         return dict(result, kind='summary')
 
+    def review_call(self, params):
+        """One public read-only review, using the existing provider and ledger.
+
+        No website binding or vault value is delivered to the dashboard. The
+        supervisor builds the bounded data-only prompt and independently pins
+        task provenance; all existing reservation/settlement rules still apply.
+        """
+        with self.lock:
+            run = self.state['runs'].get(params.get('run_id'))
+            if run is None or run.get('credential') is not None:
+                raise Refused('RUN_NOT_PINNED')
+        return dict(self._model_call(params, None, 1500, 10000), kind='public_review')
+
     def _model_call(self, params, proof, max_output, excerpt):
         fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens', 'prompt')
         if (not exact(params, fields) or not uuid_ok(params['run_id']) or not uuid_ok(params['call_id'])
@@ -792,7 +805,7 @@ class Broker:
                         raise Refused(existing.get('refusal') or 'CALL_REFUSED')
                     return dict(self._call_result(existing), replayed=True)
                 call = {'call_id': params['call_id'], 'run_id': params['run_id'], 'model_requested': params['model'],
-                        'kind': 'summary' if max_output == SUMMARY_MAX_OUTPUT_TOKENS else 'step',
+                        'kind': 'public_review' if excerpt == 10000 else 'summary' if max_output == SUMMARY_MAX_OUTPUT_TOKENS else 'step',
                         'max_output_tokens': params['max_output_tokens'], 'prompt_bytes': prompt_bytes,
                         'prompt_sha256': hashlib.sha256(params['prompt'].encode('utf-8')).hexdigest(),
                         'started_at': stamp(self.clock()), 'price_table_revision': self.state['prices']['revision']}
@@ -916,7 +929,7 @@ class Broker:
             vault = False
         return {'broker': {'version': 1, 'broker_sha256': self.state.get('broker_sha256')},
                 'vm_uuid': VM_UUID, 'origin': ORIGIN, 'routes': sorted(MODEL_ROUTES), 'vault_healthy': vault,
-                'bindings': bindings, 'prices': prices,
+                'bindings': bindings, 'prices': prices, 'public_review': True,
                 'provider': None if provider is None else {k: provider[k] for k in ('vault_key', 'vault_version',
                                                                                      'revision')}}
 
@@ -926,7 +939,7 @@ class Broker:
         handler = {'status': self.status, 'bind': self.bind, 'rotate': self.rotate, 'revoke': self.revoke,
                    'bindings': self.bindings, 'pin_run': self.pin_run, 'check': self.check, 'deliver': self.deliver,
                    'provider_bind': self.provider_bind, 'price_set': self.price_set, 'price_clear': self.price_clear,
-                   'model_call': self.model_call, 'summary_call': self.summary_call, 'ledger': self.ledger}.get(method)
+                   'model_call': self.model_call, 'summary_call': self.summary_call, 'review_call': self.review_call, 'ledger': self.ledger}.get(method)
         if handler is None:
             raise Refused('METHOD_NOT_ALLOWED')
         return handler(params)

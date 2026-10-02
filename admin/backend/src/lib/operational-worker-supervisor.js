@@ -14,7 +14,7 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const METHODS = new Set(['status', 'launch', 'renew', 'action', 'step_record', 'model_step', 'view', 'stop',
-  'takeover', 'release', 'summarize']);
+  'takeover', 'release', 'summarize', 'public_review_status', 'public_review_model', 'cancel_public_review']);
 const STREAM_METHODS = new Set(['live']);
 const MAX_REPLY = 4 * 1024 * 1024;
 // One relayed signalling line (an SDP offer is the largest, a few kB).

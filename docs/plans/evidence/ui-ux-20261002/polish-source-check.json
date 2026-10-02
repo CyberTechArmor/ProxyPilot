@@ -1,0 +1,16 @@
+{
+  "source_commit": "d47cbf32f4f54fc9199063b9ff4a2863dfa58cd7",
+  "checked_at_utc": "2026-10-02 17:20 UTC",
+  "command": ".tools/verify-ui-polish-source.sh",
+  "exit_code": 0,
+  "jsx_files_parsed": 6,
+  "browser_scripts_syntax_checked": 2,
+  "tests": 9,
+  "passed": 9,
+  "failed": 0,
+  "skipped": 0,
+  "production_build_run": false,
+  "browser_run": false,
+  "rendered_acceptance": "pending website/updater release owner's resource slot",
+  "stdout": "Six UI source files parsed; no build or browser launched.\n✔ no frame is shown before step 1 has finished: the browser before its first page is blank (14.408627ms)\n✔ a frame identical to the last thumbnail is not attached again; the pane still moves on (0.269899ms)\n✔ the phone panel: the one in the URL, else Browser while running and Details after (0.163339ms)\n✔ the feed: frames are not items; a model call a step used is not repeated (32.119984ms)\n✔ visible catalogue states never imply assignment authority from use access or verification (1.022649ms)\n✔ catalogue refresh removes inaccessible selections and never widens a chosen scope (2.514856ms)\n✔ pilot scope refusal gives an actual site route without implying research is runnable (0.898308ms)\n✔ missing guide directs saving and assignment; credential binding remains operator managed (3.53905ms)\n✔ a historical guide is accepted only with the exact run version and content hash (0.284104ms)\nℹ tests 9\nℹ suites 0\nℹ pass 9\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 268.255063\n"
+}

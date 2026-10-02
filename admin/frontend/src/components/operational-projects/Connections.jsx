@@ -8,12 +8,12 @@ import { Action, Panel, Field } from './shared';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { connectionAssignmentState, connectionStatus, operationLabel } from './connection-ui-logic';
 
-export function BrokerStatus({ capabilities }) {
+export function BrokerStatus({ capabilities, compact=false }) {
   return <div role="status" className="operations-card rounded-md border border-input bg-accent p-3 text-sm text-foreground flex items-start gap-2">
     <LockKeyhole className="h-4 w-4 mt-0.5 shrink-0" aria-hidden="true"/><div className="space-y-1">
     {capabilities?.mode === 'synthetic' && <strong className="block">Isolated synthetic development</strong>}
     <p>{!capabilities?'Checking broker availability.':capabilities.execution_enabled?'Broker available for the synthetic ledger API.':capabilities.intake_enabled?'Credential intake available. Check agent readiness before execution.':'Credential use is unavailable. Broker setup or verification is required.'}</p>
-    <p>Draft saving starts no run. Browser sign-in and OAuth are unavailable.</p></div>
+    {!compact&&<p>Draft saving starts no run. Browser sign-in and OAuth are unavailable.</p>}</div>
   </div>;
 }
 
@@ -113,7 +113,7 @@ export function ConnectionCatalogue({ projectId, agentId, onSelect, selectedIds 
       })}</ul>
     </>}
     <Action variant="outline" disabled={busy || loading} onClick={() => load()}><RefreshCw className="h-4 w-4 mr-2" aria-hidden="true"/>Refresh connections</Action>
-    {onSelect&&<BrokerStatus capabilities={caps}/>}
+    {onSelect&&<BrokerStatus capabilities={caps} compact/>}
     {detail && <Panel title={detail.connection.name}>
       <p className="text-sm break-words">Your permissions: {detail.connection.rights.join(', ')}. Revoking the connection affects every assignment. Removing one assignment preserves other agents’ access.</p>
       {detail.connection.rights.includes('manage') && <div className="space-y-4"><RenameConnection connection={detail.connection} onChanged={() => { setDetail(null); load(); }} /><div className="flex flex-wrap gap-3"><Action disabled={busy || !(caps?.mode==='synthetic'||(caps?.mode==='configured'&&caps.compatible===true&&caps.reason==='READY')) || detail.connection.readiness?.code==='POLICY_REVALIDATION_REQUIRED'} onClick={() => mutate(`/${detail.connection.id}/test`, detail.connection.revision, 'Test failed')}>Test (read only)</Action><Action variant="outline" disabled={busy || !caps?.intake_enabled || detail.connection.readiness?.code==='POLICY_REVALIDATION_REQUIRED'} onClick={()=>setRotating(detail.connection)}>Rotate credential</Action></div><ConfirmRevoke label="Revoke connection" explanation="All assignments and future sessions for this connection will stop. An upstream request already accepted cannot be undone." busy={busy} onConfirm={() => mutate(`/${detail.connection.id}/revoke`, detail.connection.revision, 'Revocation failed')} /></div>}

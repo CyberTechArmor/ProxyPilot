@@ -117,6 +117,25 @@ Retained artifacts are explicitly fixture evidence, not a live provider review:
 
 ## Deferred backlog
 
+## Key-preserving updater refresh
+
+The separately reviewable updater change adds a fixed-path paired transaction
+for already opted-in A8/A3/A4 installations. Only the two daemon sources and their
+installation digest journals change. Existing receipt key bytes, A8 pins, VM
+identity, AppRole config, provider references, bindings, prices and runtime ledgers
+are retained. It refuses active/unknown work and foreign drift, checks both serving
+digests without a model call, and rolls back both sources/journals before dashboard
+recovery. No individual reinstall/configure action, new permission or enrollment
+is introduced. Ordinary installs and `--no-restart` remain a runtime no-op.
+
+Initial evidence: 14 refresh cases passed with a real Ed25519 fixture; root updater
+selection passed 81/81 with zero skips; Python aggregate passed 307 tests with 33
+environment skips and zero failures. A final CLI no-op test was then added to
+prove no lock/backup creation for non-opted-in installations. Final source-specific
+results follow after convergence onto frozen website/UI release `444cc2fe`.
+
+### Deferred backlog (unchanged)
+
 - Authenticated browsing; passwords, OAuth, MFA and CAPTCHA handling.
 - Website writes: forms, uploads, purchases, account changes and other actions.
 - Arbitrary computer actions or generic agent SDK compatibility.

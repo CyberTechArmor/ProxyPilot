@@ -1,11 +1,13 @@
 # Public website review: bounded activation decision
 
-Plan only, 2026-10-02. No host action, new credential, provider call, publication
-or deployment is authorized or performed by this document.
+Implemented and fixture-tested in the repository, 2026-10-02, following Thomas's
+explicit approval of the bounded refresh. No host action, new credential or live
+provider call was performed. Publication/deployment follow the separate release
+authorization; Thomas updates production through ProxyPilot.
 
 ## Decision
 
-Approve repository-only implementation of a **code-only runtime refresh in the
+Implement a **code-only runtime refresh in the
 existing ProxyPilot Update path**, limited to an already configured A8/A3/A4
 installation. It must preserve the existing receipt identity, AppRole/provider
 credentials, bindings, prices and ledgers, replace only the two reviewed installed
@@ -38,7 +40,7 @@ key, deletes the private/public key files, runs `openssl genpkey` and installs a
 new key. That path requires A8 `configure` to copy the new public key; A8 `patch`
 only checks equality and refuses the stale copy. **Do not use that rotation path
 under the no-new-secrets constraint.** A key-preserving code-refresh action does
-not exist yet and must be implemented/reviewed before activation.
+now exist in `scripts/review-runtime-refresh.py`, with key-preservation tests.
 
 For the proposed refresh, A8 retains `/etc/proxypilot-a8/supervisor-pub.pem`, the
 same three socket/key/VM settings and the same read-only mount block. No A8 pin
@@ -63,9 +65,10 @@ retrieve the same existing provider secret/version; it enrolls no new credential
 | Existing A3/A4 systemd services | Bounded stop/restart and readback; no unit, timer, permission or service-user change |
 | Dashboard backend/frontend and migration 1116 | The existing normal updater installs these; no automatic start or consent migration |
 
-Add a narrowly named `refresh` action to the existing installers and a paired
-checkout helper invoked by `update.sh`. Names/implementation are proposed; they
-are not currently callable. Use the existing installer journal versions and
+The paired checkout helper `scripts/review-runtime-refresh.py` is invoked by
+`update.sh` through `preflight`, `apply`, `rollback` and `commit`. It reuses existing
+installer verification/atomic-write functions; individual installers gain no
+independently callable refresh or enrollment action. It uses journal versions and
 fixed file paths, with the approved checkout SHA and candidate digests recorded
 in the refresh receipt. Refuse other changed A3 package files or unit layout
 instead of silently expanding this two-file refresh.
@@ -127,6 +130,22 @@ undo a provider charge or erase its ledger; no run is retried automatically.
 - No host rehearsal or live model invocation is implied by repository tests.
 
 ## Release convergence checkpoint
+
+The refresh fixtures now cover all four replacements, stop/start/readback failures,
+byte-exact paired restoration, a real Ed25519 key pair and A8 pin, unchanged AppRole
+configuration and permissions, repeated unchanged refresh without a service restart,
+active DB Start/Demo/provider work, uncertain reservation retention, unknown state,
+tampered transaction paths/modes/digests and foreign configuration/ledger drift.
+Root WSL updater/self-update tests pass 81/81 with zero skips. Full Python selection
+passed 307 tests with 33 environment skips before the final CLI no-op regression
+was added; final converged results are recorded in the evidence tracker.
+
+Only old code and installation journals are backed up, never keys/config/ledgers.
+Commit allows legitimate new ledger updates after dashboard startup. A later
+failure with new active work or ledger drift refuses rollback instead of force
+cancelling work, overwriting accounting or replaying a call. Recovery remains
+blocked and reports that refusal. CI runs updater tests in its existing root
+container and the Python suite in its broker job; no host opt-in is added.
 
 The parent-provided UI head `f1e6f6d9` still contained the older checkpoint runtime.
 The UI owner subsequently incorporated implementation `9e02012f` as `68c74201`,

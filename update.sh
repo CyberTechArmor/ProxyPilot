@@ -16,6 +16,7 @@ DB_BACKUP_FILE=""
 DB_BACKUP_SOURCE=""
 BACKUPS_TO_KEEP=5
 DB_MAINTENANCE_STARTED=false
+REVIEW_RUNTIME_REFRESH_STARTED=false
 NATIVE_BACKEND_MODE=""
 DB_LAYOUT_NEW_PATH=""
 DB_LAYOUT_ENV_BACKUP=""
@@ -846,6 +847,14 @@ on_error() {
         log "${RED}Recovery refused or failed; services are not restarted. Backup: $DB_BACKUP_FILE${NC}"
         exit "$exit_code"
     fi
+    if [ "${REVIEW_RUNTIME_REFRESH_STARTED:-false}" = true ]; then
+        # restore_db has stopped the replacement backend. Restore both daemon
+        # copies before restarting the dashboard; never restore runtime ledgers.
+        if ! review_runtime_refresh rollback; then
+            log "${RED}Paired runtime recovery refused; dashboard remains stopped. Inspect the refresh transaction.${NC}"
+            exit "$exit_code"
+        fi
+    fi
     # The layout and its .env now match again. Apply the same restart and
     # readiness/policy rules as success, before the backend reads the .env.
     install_setup_runner
@@ -870,6 +879,12 @@ on_error() {
             log "${RED}Could not auto-restart. Manual: cd $INSTALL_DIR && $DC_CMD up -d${NC}"
     fi
     exit "$exit_code"
+}
+
+review_runtime_refresh() {
+    python3 "${INSTALL_DIR}/scripts/review-runtime-refresh.py" "$1" \
+        --install-dir "$INSTALL_DIR" --source-dir "$SCRIPT_DIR" \
+        --source-sha "$EXPECTED_UPDATE_SHA" --database "${DB_BACKUP_SOURCE:-${INSTALL_DIR}/data/db/proxypilot.db}"
 }
 
 # Hand off BEFORE taking the lock or doing any update work. A dashboard
@@ -1958,6 +1973,9 @@ PYEOF
             log "${RED}A8 supervisor wiring refused; the running dashboard has not been stopped.${NC}"
             exit 1
         }
+        # Metadata/code validation only. Never install or opt in an ordinary
+        # dashboard, rotate a key, bind a credential or start a run.
+        review_runtime_refresh preflight
 
         # Rebuild frontend at the install location
         log "Rebuilding frontend..."
@@ -1988,6 +2006,12 @@ PYEOF
         stop_setup_runner
         DB_MAINTENANCE_STARTED=true
         stop_update_writers
+        # Arm paired recovery before the first runtime mutation. The helper
+        # independently verifies that this backend is down and work is idle.
+        if [ -f "${INSTALL_DIR}/scripts/review-runtime-refresh.py" ]; then
+            REVIEW_RUNTIME_REFRESH_STARTED=true
+            review_runtime_refresh apply
+        fi
 
         # Backend is now stopped — safe window to relocate the SQLite
         # DB into its own subdirectory if this install is on the legacy
@@ -2257,6 +2281,9 @@ if [[ -d "$SCRIPT_DIR/cli" ]]; then install_setup_runner; fi
 # Never announce success before restart/readiness: the operator may see only
 # this log's last lines if their browser terminal disconnects.
 pp_complete_update || exit 1
+if [ "${REVIEW_RUNTIME_REFRESH_STARTED:-false}" = true ]; then
+    review_runtime_refresh commit
+fi
 pp_report_update_completion
 
 # Update succeeded — disarm the restore trap. The backup is kept on disk

@@ -168,24 +168,24 @@ needed, but the existing A4 provider / vault configuration and price table must
 already be healthy. An old bridge remains blocked instead of falling back to
 Demo sign-in or claiming execution availability.
 
-**A normal `update.sh` pull/build does not replace the installed A3/A4 copies.**
-It runs A8 `patch` for an already opted-in deployment, which verifies key equality
-but does not refresh a rotated supervisor key. Runtime activation therefore
-requires a separate, explicitly authorized operator maintenance step; repository
-development does not authorize it.
+The normal Docker Update path now invokes `scripts/review-runtime-refresh.py`
+for an **already opted-in** A8 installation. It verifies installed identity and
+the pinned checkout before outage, refuses active/unverifiable work, then confirms
+the dashboard is stopped before replacing only the A3/A4 daemon files and their
+installation digest records. The existing services restart A4 then A3. Keys,
+AppRole config, provider/binding/price/ledger state and A8 pins remain unchanged.
+Other package/unit changes or foreign drift refuse the update. Do not use
+`reinstall`/`configure` as an activation shortcut.
 
-The existing tools' behavior is A4
-`a4-install-broker.py reinstall` (preserves the existing AppRole config and state),
-A3 `a3-install-supervisor.py reinstall` (requires no live worker, rotates the
-receipt key and archives the previous public key), and A8
-`a8-wire-dashboard.py configure --install-dir /opt/proxypilot` (refreshes the
-public-key copy and the existing three pins/read-only mount block). Perform this
-only with separate explicit authorization from the verified reviewed checkout,
-before the subsequent dashboard update/restart so its A8 `patch` check sees the
-refreshed key. Confirm installed digest readback, existing vault/provider/price
-health, wiring status and dashboard review readiness. These are component updates,
-not new credential configuration; do not use A4 `configure`, remove-only or a
-new A8 opt-in as a shortcut. No automatic privileged activation hook is added.
+Metadata-only readback verifies both serving digests and `website-review.v1`.
+The existing provider/price requirement may still block readiness; activation
+does not enroll credentials or make a model call. Dashboard health must pass
+before the transaction commits and Update reports completion. Recovery restores
+both old daemon files/journals before restarting the dashboard; it never restores
+runtime ledgers or replays uncertain calls. A refused rollback blocks dashboard
+recovery. Non-opted-in and `--no-restart` installs receive no runtime change.
+Backups and the transaction receipt are root-private under
+`/var/lib/proxypilot/update/review-runtime-refresh`.
 
 No component installation, production review, provider enrollment or host change
 was performed in the development evidence. See the scoped
@@ -196,10 +196,7 @@ was performed in the development evidence. See the scoped
 
 `admin/frontend/tests/website-review.browser.mjs` checks the component contract and responsive states. `website-review-integrated.browser.mjs` exercises the full dashboard with real session/CSRF middleware, Operations routes/store and the public extraction service; DNS/HTTP and model responses are scripted fixtures. Its `--service-only` mode checks the real HTTP journey without Chromium. These fixtures do not establish live public-network, provider or deployment proof.
 
-The later no-new-secrets / normal-Update constraint selects a key-preserving
-code refresh instead of A3 `reinstall`. That supported refresh still needs
-repository implementation and review. Key rotation is not necessary; unchanged
-keys require A8 verification rather than a pin rewrite. The concrete decision,
-two-file scope and paired rollback are in the
-[activation plan](../plans/public-website-review-activation.md). The tool behavior
-above is not authorization to execute a reinstall or rotate an identity.
+The authorized implementation, two-file scope, failure evidence and remaining
+deployment requirements are in the
+[activation decision](../plans/public-website-review-activation.md).
+Repository tests do not constitute a production review or host rehearsal.

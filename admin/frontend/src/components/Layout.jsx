@@ -43,6 +43,7 @@ export default function Layout() {
   // to the built-in ProxyPilot name/rocket when unset.
   const branding = useBranding();
   const location = useLocation();
+  const operationsSurface = location.pathname.startsWith('/operational-projects');
   const { toasts } = useToast();
 
   // Mobile sidebar drawer state
@@ -386,13 +387,14 @@ export default function Layout() {
           // the LARGE viewport — the drawer then extends under the browser's
           // URL bar and its footer is unreachable.
           "fixed top-0 left-0 z-50 w-64 h-viewport bg-sidebar border-r shadow-xl md:shadow-none transform transition-transform duration-200 ease-out",
+          operationsSurface && "md:w-56",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           collapsed ? "md:-translate-x-full" : "md:translate-x-0"
         )}
       >
         <div className="flex flex-col h-full">
           {/* Logo and Version */}
-          <div className="flex items-start justify-between gap-2 px-4 md:px-6 py-4 border-b">
+          <div className={cn("flex items-start justify-between gap-2 px-4 py-4 border-b", operationsSurface ? "md:px-4" : "md:px-6")}>
             <div className="flex flex-col min-w-0">
               <div className="flex items-center gap-2 min-w-0">
                 {branding.logo
@@ -455,7 +457,7 @@ export default function Layout() {
               gives it its own scroller. */}
           <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-4 space-y-1">
             {filteredNavigation.map((item) => {
-              const isActive = location.pathname === item.href;
+              const isActive = location.pathname === item.href || (item.href === '/operational-projects' && operationsSurface);
               return (
                 <Link
                   key={item.name}
@@ -666,7 +668,7 @@ export default function Layout() {
         chromeless ? "pt-0" : "pt-14",
         // Collapsed: leave a thin rail (md:pl-14) so the floating expand button
         // doesn't overlap page content; expanded: clear the full sidebar.
-        collapsed ? "md:pl-14" : "md:pl-64",
+        collapsed ? "md:pl-14" : operationsSurface ? "md:pl-56" : "md:pl-64",
       )}>
         <SnapshotExportBanner />
         <div className={cn(
@@ -674,7 +676,8 @@ export default function Layout() {
           // descendants (sr-only labels, popovers) — without it they are
           // placed against the document, land below the fold and give the
           // page a second, outer scrollbar.
-          "relative md:p-8 flex-1 flex flex-col min-h-0 overflow-y-auto",
+          "relative flex-1 flex flex-col min-h-0 overflow-y-auto",
+          operationsSurface ? "md:p-6" : "md:p-8",
           chromeless ? "p-0" : "p-4",
         )}>
           <Outlet context={{ openNav, setChromeless }} />

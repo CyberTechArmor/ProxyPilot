@@ -4,7 +4,7 @@ import { Action, Field, Choice } from './shared';
 
 const exact = r => ({demonstration_id:r.demonstration_id,revision_id:r.revision_id,item_position:r.item_position,object_id:r.object_id,annotation_id:r.annotation_id});
 const keyOf = r => JSON.stringify(exact(r));
-const notice = 'Evidence unavailable. Retained identities are unchanged. Cancel or request changes if publication is refused; restore the reviewed capability before changing evidence selection.';
+const notice = 'Evidence unavailable. Retained identities are unchanged. Restore the reviewed capability before saving and approving a guide with this evidence, or explicitly revise the draft selection.';
 export const evidenceDisclaimer = 'Demonstration evidence never authorizes an agent action.';
 
 // Every request belongs to this mounted account/operation scope. Invalidate before
@@ -68,9 +68,9 @@ export function Demonstrations({base,user,project,draft,guideDirty,busy,onSelect
   const selectionDirty=JSON.stringify(selection)!==JSON.stringify(draft.evidence?.references.map(exact)||[]);
   useEffect(()=>{onSelectionDirty(selectionDirty);return()=>onSelectionDirty(false);},[selectionDirty]);
   useEffect(()=>{if(error)errRef.current?.focus();},[error]);
-  // Advance the shared draft revision only when the local selection still equals
-  // the server. A conflict never silently rebases a modified selection.
-  useEffect(()=>{if(!selectionDirty)setSelectionRevision(draft.revision);},[draft.revision]);
+  // Advance only when both local inputs are clean. A conflict never silently
+  // rebases a modified selection or entered guide text onto a newer revision.
+  useEffect(()=>{if(!selectionDirty&&!guideDirty)setSelectionRevision(draft.revision);},[draft.revision]);
   const retryBody=(action,body)=>{const signature=JSON.stringify({action,body});if(!keys.current.has(signature))keys.current.set(signature,crypto.randomUUID());return {...body,idempotency_key:keys.current.get(signature)};};
   const write=(path,body,revision,method)=>api.write(`${base}/demonstrations${path}`,body,revision,method,scope.signal());
   async function load(append=false) {
@@ -111,10 +111,10 @@ export function Demonstrations({base,user,project,draft,guideDirty,busy,onSelect
       {active&&(owner||author)&&!demo.archived_at&&<Action variant="outline" disabled={working} onClick={()=>run(async()=>{await write(`/${demo.id}/archive`,{reason:'Archived by human review'},demo.demonstration_revision);await open(demo.id);},'Demonstration archived; mutations frozen.')}>Archive demonstration</Action>}
       {author&&workspace&&active&&workspace.objects.map(o=><div key={o.id} className="space-y-2"><p className="text-xs break-all">Private object {o.id}</p><Moderation {...{demo,write,run}} objectId={o.id} owner={owner} reload={()=>open(demo.id)}/></div>)}
     </div>}
-    {canSelect&&<section className="space-y-3"><h4 className="font-semibold">Draft evidence selection ({selection.length}/20)</h4><p>{evidenceDisclaimer}</p><p className="text-sm">Detaching evidence does not restore approval eligibility for any contributor. Save guide text before saving evidence selection.</p>
+    {canSelect&&<section className="space-y-3"><h4 className="font-semibold">Draft evidence selection ({selection.length}/20)</h4><p>{evidenceDisclaimer}</p><p className="text-sm">Save this evidence selection before Save and approve. Selection saving preserves your entered guide text and does not approve the guide.</p>
       <ol className="space-y-3">{selection.map((r,i)=><li key={keyOf(r)} className="border rounded-md p-3 space-y-2"><p>Selection {i+1}</p><Identity reference={r}/><div className="flex flex-wrap gap-2"><Action variant="outline" disabled={i===0} onClick={()=>setSelection(move(selection,i,-1))}>Move selection {i+1} up</Action><Action variant="outline" disabled={i===selection.length-1} onClick={()=>setSelection(move(selection,i,1))}>Move selection {i+1} down</Action><Action variant="outline" onClick={()=>setSelection(selection.filter((_,n)=>n!==i))}>Detach selection {i+1}</Action></div></li>)}</ol>
-      <div className="flex flex-wrap gap-2"><Action disabled={working||busy||guideDirty||!selectionDirty} onClick={()=>run(async()=>{const result=await api.write(`${base}/draft/evidence`,{references:selection},selectionRevision,'PUT',scope.signal());if(scope.live()){setSelectionRevision(result.revision??result.draft?.revision);await onSelectionSaved(result.revision);}},'Exact evidence selection saved.')}>Save evidence selection</Action><Action variant="outline" disabled={working||guideDirty} onClick={()=>setSelectionRevision(draft.revision)}>Use compared server revision for retained selection</Action><Action variant="outline" disabled={working} onClick={()=>{setSelection(draft.evidence?.references.map(exact)||[]);setSelectionRevision(draft.revision);}}>Discard local selection and reload server</Action></div>
-      {guideDirty&&<p role="status">Save or explicitly discard local guide changes before saving selection.</p>}
+      <div className="flex flex-wrap gap-2"><Action disabled={working||busy||!selectionDirty} onClick={()=>run(async()=>{const result=await api.write(`${base}/draft/evidence`,{references:selection},selectionRevision,'PUT',scope.signal());if(scope.live()){const savedRevision=result.revision??result.draft?.revision;if(!Number.isSafeInteger(savedRevision)||savedRevision<1)throw new Error('Evidence save returned no usable draft revision. Compare and reload the server draft before saving the guide.');setSelectionRevision(savedRevision);await onSelectionSaved(savedRevision);}},'Exact evidence selection saved; entered guide text retained.')}>Save evidence selection</Action><Action variant="outline" disabled={working||guideDirty} onClick={()=>setSelectionRevision(draft.revision)}>Use compared server revision for retained selection</Action><Action variant="outline" disabled={working} onClick={()=>{setSelection(draft.evidence?.references.map(exact)||[]);setSelectionRevision(draft.revision);}}>Discard local selection and reload server</Action></div>
+      {guideDirty&&<p role="status">Your guide text is retained while saving selection. If the draft changed on the server, compare it and explicitly reload before retrying.</p>}
       {selectionDirty&&<details><summary className="min-h-11 py-3 cursor-pointer">Compare server selection</summary><pre className="text-xs whitespace-pre-wrap break-all">{JSON.stringify(draft.evidence?.references.map(exact)||[],null,2)}</pre></details>}
     </section>}
   </section>;

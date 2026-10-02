@@ -1,0 +1,48 @@
+{
+  "source_commit": "96eed9c3fc9115e28076a9480dca91880ac53da3",
+  "fixture_only": true,
+  "files": [
+    {
+      "file": "overview-office-1536.png",
+      "sha256": "92cbe6b77812c3dd4789d7af76f95e160eb3458a674085de3f1639331ea4243e",
+      "bytes": 170121,
+      "source_suite": "ui-alignment"
+    },
+    {
+      "file": "overview-office-375.png",
+      "sha256": "38730ab8e4a91be0a70ee89568bcc657544d1504f6dea7a7647b228f466d00ae",
+      "bytes": 50395,
+      "source_suite": "ui-alignment"
+    },
+    {
+      "file": "setup-connections-office-1536.png",
+      "sha256": "fd126c224fac7a14f858e69cb8e19b0152eda12480ec1e4d6da94bd3d109d587",
+      "bytes": 176724,
+      "source_suite": "ui-alignment"
+    },
+    {
+      "file": "add-connection-office-1536.png",
+      "sha256": "ac3d77f057cf520021bec50d70c50e3485353526a3c5bafc3d07fcfb6a6f7397",
+      "bytes": 167598,
+      "source_suite": "ui-alignment"
+    },
+    {
+      "file": "add-connection-office-375.png",
+      "sha256": "b416927c546580e652d20997dc8019c54229df96b6483e16df83684bb2bb6493",
+      "bytes": 54605,
+      "source_suite": "ui-alignment"
+    },
+    {
+      "file": "deck-1280x800.png",
+      "sha256": "2d3ffd55d068db4d29cb994c9e6ac335b838fc615c8f823d2d0227b416bb85c1",
+      "bytes": 136313,
+      "source_suite": "agent-runs"
+    },
+    {
+      "file": "flow-result.png",
+      "sha256": "03166df04fbcc8d9f2900917fa8aaf885cfe25d0b1fb803187f4853c3fbb05be",
+      "bytes": 144187,
+      "source_suite": "agent-runs"
+    }
+  ]
+}

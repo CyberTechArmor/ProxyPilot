@@ -83,7 +83,6 @@ function Operation({id}) {
   const active=!p.archived_at,canRun=p.own_role!=='viewer',pending=d.pending_submission;
   const dirty=draft&&(draft.title!==d.title||draft.instructions!==d.instructions||draft.revision!==d.revision);
   const peopleCount=1+(a?.members.filter(member=>member.active).length||0);
-  const peopleCount=1+(a?.members.filter(member=>member.active).length||0);
   const actorName=accountId=>accountId===user?.id?user.username:accountId===p.owner_user_id?p.owner_name:a?.members.find(member=>member.user_id===accountId)?.username||'Project member';
   async function record(event) {
     event.preventDefault();

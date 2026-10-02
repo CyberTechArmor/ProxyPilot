@@ -196,6 +196,12 @@ before the transaction commits and Update reports completion. Recovery restores
 both old daemon files/journals before restarting the dashboard; it never restores
 runtime ledgers or replays uncertain calls. A refused rollback blocks dashboard
 recovery. Non-opted-in and `--no-restart` installs receive no runtime change.
+Both existing runtime ledgers have a separate 16 MiB input cap, allowing retained
+terminal history larger than the 2 MiB code/config/transaction-file cap. The same
+bounded reader is used for preflight, apply and rollback comparisons. Missing,
+nonregular, unreadable and oversized inputs refuse with their path; ledger
+absence is never treated as empty state. The updater does not prune or rewrite
+ledger history. Files beyond the explicit cap require separate investigation.
 Backups and the transaction receipt are root-private under
 `/var/lib/proxypilot/update/review-runtime-refresh`.
 

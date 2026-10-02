@@ -29,6 +29,10 @@ ACTIVE_DB = {
     'ops_website_review_runs': {'queued', 'extracting', 'reviewing'},
 }
 MAX_FILE = 2 * 1024 * 1024
+# Runtime journals retain terminal attempts/calls and can legitimately outgrow
+# a source/config file. This separate cap covers both ledgers at every read;
+# it does not authorize pruning, migration, replay or rewriting their history.
+MAX_LEDGER = 16 * 1024 * 1024
 # PR #710's installed Demo worker is protocol-compatible with this review
 # bridge. 39ada2b only corrects bound-session/sign-out observations; that guest
 # refresh remains deferred. Retain its bytes and pin, never copy the candidate.
@@ -53,16 +57,36 @@ def load(name, directory):
     return module
 
 
-def bounded(path):
-    if not path.is_file() or path.stat().st_size > MAX_FILE:
-        raise ValueError('Required bounded regular file is missing')
-    return path.read_bytes()
+def bounded(path, max_bytes=MAX_FILE):
+    def check(info):
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f'Required path is not a regular file: {path}')
+        if info.st_size > max_bytes:
+            raise ValueError(f'Required file exceeds {max_bytes}-byte limit: {path} ({info.st_size} bytes)')
+    try:
+        check(path.lstat())
+        # A changed path cannot become a symlink or blocking FIFO between
+        # metadata validation and opening. The descriptor is checked again.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            check(os.fstat(stream.fileno()))
+            data = stream.read(max_bytes + 1)
+    except FileNotFoundError:
+        raise ValueError(f'Required file is missing: {path}') from None
+    except OSError as error:
+        raise ValueError(f'Required file cannot be read: {path} ({type(error).__name__})') from None
+    if len(data) > max_bytes:
+        raise ValueError(f'Required file grew beyond {max_bytes}-byte limit: {path}')
+    return data
 
 
 def ledger(path, vm, serving_field):
-    data = json.loads(bounded(path))
-    if data.get('version') != 1 or data.get('vm_uuid') != vm:
-        raise ValueError('Runtime ledger identity is unknown')
+    try:
+        data = json.loads(bounded(path, MAX_LEDGER).decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ValueError(f'Runtime ledger is not valid UTF-8 JSON: {path}') from None
+    if not isinstance(data, dict) or data.get('version') != 1 or data.get('vm_uuid') != vm:
+        raise ValueError(f'Runtime ledger identity is unknown: {path}')
     # A daemon records its new source digest on startup. All business state,
     # uncertain reservations, prices and bindings must remain identical.
     data.pop(serving_field, None)

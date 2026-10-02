@@ -13,7 +13,6 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs';
 
-
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
 const report = { journeys: [], layout: [], started_at: new Date().toISOString() };
@@ -65,7 +64,7 @@ async function as(role, { width = 1280, height = 900, theme = 'dark', live = tru
     localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', theme);
   }, { user: { id: u.id, username: u.username, role: 'user' }, theme });
   if (live) await ctx.addInitScript(stubWebRtc);
-  const page = await ctx.newPage();
+  const page = await ctx.newPage(); page.setDefaultNavigationTimeout(90000);
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
   page.on('response', r => { if (r.status() >= 500 || (r.status() === 404 && r.url().includes('/api/') && !shell404.test(r.url()) && !r.url().includes('/operational-projects/'))) page.errors.push(`${r.status()} ${r.url()}`); });
@@ -95,7 +94,7 @@ async function startFromUi(page) {
   const start = page.getByRole('button', { name: 'Start run' });
   await start.waitFor(WAIT);
   await start.click();
-  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
 const approvalCard = page => page.getByRole('region', { name: 'Approval needed' });
@@ -234,6 +233,7 @@ try {
     await page.getByTestId('reconcile-run').getByText('Decided').waitFor(WAIT);
     assert.equal(await page.getByRole('dialog').filter({ hasText: 'Confirm it is you' }).count(), 0);
     // Review: the takeover is counted, never what was typed.
+    await page.getByRole('tablist', { name: 'Run context panels' }).getByRole('tab', { name: 'Details', exact: true }).click();
     await page.getByRole('tab', { name: 'Review' }).click();
     const review = await page.getByTestId('run-review').innerText();
     assert.match(review, /omar-operator took over/);

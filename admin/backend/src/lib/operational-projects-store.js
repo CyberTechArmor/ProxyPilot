@@ -201,7 +201,9 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
     events(actor, id, input = {}) {
       const { role } = access(actor, id);
       const q = parse(schemas.events, input);
-      const rows = all('SELECT * FROM ops_project_events WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?', id, q.after, q.limit + 1);
+      const rows = q.order === 'desc'
+        ? all('SELECT * FROM ops_project_events WHERE project_id = ? AND id < ? ORDER BY id DESC LIMIT ?', id, q.after || Number.MAX_SAFE_INTEGER, q.limit + 1)
+        : all('SELECT * FROM ops_project_events WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?', id, q.after, q.limit + 1);
       return { events: rows.slice(0, q.limit).map(({ metadata_json, ...e }) => {
         const sensitive = e.action.startsWith('member_') || e.action.startsWith('ownership_');
         return { ...e, subject_id: sensitive && role !== 'owner' ? null : e.subject_id,

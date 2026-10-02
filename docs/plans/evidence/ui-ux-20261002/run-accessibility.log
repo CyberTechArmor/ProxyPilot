@@ -1,0 +1,10 @@
+(node:2264) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+operations-and-inbox {"score":96,"form_factor":"mobile","failing":["color-contrast"]}
+agent-runs-overview {"score":96,"form_factor":"mobile","failing":["color-contrast"]}
+run-deck-browser {"score":100,"form_factor":"mobile","failing":[]}
+run-deck-activity {"score":98,"form_factor":"mobile","failing":["heading-order"]}
+run-deck-details {"score":100,"form_factor":"mobile","failing":[]}
+agents-section {"score":96,"form_factor":"mobile","failing":["color-contrast"]}
+pending-guide-save-approve {"score":96,"form_factor":"mobile","failing":["color-contrast"]}
+{"a6_lighthouse_accessibility":"passed","min":90,"pages":7}

@@ -1,0 +1,119 @@
+{
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "real_operations_router": true,
+  "real_operations_store": true,
+  "real_csrf": true,
+  "real_website_review_service": true,
+  "scripted_fixtures": [
+    "authenticated session",
+    "DNS/HTTP public page transport",
+    "model adapter and readiness"
+  ],
+  "production_provider_proof": false,
+  "journeys": [
+    "Full main dashboard navigation, real atomic approved freeform guide, inert settings save and explicit owner consent",
+    "Exact-pin Start traverses real routes/service/extraction and renders cited completion, source hashes, usage and settled cost",
+    "Provider-unavailable readiness disables Start; cancellation during model await retains immutable pins and blocks late review publication"
+  ],
+  "layout": [
+    {
+      "state": "new-agent",
+      "scroll": 360,
+      "width": 360
+    },
+    {
+      "state": "new-agent",
+      "scroll": 375,
+      "width": 375
+    },
+    {
+      "state": "new-agent",
+      "scroll": 768,
+      "width": 768
+    },
+    {
+      "state": "completed-evidence",
+      "scroll": 360,
+      "width": 360
+    },
+    {
+      "state": "completed-evidence",
+      "scroll": 375,
+      "width": 375
+    },
+    {
+      "state": "completed-evidence",
+      "scroll": 768,
+      "width": 768
+    },
+    {
+      "state": "cancelled",
+      "scroll": 360,
+      "width": 360
+    },
+    {
+      "state": "cancelled",
+      "scroll": 375,
+      "width": 375
+    },
+    {
+      "state": "cancelled",
+      "scroll": 768,
+      "width": 768
+    }
+  ],
+  "transport_requests": 6,
+  "model_calls": 2,
+  "errors": [],
+  "outbound": [],
+  "consoleMessages": [
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    }
+  ],
+  "failedRequests": [
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects/capabilities",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects/73d90825-3fb4-4089-a49b-c195ca939f2f/website-review-agents",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects/73d90825-3fb4-4089-a49b-c195ca939f2f/website-review-runs",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects/73d90825-3fb4-4089-a49b-c195ca939f2f/website-review-agents/e7e3d063-d01d-4889-9f79-58c6602d8320/readiness",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects/73d90825-3fb4-4089-a49b-c195ca939f2f/website-review-agents/e7e3d063-d01d-4889-9f79-58c6602d8320/readiness",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/operational-projects/73d90825-3fb4-4089-a49b-c195ca939f2f/website-review-agents/e7e3d063-d01d-4889-9f79-58c6602d8320/readiness",
+      "error": "net::ERR_ABORTED"
+    }
+  ],
+  "failedResponses": [
+    {
+      "url": "http://127.0.0.1:5173/api/lxc/containers/snapshot-export-queue",
+      "status": 404
+    },
+    {
+      "url": "http://127.0.0.1:5173/api/lxc/containers/snapshot-export-queue",
+      "status": 404
+    }
+  ]
+}

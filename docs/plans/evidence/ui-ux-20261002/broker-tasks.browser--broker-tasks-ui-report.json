@@ -1,0 +1,41 @@
+{
+  "synthetic": true,
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "generated_at": "2026-10-02T18:45:21.069Z",
+  "journeys": [
+    "only compatible configured capability mounts task controls",
+    "saving configuration and opening readiness never starts a task",
+    "failed independent preflight cannot expose start",
+    "expired independent readiness cannot start a saved agent",
+    "typed review emits bounded fields and starts only after explicit authentication",
+    "pending approval displays exact request and continuation uses issued reference",
+    "refresh observes status and cancellation is explicit"
+  ],
+  "layout": [
+    {
+      "theme": "midnight",
+      "width": 390
+    },
+    {
+      "theme": "midnight",
+      "width": 1536
+    },
+    {
+      "theme": "latte",
+      "width": 390
+    },
+    {
+      "theme": "latte",
+      "width": 1536
+    },
+    {
+      "theme": "office",
+      "width": 390
+    },
+    {
+      "theme": "office",
+      "width": 1536
+    }
+  ],
+  "limitation": "Synthetic UI request fixtures only; no authority, vault or runner enforcement proof"
+}

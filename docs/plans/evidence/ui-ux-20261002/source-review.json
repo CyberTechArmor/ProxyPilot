@@ -1,0 +1,28 @@
+{
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "recorded_at": "2026-10-02T18:58:18.431026+00:00",
+  "independent_reviewer": "/root/review",
+  "result": "No concrete blockers found",
+  "reviewed_against": "35c2e9d4eb657f92e1499d8d56035217b04f7ae6",
+  "checks": [
+    "Strict website enabled/contract/strategy gate and URL handling retained",
+    "Website shortcut hidden while API wizard active; separate navigation retained",
+    "Guide exact snapshot publication and disabled agent draft saves start no run/assignment",
+    "Recent-event descending order is SELECT-only; default ascending and access redaction retained"
+  ],
+  "backend_unchanged_since_224_tested_merge": true,
+  "run_source_identity": [
+    {
+      "path": "admin/frontend/src/components/operational-projects/RunDeck.jsx",
+      "blob": "03f873e32a4de0f1873cc437a0d6d3d0742d6181",
+      "unchanged_from": "0411e2cc7b2e1ac0672685d1d71e60639490a5a5"
+    },
+    {
+      "path": "admin/frontend/tests/agent-runs.browser.mjs",
+      "blob": "3e08896ee6f823dbbd109b4e61ccf5bad9080a69",
+      "unchanged_from": "0411e2cc7b2e1ac0672685d1d71e60639490a5a5"
+    }
+  ],
+  "released_website_updater_product_unchanged": true,
+  "publication": "Unpublished; no production actions"
+}

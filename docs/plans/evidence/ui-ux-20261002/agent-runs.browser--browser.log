@@ -1,0 +1,23 @@
+(node:25682) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ok - roles: run roles may start; a viewer is told why not; an outsider gets 404
+ok - desktop context tabs use keyboard navigation and show the run's immutable pinned guide
+ok - start, rule steps, live browser, approval with sudo and the digest, verified result
+ok - run deck at 1280×800: the whole frame and the latest activity are in view while an approval is open
+ok - phone panels: one at a time, the choice survives a refresh (&panel=), the banner follows the panel
+ok - follow-latest: new items keep the feed at the bottom; a reader who scrolled up sees Jump to latest and is not moved
+ok - frames: none before step 1 has finished (no blank first frame); an identical frame is not attached again
+ok - browser state: LIVE, Paused (no frames), Ended with "Last frame · at step N"; Details tabs by keyboard
+ok - stop mid-run: the run is fenced and says why Stop is gone
+ok - stale approval: a rotated binding closes the control with the reason
+ok - stale approval: a newly approved guide, then the profile is not ready until reassigned
+ok - owner consent: withdrawing it makes Start say why; giving it needs the reviewed statement
+ok - an approval racing a stop: the open dialog closes itself with the reason
+ok - a revoked grant while viewing: the next poll shows the refusal and the live view stops
+ok - refresh and reconnect during an approval at 360px: durable state returns, then approve
+ok - keyboard only: start, open the approval, type the digest, confirm sudo, finish
+ok - each result class and help banner; the inbox lists the open help request
+ok - layout: overview, run detail with a pending approval, and the inbox at six widths in both themes
+ok - toggles: off until an administrator turns them on with sudo; everyone sees the result
+ok - execution unavailable: Start says why; the inbox says so; nothing launches
+{"a6_browser_journeys":"passed","journeys":20,"layout_checks":96}

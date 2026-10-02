@@ -1,0 +1,52 @@
+(node:1438) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+file://<repo>/services/credential-broker/fixtures/disposable.mjs:295
+    throw new Error("Disposable fixture setup failed", { cause: e });
+          ^
+
+Error: Disposable fixture setup failed
+    at createDisposableFixture (file://<repo>/services/credential-broker/fixtures/disposable.mjs:295:11)
+    at dependenciesFactory (file://<repo>/admin/frontend/tests/broker-integrated.browser.mjs:11:84)
+    ... 2 lines matching cause stack trace ...
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+  [cause]: <ref *1> Error: spawnSync docker ENOENT
+      at Object.spawnSync (node:internal/child_process:1120:20)
+      at spawnSync (node:child_process:911:24)
+      at execFileSync (node:child_process:954:15)
+      at docker (file://<repo>/services/credential-broker/fixtures/disposable.mjs:18:3)
+      at createDisposableFixture (file://<repo>/services/credential-broker/fixtures/disposable.mjs:57:5)
+      at dependenciesFactory (file://<repo>/admin/frontend/tests/broker-integrated.browser.mjs:11:84)
+      at createBrokerDashboardHarness (file://<repo>/admin/backend/src/__tests__/helpers/broker-dashboard-harness.js:29:46)
+      at file://<repo>/admin/frontend/tests/broker-integrated.browser.mjs:11:15
+      at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {
+    errno: -2,
+    code: 'ENOENT',
+    syscall: 'spawnSync docker',
+    path: 'docker',
+    spawnargs: [
+      'create',
+      '--name',
+      'fractionate-broker-b90169bc-02e2-4380-bd3c-26fdaf829337',
+      '--label',
+      'fractionate.synthetic-broker=true',
+      '--user',
+      '0',
+      '--entrypoint',
+      'bao',
+      '-p',
+      '127.0.0.1::8200',
+      'openbao/openbao:2.6.2@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641',
+      'server',
+      '-config=/fixture/bao.hcl'
+    ],
+    error: [Circular *1],
+    status: null,
+    signal: null,
+    output: null,
+    pid: 0,
+    stdout: undefined,
+    stderr: undefined
+  }
+}
+
+Node.js v24.13.0

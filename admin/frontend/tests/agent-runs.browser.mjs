@@ -13,7 +13,9 @@ import { startHarness, SUDO_PASSWORD, SUDO_TOTP } from './agent-runs-harness.mjs
 
 const artifacts = process.env.BROWSER_ARTIFACTS;
 if (artifacts) mkdirSync(artifacts, { recursive: true });
-const report = { journeys: [], layout: [], started_at: new Date().toISOString() };
+const journeyFilterSource = process.env.AGENT_RUN_JOURNEY_FILTER || '';
+const journeyFilter = journeyFilterSource ? new RegExp(journeyFilterSource) : null;
+const report = { filter: journeyFilterSource || null, skipped: [], journeys: [], layout: [], started_at: new Date().toISOString() };
 const browser = await chromium.launch({ executablePath: process.env.BROWSER_EXE || '/opt/pw-browsers/chromium', headless: true });
 const WAIT = { timeout: 30000 };
 let h;
@@ -28,7 +30,7 @@ async function as(role, { width = 1280, height = 900, theme = 'dark' } = {}) {
   await ctx.addInitScript(({ user, theme }) => {
     localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', theme);
   }, { user: { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user' }, theme });
-  const page = await ctx.newPage();
+  const page = await ctx.newPage(); page.setDefaultNavigationTimeout(90000);
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
   page.on('response', r => { if (r.status() >= 500 || (r.status() === 404 && r.url().includes('/api/') && !shell404.test(r.url()) && !r.url().includes('/operational-projects/'))) page.errors.push(`${r.status()} ${r.url()}`); });
@@ -51,6 +53,7 @@ async function settleAll() {
   assert.equal(activeRun(), undefined, 'a run is still active');
 }
 async function journey(name, fn) {
+  if (journeyFilter && !journeyFilter.test(name)) { report.skipped.push(name); return; }
   const started = Date.now();
   try { await fn(); report.journeys.push({ name, passed: true, seconds: Math.round((Date.now() - started) / 100) / 10 }); console.log(`ok - ${name}`); }
   catch (error) { report.journeys.push({ name, passed: false, error: error.message }); console.log(`not ok - ${name}\n  ${error.stack}`); throw error; }
@@ -61,7 +64,7 @@ async function startFromUi(page) {
   const start = page.getByRole('button', { name: 'Start run' });
   await start.waitFor(WAIT);
   await start.click();
-  await page.getByRole('button', { name: 'Back to runs' }).waitFor(WAIT);
+  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
   return new URL(page.url()).searchParams.get('run');
 }
 // The run deck: a phone shows one panel at a time behind the bottom bar.
@@ -89,7 +92,15 @@ async function approveInUi(page, { prefix = 12 } = {}) {
   await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
   return digest;
 }
-const result = (page, label) => page.getByTestId('run-result').filter({ hasText: label }).waitFor(WAIT);
+const showPanel = async (page, name) => {
+  const context = page.getByRole('tablist', { name: 'Run context panels' });
+  if (page.viewportSize().width>=1024) {await context.waitFor(WAIT);await context.getByRole('tab', { name, exact: true }).click();}
+  else await panelButton(page, name).click();
+};
+const result = async (page, label) => {
+  await showPanel(page,'Details');
+  await page.getByTestId('run-result').filter({ hasText: label }).waitFor(WAIT);
+};
 // Every visible disabled control must say why: aria-describedby naming visible text.
 async function deadControls(page, scope = 'main') {
   return page.locator(scope).evaluate(root => [...root.querySelectorAll('button:disabled')].filter(b => b.offsetParent).map(b => {
@@ -134,7 +145,7 @@ try {
     }
     const viewer = await as('viewer');
     await viewer.goto(runsUrl());
-    await viewer.getByText('Agent runs are not available to you: Agent runs need run access: owner, operator, editor or reviewer.').waitFor(WAIT);
+    await viewer.getByText('Demo sign-in runs are not available to you: Agent runs need run access: owner, operator, editor or reviewer.').waitFor(WAIT);
     assert.equal(await viewer.getByRole('button', { name: 'Start run' }).count(), 0);
     await viewer.getByRole('button', { name: 'Agents', exact: true }).click();
     await viewer.getByText('Only the owner can change this.').waitFor(WAIT);
@@ -147,7 +158,30 @@ try {
     const outsider = await as('outsider');
     await outsider.goto(runsUrl());
     await outsider.getByText('Operational record not found').waitFor(WAIT);
-    assert.equal(await outsider.getByRole('heading', { name: 'Agent runs' }).count(), 0);
+    assert.equal(await outsider.getByRole('heading', { name: 'Demo sign-in runs' }).count(), 0);
+  });
+
+  await journey('desktop context tabs use keyboard navigation and show the run\'s immutable pinned guide', async () => {
+    resetScenario({ holds: new Set(['open_login']) });
+    const page = await as('operator');
+    await startFromUi(page);
+    await page.getByTestId('step-1').waitFor(WAIT);
+    const context = page.getByRole('tablist', { name: 'Run context panels' });
+    await context.getByRole('tab', { name: 'Activity', exact: true }).focus();
+    await page.keyboard.press('ArrowRight');
+    await context.getByRole('tab', { name: 'Guide', selected: true }).waitFor(WAIT);
+    const guide = page.getByTestId('pinned-guide');
+    await guide.getByRole('heading', { name: h.world.version.title, exact: true }).waitFor(WAIT);
+    assert.equal(await guide.locator('pre').innerText(), h.world.version.instructions);
+    await guide.getByText('Guide hash', { exact: true }).click();
+    await guide.getByText(h.world.version.content_hash, { exact: true }).waitFor(WAIT);
+    await context.getByRole('tab', { name: 'Guide', exact: true }).focus();
+    await page.keyboard.press('End');
+    await context.getByRole('tab', { name: 'Details', selected: true }).waitFor(WAIT);
+    await page.getByRole('tab', { name: 'Result', exact: true }).waitFor(WAIT);
+    await page.getByRole('button', { name: 'Stop run' }).click();
+    await result(page, 'Stopped');
+    assert.deepEqual(page.errors, []);
   });
 
   await journey('start, rule steps, live browser, approval with sudo and the digest, verified result', async () => {
@@ -186,6 +220,7 @@ try {
     await page.getByText('Approved. The agent may now submit the bound credential.').waitFor(WAIT);
     await result(page, 'Signed in and verified');
     await page.getByText(`Teardown receipt: verified · key ${h.world.supervisor.keyId.slice(0, 8)}`).waitFor(WAIT);
+    await showPanel(page,'Activity');
     await page.getByText('Approved by omar-operator', { exact: true }).waitFor(WAIT);
     await page.getByText(/Decided by the model, choosing from/).first().waitFor(WAIT);
     await page.getByText('Stop is not available: The run has ended.').waitFor(WAIT);
@@ -219,25 +254,39 @@ try {
     });
     assert.deepEqual(fit, { frame: true, items: [true, true, true, true], pageScrolled: 0 });
     report.deck_fit = fit;
-    // The banner is one row; its nine fields stay in the dialog.
+    const railPlacement = await page.evaluate(() => {
+      const approval = document.querySelector('[data-run-approval]').getBoundingClientRect();
+      const browser = document.querySelector('[data-browser-pane]').getBoundingClientRect();
+      const context = document.querySelector('[data-run-context]').getBoundingClientRect();
+      return { rightOfBrowser: approval.left >= browser.right,
+        alignedWithBrowser: Math.abs(approval.top - browser.top) <= 1,
+        aboveContext: approval.bottom <= context.top,
+        alignedWithContext: Math.abs(approval.left - context.left) <= 1 && Math.abs(approval.right - context.right) <= 1 };
+    });
+    assert.deepEqual(railPlacement, { rightOfBrowser: true, alignedWithBrowser: true, aboveContext: true, alignedWithContext: true });
+    assert.equal(await approvalCard(page).count(), 1, 'one approval card across responsive layouts');
+    report.approval_rail_placement = railPlacement;
+    // The right-rail card stays before Browser in the DOM; nine fields remain in the dialog.
     assert.equal(await approvalCard(page).getByTestId('approval-digest').count(), 0);
     await approvalCard(page).getByText(/digest [0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4} …/).waitFor(WAIT);
     assert.deepEqual(await deadControls(page), []);
-    // Focus order: run bar → approval → Browser → Activity → Details.
-    await page.getByRole('button', { name: 'Back to runs' }).focus();
+    // Tab reaches the active context tab; arrow keys expose Guide and Details
+    // (verified by the dedicated keyboard journey above).
+    await page.getByRole('button', { name: 'Back to demo sign-in runs' }).focus();
     const order = [];
-    for (let i = 0; i < 30 && order.at(-1) !== 'details'; i += 1) {
+    for (let i = 0; i < 30 && order.at(-1) !== 'context tabs'; i += 1) {
       const where = await page.evaluate(() => {
         const e = document.activeElement;
         if (e.closest('[aria-label="Approval needed"]')) return 'approval';
-        if (e.closest('[aria-label="Details"]')) return 'details';
-        const heading = e.closest('section')?.querySelector('h2, h3')?.textContent;
-        return heading === 'Browser' ? 'browser' : heading === 'Activity' ? 'activity' : e.closest('section')?.querySelector('h2') ? 'run bar' : 'other';
+        if (e.closest('[data-run-header]')) return 'run bar';
+        if (e.closest('[data-browser-pane]')) return 'browser';
+        if (e.closest('[role="tablist"][aria-label="Run context panels"]')) return 'context tabs';
+        return 'other';
       });
       if (order.at(-1) !== where) order.push(where);
       await page.keyboard.press('Tab');
     }
-    assert.deepEqual(order, ['run bar', 'approval', 'browser', 'activity', 'details']);
+    assert.deepEqual(order, ['run bar', 'approval', 'browser', 'context tabs']);
     report.focus_order = order;
     await shot(page, 'deck-1280x800');
     await page.getByRole('button', { name: 'Stop run' }).click();
@@ -249,10 +298,13 @@ try {
     const page = await as('operator', { width: 375, height: 812 });
     const runId = await startFromUi(page);
     await approvalCard(page).waitFor(WAIT);
+    assert.equal(await approvalCard(page).count(), 1);
+    assert.equal(await page.getByRole('button', { name: 'Review and approve' }).count(), 1);
     // Browser is the default while the run is running: the full banner form.
     assert.equal(await panelButton(page, 'Browser').getAttribute('aria-pressed'), 'true');
     assert.equal((await page.getByRole('button', { name: 'Review and approve' }).innerText()).trim(), 'Review and approve');
     await panelButton(page, 'Activity').click();
+    assert.equal(await approvalCard(page).isVisible(), true, 'approval remains outside the Activity panel');
     assert.equal(new URL(page.url()).searchParams.get('panel'), 'activity');
     await page.getByTestId('step-1').waitFor(WAIT);
     assert.equal(await page.getByTestId('browser-frame').isVisible(), false);
@@ -263,6 +315,7 @@ try {
     assert.equal(await page.getByTestId('browser-frame').isVisible(), false);
     assert.equal(new URL(page.url()).searchParams.get('run'), runId);
     await panelButton(page, 'Details').click();
+    assert.equal(await approvalCard(page).isVisible(), true, 'approval remains outside the Details panel');
     await page.getByRole('button', { name: 'Refresh run' }).waitFor(WAIT);
     await page.reload();
     await page.getByRole('tab', { name: 'Result' }).waitFor(WAIT);
@@ -270,6 +323,7 @@ try {
     assert.deepEqual(await deadControls(page), []);
     await shot(page, 'phone-details');
     await panelButton(page, 'Browser').click();
+    assert.equal(await approvalCard(page).isVisible(), true, 'approval remains visible above the default Browser panel');
     await page.getByTestId('browser-frame').waitFor(WAIT);
     assert.equal(new URL(page.url()).searchParams.get('panel'), 'browser');
     // The reader chose Browser, so it stays after the run ends: Ended, with the last frame.
@@ -424,7 +478,7 @@ try {
     await page.getByRole('dialog').getByText(/The approval is stale/).waitFor(WAIT);
     await page.keyboard.press('Escape');
     await result(page, 'Approval stale');
-    await page.getByRole('button', { name: 'Back to runs' }).click();
+    await page.getByRole('button', { name: 'Back to demo sign-in runs' }).click();
     await page.getByText('The assigned guide is no longer the current approved version.').waitFor(WAIT);
     assert.equal(await page.getByRole('button', { name: 'Start run' }).isDisabled(), true);
     assert.deepEqual(await deadControls(page), []);
@@ -591,8 +645,8 @@ try {
       await startFromUi(page);
       if (approve) await approveInUi(page);
       await result(page, label);
-      if (help) await page.getByRole('note').filter({ hasText: `A person needs to decide: ${label}` }).waitFor(WAIT);
-      else assert.equal(await page.getByRole('note').filter({ hasText: 'A person needs to decide' }).count(), 0, label);
+      if (help) await page.getByRole('note').filter({ hasText: `Review needed: ${label}` }).waitFor(WAIT);
+      else assert.equal(await page.getByRole('note').filter({ hasText: 'Review needed' }).count(), 0, label);
       report.result_classes.push({ label, help });
       await settleAll();
       if (label === 'Timed out') {
@@ -614,7 +668,7 @@ try {
     // The reader chose Activity, so it stays; the result is its last item, the summary is in Details.
     await page.getByTestId('feed-result').filter({ hasText: 'Result: Interrupted' }).waitFor(WAIT);
     await page.getByText('Error: COORDINATOR_RESTART').waitFor(WAIT);
-    await page.getByRole('note').filter({ hasText: 'A person needs to decide: Interrupted' }).waitFor(WAIT);
+    await page.getByRole('note').filter({ hasText: 'Review needed: Interrupted' }).waitFor(WAIT);
     await panelButton(page, 'Details').click();
     await result(page, 'Interrupted');
     report.result_classes.push({ label: 'Interrupted', help: true });
@@ -645,7 +699,7 @@ try {
       await page.getByText('Pending approvals (1)').waitFor(WAIT);
       await layoutCheck(page, `inbox-${theme}`);
       await page.goto(runsUrl());
-      await page.getByText('Runs').first().waitFor(WAIT);
+      await page.getByRole('heading', { name: 'Run history' }).waitFor(WAIT);
       await layoutCheck(page, `overview-${theme}`);
       await page.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
       await page.getByText('Hard rules enforced by code').click();
@@ -676,8 +730,9 @@ try {
     const admin = await as('admin', { width: 375 });
     await admin.goto(`${h.origin}/operational-projects`);
     await admin.getByText('Operations is not turned on for this installation. Turn it on in Operations settings below.').waitFor(WAIT);
+    await admin.locator('summary').filter({hasText:'Operations settings'}).click();
     await admin.getByText('Turn on Operations first.').first().waitFor(WAIT);
-    assert.equal(await admin.getByRole('button', { name: 'Turn on Agent runs' }).isDisabled(), true);
+    assert.equal(await admin.getByRole('button', { name: 'Turn on Demo sign-in runs' }).isDisabled(), true);
     assert.deepEqual(await deadControls(admin), []);
     await layoutCheck(admin, 'settings-off');
     await admin.setViewportSize({ width: 375, height: 900 });
@@ -685,12 +740,12 @@ try {
     await admin.getByRole('dialog').filter({ hasText: 'Confirm with password' }).waitFor(WAIT);
     await sudoIfAsked(admin);
     await admin.getByText('Operations turned on.').waitFor(WAIT);
-    await admin.getByRole('heading', { name: 'New project' }).waitFor(WAIT);
+    await admin.getByRole('button', { name: 'New project', exact: true }).waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent metadata' }).click();
     await admin.getByText('Agent metadata turned on.').waitFor(WAIT);
-    await admin.getByRole('button', { name: 'Turn on Agent runs' }).click();
-    await admin.getByText('Agent runs turned on.').waitFor(WAIT);
-    await admin.getByRole('heading', { name: 'Agent inbox' }).waitFor(WAIT);
+    await admin.getByRole('button', { name: 'Turn on Demo sign-in runs' }).click();
+    await admin.getByText('Demo sign-in runs turned on.').waitFor(WAIT);
+    await admin.getByRole('heading', { name: 'Demo sign-in inbox' }).waitFor(WAIT);
     await layoutCheck(admin, 'settings-on');
     const audit = h.world.f.db.prepare("SELECT resource_id FROM audit_log WHERE action='OPERATIONS_TOGGLE_CHANGED' ORDER BY rowid").all();
     assert.deepEqual(audit.map(a => a.resource_id), ['operations', 'agents_metadata', 'agent_runs']);
@@ -730,9 +785,10 @@ try {
   await h.close();
   await browser.close();
 }
+assert(report.journeys.length > 0, 'the requested browser journey filter must match a real journey');
 report.passed = report.journeys.every(j => j.passed);
 report.finished_at = new Date().toISOString();
 if (artifacts) writeFileSync(`${artifacts}/report.json`, `${JSON.stringify(report, null, 2)}\n`);
 console.log(JSON.stringify({ a6_browser_journeys: report.passed ? 'passed' : 'failed', journeys: report.journeys.length,
-  layout_checks: report.layout.length }));
+  filter: report.filter, skipped: report.skipped, layout_checks: report.layout.length }));
 if (!report.passed) process.exitCode = 1;

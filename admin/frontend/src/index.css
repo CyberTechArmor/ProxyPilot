@@ -193,3 +193,57 @@
 .broker-colors [role="alert"] {
   color: hsl(var(--broker-error-text));
 }
+
+/* Approved Operations references: a sans UI with compact outlined cards,
+   strong title hierarchy, and one spacing scale. All three palettes reuse
+   these rules; theme selectors above change color channels only. */
+.operations-ui,
+.operations-dialog {
+  --operations-space: 4px;
+  --operations-radius: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+.operations-title {
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+.operations-heading {
+  font-size: 22px;
+  line-height: 1.25;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+.operations-card {
+  border-radius: var(--operations-radius, 6px);
+  box-shadow: none;
+}
+.operations-tabs {
+  display: flex;
+  overflow-x: auto;
+  border-bottom: 1px solid hsl(var(--border));
+  gap: 12px;
+}
+.operations-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  background: hsl(var(--muted));
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.operations-ui :where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 3px;
+}
+@media (min-width: 640px) {
+  .operations-title { font-size: 32px; }
+}
+@media (min-width: 1280px) {
+  .operations-title { font-size: 40px; }
+}

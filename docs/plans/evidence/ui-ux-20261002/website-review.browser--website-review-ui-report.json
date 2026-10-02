@@ -1,0 +1,122 @@
+{
+  "fixture_only": true,
+  "source_commit": "00b5c68d0816cb0921a2caee71a11adcf8d71ec7",
+  "journeys": [
+    "Save pins the approved guide; Save neither grants consent nor starts a review.",
+    "Editing resets consent and readiness; the exact reviewed statement requires a separate owner action.",
+    "A fresh readiness response with a different agent revision cannot start a review.",
+    "Explicit Start sends exact saved revision and guide pins; completed review shows citations, tokens, cost and receipt.",
+    "CAS conflict preserves local input and requires explicit reload before another save.",
+    "Unavailable runtime bridge is honest; cancellation preserves accepted-call spending uncertainty.",
+    "Client-rendered page refusal shows the fixed typed outcome without a fabricated review.",
+    "Missing guide, viewer/editor restrictions, archival and revoked access clear or disable the relevant controls.",
+    "Explicit read-only Refresh recovers after access is restored. Consent controls are operable by keyboard."
+  ],
+  "layout": [
+    {
+      "width": 360,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 360,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 360,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 375,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 375,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 375,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 390,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 390,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 390,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 768,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 768,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 768,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1280,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1280,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1280,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1536,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1536,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1536,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1920,
+      "theme": "office",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1920,
+      "theme": "latte",
+      "horizontal_overflow": false
+    },
+    {
+      "width": 1920,
+      "theme": "midnight",
+      "horizontal_overflow": false
+    }
+  ]
+}

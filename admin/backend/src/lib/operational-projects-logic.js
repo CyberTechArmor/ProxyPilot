@@ -77,6 +77,7 @@ export const schemas = {
     limit: z.string().regex(/^\d{1,3}$/).transform(Number).refine(n => n > 0 && n <= 100).default('25'),
   }).strict(),
   events: z.object({
+    order: z.enum(['asc', 'desc']).default('asc'),
     after: z.string().regex(/^\d{1,15}$/).transform(Number).default('0'),
     limit: z.string().regex(/^\d{1,3}$/).transform(Number).refine(n => n > 0 && n <= 100).default('25'),
   }).strict(),

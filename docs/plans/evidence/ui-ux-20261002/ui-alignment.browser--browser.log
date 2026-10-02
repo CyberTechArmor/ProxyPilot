@@ -1,0 +1,9 @@
+ok - short private creation with cancel/reopen and no raw account IDs
+ok - overview summary hierarchy and separate Details actions
+ok - pending guide has explicit save-to-approved action with no reviewer blocker
+ok - stale guide save retains entered text and makes no run request
+ok - viewer sees guide without publishing controls
+ok - evidence save after remount never rebases stale local guide text
+ok - same frozen project state has identical theme geometry
+ok - setup geometry, draft save separation and unsupported capability
+PASS UI alignment fixture journeys and seven-width overflow audit

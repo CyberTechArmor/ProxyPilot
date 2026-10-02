@@ -1,0 +1,57 @@
+{
+  "tested_commit": "da6630b83ff01e392be058557784ccc531492142",
+  "product_source_matches": "60bf9968a3aac83ef174709f304cdf4fccc58929",
+  "backend_and_scripts_match": "fb5d4bb335e4dfa4a98bd6d530b33185f491f067",
+  "backend_ci_selection": {
+    "passed": 223,
+    "failed": 0
+  },
+  "python_review": {
+    "passed": 9,
+    "failed": 0
+  },
+  "frontend_unit": {
+    "passed": 4,
+    "failed": 0
+  },
+  "production_build": "passed; existing dynamic-import/chunk-size warnings",
+  "fixture_only": true,
+  "production_provider_proof": false,
+  "review": "Independent read-only review found no concrete release blocker",
+  "reports": {
+    "component": {
+      "original_source_commit": "da6630b83ff01e392be058557784ccc531492142",
+      "journeys": 9,
+      "layouts": 21,
+      "scores": [],
+      "sha256": "77ad7edb685e6853b134ab3e1cd90868ced1b264dde019a8f0a6c568ac4d73e2"
+    },
+    "dashboard": {
+      "original_source_commit": "da6630b83ff01e392be058557784ccc531492142",
+      "journeys": 3,
+      "layouts": 9,
+      "scores": [],
+      "sha256": "13132906540a88bcf46ec3f6ecc98ef78cfb94841ae6cf8409b8ca451c7b82d2"
+    },
+    "signed-runtime": {
+      "original_source_commit": null,
+      "journeys": 4,
+      "layouts": 2,
+      "scores": [],
+      "sha256": "5b82147cac5d2e9ee3c2bdbc467555970d2ea24486a3f8d136ef25d985159331"
+    },
+    "lighthouse": {
+      "original_source_commit": "60bf9968a3aac83ef174709f304cdf4fccc58929",
+      "journeys": 0,
+      "layouts": 0,
+      "scores": [
+        100,
+        100,
+        100
+      ],
+      "sha256": "e3f01b64a97994cb358bde0374b880f059430a5b05ae754d124e3c351dc60f51"
+    }
+  },
+  "signed_runtime_source_note": "The runtime fixture omits a source field; its run was performed after freezing this tested commit, with unchanged product tree before/after. No source value was inserted into the original report.",
+  "environment_limits": "Full runtime aggregate: 3536 passed, 10 failed, 4 cancelled, 40 skipped; baseline reproduction disclosed. Docker OpenBao integration unavailable; security CRLF/LF snapshot mismatch disclosed."
+}

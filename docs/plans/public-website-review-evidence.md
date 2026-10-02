@@ -128,3 +128,19 @@ Retained artifacts are explicitly fixture evidence, not a live provider review:
 The synthetic A3/A4/A7/A8 pilot and its credential/write approvals remain separate.
 Auto-approved guide saves confer no credential-write approval or website-write
 permission. No dependency on completing the cosmetic redesign is introduced.
+
+## Frozen converged release evidence - 2026-10-02
+
+The sole proposed release branch is `ui/website-review-integration-20261002`. Frozen tested source is `da6630b83ff01e392be058557784ccc531492142`. Its product tree is identical to `60bf9968`; backend/scripts match runtime proof `fb5d4bb3`. Subsequent evidence-only commits do not change those tested products. The separate full mockup alignment and original backlog commits are excluded from this branch.
+
+- Repository CI backend selection: 223 passed, zero failures/cancellations/skips.
+- Cross-language website-review Python: 9 passed. Frontend selection: 4 passed. Production build passed, retaining existing import/chunk-size warnings.
+- Final component: 9 grouped journeys, 21 viewport/theme audits. Full dashboard: 3 journeys, 9 layouts. Signed model bridge: 4 journeys, 2 layouts.
+- Actual mobile Lighthouse new form, saved consent/readiness agent and expanded completed result: 100 / 100 / 100. No page errors or external browser requests.
+- Independent final review found no concrete release blocker in this scoped implementation.
+
+[Verification manifest](assets/public-website-review/release/verification.json) links retained report hashes and exact test source. [New form](assets/public-website-review/release/dashboard-new-agent-375.png) and [completed evidence](assets/public-website-review/release/dashboard-completed-evidence-375.png) show actual dashboard pixels. All public-site/provider responses are explicitly scripted fixtures. A3/A4 receipt verification is real, but no live public-site/provider or installed-host proof is claimed.
+
+Two first wrapper attempts stopped before component/dashboard startup because WSL could not follow a Windows Git worktree pointer. The wrapper now receives the verified Windows commit explicitly. Both restarted suites exited zero. The already successful signed-runtime suite was not repeated. No failure was counted as a completed journey.
+
+Repository implementation of the separately owned key-preserving updater refresh was authorized through the parent at 16:27 UTC. It is not part of this frozen evidence and needs targeted integration verification. Host actions and public publication remain unauthorized for this executor.

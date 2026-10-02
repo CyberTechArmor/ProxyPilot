@@ -57,7 +57,15 @@ export function operationsFixture({path=':memory:'}={}) {
     db.prepare('INSERT INTO users(id,username,role) VALUES(?,?,?)').run(id, `person-${id}`, role);
     return { id, role };
   };
-  return { db, adapter, store, migrate, addUser, advance: ms => { time += ms; }, close: () => db.close() };
+  // Seed data written by the pre-save-approval application. This is deliberately
+  // a fixture-only SQL writer, not an alternate public save contract.
+  const seedLegacyDraft = (actor,id,input) => {
+    const d=db.prepare('SELECT * FROM ops_guide_drafts WHERE project_id=?').get(id);
+    db.prepare('UPDATE ops_guide_drafts SET title=?,instructions=?,revision=revision+1,updated_by=?,updated_at=? WHERE project_id=?')
+      .run(input.title ?? d.title,input.instructions ?? d.instructions,actor.id,new Date(time).toISOString(),id);
+    db.prepare('INSERT OR IGNORE INTO ops_draft_contributors VALUES (?,?)').run(id,actor.id);
+  };
+  return { db, adapter, store, migrate, addUser, seedLegacyDraft, advance: ms => { time += ms; }, close: () => db.close() };
 }
 
 // Handler fixture, NOT an Express replacement for production. Runs the actual

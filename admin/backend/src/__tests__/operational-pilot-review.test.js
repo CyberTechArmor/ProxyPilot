@@ -8,7 +8,7 @@ function world() {
   const f = operationsFixture(), owner = f.addUser(), other = f.addUser();
   const p = f.store.create(owner, { name: 'A8 demo pilot' });
   f.db.prepare('UPDATE ops_projects SET site_origin=? WHERE id=?').run('https://demo.fractionate.ai', p.id);
-  f.store.saveDraft(owner, p.id, 1, { title: 'Demo guide', instructions: 'Open the demo sign-in dialog.' });
+  f.seedLegacyDraft(owner, p.id, { title: 'Demo guide', instructions: 'Open the demo sign-in dialog.' });
   const s = f.store.submit(owner, p.id, 2, {}).submission;
   const scope = { owner_id: owner.id, project_id: p.id, submission_id: s.id, content_hash: s.content_hash };
   const grant = () => authorizePilotSelfReview(f.db, scope, { now: () => s.submitted_at });
@@ -65,7 +65,7 @@ test('A8 exception is tied to current owner and pending iteration; approval roll
     assert.ok(f.store.submission(owner, p.id, s.id).submission.pilot_self_review);
     f.db.exec('DROP TRIGGER fail_pilot_approval');
     f.store.cancelSubmission(owner, p.id, s.id, 1, { reason: 'New draft' });
-    f.store.saveDraft(owner, p.id, f.store.draft(owner, p.id).revision, { instructions: 'Changed guide' });
+    f.seedLegacyDraft(owner, p.id, { instructions: 'Changed guide' });
     const next = f.store.submit(owner, p.id, f.store.draft(owner, p.id).revision, {}).submission;
     assert.equal(next.pilot_self_review, null);
     assert.throws(() => f.store.review(owner, p.id, next.id, 1, { decision: 'approve' }), e => e.status === 403);

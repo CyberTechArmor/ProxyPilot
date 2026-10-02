@@ -288,9 +288,7 @@ export function agentRunsWorld({ rules = baseRules, consent = true, bind = true,
   const approveGuide = (instructions) => {
     if (latest) f.store.startRevision(owner, p.id, f.store.draft(owner, p.id).revision,
       { version_id: latest.id, discard_draft: true });
-    f.store.saveDraft(owner, p.id, f.store.draft(owner, p.id).revision, { title: 'Sign-in guide', instructions });
-    const submitted = f.store.submit(owner, p.id, f.store.draft(owner, p.id).revision, {}).submission;
-    latest = f.store.review(users.reviewer, p.id, submitted.id, 1, { decision: 'approve' }).version;
+    latest = f.store.saveDraft(owner, p.id, f.store.draft(owner, p.id).revision, { title: 'Sign-in guide', instructions }).version;
     return latest;
   };
   const version = approveGuide(guideWith(rules));

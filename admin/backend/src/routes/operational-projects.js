@@ -169,6 +169,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.get('/:id/events', handle((r, a) => store.events(a, r.params.id, r.query)));
   router.post('/:id/submissions',handle((r,a)=>store.submit(a,r.params.id,expected(r),r.body),201));
   router.get('/:id/submissions/:submissionId',handle((r,a)=>store.submission(a,r.params.id,r.params.submissionId)));
+  router.post('/:id/submissions/:submissionId/approve',handle((r,a)=>store.approveSubmission(a,r.params.id,r.params.submissionId,expected(r),r.body)));
   router.post('/:id/submissions/:submissionId/decision',handle((r,a)=>store.review(a,r.params.id,r.params.submissionId,expected(r),r.body)));
   router.post('/:id/submissions/:submissionId/cancel',handle((r,a)=>store.cancelSubmission(a,r.params.id,r.params.submissionId,expected(r),r.body)));
   router.post('/:id/draft/start-revision',handle((r,a)=>store.startRevision(a,r.params.id,expected(r),r.body)));

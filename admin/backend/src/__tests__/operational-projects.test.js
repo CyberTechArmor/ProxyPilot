@@ -43,7 +43,7 @@ test('role matrix separates editing, ownership and read-only roles', withFixture
     refused(403,()=>f.store.roster(member,p.id));
     refused(403,()=>f.store.grant(member,p.id,f.addUser().id,rev(f,owner,p.id),{role:'editor'}));
     refused(403,()=>f.store.archive(member,p.id,rev(f,owner,p.id),{reason:'No'}));
-    if(role==='editor') f.store.saveDraft(member,p.id,1,{instructions:'Human instructions'});
+    if(role==='editor') f.store.saveDraft(member,p.id,1,{title:'Guide',instructions:'Human instructions'});
     else refused(403,()=>f.store.saveDraft(member,p.id,1,{instructions:'No'}));
   }
   for(const role of ['viewer','operator','editor','reviewer','owner']) {
@@ -77,9 +77,12 @@ test('draft/project optimistic concurrency and contributor provenance; strict bo
   f.store.saveDraft(a,p.id,1,{title:'Draft',instructions:'Retained text'});
   refused(412,()=>f.store.saveDraft(b,p.id,1,{instructions:'Overwrite'}));
   refused(412,()=>f.store.update(a,p.id,stale,{name:'Outdated'}));
-  f.store.saveDraft(b,p.id,2,{instructions:'Second iteration'});
+  const base=f.store.get(a,p.id).current_version;
+  f.store.startRevision(b,p.id,2,{version_id:base.id,discard_draft:true});
+  f.store.saveDraft(b,p.id,3,{instructions:'Second iteration'});
   f.store.remove(a,p.id,b.id,rev(f,a,p.id));
-  assert.deepEqual(f.store.draft(a,p.id).contributors.sort(),[a.id,b.id].sort());
+  assert.deepEqual(f.store.draft(a,p.id).contributors,[b.id]);
+  assert.deepEqual(f.store.version(a,p.id,base.id).version.contributors,[a.id]);
   refused(400,()=>f.store.saveDraft(a,p.id,3,{instructions:'x'.repeat(100001)}));
   refused(400,()=>f.store.saveDraft(a,p.id,3,{instructions:'🧪'.repeat(25001)}));
   refused(400,()=>f.store.create(a,{name:'X',container:'forbidden'}));
@@ -93,7 +96,7 @@ test('draft/project optimistic concurrency and contributor provenance; strict bo
 test('archive freezes mutations, allows revocation/leave/read/restore, and preserves drafts', withFixture(f => {
   const a=f.addUser(), b=f.addUser(), c=f.addUser(), p=f.store.create(a,{name:'Archive'});
   add(f,a,p,b,'editor'); add(f,a,p,c,'viewer');
-  f.store.saveDraft(a,p.id,1,{instructions:'Retain me'});
+  f.store.saveDraft(a,p.id,1,{title:'Guide',instructions:'Retain me'});
   f.store.archive(a,p.id,rev(f,a,p.id),{reason:'Finished for now'});
   assert.equal(f.store.list(a).projects.length,0);
   assert.equal(f.store.list(a,{state:'archived'}).projects.length,1);
@@ -147,12 +150,12 @@ test('audit insertion failure atomically rolls back create and save; audit appen
   f.db.exec("CREATE TRIGGER fixture_audit_failure BEFORE INSERT ON ops_project_events BEGIN SELECT RAISE(ABORT,'fixture'); END");
   assert.throws(()=>f.store.create(a,{name:'Rolled back'}),/fixture/);
   assert.equal(f.store.list(a).projects.length,1);
-  assert.throws(()=>f.store.saveDraft(a,p.id,1,{instructions:'Private content'}),/fixture/);
+  assert.throws(()=>f.store.saveDraft(a,p.id,1,{title:'Guide',instructions:'Private content'}),/fixture/);
   assert.equal(f.store.draft(a,p.id).revision,1);
   assert.equal(f.store.draft(a,p.id).contributors.length,0);
   assert.equal(rev(f,a,p.id),2);
   f.db.exec('DROP TRIGGER fixture_audit_failure');
-  f.store.saveDraft(a,p.id,1,{instructions:'Private content'});
+  f.store.saveDraft(a,p.id,1,{title:'Guide',instructions:'Private content'});
   assert.equal(JSON.stringify(f.store.events(a,p.id)).includes('Private content'),false);
   const grantEvent=f.store.events(b,p.id).events.find(e=>e.action==='member_set');
   assert.equal(grantEvent.subject_id,null); assert.deepEqual(grantEvent.metadata,{});

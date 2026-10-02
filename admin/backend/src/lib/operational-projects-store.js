@@ -61,7 +61,7 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
     });
   }
   const evidence = evidenceFactory?.({one,all,run,tx,access,event,bump,now,uuid});
-  const workflow = createOperationsWorkflow({one,all,run,tx,access,event,bump,now,uuid,evidence});
+  const workflow = createOperationsWorkflow({one,all,run,tx,access,event,bump,now,uuid,user,evidence});
   const agents = createOperationalAgentsStore({one,all,run,tx,access,eligible,event,bump,now,uuid,user,workflow});
   return {
     ...(evidence ? { evidence } : {}),
@@ -111,23 +111,10 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
     draft(actor, id) {
       access(actor, id);
       const state=workflow.draftState(id);
-      return { ...one('SELECT * FROM ops_guide_drafts WHERE project_id = ?', id), ...state, status: state.pending_submission ? 'pending' : state.phase,
-        contributors: all('SELECT user_id FROM ops_draft_contributors WHERE project_id = ? ORDER BY user_id', id).map(r => r.user_id) };
-    },
-    saveDraft(actor, id, expected, input) {
-      const v = parse(schemas.draft, input);
-      return tx(() => {
-        access(actor, id, 'edit');
-        workflow.editable(id);
-        const d = one('SELECT * FROM ops_guide_drafts WHERE project_id = ?', id);
-        assertRevision(expected, d.revision);
-        run(`UPDATE ops_guide_drafts SET title = ?, instructions = ?, revision = revision + 1,
-          updated_by = ?, updated_at = ? WHERE project_id = ?`, v.title ?? d.title, v.instructions ?? d.instructions, actor.id, now(), id);
-        run('INSERT OR IGNORE INTO ops_draft_contributors(project_id,user_id) VALUES (?,?)', id, actor.id);
-        bump(id);
-        event(actor, id, 'draft_saved', null, { draft_revision: d.revision + 1, fields: Object.keys(v) });
-        return { revision: d.revision + 1, status: 'draft' };
-      });
+      const d=one('SELECT * FROM ops_guide_drafts WHERE project_id = ?',id);
+      const contributors=all('SELECT user_id FROM ops_draft_contributors WHERE project_id = ? ORDER BY user_id',id).map(r=>r.user_id);
+      return {...d,...state,status:state.pending_submission?'pending':state.phase,updated_by_name:user(d.updated_by)?.username ?? 'Deleted account',
+        contributors,contributor_names:contributors.map(id=>user(id)?.username ?? 'Deleted account')};
     },
     roster(actor, id) {
       const { p } = access(actor, id, 'access');

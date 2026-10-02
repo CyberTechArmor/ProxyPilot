@@ -133,7 +133,11 @@ try{
   assert.equal(new Set(palettes).size,3,'Each selected theme must render its own palette');report.theme_palettes=palettes;
  });
  await journey('setup geometry, draft save separation and unsupported capability',async()=>{
-  await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByLabel('Agent name',{exact:true}).fill('Invoice assistant');await shot('setup-work-office-1536');await page.getByRole('button',{name:'Next: Connections',exact:true}).click();await page.getByRole('button',{name:'Select connection',exact:true}).waitFor();await page.getByRole('button',{name:'Select connection',exact:true}).click();await shot('setup-connections-office-1536');
+  await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByLabel('Agent name',{exact:true}).fill('Invoice assistant');await shot('setup-work-office-1536');
+  const workFooter=await page.getByRole('button',{name:'Next: Connections',exact:true}).boundingBox();
+  report.reference_fit.work={viewport:{width:1536,height:1024},footer_action:workFooter};
+  assert(workFooter.y+workFooter.height<=1024,`Work continuation should fit the first reference-size viewport: ${JSON.stringify(workFooter)}`);
+  await page.getByRole('button',{name:'Next: Connections',exact:true}).click();await page.getByRole('button',{name:'Select connection',exact:true}).waitFor();await page.getByRole('button',{name:'Select connection',exact:true}).click();await shot('setup-connections-office-1536');
   const controls=await page.getByRole('button',{name:'Next: Controls',exact:true}).boundingBox();
   const selected=await page.getByRole('button',{name:'Remove selection',exact:true}).evaluate(button=>{const box=button.closest('li').getBoundingClientRect();return {top:box.top,bottom:box.bottom,height:box.height};});
   report.reference_fit.connections={viewport:{width:1536,height:1024},selected_card:selected,footer_action:controls};

@@ -56,15 +56,34 @@
     "verification.json": {
       "sha256": "6ca10ff38f79dd8433e50ffb8026c9f7ef93a710d72fdbad371e70bd8820388e",
       "bytes": 6057
+    },
+    "agent-runs-a6.json": {
+      "sha256": "763690e66156b967e24fe4a5b763c9c72b103bd7af8f2d40d68ba16c55826ab2",
+      "bytes": 16293
+    },
+    "agent-runs-a7-a8.json": {
+      "sha256": "aaf2c06e7e337cc7c5e39854d7d6e0d6994b570b5489aeb199ab16daa4ef5df0",
+      "bytes": 5976
+    },
+    "journey-verification.json": {
+      "sha256": "0978f1e58c6cbd37e04c7329f44f8f8f258e110a9585d8009fad1e201a904eef",
+      "bytes": 1144
     }
   },
   "limitations": [
     "Scripted fixture frame and mock Neko viewer; no production/live WebRTC target proof",
     "Lighthouse report timestamps retained; numerical audits preceded final metadata relocation; final viewport/media behavior checks use frozen source"
   ],
-  "evidence_revision": 2,
-  "previous_candidate": "e48542f4b8b72d11d1ee42c165be1197b9838028",
+  "evidence_revision": 3,
+  "previous_candidate": "fafc5a5926491873045b43e0d68b1ce96c6b12f6",
   "superseded_evidence": {
     "verification-superseded.json": "Initial checker reset purported short viewport measurements to900px; use verification.json for current height proof."
+  },
+  "test_files": {
+    ".github/workflows/security-regression.yml": "1c5803d8e8e76bf5a81aac4c7ac2969cb408aa3d03e18bccbb5c13fe913658ce",
+    "admin/frontend/tests/agent-runs.browser.mjs": "da9abba33d1af0787eff4b00b0eda164340ff6e0655ea7b0ea0c7f639752e014",
+    "admin/frontend/tests/agent-runs-a7.browser.mjs": "cf62452812fdca514bab53c013a05ed6f2c05ec64d0d609b3ebcd986d113cd34",
+    "admin/frontend/tests/agent-runs-cleanup.mjs": "0d6bcb92ec1b18495667541bd32ccea9d99c52fc64e572201a01b241097a07ed",
+    "admin/frontend/tests/agent-runs-cleanup.test.mjs": "bb16fd888e3b41459946d5d7059ef800e2985747e2cd679a78acc4a079db063b"
   }
 }

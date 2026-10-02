@@ -1,0 +1,290 @@
+{
+  "journeys": [
+    {
+      "name": "pending guide: authorized save approves the exact snapshot without starting execution",
+      "passed": true,
+      "seconds": 6.5
+    },
+    {
+      "name": "live view and takeover: confirm it is you once, control the browser, give it back, decide, resume",
+      "passed": true,
+      "seconds": 8.4
+    },
+    {
+      "name": "a timed-out sign-in blocks the profile until a person decides it (360 px)",
+      "passed": true,
+      "seconds": 7.7
+    },
+    {
+      "name": "practice run: choose the demo behaviour; the Review tab says it matched; the model summary is shown",
+      "passed": true,
+      "seconds": 9.4
+    },
+    {
+      "name": "no live install: a quiet note and still frames, no retry",
+      "passed": true,
+      "seconds": 3.9
+    },
+    {
+      "name": "layout: live pane, takeover bar, confirmation and the agent-control prompt at six widths",
+      "passed": true,
+      "seconds": 6.6
+    }
+  ],
+  "layout": [
+    {
+      "label": "pending-guide-save-approve",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "pending-guide-save-approve",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "pending-guide-save-approve",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "pending-guide-save-approve",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "pending-guide-save-approve",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "pending-guide-save-approve",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "reconcile",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "reconcile",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "reconcile",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "reconcile",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "reconcile",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "reconcile",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "practice-dialog",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "practice-dialog",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "practice-dialog",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "practice-dialog",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "practice-dialog",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "practice-dialog",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "review",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "review",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "review",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "review",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "review",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "review",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "live-pane",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "live-pane",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "live-pane",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "live-pane",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "live-pane",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "live-pane",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "takeover-confirm",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "takeover-confirm",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "takeover-confirm",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "takeover-confirm",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "takeover-confirm",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "takeover-confirm",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agent-control-prompt",
+      "width": 360,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agent-control-prompt",
+      "width": 375,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agent-control-prompt",
+      "width": 390,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agent-control-prompt",
+      "width": 768,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agent-control-prompt",
+      "width": 1280,
+      "overflow": false,
+      "small_targets": 0
+    },
+    {
+      "label": "agent-control-prompt",
+      "width": 1920,
+      "overflow": false,
+      "small_targets": 0
+    }
+  ],
+  "started_at": "2026-10-02T22:56:21.386Z",
+  "finished_at": "2026-10-02T22:57:05.226Z"
+}

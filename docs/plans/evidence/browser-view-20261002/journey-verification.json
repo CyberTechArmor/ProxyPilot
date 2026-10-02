@@ -1,0 +1,33 @@
+{
+  "previous_head": "fafc5a5926491873045b43e0d68b1ce96c6b12f6",
+  "failed_ci": {
+    "run": 37072711686,
+    "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37072711686",
+    "failure": "Removed main > .overflow-y-auto selector produced null.scrollTop; held-run cleanup then exceeded job deadline",
+    "cloud_reproduction": "Same null.scrollTop on frozen head; timeout exit124 at180s"
+  },
+  "corrected_cloud": {
+    "a6": {
+      "journeys": 20,
+      "passed": 20,
+      "layout_checks": 96,
+      "skipped": 0
+    },
+    "a7_a8": {
+      "journeys": 6,
+      "passed": 6,
+      "layout_checks": 42
+    },
+    "cleanup": {
+      "tests": 3,
+      "passed": 3
+    },
+    "existing_ui_units": {
+      "tests": 8,
+      "passed": 8
+    },
+    "build": "passed,1997modules",
+    "fixed_viewport_sha256": "6ca10ff38f79dd8433e50ffb8026c9f7ef93a710d72fdbad371e70bd8820388e"
+  },
+  "changes": "Test selectors select current viewport and visible Browser feedback; exact original geometry assertions retained and document bounds added; failed-journey cleanup fences held runs before bounded settlement. Product source unchanged."
+}

@@ -10,6 +10,7 @@ Based on shipped main `9b88f8f03925ee4c4cf097e40429897be9195e2f` (PR724). This s
 
 - Production Vite build passed; existing chunk-size/dynamic-import warnings remain.
 - Existing `agent-run-deck.test.js` and `agent-live-client.test.js`: 8/8 passed.
+- Complete real A6 journeys: 20/20,96 layout checks; A7/A8: 6/6,42 layout checks. Failed-journey cleanup regressions:3/3. CI runs these cleanup checks before the unchanged journey coverage. [Journey reports and failed-head reproduction](evidence/browser-view-20261002/journey-verification.json) retain the earlier CI failure and corrected cloud results.
 - Actual Layout + RunDeck/project/detail fixtures: no document scroll or horizontal overflow at 360,375,768,1280,1920px, including reload. Eight fullscreen cycles test actual640px resize, Escape/Exit/focus restore; API refusal fallback and frame dialog Escape pass. Three mock live viewer cycles keep the same video node and one connection. Ended-session approval suppression passes. Native and fallback fullscreen Give back opens the production portaled confirmation after exiting fullscreen; Cancel preserves the controller, same video/viewer and trigger focus. Populated help and eight reconciliation decisions retain internal scrolling at360×640,375×667,768×640,1280×640 and1920×800. Actual approval digest entry/Cancel passes at each size; keyboard scrolling and reload pass at375×450. No page errors.
 - Mobile Lighthouse accessibility: 100 for deck, project and project index. Audit timestamps are retained; these numerical audits preceded the final metadata move. Frozen-source behavior verification was rerun after that move.
 - [Verification report](evidence/browser-view-20261002/verification.json), [source and artifact hashes](evidence/browser-view-20261002/manifest.json), [375px screenshot](evidence/browser-view-20261002/phone-375.png), [1280px screenshot](evidence/browser-view-20261002/desktop-1280.png).
@@ -26,6 +27,9 @@ npm ci
 npm run build
 cd ../..
 node --test admin/backend/src/__tests__/agent-run-deck.test.js admin/backend/src/__tests__/agent-live-client.test.js
+BROWSER_EXE=/usr/bin/chromium node --test admin/frontend/tests/agent-runs-cleanup.test.mjs
+BROWSER_EXE=/usr/bin/chromium node admin/frontend/tests/agent-runs.browser.mjs
+BROWSER_EXE=/usr/bin/chromium node admin/frontend/tests/agent-runs-a7.browser.mjs
 ```
 
 For the viewport fixture, start Vite on port5178. Install `playwright-core` and `@axe-core/playwright` in a disposable tools directory, set `BROWSER_TEST_TOOLS` to it, then run `node admin/frontend/tests/operations-viewport-check.mjs`. The checker uses `/usr/bin/chromium` and contacts only the local fixture. No production browser task, deployment or host mutation was performed.

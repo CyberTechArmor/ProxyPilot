@@ -177,6 +177,18 @@ AppRole config, provider/binding/price/ledger state and A8 pins remain unchanged
 Other package/unit changes or foreign drift refuse the update. Do not use
 `reinstall`/`configure` as an activation shortcut.
 
+One explicitly reviewed compatibility pair retains the installed PR #710 Demo
+guest worker: recorded and actual SHA-256
+`d0724e5fb5573a18095a8e906cd9bb9c2542c17c494184ca15cbc65d345331f9`
+with candidate SHA-256
+`54302e5ee880470480d9b4de3d30616b263c7213d9eb08712b1ef3f50c5c0d21`.
+The latter is commit `39ada2b`'s bound-session/single-sign-out correction. Public
+reviews use backend extraction and the A3/A4 model bridge, without launching a
+guest browser. This rule retains the worker bytes and journal pin; that Demo
+correction remains deferred. Unknown/reversed pairs and every other adjacent
+source/unit mismatch still refuse, naming the mismatched path. Installed files
+must continue matching their recorded digests before any refresh.
+
 Metadata-only readback verifies both serving digests and `website-review.v1`.
 The existing provider/price requirement may still block readiness; activation
 does not enroll credentials or make a model call. Dashboard health must pass

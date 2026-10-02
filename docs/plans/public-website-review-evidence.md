@@ -180,3 +180,49 @@ The website/UI slice was frozen on `ui/website-review-integration-20261002`. Its
 Two first wrapper attempts stopped before component/dashboard startup because WSL could not follow a Windows Git worktree pointer. The wrapper now receives the verified Windows commit explicitly. Both restarted suites exited zero. The already successful signed-runtime suite was not repeated. No failure was counted as a completed journey.
 
 Repository implementation of the key-preserving updater refresh was authorized through the parent at 16:27 UTC. Its affected checks are recorded below separately from the unchanged website/UI fixtures. Thomas subsequently explicitly authorized publishing the combined draft PR, with parent review/CI before merge and production Update performed by Thomas. No production action was performed by this executor.
+
+## Retained guest compatibility repair - 2026-10-02
+
+Repair branch `fix/review-guest-compatibility-20261002` starts from verified main
+`35c2e9d4eb657f92e1499d8d56035217b04f7ae6`. The user's read-only diagnostic
+identified one candidate mismatch: installed and recorded `a3-worker-guest.py`
+hash `d0724e5fb5573a18095a8e906cd9bb9c2542c17c494184ca15cbc65d345331f9`
+matches the historical PR #710 source (`02398ef`); candidate hash
+`54302e5ee880470480d9b4de3d30616b263c7213d9eb08712b1ef3f50c5c0d21`
+matches `39ada2b`'s deferred bound-session/single-sign-out correction. The other
+adjacent sources and A3/A4 units matched the journal and candidate.
+
+The updater recognizes only that exact pair, still requiring actual installed
+bytes to match the journal. It retains the guest source and pin, and changes
+only the existing two daemon files/two install journals. Unknown/reversed
+pairs, foreign installed bytes and all other adjacent source/unit mismatches
+remain refused; the refusal now names the path. The Demo guest correction
+remains deferred. No guest VM action, enrollment, new permission or host target
+is introduced. Public reviews use backend extraction and the A3/A4 model
+bridge, without launching this worker or its browser.
+
+The exact historical guest is reconstructed from the reviewed four-change
+delta and asserted against its full source hash, so tests need no historical
+Git object or duplicate worker distribution. Before the repair, two real-file
+regression cases reproduced the same generic preflight refusal. After it:
+
+- Root refresh: 16/16, zero skips. Real Ed25519 key, installer adapters and
+  fixed files prove apply/rollback retain guest bytes, modes and journal pin,
+  plus keys/config/pins/other package files. Unknown and reversed hash pairs,
+  changed candidates, foreign bytes and each other adjacent source/unit reject.
+- Public review: 16/16, zero skips, including real Python-to-Node receipt
+  verification. The historical guest module completes a scripted provider
+  review while browser construction, worker creation and guest launch raise
+  assertions; no website credential binding occurs.
+- Full Python runtime/security selection: 316 cases, 33 existing environment
+  skips, zero failures (73.230 seconds).
+- Root updater/self-update selection: 83/83, zero skips/failures (23.794 seconds).
+- Whitespace verification passed. Frontend, dashboard/provider daemons,
+  manifests, worker source, units and update orchestration are unchanged.
+
+[Compatibility verification manifest](assets/public-website-review/release/guest-compatibility-verification.json)
+records source and local log hashes, including the reproduced pre-fix failure.
+These are local fixtures with scripted VM/service/socket/provider operations;
+no production shell, host write, model call or deployment was performed. Parent
+review and exact-head CI precede merge; Thomas's normal Update remains the
+deployment path, with existing provider/price readiness requirements intact.

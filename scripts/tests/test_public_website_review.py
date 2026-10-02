@@ -8,6 +8,8 @@ import importlib.util
 import shutil
 import subprocess
 import threading
+from unittest.mock import patch
+from guest_compatibility_fixture import legacy_guest_source, LEGACY_GUEST_SHA
 
 spec = importlib.util.spec_from_file_location('public_review_model_fixture', Path(__file__).with_name('test_a5_model_step.py'))
 m = importlib.util.module_from_spec(spec)
@@ -69,6 +71,28 @@ class PublicReviewTests(unittest.TestCase):
         self.assertIn('No tools, writes, login or credential access', prompt)
         self.assertEqual(self.broker.state['calls'][m.CALL]['kind'], 'public_review')
         self.assertRefused('CALL_UNCERTAIN', self.sup.public_review_model, request)
+        self.assertEqual(len(self.provider.requests), 1)
+
+    def test_exact_historical_guest_supports_review_without_browser_or_guest_launch(self):
+        data = legacy_guest_source()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), LEGACY_GUEST_SHA)
+        path = self.root / 'historical-guest.py'
+        path.write_bytes(data)
+        spec = importlib.util.spec_from_file_location('historical_review_guest', path)
+        guest = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guest)
+        self.sup.source = data.decode()
+        expected = self.answer()
+        with patch.object(s, 'runner', guest), \
+                patch.object(guest, 'Browser', side_effect=AssertionError('No browser for a public review')), \
+                patch.object(s, 'Worker', side_effect=AssertionError('No guest worker for a public review')), \
+                patch.object(self.sup, 'launch', side_effect=AssertionError('No guest launch for a public review')):
+            self.assertTrue(self.sup.public_review_status({})['available'])
+            out = self.sup.dispatch('public_review_model', self.request())
+        self.assertEqual(out['text'], expected)
+        self.assertTrue(out['attestation'].startswith('ppr1.'))
+        self.assertEqual(self.host.units, {})
+        self.assertIsNone(self.broker.state['runs'][m.RUN]['credential'])
         self.assertEqual(len(self.provider.requests), 1)
 
     def test_strict_request_guide_pins_budget_and_cancel_prevent_provider_contact(self):

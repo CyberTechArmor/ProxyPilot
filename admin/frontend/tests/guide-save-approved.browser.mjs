@@ -122,7 +122,7 @@ try {
   await owner.getByLabel('Guide title').fill('Retain my local title');
   await owner.getByLabel('Instructions',{exact:true}).fill('Retain my local instructions');
   revision=2;
-  await owner.getByRole('button',{name:'Refresh server state',exact:true}).click();
+  await owner.getByRole('button',{name:'Refresh',exact:true}).click();
   await owner.getByText('Server state refreshed; unsaved forms retained.',{exact:true}).waitFor();
   await sections(owner).getByRole('button',{name:'Overview',exact:true}).click();
   await sections(owner).getByRole('button',{name:'Guide',exact:true}).click();

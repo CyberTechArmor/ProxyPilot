@@ -255,21 +255,23 @@ try {
     assert.equal(await approvalCard(page).getByTestId('approval-digest').count(), 0);
     await approvalCard(page).getByText(/digest [0-9a-f]{4} [0-9a-f]{4} [0-9a-f]{4} …/).waitFor(WAIT);
     assert.deepEqual(await deadControls(page), []);
-    // Focus order: run bar → approval → Browser → Activity → Details.
+    // Tab reaches the active context tab; arrow keys expose Guide and Details
+    // (verified by the dedicated keyboard journey above).
     await page.getByRole('button', { name: 'Back to runs' }).focus();
     const order = [];
-    for (let i = 0; i < 30 && order.at(-1) !== 'details'; i += 1) {
+    for (let i = 0; i < 30 && order.at(-1) !== 'context tabs'; i += 1) {
       const where = await page.evaluate(() => {
         const e = document.activeElement;
         if (e.closest('[aria-label="Approval needed"]')) return 'approval';
-        if (e.closest('[aria-label="Details"]')) return 'details';
-        const heading = e.closest('section')?.querySelector('h2, h3')?.textContent;
-        return heading === 'Browser' ? 'browser' : heading === 'Activity' ? 'activity' : e.closest('section')?.querySelector('h2') ? 'run bar' : 'other';
+        if (e.closest('[data-run-header]')) return 'run bar';
+        if (e.closest('[data-browser-pane]')) return 'browser';
+        if (e.closest('[role="tablist"][aria-label="Run context panels"]')) return 'context tabs';
+        return 'other';
       });
       if (order.at(-1) !== where) order.push(where);
       await page.keyboard.press('Tab');
     }
-    assert.deepEqual(order, ['run bar', 'approval', 'browser', 'activity', 'details']);
+    assert.deepEqual(order, ['run bar', 'approval', 'browser', 'context tabs']);
     report.focus_order = order;
     await shot(page, 'deck-1280x800');
     await page.getByRole('button', { name: 'Stop run' }).click();
@@ -708,6 +710,7 @@ try {
     const admin = await as('admin', { width: 375 });
     await admin.goto(`${h.origin}/operational-projects`);
     await admin.getByText('Operations is not turned on for this installation. Turn it on in Operations settings below.').waitFor(WAIT);
+    await admin.locator('summary').filter({hasText:'Operations settings'}).click();
     await admin.getByText('Turn on Operations first.').first().waitFor(WAIT);
     assert.equal(await admin.getByRole('button', { name: 'Turn on Agent runs' }).isDisabled(), true);
     assert.deepEqual(await deadControls(admin), []);
@@ -717,7 +720,7 @@ try {
     await admin.getByRole('dialog').filter({ hasText: 'Confirm with password' }).waitFor(WAIT);
     await sudoIfAsked(admin);
     await admin.getByText('Operations turned on.').waitFor(WAIT);
-    await admin.getByRole('heading', { name: 'New project' }).waitFor(WAIT);
+    await admin.getByRole('button', { name: 'New project', exact: true }).waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent metadata' }).click();
     await admin.getByText('Agent metadata turned on.').waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent runs' }).click();

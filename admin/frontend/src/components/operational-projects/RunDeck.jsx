@@ -443,7 +443,7 @@ function ActivityColumn({ feed, data, thumbs, visible, onFrame, className }) {
   const jump = () => { follow.current = true; toEnd(); setUnseen(0); };
   const open = data.approvals.some(a => a.open);
   return <section aria-labelledby={headingId} className={`${className} relative flex-col min-w-0 lg:min-h-0 lg:flex-1`}>
-    <div className="flex flex-wrap items-baseline gap-x-2 border-b px-3 py-2">
+    <div className="flex flex-wrap items-baseline gap-x-2 border-b px-3 py-2 lg:sr-only lg:border-0 lg:p-0">
       <h3 id={headingId} className="font-semibold">{DECK_TEXT.activity}</h3>
       <span className="text-sm text-muted-foreground">{DECK_TEXT.events(feed.length)}</span>
     </div>
@@ -533,7 +533,7 @@ export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, o
     <RunBar data={data} busy={busy} message={message} statusId={statusId} onBack={onBack} onStop={onStop} onResume={onResume}
       onOpenRun={onOpenRun}/>
     {error && <p role="alert" className="text-destructive break-words">{error}</p>}
-    <div className={`min-w-0 space-y-4 lg:space-y-0 lg:grid lg:h-[calc(100dvh-12rem)] lg:min-h-[32rem] lg:grid-cols-[minmax(0,1.65fr)_minmax(320px,1fr)] ${open ? 'lg:grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-rows-[minmax(0,1fr)]'} lg:gap-4`} data-run-workspace>
+    <div className={`min-w-0 space-y-4 lg:space-y-0 lg:grid lg:h-[calc(100dvh-11rem)] lg:min-h-[32rem] lg:grid-cols-[minmax(0,1.65fr)_minmax(320px,1fr)] ${open ? 'lg:grid-rows-[auto_minmax(0,1fr)]' : 'lg:grid-rows-[minmax(0,1fr)]'} lg:gap-4`} data-run-workspace>
       {open && <ApprovalBanner approval={open} compact={panel !== 'browser'} onReview={() => onReview(open.id)}/>}
       <BrowserPane className={`${panel === 'browser' ? 'flex' : 'hidden'} lg:flex lg:col-start-1 lg:row-start-1 ${open ? 'lg:row-span-2' : ''}`} data={data} active={active} live={view.live} watch={watch} onWatch={onWatch}
         onEnlarge={onFrame} viewNote={viewNote} liveView={liveView} me={me} busy={busy} onTakeover={onTakeover}
@@ -545,8 +545,9 @@ export function RunDeck({ base, data, feed, view, active, panel, onPanel, tab, o
         </div>}
         <div ref={railNav} role="tablist" aria-label="Run context panels" onKeyDown={railKey} className="hidden lg:flex border-b px-3">
           {railTabs.map(([key, label]) => <button key={key} type="button" role="tab" id={`${railId}-${key}-tab`}
-            aria-controls={`${railId}-${key}`} aria-selected={railTab === key} tabIndex={railTab === key ? 0 : -1}
-            onClick={() => selectRail(key)} className={`min-h-11 flex-1 border-b-2 px-3 text-sm font-medium ${railTab === key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>{label}</button>)}
+            aria-label={label} aria-controls={`${railId}-${key}`} aria-selected={railTab === key} tabIndex={railTab === key ? 0 : -1}
+            onClick={() => selectRail(key)} className={`min-h-11 flex flex-1 items-center justify-center gap-2 border-b-2 px-3 text-sm font-medium ${railTab === key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>{label}
+            {key === 'activity' && <span aria-hidden="true" className="rounded-full bg-muted px-1.5 text-xs text-foreground">{feed.length}</span>}</button>)}
         </div>
         <div id={`${railId}-activity`} role="tabpanel" aria-labelledby={`${railId}-activity-tab`} className={`${shown('activity')} flex-col min-w-0 lg:flex-1 lg:min-h-0`}>
           <ActivityColumn className="flex" feed={feed} data={data} thumbs={view.thumbs} visible={`${panel}:${railTab}`} onFrame={onFrame}/>

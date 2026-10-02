@@ -86,7 +86,7 @@ export function WebsiteReviews({ base, project, onChanged = async () => {} }) {
       } catch (e) { if (!controller.signal.aborted && gen === generation.current) report(e); }
     }, 2000);
     return () => { controller.abort(); clearInterval(timer); };
-  }, [base, run?.id, run?.state, lost]);
+  }, [base, run?.id, run?.state, lost, tick]);
   async function perform(fn, success) {
     if (locked.current || lost) return;
     locked.current = true; setBusy(true); setError(''); setMessage('');
@@ -97,7 +97,7 @@ export function WebsiteReviews({ base, project, onChanged = async () => {} }) {
       await load(signal, gen); setTick(t => t + 1); setMessage(success);
       await onChanged();
     } catch (e) {
-      if (gen === generation.current && !signal?.aborted) { if (e.status === 412) setStale(true); report(e); }
+      if (gen === generation.current && !signal?.aborted) { if (e.status === 412) setStale(true); report(e); setTick(t => t + 1); }
     } finally { locked.current = false; if (gen === generation.current) setBusy(false); }
   }
   async function refreshReviews() {
@@ -112,7 +112,7 @@ export function WebsiteReviews({ base, project, onChanged = async () => {} }) {
       setLost(false); setTick(t => t + 1); setMessage('Website reviews refreshed.');
       await onChanged();
     } catch (e) { if (gen === generation.current && !controller.signal.aborted) report(e); }
-    finally { locked.current = false; if (gen === generation.current) { setBusy(false); setLoading(false); } }
+    finally { locked.current = false; if (gen === generation.current) { setBusy(false); setLoading(false); setTick(t => t + 1); } }
   }
   function edit(a) { setEditing(a); setForm({ name: a.name, url: a.url, objective: a.objective, limits: { ...a.limits } }); setStale(false); setError(''); }
   function showRun(value) { resultGeneration.current++; setRun(value); }

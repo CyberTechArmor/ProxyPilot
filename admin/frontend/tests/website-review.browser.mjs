@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { createServer } from 'vite';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '../../backend/node_modules/playwright-core/index.mjs');
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -16,7 +19,7 @@ import {ThemeProvider} from '/src/context/ThemeContext.jsx';
 import '/src/index.css';
 function Fixture(){const[p,setP]=useState(null);async function refresh(){const r=await operationsApi.get('/fixture-project');setP(r.project);}useEffect(()=>{window.__refreshProject=refresh;refresh();},[]);return <main className="p-4 md:p-8 mx-auto max-w-6xl">{p&&<WebsiteReviews base="/fixture-project" project={p} onChanged={refresh}/>}</main>}
 createRoot(document.getElementById('root')).render(<ThemeProvider><Fixture/></ThemeProvider>);`;
-const vite = await createServer({ root, logLevel: 'error', optimizeDeps: { noDiscovery: true, include: ['react', 'react-dom/client', 'react/jsx-dev-runtime', 'lucide-react'] }, server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{
+const vite = await createServer({ root, logLevel: 'error', cacheDir: join(tmpdir(), `proxypilot-website-review-vite-${createHash('sha256').update(root).digest('hex').slice(0, 12)}`), optimizeDeps: { entries: [], include: ['react', 'react-dom/client', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'lucide-react', '@radix-ui/react-slot', 'class-variance-authority', 'clsx', 'tailwind-merge'] }, server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [{
   name: 'website-review-ui-fixture', resolveId(id) { if (id === entry) return id; }, load(id) { if (id === entry) return fixture; },
   configureServer(server) { server.middlewares.use(async (req, res, next) => {
     if (req.url !== '/__website-review-fixture') return next();
@@ -25,14 +28,19 @@ const vite = await createServer({ root, logLevel: 'error', optimizeDeps: { noDis
 }] });
 await vite.listen();
 const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
+console.log('Website review fixture listening; starting local Chromium.');
 const browser = await chromium.launch({ executablePath: process.env.BROWSER_EXE || '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
 const context = await browser.newContext({ viewport: { width: 375, height: 900 } });
 await context.addCookies([{ name: 'pp_csrf', value: 'website-review-ui-fixture', url: origin }]);
 await context.addInitScript(() => localStorage.setItem('pp-theme', 'office'));
 const page = await context.newPage(); page.setDefaultTimeout(30000); page.setDefaultNavigationTimeout(90000);
-const errors = [], requests = [], external = [], report = { fixture_only: true, source_commit: process.env.SOURCE_COMMIT || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), journeys: [], layout: [] };
+const errors = [], requests = [], external = [], diagnostics = { console: [], failed: [], http_errors: [], pending: new Set() }, report = { fixture_only: true, source_commit: process.env.SOURCE_COMMIT || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), journeys: [], layout: [] };
 page.on('pageerror', e => errors.push(e.message));
-page.on('request', r => { if (!r.url().startsWith(origin) && !r.url().startsWith('data:')) external.push(r.url()); });
+page.on('console', m => { if (m.type() === 'error' || m.type() === 'warning') diagnostics.console.push(m.text()); });
+page.on('request', r => { diagnostics.pending.add(r.url()); if (!r.url().startsWith(origin) && !r.url().startsWith('data:')) external.push(r.url()); });
+page.on('requestfinished', r => diagnostics.pending.delete(r.url()));
+page.on('requestfailed', r => { diagnostics.pending.delete(r.url()); diagnostics.failed.push({ url: r.url(), failure: r.failure() }); });
+page.on('response', r => { if (r.status() >= 400) diagnostics.http_errors.push({ url: r.url(), status: r.status() }); });
 const guide = { id: '10000000-0000-4000-8000-000000000001', version_number: 1, content_hash: 'a'.repeat(64) };
 let project = { id: 'fixture-project', own_role: 'owner', revision: 1, archived_at: null, current_version: { ...guide } };
 const agentId = '20000000-0000-4000-8000-000000000001', runId = '30000000-0000-4000-8000-000000000001';
@@ -107,12 +115,13 @@ await page.route('**/api/**', async route => {
 });
 const button = name => page.getByRole('button', { name, exact: true });
 const starts = () => requests.filter(r => r.method === 'POST' && r.path.endsWith('/website-review-runs'));
-async function consent() { await page.getByRole('checkbox', { name: `I reviewed: ${statement}.` }).check(); await button('Give model consent').click(); await page.getByText('Ready to start', { exact: true }).waitFor(); }
+async function consent() { const checkbox = page.getByRole('checkbox', { name: `I reviewed: ${statement}.` }); await checkbox.focus(); await page.keyboard.press('Space'); assert.equal(await checkbox.isChecked(), true); await button('Give model consent').focus(); await page.keyboard.press('Enter'); await page.getByText('Ready to start', { exact: true }).waitFor(); }
 async function reload() { await page.reload(); await page.getByRole('heading', { name: 'Public website reviews', exact: true }).waitFor(); await page.getByText('Loading website reviews…', { exact: true }).waitFor({ state: 'hidden' }); }
 try {
   await page.goto(origin + '/__website-review-fixture', { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: 'Public website reviews', exact: true }).waitFor({ timeout: 90000 });
   await page.getByText('No website review agents yet.', { exact: true }).waitFor();
+  console.log('Website review fixture mounted; running behavioral journeys.');
   await button('New review agent').click();
   assert.equal(await page.getByRole('heading', { name: 'New review agent', exact: true }).evaluate(el => el === document.activeElement), true);
   await page.getByLabel('Review agent name', { exact: true }).fill('Garden accessibility review');
@@ -171,9 +180,12 @@ try {
   project.own_role = 'editor'; agents[0].model_consent = false; await reload(); assert.equal(await button('Give model consent').count(), 0); assert.equal(await button('Edit review agent').count(), 1);
   project.own_role = 'owner'; project.archived_at = '2026-10-02T12:00:00Z'; await reload(); assert.equal(await button('New review agent').count(), 0); assert.equal(await button('Start website review').count(), 0);
   project.archived_at = null; await reload(); deny = true; await button('Refresh reviews').click(); await page.getByRole('alert').filter({ hasText: 'your access has changed' }).waitFor(); assert.equal(await page.getByRole('heading', { name: 'Garden accessibility review' }).count(), 0); assert.equal(await button('New review agent').count(), 0);
+  deny = false; await button('Refresh reviews').click(); await page.getByRole('heading', { name: 'Garden accessibility review' }).waitFor();
+  assert.equal(await page.getByRole('alert').count(), 0);
   report.journeys.push('Missing guide, viewer/editor restrictions, archival and revoked access clear or disable the relevant controls.');
+  report.journeys.push('Explicit read-only Refresh recovers after access is restored. Consent controls are operable by keyboard.');
   assert.deepEqual(errors, []); assert.deepEqual(external, []);
   if (process.env.BROWSER_ARTIFACTS) writeFileSync(`${process.env.BROWSER_ARTIFACTS}/website-review-ui-report.json`, JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
-} catch (e) { if (process.env.BROWSER_ARTIFACTS) { mkdirSync(process.env.BROWSER_ARTIFACTS, { recursive: true }); await page.screenshot({ path: `${process.env.BROWSER_ARTIFACTS}/website-review-failure.png`, fullPage: true }); } throw e; }
+} catch (e) { const detail = { errors, ...diagnostics, pending: [...diagnostics.pending], requests, dom: await page.content() }; console.error(JSON.stringify(detail, null, 2)); if (process.env.BROWSER_ARTIFACTS) { mkdirSync(process.env.BROWSER_ARTIFACTS, { recursive: true }); writeFileSync(`${process.env.BROWSER_ARTIFACTS}/website-review-failure.json`, JSON.stringify(detail, null, 2)); await page.screenshot({ path: `${process.env.BROWSER_ARTIFACTS}/website-review-failure.png`, fullPage: true }); } throw e; }
 finally { await browser.close(); await vite.close(); }

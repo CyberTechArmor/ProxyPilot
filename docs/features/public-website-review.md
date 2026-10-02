@@ -174,13 +174,13 @@ but does not refresh a rotated supervisor key. Runtime activation therefore
 requires a separate, explicitly authorized operator maintenance step; repository
 development does not authorize it.
 
-For an already opted-in installation, the reviewed existing tools are A4
+The existing tools' behavior is A4
 `a4-install-broker.py reinstall` (preserves the existing AppRole config and state),
 A3 `a3-install-supervisor.py reinstall` (requires no live worker, rotates the
 receipt key and archives the previous public key), and A8
 `a8-wire-dashboard.py configure --install-dir /opt/proxypilot` (refreshes the
 public-key copy and the existing three pins/read-only mount block). Perform this
-only from the verified reviewed checkout, in an approved maintenance window,
+only with separate explicit authorization from the verified reviewed checkout,
 before the subsequent dashboard update/restart so its A8 `patch` check sees the
 refreshed key. Confirm installed digest readback, existing vault/provider/price
 health, wiring status and dashboard review readiness. These are component updates,
@@ -195,3 +195,11 @@ was performed in the development evidence. See the scoped
 
 
 `admin/frontend/tests/website-review.browser.mjs` checks the component contract and responsive states. `website-review-integrated.browser.mjs` exercises the full dashboard with real session/CSRF middleware, Operations routes/store and the public extraction service; DNS/HTTP and model responses are scripted fixtures. Its `--service-only` mode checks the real HTTP journey without Chromium. These fixtures do not establish live public-network, provider or deployment proof.
+
+The later no-new-secrets / normal-Update constraint selects a key-preserving
+code refresh instead of A3 `reinstall`. That supported refresh still needs
+repository implementation and review. Key rotation is not necessary; unchanged
+keys require A8 verification rather than a pin rewrite. The concrete decision,
+two-file scope and paired rollback are in the
+[activation plan](../plans/public-website-review-activation.md). The tool behavior
+above is not authorization to execute a reinstall or rotate an identity.

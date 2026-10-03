@@ -2038,12 +2038,18 @@ PYEOF
         # An operator who wants a guaranteed clean image can still force it:
         # `sudo ./update.sh --rebuild` on an up-to-date checkout takes the
         # --no-cache path (no re-exec ⇒ PROXYPILOT_DEP_CHANGED unset).
+        # Capture provenance from the source being copied into this image.
+        PP_BUILD_SHA=$($GIT_CMD -C "$SCRIPT_DIR" rev-parse HEAD)
+        PP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        PP_BUILD_DIRTY=false
+        if [ -n "$($GIT_CMD -C "$SCRIPT_DIR" status --porcelain)" ]; then PP_BUILD_DIRTY=true; fi
+        PP_BUILD_ARGS=(--build-arg "PROXYPILOT_BUILD_SHA=$PP_BUILD_SHA" --build-arg "PROXYPILOT_BUILD_TIME=$PP_BUILD_TIME" --build-arg "PROXYPILOT_BUILD_DIRTY=$PP_BUILD_DIRTY")
         if [ "${PROXYPILOT_DEP_CHANGED:-1}" = "0" ]; then
             log "No dependency/Dockerfile changes — building with the cache (reuses the native module compile)..."
-            $DC_CMD build
+            $DC_CMD build "${PP_BUILD_ARGS[@]}"
         else
             log "Building with --no-cache..."
-            $DC_CMD build --no-cache
+            $DC_CMD build --no-cache "${PP_BUILD_ARGS[@]}"
         fi
         # The database is now at its final path. Restart on refreshed code
         # and record readiness before the backend reads the executor policy.

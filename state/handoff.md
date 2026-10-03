@@ -274,3 +274,8 @@ Also on the host, unrelated to this work:
 a temp instance left by the S3 snapshot-export dance on 2026-09-20 13:48.
 `sweepOrphanTempInstances()` in `lib/snapshot-s3-export.js` is what clears
 those; worth checking why it did not.
+
+
+## Cloud continuation — 2026-10-03
+
+PR 726 and deployment confirmed at 91472e9e34. First tranche implements image build identity and 30 hash-verified Mock2 1.14.0 guidance files. See `state/work-cloud-continuation-20261003.md` and the matching change record. Not yet a claim of Relay runtime/producer integration, consumer rollout, activation or live acceptance. Earlier paused worktrees are not available in this cloud workspace.

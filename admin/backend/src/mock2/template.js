@@ -23,6 +23,7 @@ import { PLATFORM_VERSION_PATH, renderPlatformVersionFile } from './base-app-upg
 import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
+import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
@@ -262,6 +263,12 @@ constitution and rules installed at user level on every developer machine) and
 to this project. Nothing in it blocks building or testing (constitution rule 0);
 production decisions live in \`state/production-checklist.md\`.
 
+The pinned guidance in \`.mock2/standards/\` governs current general workflow;
+start with \`constitution.md\` and load the applicable rules. Provenance records the
+source release and hashes. This is a guidance seed, not a Relay runtime install.
+New apps implement the relevant Universal-Integration-New-App-Prompt foundation;
+existing apps preserve working integrations unless modernization is requested.
+
 ## Project
 - Purpose: <one sentence>
 - Owner / reviewer: <name>
@@ -353,13 +360,23 @@ records in \`state/changes/\` are the audit spine; never delete either.
       content: `# .mock2
 
 Project-local framework files. Stage guidance and the production checklist
-baseline live at user level (installed from https://mock2.fractionate.ai); put only
-project overrides here.
+baseline are pinned in \`standards/\`; \`standards/PROVENANCE.json\` records the source
+release, scope and file hashes. Framework/scaffold versions are separate identities.
+Relay runtime, producer configuration and delivery verification remain explicit
+host integration work; a guidance version never proves those capabilities.
 
 - \`checks/\` — extra verification scripts specific to this repo (optional; they report, they do not block)
 - \`interview.md\` — answers captured during Stage 2 (optional, for audit)
 `,
     },
+    ...guidance.files.map(({ path, content }) => ({ path, content })),
+    { path: '.mock2/standards/VERSION', content: `${guidance.version}\n` },
+    { path: '.mock2/standards/PROVENANCE.json', content: JSON.stringify({
+      family: guidance.family, version: guidance.version, scope: guidance.scope,
+      source: 'https://git.fractionate.ai/mock2/mock2-core',
+      files: guidance.files.map(({ path, source, sha256 }) => ({ path, source, sha256 })),
+      relay_runtime: 'not_installed_by_guidance_seed',
+    }, null, 2) + '\n' },
   ];
 }
 

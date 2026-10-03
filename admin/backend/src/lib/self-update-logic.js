@@ -303,6 +303,7 @@ export function buildProgress({ agentStatus, reachable = true, source = 'agent',
 // The /version/check payload.
 export function buildVersionCheck({
   currentVersion,
+  runningBuild = null,
   repo,
   release = null,
   branchVersion = null,
@@ -320,10 +321,14 @@ export function buildVersionCheck({
   // "Latest" is the version an update would install: the branch's
   // package.json. The release tag is a fallback for when that is unknown.
   const latestVersion = codeVersion || releaseVersion || normalizeVersion(currentVersion);
+  // Legacy seeds documented `version` as the source Mock2 release. New metadata
+  // names that identity explicitly, independently of internal seed revisions.
+  const sourceVersion = standards.source_version ?? standards.seed_version;
+  const sameStandardsFamily = !standards.version_family || standards.version_family === 'mock2-core';
   const decision = decideUpdate({
     installed: { version: currentVersion, sha: inst.sha },
     latest: { sha: mainCommit?.sha || null, code_version: codeVersion, release_version: releaseVersion },
-    standards: { seed_version: standards.seed_version, site_version: standards.site_version },
+    standards: { seed_version: sameStandardsFamily ? sourceVersion : null, site_version: standards.site_version },
   });
   const refusal = updateStartRefusal({ installed: inst });
   return {
@@ -349,10 +354,25 @@ export function buildVersionCheck({
     latest_branch: mainCommit?.branch || null,
     commits_behind: Number.isFinite(commitsBehind) ? commitsBehind : null,
     installed: inst,
+    running: runningBuild,
+    deployment: {
+      status: !runningBuild?.sha || !inst.sha ? 'unknown'
+        : runningBuild.dirty !== false ? 'unverified_source'
+          : runningBuild.sha === inst.sha ? 'matches_checkout' : 'restart_or_rebuild_required',
+      checkout_sha: inst.sha || null,
+      running_sha: runningBuild?.sha || null,
+    },
     standards: {
-      seed_version: decision.standards.seed_version,
+      seed_version: normalizeVersion(standards.seed_version) || null,
+      version_family: standards.version_family || null,
+      source_version: normalizeVersion(sourceVersion) || null,
+      adoption_scope: standards.adoption_scope || null,
       site_version: decision.standards.site_version,
       update_available: decision.standards.available,
+      status: !decision.standards.seed_version || !decision.standards.site_version ? 'unknown'
+        : decision.standards.available ? 'adoption_required' : 'current',
+      next_action: decision.standards.available
+        ? 'Review and integrate the published standards, then deploy a ProxyPilot build containing that adoption.' : null,
       site: standards.site || STANDARDS_SITE_URL,
       source: standards.source || null,
       synced: standards.synced || null,

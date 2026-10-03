@@ -163,13 +163,24 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
       {/* Installed / latest / standards */}
       <div className="rounded-lg bg-muted p-4 space-y-3 text-sm">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <span className="text-muted-foreground">Installed</span>
+          <span className="text-muted-foreground">Package version / checkout</span>
           <span className="font-medium break-all">
             v{info?.currentVersion || '…'}
             {installed?.short_sha && <span className="font-mono text-xs text-muted-foreground"> · {installed.short_sha}</span>}
             {installed?.branch && <span className="text-xs text-muted-foreground"> · {installed.branch}</span>}
           </span>
         </div>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <span className="text-muted-foreground">Running build</span>
+          <span className="font-medium break-all">
+            {info?.running?.short_sha || 'Unknown — this image has no build identity'}
+            {info?.running?.built_at && <span className="block text-xs font-normal text-muted-foreground">Built {fmtWhen(info.running.built_at)}</span>}
+            {info?.running?.dirty === true && <span className="block text-xs">Built with local source changes</span>}
+          </span>
+        </div>
+        {info?.deployment?.status === 'restart_or_rebuild_required' && (
+          <p className="text-sm text-primary">The running build differs from the checkout. Rebuild and verify deployment.</p>
+        )}
         {installed?.head_date && (
           <p className="text-xs text-muted-foreground -mt-2">
             Commit from {fmtWhen(installed.head_date)}{installed.head_subject ? ` — ${installed.head_subject}` : ''}
@@ -201,7 +212,7 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
           </div>
         )}
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <span className="text-muted-foreground">Status</span>
+          <span className="text-muted-foreground">Checkout update status</span>
           <span className={`font-medium ${info?.updateAvailable ? 'text-primary' : 'text-green-500'}`}>
             {!info ? '…' : info.updateAvailable
               ? (info.updateReason === 'newer_commit' ? 'Newer commit available' : 'Update available')
@@ -213,11 +224,11 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
           <span className="font-medium text-right">
             {standards ? (
               <>
-                seed {standards.seed_version || '?'}
+                {standards.adoption_scope === 'guidance' ? 'guidance ' : 'source '}{standards.source_version || standards.seed_version || '?'}
                 {standards.site_version
                   ? <>, site {standards.site_version} — {standards.update_available
-                    ? <span className="text-primary">site {standards.site_version} available, update ProxyPilot to pick it up</span>
-                    : <span className="text-green-500">current</span>}</>
+                    ? <span className="text-primary">adoption required in a new ProxyPilot build</span>
+                    : <span className="text-muted-foreground">{standards.status === 'unknown' ? 'adoption unknown' : 'current'}</span>}</>
                   : <span className="text-muted-foreground">, site unreachable</span>}
               </>
             ) : '…'}

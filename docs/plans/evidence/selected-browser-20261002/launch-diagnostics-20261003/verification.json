@@ -1,0 +1,40 @@
+{
+  "base_revision": "307a85f393d3441a2973e3044027ac8e008c4514",
+  "source_sha256": {
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": "6c1df0932655ab77284eb56b1dcf86cfa7e9cced8ca9610747b75713fe734a85",
+    "scripts/tests/selected_browser_backend_bridge.py": "448f8d0326a8ba4b651bbe2258b2292c3544c4d90889ca9e6051a54dc603e80b",
+    "scripts/a3-worker-guest.py": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f",
+    "scripts/selected_browser_supervisor.py": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab"
+  },
+  "scope": "test-only launch diagnostics and poisoned transport cleanup; production files unchanged",
+  "backend_aggregate": {
+    "tests": 462,
+    "passed": 462,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 12.121347818
+  },
+  "actual_cross_language": {
+    "tests": 1,
+    "passed": 1,
+    "skipped": 0,
+    "seconds": 3.25903093
+  },
+  "negative_controls": {
+    "expected_failures": 2,
+    "classification_cleanup_assertions_passed": true,
+    "actions": 0,
+    "model_calls": 0,
+    "deadline_ms_unchanged": 20000,
+    "no_post_deadline_rpc": true,
+    "owned_browser_group_empty": true
+  },
+  "unchanged_budgets": {
+    "rpc_ms": 20000,
+    "fixture_close_ms": 5000,
+    "test_ms": 60000
+  },
+  "original_broker_CI_cause": "unproven; original source omitted launch state and RPC cause",
+  "fresh_exact_head_CI": "not established by this local checkpoint",
+  "host_activated": false
+}

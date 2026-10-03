@@ -1,0 +1,38 @@
+{
+  "README.md": {
+    "sha256": "3f35d43d9653461e256fd51f8a05c69c58a776f9c5b6ba6dbc36dc0f801c6001",
+    "bytes": 1875
+  },
+  "actual-success.txt": {
+    "sha256": "11295ce447ae7aaa5a7f74becd47eb7909e5d8cf9d343dd6fe0cf3d939d9bd43",
+    "bytes": 854
+  },
+  "backend-aggregate.txt": {
+    "sha256": "6c272d24ec1acdc12088e2ab5cfcc3419222d6e0398df3232f0b4821ed199b7c",
+    "bytes": 50612
+  },
+  "controls.json": {
+    "sha256": "91e0c26343c34ed58e9eaada58a006a54d9dd1339e5b37a75084f01b253c2b23",
+    "bytes": 2534
+  },
+  "held-launch-response.txt": {
+    "sha256": "883a1f8a910523ca2cabea838e2a21dbf09f789bc827763de3cad44468935f66",
+    "bytes": 11195
+  },
+  "log-provenance.json": {
+    "sha256": "5f396a9b0de70879113fe06bb6579343e48863e775f3b455457771d0e4a1f7b2",
+    "bytes": 1382
+  },
+  "refused-start.txt": {
+    "sha256": "bae5542a83737905832551d9ae3a87fd149cccef28ae936c3156ec8c1b09f5a9",
+    "bytes": 3446
+  },
+  "review.json": {
+    "sha256": "d7bcbb8b10160ad462a23c067efc6e5df124bc3fb66781a3591f4323928104a5",
+    "bytes": 454
+  },
+  "verification.json": {
+    "sha256": "7370480a9873e1e5149bc038c4c98eb75fd3496608319586a8bfaa1e3c6e9e78",
+    "bytes": 1475
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "backend-aggregate.txt": {
+    "original_local_path": "/tmp/proxypilot-selected-diagnostic-backend-final.log",
+    "original_sha256": "6c272d24ec1acdc12088e2ab5cfcc3419222d6e0398df3232f0b4821ed199b7c",
+    "original_bytes": 50612,
+    "trailing_whitespace_normalized": false
+  },
+  "actual-success.txt": {
+    "original_local_path": "/tmp/selected-browser-diagnostics-success-final.log",
+    "original_sha256": "11295ce447ae7aaa5a7f74becd47eb7909e5d8cf9d343dd6fe0cf3d939d9bd43",
+    "original_bytes": 854,
+    "trailing_whitespace_normalized": false
+  },
+  "refused-start.txt": {
+    "original_local_path": "/tmp/selected-browser-diagnostics-refuse.log",
+    "original_sha256": "bae5542a83737905832551d9ae3a87fd149cccef28ae936c3156ec8c1b09f5a9",
+    "original_bytes": 3446,
+    "trailing_whitespace_normalized": false
+  },
+  "held-launch-response.txt": {
+    "original_local_path": "/tmp/selected-browser-diagnostics-stall-final.log",
+    "original_sha256": "883a1f8a910523ca2cabea838e2a21dbf09f789bc827763de3cad44468935f66",
+    "original_bytes": 11195,
+    "trailing_whitespace_normalized": false
+  },
+  "controls.json": {
+    "original_local_path": "/tmp/selected-browser-diagnostics-controls-final.json",
+    "original_sha256": "91e0c26343c34ed58e9eaada58a006a54d9dd1339e5b37a75084f01b253c2b23",
+    "original_bytes": 2534,
+    "trailing_whitespace_normalized": false
+  }
+}

@@ -23,34 +23,49 @@ const root = fileURLToPath(new URL('../../../../', import.meta.url));
 // test injects only the supervisor transport, provider and installed OS boundary;
 // there are no synthetic blocked polls or direct-host destination grants.
 test('service approval settles actual Chromium off-list action before a temporary grant and fresh next action',
-  { skip: !process.env.CI && !existsSync('/usr/bin/chromium') && 'Local Chromium is required', timeout: 60000 }, async () => {
+  { skip: !process.env.CI && !existsSync('/usr/bin/chromium') && 'Local Chromium is required', timeout: 60000 }, async t => {
   assert.equal(existsSync('/usr/bin/chromium'),true,'CI must install the fixed /usr/bin/chromium test browser');
   const child = spawn('python3', ['-u', path.join(root, 'scripts/tests/selected_browser_backend_bridge.py')],
     { cwd: root, stdio: ['pipe','pipe','pipe'] });
-  const pending = new Map(); let sequence = 0, stderr = '', ended = false, transportFailure = null;
+  const pending = new Map(), rpcHistory=[], stageTimings=[]; let sequence = 0, stderr = '', ended = false, transportFailure = null, bridgeEvidence=null, launchEvidence=null;
+  const remember = value => { rpcHistory.push(value);if(rpcHistory.length>32)rpcHistory.shift();
+    if(['fixture_bootstrap','selected_browser_status','selected_browser_model_status','selected_browser_launch','selected_browser_stop'].includes(value.method)){stageTimings.push(value);if(stageTimings.length>8)stageTimings.shift();} };
   const rejectPending = error => { for (const job of pending.values()) { clearTimeout(job.timer); job.reject(error); } pending.clear(); };
   let resolveExit; const exited = new Promise(resolve => { resolveExit=resolve; });
   child.stderr.on('data', bytes => { stderr = (stderr + bytes).slice(-10000); });
   const lines = createInterface({ input: child.stdout });
   lines.on('line', line => {
     let value;
-    try { value=JSON.parse(line); } catch {
-      transportFailure=new Error('Malformed browser fixture reply\n'+stderr); rejectPending(transportFailure); child.kill('SIGTERM'); return;
+    try { value=JSON.parse(line);if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('Unexpected reply'); } catch {
+      transportFailure??=new Error('Malformed browser fixture reply\n'+stderr); rejectPending(transportFailure); child.kill('SIGTERM'); return;
+    }
+    if(value.event==='fixture_diagnostics'){
+      if(typeof value.phase!=='string'||value.phase.length>64||!value.evidence||typeof value.evidence!=='object'||Array.isArray(value.evidence)||Buffer.byteLength(JSON.stringify(value.evidence))>16000){
+        transportFailure??=new Error('Invalid browser fixture diagnostics\n'+stderr);rejectPending(transportFailure);child.kill('SIGTERM');return;
+      }
+      bridgeEvidence={phase:value.phase,evidence:value.evidence};if(value.phase.startsWith('launch_'))launchEvidence=bridgeEvidence;return;
     }
     const job = pending.get(value.id);
     if (!job) return; pending.delete(value.id); clearTimeout(job.timer);
+    remember({method:job.method,elapsed_ms:Date.now()-job.started,status:value.error?'refused':'returned',code:value.error?.code??null});
     if (value.error) job.reject(Object.assign(new Error(value.error.code + ': ' + value.error.detail + '\n' + value.error.diagnostics), value.error));
     else job.resolve(value.result);
   });
-  child.on('error', error => { transportFailure=error; ended=true; rejectPending(error); resolveExit(); });
+  child.on('error', error => { transportFailure??=error; ended=true; rejectPending(transportFailure); resolveExit(); });
   child.on('exit', code => { ended=true; rejectPending(new Error('Browser fixture exited ' + code + '\n' + stderr)); resolveExit(); });
-  child.stdin.on('error', error => { transportFailure=error; rejectPending(error); });
+  child.stdin.on('error', error => { transportFailure??=error; rejectPending(transportFailure); });
   const client = { request(method, params = {}) {
     if(ended||transportFailure)return Promise.reject(transportFailure??new Error('Browser fixture has exited\n'+stderr));
     return new Promise((resolve, reject) => {
-      const id = ++sequence, timer = setTimeout(() => { pending.delete(id); reject(new Error('Browser fixture deadline: '+method+'\n'+stderr)); }, method==='fixture_close'?5000:20000);
-      pending.set(id, {resolve, reject, timer});
-      child.stdin.write(JSON.stringify({id,method,params})+'\n',error=>{if(error){transportFailure=error;rejectPending(error);}});
+      const id = ++sequence, started=Date.now(), timer = setTimeout(() => {
+        transportFailure=Object.assign(new Error('Browser fixture deadline: '+method+'\n'+stderr),{code:'FIXTURE_RPC_DEADLINE'});
+        remember({method,elapsed_ms:Date.now()-started,status:'deadline',code:transportFailure.code});
+        // A timed-out command may still be running. Never reuse its stream or
+        // enqueue cleanup/diagnostics behind it; the owned child performs cleanup.
+        rejectPending(transportFailure);child.kill('SIGTERM');
+      }, method==='fixture_close'?5000:20000);
+      pending.set(id, {resolve, reject, timer,method,started});
+      child.stdin.write(JSON.stringify({id,method,params})+'\n',error=>{if(error){transportFailure??=error;rejectPending(transportFailure);}});
     });
   } };
   const waitExit = ms => new Promise(resolve=>{if(ended)return resolve(true);const timer=setTimeout(()=>resolve(false),ms);exited.then(()=>{clearTimeout(timer);resolve(true);});});
@@ -77,7 +92,18 @@ test('service approval settles actual Chromium off-list action before a temporar
       configuration_sha256:configuration.configuration_sha256,project_revision:f.store.get(owner,p.id).revision,idempotency_key:randomUUID()});
     runId=started.run.id;
     const get=()=>runtime.runs.get(owner,p.id,runId);
-    const step=()=>runtime.runs.step(owner,p.id,runId,get().run.revision);
+    const assertRunning=async(dto,phase)=>{
+      if(dto.run.state==='running')return;
+      let inspection=null,inspectionError=null;
+      if(!ended&&!transportFailure)try{inspection=await client.request('fixture_diagnostics');}catch(error){inspectionError={code:error.code??null,message:error.message.slice(0,2000)};}
+      assert.fail('Actual browser '+phase+' failed before step: '+JSON.stringify({
+        run:{state:dto.run.state,result_code:dto.run.result_code,revision:dto.run.revision,fence:dto.run.fence,usage:dto.run.usage},
+        uncertainties:dto.uncertainties,receipts:dto.receipts.map(receipt=>({closed:receipt.closed,final_network:receipt.final_network})),
+        rpc_history:rpcHistory,transport_failure:transportFailure?{code:transportFailure.code??null,message:transportFailure.message.slice(0,2000)}:null,
+        launch_evidence:launchEvidence,bridge_evidence:bridgeEvidence,inspection,inspection_error:inspectionError,stderr}));
+    };
+    await assertRunning(started,'launch');
+    const step=async()=>{const current=get();await assertRunning(current,'continuation');return runtime.runs.step(owner,p.id,runId,current.run.revision);};
     const settle=async predicate=>{
       const until=Date.now()+5000;
       while(Date.now()<until) { await runtime.runs.refresh(owner,p.id,runId); if(predicate(get())) return get(); await delay(25); }
@@ -144,7 +170,10 @@ test('service approval settles actual Chromium off-list action before a temporar
     assert.equal(navigations[3].operation.destination_id.startsWith('temporary'),true);
     assert.equal(get().run.usage.actions,4); assert.equal(get().run.usage.tokens,440);
     assert.equal(get().run.state,'uncertain'); // Unclassified GET has no generic business readback.
-    assert.equal(get().report,null); runId=null;
+    assert.equal(get().report,null);
+    t.diagnostic('Cross-language browser stages: '+JSON.stringify({browser_version:launchEvidence?.evidence?.browser_version??null,
+      rpc_deadline_ms:20000,stages:stageTimings,final_state:get().run.state,actions:get().run.usage.actions}));
+    runId=null;
   } finally {
     if (runId&&runtime) {
       const row=f.db.prepare('SELECT * FROM ops_selected_browser_runs WHERE id=?').get(runId);

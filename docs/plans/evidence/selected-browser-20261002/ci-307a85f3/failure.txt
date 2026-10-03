@@ -1,0 +1,24 @@
+2026-10-03T12:12:08.5590928Z ℹ suites 0
+2026-10-03T12:12:08.5591149Z ℹ pass 461
+2026-10-03T12:12:08.5591349Z ℹ fail 1
+2026-10-03T12:12:08.5591556Z ℹ cancelled 0
+2026-10-03T12:12:08.5591769Z ℹ skipped 0
+2026-10-03T12:12:08.5591967Z ℹ todo 0
+2026-10-03T12:12:08.5592207Z ℹ duration_ms 31599.879332
+2026-10-03T12:12:08.5592356Z
+2026-10-03T12:12:08.5592467Z ✖ failing tests:
+2026-10-03T12:12:08.5592587Z
+2026-10-03T12:12:08.5592903Z test at src/__tests__/operational-selected-browser-chromium.test.js:25:1
+2026-10-03T12:12:08.5593799Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (25195.072182ms)
+2026-10-03T12:12:08.5594631Z   Error: ATTEMPT_NOT_RUNNING
+2026-10-03T12:12:08.5595330Z       at selectedFail (file:///home/runner/work/ProxyPilot/ProxyPilot/admin/backend/src/lib/operational-selected-browser-contract.js:6:63)
+2026-10-03T12:12:08.5596379Z       at Object.step (file:///home/runner/work/ProxyPilot/ProxyPilot/admin/backend/src/lib/operational-selected-browser-service.js:382:106)
+2026-10-03T12:12:08.5597446Z       at step (file:///home/runner/work/ProxyPilot/ProxyPilot/admin/backend/src/__tests__/operational-selected-browser-chromium.test.js:80:33)
+2026-10-03T12:12:08.5598611Z       at TestContext.<anonymous> (file:///home/runner/work/ProxyPilot/ProxyPilot/admin/backend/src/__tests__/operational-selected-browser-chromium.test.js:86:11)
+2026-10-03T12:12:08.5599523Z       at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+2026-10-03T12:12:08.5600047Z       at async Test.run (node:internal/test_runner/test:1409:7)
+2026-10-03T12:12:08.5600570Z       at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+2026-10-03T12:12:08.5600984Z     status: 409,
+2026-10-03T12:12:08.5601225Z     code: 'ATTEMPT_NOT_RUNNING'
+2026-10-03T12:12:08.5601460Z   }
+2026-10-03T12:12:08.5612439Z ##[error]Process completed with exit code 1.

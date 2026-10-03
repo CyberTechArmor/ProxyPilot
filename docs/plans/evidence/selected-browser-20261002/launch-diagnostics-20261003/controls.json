@@ -1,0 +1,95 @@
+{
+  "controls": [
+    {
+      "control": "refuse",
+      "log": "/tmp/selected-browser-diagnostics-refuse.log",
+      "state": "uncertain",
+      "result_code": "LAUNCH_UNCERTAIN",
+      "actions": 0,
+      "model_calls": 0,
+      "rpc_history": [
+        {
+          "method": "fixture_bootstrap",
+          "elapsed_ms": 251,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_status",
+          "elapsed_ms": 9,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_model_status",
+          "elapsed_ms": 5,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_launch",
+          "elapsed_ms": 1,
+          "status": "refused",
+          "code": "BROWSER_START_FAILED"
+        },
+        {
+          "method": "selected_browser_stop",
+          "elapsed_ms": 2,
+          "status": "refused",
+          "code": "INVALID_REQUEST"
+        },
+        {
+          "method": "fixture_diagnostics",
+          "elapsed_ms": 1,
+          "status": "returned",
+          "code": null
+        }
+      ],
+      "launch_refusal": "BROWSER_START_FAILED"
+    },
+    {
+      "control": "stall",
+      "log": "/tmp/selected-browser-diagnostics-stall-final.log",
+      "state": "uncertain",
+      "result_code": "LAUNCH_UNCERTAIN",
+      "actions": 0,
+      "model_calls": 0,
+      "rpc_history": [
+        {
+          "method": "fixture_bootstrap",
+          "elapsed_ms": 337,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_status",
+          "elapsed_ms": 13,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_model_status",
+          "elapsed_ms": 6,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_launch",
+          "elapsed_ms": 20001,
+          "status": "deadline",
+          "code": "FIXTURE_RPC_DEADLINE"
+        }
+      ],
+      "transport_failure": "FIXTURE_RPC_DEADLINE",
+      "browser_fingerprint": {
+        "pid": 189373,
+        "start": 5815616
+      },
+      "active_owned_browser_group_members": [],
+      "no_post_deadline_rpc": true
+    }
+  ],
+  "active_owned_test_processes": [],
+  "actual_proof_log": "/tmp/selected-browser-diagnostics-success-final.log",
+  "original_CI_cause": "unproven; original log omits launch state and RPC outcome"
+}

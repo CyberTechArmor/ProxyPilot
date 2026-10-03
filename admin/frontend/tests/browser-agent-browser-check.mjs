@@ -187,7 +187,7 @@ try{
     await page.setViewportSize({width,height});await page.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
     const measured=await page.evaluate(()=>({width:innerWidth,height:innerHeight,documentWidth:document.documentElement.scrollWidth}));assert.equal(measured.documentWidth,width,`Authentication horizontal overflow at ${width}×${height}`);
     await requestChoices.nth(1).scrollIntoViewIfNeeded();await requestChoices.nth(1).check();await confirmation.scrollIntoViewIfNeeded();await confirmation.check();
-    await confirmAuth().scrollIntoViewIfNeeded();const box=await confirmAuth().boundingBox();assert.ok(box.y>=0&&box.y+box.height<=height,'Authentication confirmation reachable at the actual viewport height');
+    await confirmAuth().evaluate(el=>el.scrollIntoView({block:'center',behavior:'instant'}));const box=await confirmAuth().boundingBox();assert.ok(box.y>=0&&box.y+box.height<=height,'Authentication confirmation reachable at the actual viewport height');
     const accessibility=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();assert.deepEqual(accessibility.violations.map(v=>({id:v.id,nodes:v.nodes.length})),[],`Authentication accessibility at ${width}×${height}`);
     authLayouts.push({...measured,horizontal_overflow:false,accessibility_violations:0});
     if(authEvidence)await page.screenshot({path:`${authEvidence}/authentication-${width}x${height}.png`});

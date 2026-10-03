@@ -25,7 +25,7 @@ import time
 import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 import test_selected_browser_supervisor as fixture
@@ -776,13 +776,17 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         # This fixture models public dual-stack DNS on an IPv4-only host.
         # Actual host-route boundaries remain injected; Chromium/TLS/gateway run.
         self.host.selected_resolve=lambda _:['1.1.1.1','2606:4700:4700::1111']
+        self.host.registry.resolver=self.host.selected_resolve
         self.host.selected_public_route_plan=lambda _:dict(addresses=['1.1.1.1'],route_sha256='b'*64)
         self.launch('/public-start')
+        route_reader=Mock(wraps=self.host.selected_public_route_plan)
+        self.host.registry.gateway.public_route_reader=route_reader
         ordinal,envelope=self.action('navigate')
         result=self.poll(ordinal)
         self.assertEqual(result['kind'],'done',self.diagnostics())
         self.assertTrue(any(host=='frame.example' and path=='/public-page' for _,host,path,_ in Origin.received),self.diagnostics())
         self.assertTrue(any(path=='/asset.png' for _,_,path,_ in Origin.received),self.diagnostics())
+        route_reader.assert_any_call(['1.1.1.1','2606:4700:4700::1111'])
         observation=self.runtime.observe(self.ref)
         self.assertIn('Public redirect destination',observation['observation'])
         self.assertEqual(self.runtime.pending(self.ref)['pending'],[])

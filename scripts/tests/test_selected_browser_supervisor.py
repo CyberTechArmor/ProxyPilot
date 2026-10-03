@@ -94,6 +94,9 @@ class SelectedHost(helpers.FakeHost):
         self.trace.append('route')
         return 'b' * 64
 
+    def selected_public_route_plan(self, addresses):
+        return dict(addresses=list(addresses), route_sha256=self.selected_route_hash(addresses))
+
     def spawn(self, unit, properties, source, config):
         self.trace.append('spawn')
         self.spawns += 1

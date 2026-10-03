@@ -25,7 +25,7 @@ import time
 import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 import test_selected_browser_supervisor as fixture
@@ -227,6 +227,7 @@ class RealGuestHost(fixture.SelectedHost):
         result = super().selected_gateway(method, params)
         if method == 'register':
             self.registry.gateway.route_reader = lambda _: 'b' * 64
+            self.registry.gateway.public_route_reader = self.selected_public_route_plan
             forward = self.registry.gateway.forward
             def observed_forward(method, url, headers, body):
                 self.wire.append((method, url, 'x-proxypilot-request-token' in headers))
@@ -772,12 +773,20 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.host.public_navigation_inventory=lambda:dict(v=1,vm_uuid=s.VM_UUID,protected_hosts=['controller.example'],protected_addresses=['10.185.17.1','10.185.17.179'])
         self.host.selected_managed_policy_hash=lambda:hashlib.sha256(s.runner.live_policy_bytes()).hexdigest()
         self.supervisor.turn_credentials=lambda _:[]
+        # This fixture models public dual-stack DNS on an IPv4-only host.
+        # Actual host-route boundaries remain injected; Chromium/TLS/gateway run.
+        self.host.selected_resolve=lambda _:['1.1.1.1','2606:4700:4700::1111']
+        self.host.registry.resolver=self.host.selected_resolve
+        self.host.selected_public_route_plan=lambda _:dict(addresses=['1.1.1.1'],route_sha256='b'*64)
         self.launch('/public-start')
+        route_reader=Mock(wraps=self.host.selected_public_route_plan)
+        self.host.registry.gateway.public_route_reader=route_reader
         ordinal,envelope=self.action('navigate')
         result=self.poll(ordinal)
         self.assertEqual(result['kind'],'done',self.diagnostics())
         self.assertTrue(any(host=='frame.example' and path=='/public-page' for _,host,path,_ in Origin.received),self.diagnostics())
         self.assertTrue(any(path=='/asset.png' for _,_,path,_ in Origin.received),self.diagnostics())
+        route_reader.assert_any_call(['1.1.1.1','2606:4700:4700::1111'])
         observation=self.runtime.observe(self.ref)
         self.assertIn('Public redirect destination',observation['observation'])
         self.assertEqual(self.runtime.pending(self.ref)['pending'],[])

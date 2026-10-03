@@ -191,6 +191,23 @@ class PolicyTests(unittest.TestCase):
             p.build_public_target('https://controller.example', ['1.1.1.1'], 'b' * 64,
                                   ['controller.example'], ['10.185.17.1'])
 
+
+    def test_public_subset_is_validated_against_complete_dns_answers(self):
+        answers=['1.1.1.1','2606:4700:4700::1111']
+        target=p.build_public_target('https://site.example',answers,'b'*64,
+            ['controller.example'],['10.185.17.1'],['1.1.1.1'])
+        self.assertEqual(target['addresses'],['1.1.1.1'])
+        for subset in ([],['1.1.1.1','1.1.1.1'],['8.8.8.8'],['1.1.1.01'],[{}],'1.1.1.1'):
+            with self.subTest(subset=subset):
+                self.assertDenied('NETWORK_TARGET_UNVERIFIED',p.build_public_target,'https://site.example',
+                    answers,'b'*64,['controller.example'],['10.185.17.1'],subset)
+        for unsafe in ('10.0.0.1','fd00::1','127.0.0.1','::1','::ffff:1.1.1.1','2002:101:101::1','64:ff9b::101:101','1.1.1.2'):
+            with self.subTest(unsafe=unsafe),self.assertRaises(p.Denied):
+                p.build_public_target('https://site.example',['1.1.1.1',unsafe],'b'*64,
+                    ['controller.example'],['10.185.17.1','1.1.1.2'],['1.1.1.1'])
+        self.assertDenied('NETWORK_LITERAL_MISMATCH',p.build_public_target,'https://1.1.1.1',
+            answers,'b'*64,['controller.example'],['10.185.17.1'],['1.1.1.1'])
+
     def test_roles_session_rules_overlap_query_and_methods(self):
         c = configuration()
         c['destinations']['allowed_origins'].append(dict(id='asset', origin='https://assets.example',
@@ -214,6 +231,54 @@ class PolicyTests(unittest.TestCase):
             c['destinations']['allowed_origins'][0]['roles'] = roles
             with self.subTest(origin=origin, roles=roles), self.assertRaises(p.Denied):
                 policy(c)
+
+
+class RouteReadbackTests(unittest.TestCase):
+    A='1.1.1.1'
+    AAAA='2606:4700:4700::1111'
+
+    def readback(self, command, **kwargs):
+        address=command[-1]
+        if address==self.AAAA:
+            raise subprocess.CalledProcessError(2,command,stderr=b'Network is unreachable')
+        return Mock(stdout=p.canonical([dict(dst=address,dev='eth0',gateway='192.0.2.1',table='main')]).encode())
+
+    def test_public_dual_stack_uses_verified_family_and_strict_plans_still_refuse(self):
+        with patch.object(g.subprocess,'run',side_effect=self.readback) as route:
+            selected=g.public_route_plan([self.A,self.AAAA])
+            self.assertEqual(selected['addresses'],[self.A])
+            self.assertEqual(selected['route_sha256'],g.route_hash([self.A]))
+            with self.assertRaises(p.Denied) as error:g.route_hash([self.A,self.AAAA])
+            self.assertEqual(error.exception.code,'NETWORK_ROUTE_UNVERIFIED')
+        self.assertTrue(all(0<call.kwargs['timeout']<=5 for call in route.call_args_list))
+
+    def test_public_ipv6_only_route_is_retained(self):
+        with patch.object(g.subprocess,'run',return_value=Mock(stdout=p.canonical([dict(dst=self.AAAA,dev='eth0')]).encode())):
+            selected=g.public_route_plan([self.AAAA])
+            self.assertEqual(selected['addresses'],[self.AAAA])
+            self.assertEqual(selected['route_sha256'],g.route_hash([self.AAAA]))
+
+    def test_no_usable_route_never_returns_an_empty_plan(self):
+        for value in ([],[dict(type='unreachable')],[None],dict(dev='eth0')):
+            with self.subTest(value=value),patch.object(g.subprocess,'run',return_value=Mock(stdout=p.canonical(value).encode())):
+                with self.assertRaises(p.Denied) as error:g.public_route_plan([self.A])
+                self.assertEqual(error.exception.code,'NETWORK_ROUTE_UNVERIFIED')
+        with patch.object(g.subprocess,'run',side_effect=OSError('fixture missing route reader')):
+            with self.assertRaises(p.Denied) as error:g.public_route_plan([self.A,self.AAAA])
+            self.assertEqual(error.exception.code,'NETWORK_ROUTE_UNVERIFIED')
+
+    def test_entire_probe_has_one_deadline_and_does_not_return_partial_timeout_success(self):
+        with patch.object(g.time,'monotonic',side_effect=[100,101,102,106]),patch.object(g.subprocess,'run',side_effect=self.readback) as route:
+            with self.assertRaises(p.Denied) as error:g.public_route_plan([self.A,self.AAAA])
+            self.assertEqual(error.exception.code,'NETWORK_ROUTE_UNVERIFIED')
+            self.assertEqual(route.call_count,2)
+            self.assertEqual([call.kwargs['timeout'] for call in route.call_args_list],[4,3])
+
+    def test_invalid_or_private_candidates_are_refused_before_route_observation(self):
+        for values in ([],[self.A,self.A],[{}],[self.A,'10.0.0.1'],[self.A,'fd00::1'],[self.A,'::ffff:1.1.1.1']):
+            with self.subTest(values=values),patch.object(g.subprocess,'run') as route:
+                with self.assertRaises(p.Denied):g.public_route_plan(values)
+                route.assert_not_called()
 
 
 class GatewayTests(unittest.TestCase):

@@ -15,7 +15,7 @@ spec.loader.exec_module(r)
 
 class PackageHost(FixtureHost):
     def identity(self, allow_work=False):
-        return super().identity()
+        return dict(super().identity(), proxy_spki_sha256=p.sha(self.tree.read(p.ROOT + "/proxy-cert.pem")))
 
     def health(self, pins, key_id, selected, allow_work=False):
         return super().health(pins, key_id, selected)
@@ -132,6 +132,47 @@ class SelectedPreservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'drift'):
             self.refresh.commit()
         self.assertEqual(self.host.events, [])
+
+    def renew_proxy(self):
+        journal = p.strict(self.host.tree.read(p.JOURNALS[1]))
+        for name, mode in (('proxy-cert.pem', 0o644), ('proxy-key.pem', 0o600)):
+            path = p.ROOT + '/' + name
+            self.host.put(path, b'fixture renewed pair\n', mode)
+            journal['files'][path] = self.host.tree.pin(path)['sha256']
+        self.host.put(p.JOURNALS[1], p.encoded(journal), 0o600)
+
+    def test_certificate_renewal_during_update_allows_commit_and_rollback(self):
+        for operation in ('commit', 'rollback'):
+            self.refresh.apply()
+            self.renew_proxy()
+            before = self.runtime_bytes()
+            getattr(self.refresh, operation)()
+            self.assertEqual(before, self.runtime_bytes())
+
+    def test_reboot_recovery_keeps_completed_new_history(self):
+        self.refresh.apply()
+        self.host.boot = '00000000-0000-4000-8000-000000000099'
+        state = p.strict(self.host.tree.read(p.LEDGERS[0]))
+        state['selected_browser_model_runs'] = {'new':{'state':'active','calls':{'x':{'state':'completed'}}}}
+        self.host.put(p.LEDGERS[0], p.encoded(state), 0o600)
+        before = self.runtime_bytes()
+        self.refresh.rollback()
+        self.assertEqual(before, self.runtime_bytes())
+        self.refresh.preflight()
+
+    def test_exact_setup_policy_enrollment_allowed_but_other_env_edits_refuse(self):
+        path = p.SOURCE + '/.env'
+        original = self.host.tree.read(path)
+        mode = self.host.tree.pin(path)['mode']
+        suffix = '\n# Who executes setup jobs (docs/features/setup-engine.md § "Who executes").\nSETUP_EXECUTOR_POLICY=runner-required\n'.encode()
+        self.refresh.apply()
+        self.host.put(path, original + suffix, mode)
+        self.refresh.commit()
+        self.assertEqual(self.host.tree.read(path), original + suffix)
+        self.refresh.apply()
+        self.host.put(path, original + suffix + b'UNREVIEWED=value\n', mode)
+        with self.assertRaisesRegex(ValueError, 'drift'):
+            self.refresh.rollback()
 
     def test_no_package_enrollment_or_acceptance_created(self):
         self.assertIsNone(self.host.tree.pin(p.ROOT + '/selected-browser-acceptance.json', missing=True))

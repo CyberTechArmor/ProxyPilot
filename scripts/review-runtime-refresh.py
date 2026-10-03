@@ -859,6 +859,36 @@ class SelectedRefresh:
             raise ValueError('Selected runtime/source changed during preservation')
         return self.result(awaiting_dashboard_health=True)
 
+    def completion_comparison(self, snapshot, expected, operation):
+        # snapshot() already checked current certificate/key equality, lifetime,
+        # custody, all serving bytes, and the complete retained journal metadata.
+        # The separately owned timer may renew while the dashboard rebuilds.
+        value = json.loads(json.dumps(snapshot))
+        value['identity'].pop('proxy_spki_sha256')
+        if operation == 'rollback':
+            # Recovery across reboot is read-only and still checks the exact
+            # machine, VM, policy, keys, installed bytes and current idle state.
+            value['identity'].pop('host_boot_id')
+        for path in (self.module.ROOT + '/proxy-cert.pem', self.module.ROOT + '/proxy-key.pem'):
+            value['protected'][path] = {'mode': value['protected'][path]['mode']}
+        journal = self.module.JOURNALS[1]
+        value['files'][journal] = {'mode': value['files'][journal]['mode']}
+        value['ledgers'] = None  # Never rewind even completed post-start history.
+        env_path = self.module.SOURCE + '/.env'
+        original = expected['protected'][env_path]
+        if value['protected'][env_path] != original:
+            # install_setup_runner owns exactly this absent-key enrollment.
+            # No other environment edits are accepted or copied back.
+            suffix = (b'\n# Who executes setup jobs (docs/features/setup-engine.md '
+                      b'\xc2\xa7 "Who executes").\nSETUP_EXECUTOR_POLICY=runner-required\n')
+            current = self.t.read(env_path)
+            prefix = current[:-len(suffix)] if current.endswith(suffix) else None
+            if (prefix is not None and not re.search(rb'^[ \t]*(?:export[ \t]+)?SETUP_EXECUTOR_POLICY[ \t]*=', prefix, re.M) and
+                    sha(prefix) == original['sha256'] and len(prefix) == original['bytes'] and
+                    value['protected'][env_path]['mode'] == original['mode']):
+                value['protected'][env_path] = original
+        return value
+
     def finish(self, operation):
         data = self.read()
         if data is None:
@@ -870,12 +900,9 @@ class SelectedRefresh:
         if operation == 'rollback':
             self.h.stopped_backend()
         current = self.snapshot(allow_work=operation == 'commit')
-        expected = dict(data['snapshot'])
-        if operation == 'commit':
-            # The healthy dashboard may have admitted new work. Never restore,
-            # compare or settle historical reservations after restart.
-            expected['ledgers'] = None
-        if current != expected:
+        expected = data['snapshot']
+        if (self.completion_comparison(current, expected, operation) !=
+                self.completion_comparison(expected, expected, operation)):
             raise ValueError('Selected preservation drift; no runtime restoration authorized')
         data['phase'] = 'committed' if operation == 'commit' else 'rolled_back'
         if operation == 'commit':

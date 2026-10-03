@@ -81,3 +81,27 @@ into review, fabricate a TTY approval, or reuse the historical host plan after
 source delivery changes. A fresh bounded plan, recorded exact container
 recovery path and real root review precede installation. No acceptance marker
 is created by this change.
+
+## Independent review findings and corrections
+
+A separate reviewer inspected implementation `ecdce70` / head `3a053857` with
+shell and GitHub tools, without editing application code. Both CI workflows for
+that head passed, but targeted reproductions found in-scope recovery failures:
+certificate renewal during rebuild, host reboot, completed new ledger history,
+and the updater's own absent-policy .env append could strand metadata recovery.
+The review also identified the relevant pre-existing updater failure interaction:
+restoring a pre-update database after newly admitted work can lose that work.
+
+Corrections recognize only a freshly validated certificate/key/journal renewal,
+allow reboot identity change for stopped/idle metadata rollback, retain completed
+ledger history, and recognize only the exact updater-owned absent-policy suffix
+whose removal matches the original private env pin. All other drift still
+refuses. Update now arms a preservation guard before the first possible new DB
+writer (including setup runner restart), so a late failure keeps current data
+and reports incomplete recovery instead of restoring a stale backup. Existing
+pre-start build-failure recovery remains. Test expectations were changed to
+assert retained real SQLite rows, current layout and incomplete metadata after
+post-start failure; no production test is weakened to certify activation.
+
+These corrections require renewed independent review and current-head CI.
+Actual general-browser installation/provider/acceptance remain incomplete.

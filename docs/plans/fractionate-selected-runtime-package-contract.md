@@ -129,11 +129,24 @@ proof cannot be converted into acceptance by an ordinary update.
 A certificate renewal between completed updates is recognized only when the
 proxy journal's certificate/key pair changes: other journal metadata must match
 the retained committed generation. Current certificate/key equality, lifetime,
-root custody, serving bytes and policy are still verified. Changes during an
-in-flight preservation transaction refuse completion for inspection.
+root custody, serving bytes and policy are still verified. A completed renewal during an
+in-flight preservation transaction is accepted after those same checks; no
+certificate, key or journal is restored. Other drift still refuses.
 
-Interrupted preservation requires a stopped-dashboard metadata-only rollback;
-unknown state or changed pins refuse without runtime restoration. A completed
+Interrupted preservation requires a stopped-dashboard metadata-only rollback.
+A reboot may change only the host boot ID; current idle admission and every
+stable identity still verify. Completed new history is retained rather than
+compared with old ledgers. Unknown state or other changed pins refuse without
+runtime restoration. The updater's exact absent-key `SETUP_EXECUTOR_POLICY`
+append is recognized only if removing that fixed suffix reproduces the original
+private environment bytes/mode and no prior policy assignment exists.
+
+Once the setup runner or replacement dashboard could have started writing,
+update failure retains the current database and runtime history and reports an
+incomplete update for inspection. It does not stop a healthy backend or restore
+the older database. Pre-start build failures retain the existing stopped-writer
+restore path. This guards against a late preservation failure discarding new
+work. A completed
 initial-install rollback may retain its transaction directory: its exact restored old
 files and journal metadata must verify before the existing positive legacy
 profile admits an ordinary update. No history directory is deleted to achieve

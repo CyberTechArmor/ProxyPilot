@@ -15,7 +15,8 @@ class PublicGatewayTests(unittest.TestCase):
         c=copy.deepcopy(PUBLIC)
         policy=fixtures.policy(c)
         return g.AttemptGateway(policy,g.MemoryLedger(),clock=lambda:fixtures.NOW,
-            resolver=Mock(return_value=answers or ['1.1.1.1']),connection_factory=Mock(),route_reader=lambda _:'b'*64)
+            resolver=Mock(return_value=answers or ['1.1.1.1']),connection_factory=Mock(),route_reader=lambda _:'b'*64,
+            public_route_reader=lambda a:dict(addresses=list(a),route_sha256='b'*64))
 
     def meta(self,gate,url,method='GET',body=b''):
         meta=fixtures.metadata(gate.policy,method=method,body=body)
@@ -46,6 +47,53 @@ class PublicGatewayTests(unittest.TestCase):
             with self.assertRaises(p.Denied):gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
             gate.connection_factory.assert_not_called();self.assertEqual(gate.status()['requests'],1)
             self.assertEqual(gate.status()['inflight'],0)
+
+
+    def test_dual_stack_forward_uses_verified_subset_and_rechecks_only_that_route(self):
+        gate=self.gate(['1.1.1.1','2606:4700:4700::1111'])
+        gate.public_route_reader=Mock(return_value=dict(addresses=['1.1.1.1'],route_sha256='b'*64))
+        gate.route_reader=Mock(return_value='b'*64)
+        response=Mock(status=200);response.getheaders.return_value=[];response.read.side_effect=[b'public page',b'']
+        conn=Mock();conn.getresponse.return_value=response;gate.connection_factory.return_value=conn
+        url='https://new.public.example/';token=gate.review_request('dual',self.meta(gate,url))
+        result=gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+        self.assertEqual(result,(200,[],b'public page'))
+        gate.public_route_reader.assert_called_once_with(['1.1.1.1','2606:4700:4700::1111'])
+        gate.route_reader.assert_called_once_with(['1.1.1.1'])
+        self.assertEqual(gate.connection_factory.call_args.args[1],'1.1.1.1')
+        conn.request.assert_called_once();self.assertEqual(gate.status()['effects_sent'],0)
+
+    def test_omitted_unsafe_dns_answers_refused_before_route_selection(self):
+        for unsafe in ('10.0.0.1','fd00::1','127.0.0.1','::1','::ffff:1.1.1.1','64:ff9b::101:101','1.1.1.2'):
+            gate=self.gate(['1.1.1.1',unsafe])
+            gate.policy.protected_addresses=frozenset((*gate.policy.protected_addresses,'1.1.1.2'))
+            gate.public_route_reader=Mock(return_value=dict(addresses=['1.1.1.1'],route_sha256='b'*64))
+            url='https://new.public.example/';token=gate.review_request('unsafe',self.meta(gate,url))
+            with self.subTest(unsafe=unsafe),self.assertRaises(p.Denied):
+                gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+            gate.public_route_reader.assert_not_called();gate.connection_factory.assert_not_called()
+            self.assertEqual(gate.status()['inflight'],0)
+
+    def test_subset_route_changes_or_invented_address_refused_before_connection(self):
+        for subset,route,code in ((['1.1.1.1'],'c'*64,'NETWORK_ROUTE_CHANGED'),
+                                  (['8.8.8.8'],'b'*64,'NETWORK_TARGET_UNVERIFIED')):
+            gate=self.gate(['1.1.1.1','2606:4700:4700::1111'])
+            gate.public_route_reader=Mock(return_value=dict(addresses=subset,route_sha256='b'*64))
+            gate.route_reader=Mock(return_value=route)
+            url='https://new.public.example/';token=gate.review_request('changed',self.meta(gate,url))
+            with self.assertRaises(p.Denied) as error:gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+            self.assertEqual(error.exception.code,code);gate.connection_factory.assert_not_called()
+            self.assertEqual(gate.status()['effects_sent'],0);self.assertEqual(gate.status()['inflight'],0)
+
+    def test_route_subset_never_retries_connection_or_replays_consumed_ticket(self):
+        gate=self.gate(['1.1.1.1','8.8.8.8'])
+        conn=Mock();conn.connect.side_effect=OSError('fixture connect refusal');gate.connection_factory.return_value=conn
+        url='https://new.public.example/';token=gate.review_request('once',self.meta(gate,url))
+        with self.assertRaises(p.Denied) as error:gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+        self.assertEqual(error.exception.code,'UPSTREAM_FAILED');gate.connection_factory.assert_called_once()
+        conn.connect.assert_called_once();conn.request.assert_not_called();conn.close.assert_called_once()
+        with self.assertRaises(p.Denied):gate.admit('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+        gate.connection_factory.assert_called_once()
 
     def test_actual_peer_mismatch_closes_socket_before_tls_or_send(self):
         sock=Mock();sock.getpeername.return_value=('127.0.0.1',443)
@@ -133,3 +181,25 @@ class PublicSupervisorTests(unittest.TestCase):
         self.assertTrue(any(item.startswith('resolve:') for item in self.host.trace))
         self.host.selected_route_hash.assert_called_once();self.assertEqual(self.host.spawns,0)
         self.assertEqual(self.supervisor.state['attempts'],{});self.assertNotIn('gateway:register',self.host.trace)
+
+    def test_dual_stack_public_preflight_and_launch_pin_only_verified_routes(self):
+        self.public();params={k:self.spec[k] for k in ('configuration_json','configuration_sha256')}
+        self.host.selected_resolve=Mock(return_value=['1.1.1.1','2606:4700:4700::1111'])
+        self.host.selected_public_route_plan=Mock(return_value=dict(addresses=['1.1.1.1'],route_sha256='b'*64))
+        self.host.selected_route_hash=Mock(side_effect=AssertionError('Strict full-answer route check in public mode'))
+        self.assertTrue(self.runtime.status(params)['available']);self.assertEqual(self.host.spawns,0)
+        self.runtime.launch(self.spec)
+        target=self.host.registry.gateway.policy.targets['https://selected.example']
+        self.assertEqual(target['addresses'],['1.1.1.1']);self.assertEqual(target['route_sha256'],'b'*64)
+        self.assertEqual(self.host.selected_public_route_plan.call_count,2)
+        self.host.selected_route_hash.assert_not_called()
+        self.assertTrue(all(self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))['closed'].values()))
+
+    def test_public_full_dns_inventory_screening_precedes_route_selection(self):
+        self.public();params={k:self.spec[k] for k in ('configuration_json','configuration_sha256')}
+        self.host.public_navigation_inventory=lambda:dict(v=1,vm_uuid=supervisors.s.VM_UUID,
+            protected_hosts=['controller.example'],protected_addresses=['10.185.17.1','1.1.1.2'])
+        self.host.selected_resolve=Mock(return_value=['1.1.1.1','1.1.1.2'])
+        self.host.selected_public_route_plan=Mock(return_value=dict(addresses=['1.1.1.1'],route_sha256='b'*64))
+        out=self.runtime.status(params);self.assertEqual(out['code'],'NETWORK_ADDRESS_DENIED')
+        self.host.selected_public_route_plan.assert_not_called();self.assertEqual(self.host.spawns,0)

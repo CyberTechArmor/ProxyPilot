@@ -16,10 +16,28 @@ identity and actual browsing remain unverified.
 | Public redirects/resources/protection | In progress | Dynamic screened destinations, actual peer check; seven Python public tests pass | Public pages/resources load; protected/private/mixed DNS refused |
 | Measured readiness | In progress | Signed helper/VM/fence/policy/gateway/live prerequisites; root inventory in protected journal | Inspect actual helper hashes and capability results |
 | Frontend open/live/Stop | In progress | Public panel, existing LiveBrowser, Stop, active run restoration, readiness details; frontend build passed | Enter website, watch, stop and reopen |
-| Independent review/CI | In progress | Four review blockers corrected; public/legacy selected JS174 pass; final review/CI pending | Reviewed code with passing CI |
+| Independent review | Verified | Four review blockers corrected; independent reviewer approved implementation tree 37167ad9 and source-boundary correction | Reviewed implementation |
+| CI/merge | In progress | PR734; dashboard job passed; legacy error-path and post-Stop test diagnostics regressions corrected and independently reviewed; new CI required | Passing required checks before merge |
 | Merge/application deployment | Not started | No new merge/deployment | New dashboard plus delivered runtime source |
 | Runtime upgrade | Not started | Fixed Profile installer after app deployment | New installed helper generation |
 | Live browsing/lifecycle/update proof | Not started | No browsing acceptance claimed | Real non-demo redirects/resources, live view, Stop, cleanup, relaunch and recovery/update compatibility |
+
+Current review: https://github.com/CyberTechArmor/ProxyPilot/pull/734. CI runs
+37147143522 and 37147143512 test head 388f6ea0. Initial head 1459e519 failed
+the pure-module import allowlist in operational-projects.test.js; the new trusted
+public schema/helper are now included without weakening network/runtime restrictions.
+The failure remains in the original CI logs. Live verification project
+516021fd-e58f-46df-b171-0c2dca0ea139 has no guide and no existing browser runs.
+
+Head 388f6ea0's frontend job failed because union parsing collapsed a legacy
+configuration.work field error. Strict per-mode import parsing restores exact
+field paths; unknown/crossover modes remain refused. Its broker job ran 527 Python
+tests (33 skipped), with one error: new public Chromium test eagerly dereferenced
+the removed gateway in its post-Stop assertion message. Redirect/resource/text
+assertions passed before this error; closure assertions were not reached. The
+message now uses the cleanup receipt, with all closure/process assertions retained.
+Both corrections were independently approved. Local selected service/runtime:
+176 passed; configuration/source-boundary: 26 passed. These are not live acceptance.
 
 Retained local test limitations: cloud workspace denies some AF_UNIX sockets and
 lacks /usr/bin/chromium. These failures/skips are not passes. Disposable CI installs

@@ -783,7 +783,8 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.assertEqual(self.runtime.pending(self.ref)['pending'],[])
         self.assertEqual(self.host.registry.gateway.status()['effects_sent'],0)
         receipt=self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))
-        self.assertTrue(all(receipt['closed'].values()),self.diagnostics())
+        # Stop removes the gateway; eager diagnostics must not dereference it.
+        self.assertTrue(all(receipt['closed'].values()),repr(receipt))
         self.assertIsNone(self.supervisor.state['active'])
         self.assertFalse(self.host.live_browser_members())
 

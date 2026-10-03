@@ -238,9 +238,16 @@ class SelectedBrowserSupervisor:
             answers = self.s.host.selected_resolve(parts)
             scopes = {self.policy.address_scope(a) for a in answers}
             if scopes == {'public'}:
-                route_sha = self.s.host.selected_route_hash(answers)
-                target = self.policy.build_public_target(d['origin'], answers, route_sha,
-                    marker['protected_hosts'], marker['protected_addresses'])
+                if c.get('mode') == 'public_navigation':
+                    screened = self.policy.screen_public_answers(d['origin'], answers,
+                        marker['protected_hosts'], marker['protected_addresses'])
+                    routes = self.s.host.selected_public_route_plan(screened)
+                    target = self.policy.build_public_target(d['origin'], answers, routes['route_sha256'],
+                        marker['protected_hosts'], marker['protected_addresses'], routes['addresses'])
+                else:
+                    route_sha = self.s.host.selected_route_hash(answers)
+                    target = self.policy.build_public_target(d['origin'], answers, route_sha,
+                        marker['protected_hosts'], marker['protected_addresses'])
             elif scopes == {'internal'} and c.get('mode')!='public_navigation':
                 selected = [r for r in marker['internal_policies'] if r.get('ref') == c['destinations']['network_policy_ref']
                             and r.get('target', {}).get('origin') == d['origin']]

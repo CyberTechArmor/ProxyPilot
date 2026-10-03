@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -205,6 +205,16 @@ exec /bin/${name} "$@"
     .replaceAll('/root/.proxypilot', join(root, 'root/.proxypilot'))
     .replaceAll('/etc/sysctl.d', join(root, 'etc/sysctl.d'))
     .replaceAll('/var/lib/proxypilot', join(root, 'var/lib/proxypilot'));
+  const sourceDir = join(root, 'src');
+  const git = (...args) => {
+    const result = spawnSync('git', ['-C', sourceDir, ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init', '-q');
+  git('add', '.');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Fixture source');
+  const buildSha = git('rev-parse', 'HEAD');
   const prelude = `set -e
 export PATH=${quote(bin)}:$PATH FAKE_STATE=${quote(state)}
 SCRIPT_DIR=${quote(join(root, 'src'))}
@@ -217,6 +227,7 @@ DB_MAINTENANCE_STARTED=false DB_LAYOUT_NEW_PATH='' DB_LAYOUT_ENV_BACKUP='' DB_LA
 NATIVE_BACKEND_MODE=''
 EXPECTED_UPDATE_SHA=${quote('a'.repeat(40))}
 REVIEW_RUNTIME_REFRESH_STARTED=false
+GIT_CMD=git
 DC_CMD='docker compose'
 ${functions}
 `;
@@ -235,7 +246,7 @@ ${functions}
     }
     closeRunner(); closeBackend(); rmSync(root, { recursive: true, force: true });
   });
-  return { root, original, current, env, originalEnv, run, snapshot, trace, rows, openRunner,
+  return { root, buildSha, original, current, env, originalEnv, run, snapshot, trace, rows, openRunner,
     runtimePhase: () => existsSync(join(state, 'runtime-phase')) ? readFileSync(join(state, 'runtime-phase'), 'utf8').trim() : null,
     mutate: () => runner.exec("INSERT INTO changes VALUES ('post-backup');"),
     runnerOpen: () => runner !== null,
@@ -336,6 +347,9 @@ for (const legacy of [false, true]) {
     const r = await h.run(h.snapshot + traps + '\n' + maintenance);
     assert.equal(r.status, 0, r.stdout + r.stderr + h.trace.join('\n'));
     assert.deepEqual(h.rows(h.current), ['backup-state']);
+    assert.ok(h.calls().includes(`--build-arg PROXYPILOT_BUILD_SHA=${h.buildSha}`));
+    assert.ok(h.calls().includes('--build-arg PROXYPILOT_BUILD_DIRTY=false'));
+    assert.match(h.calls(), /PROXYPILOT_BUILD_TIME=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
     assert.ok(h.trace.indexOf('runner closed') < h.trace.indexOf('down'));
     assert.ok(h.trace.lastIndexOf('restart') < h.trace.lastIndexOf('up'));
     assert.ok(h.trace.includes('status'));

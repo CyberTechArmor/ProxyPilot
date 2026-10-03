@@ -357,7 +357,7 @@ export function buildVersionCheck({
     running: runningBuild,
     deployment: {
       status: !runningBuild?.sha || !inst.sha ? 'unknown'
-        : runningBuild.dirty !== false ? 'unverified_source'
+        : runningBuild.dirty !== false || inst.dirty !== false ? 'unverified_source'
           : runningBuild.sha === inst.sha ? 'matches_checkout' : 'restart_or_rebuild_required',
       checkout_sha: inst.sha || null,
       running_sha: runningBuild?.sha || null,

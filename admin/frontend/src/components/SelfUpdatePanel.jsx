@@ -178,6 +178,9 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
             {info?.running?.dirty === true && <span className="block text-xs">Built with local source changes</span>}
           </span>
         </div>
+        {info?.deployment?.status === 'unverified_source' && (
+          <p className="text-sm text-primary">Source verification is incomplete: the build or checkout has uncommitted changes, or its clean state is unknown.</p>
+        )}
         {info?.deployment?.status === 'restart_or_rebuild_required' && (
           <p className="text-sm text-primary">The running build differs from the checkout. Rebuild and verify deployment.</p>
         )}

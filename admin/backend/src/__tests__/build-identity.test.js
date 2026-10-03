@@ -23,6 +23,7 @@ test('running image and mutable checkout are separate, even with the same packag
   assert.equal(buildVersionCheck({ ...args, runningBuild: null }).deployment.status, 'unknown');
   assert.equal(buildVersionCheck({ ...args, installed: { ...args.installed, sha } }).deployment.status, 'matches_checkout');
   assert.equal(buildVersionCheck({ ...args, runningBuild: { ...running, dirty: true } }).deployment.status, 'unverified_source');
+  assert.equal(buildVersionCheck({ ...args, installed: { ...args.installed, sha, dirty: true } }).deployment.status, 'unverified_source');
 });
 
 test('newer published standards do not promise an unchanged application update will adopt them', () => {

@@ -2039,10 +2039,17 @@ PYEOF
         # `sudo ./update.sh --rebuild` on an up-to-date checkout takes the
         # --no-cache path (no re-exec ⇒ PROXYPILOT_DEP_CHANGED unset).
         # Capture provenance from the source being copied into this image.
-        PP_BUILD_SHA=$($GIT_CMD -C "$SCRIPT_DIR" rev-parse HEAD)
+        # Provenance is best-effort telemetry, never a new failure after the
+        # database has moved. Missing Git evidence must stay explicitly unknown.
+        PP_BUILD_SHA=""
         PP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        PP_BUILD_DIRTY=false
-        if [ -n "$($GIT_CMD -C "$SCRIPT_DIR" status --porcelain)" ]; then PP_BUILD_DIRTY=true; fi
+        PP_BUILD_DIRTY=unknown
+        if PP_BUILD_SHA=$("${GIT_CMD:-git}" -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null); then
+            if PP_BUILD_STATUS=$("${GIT_CMD:-git}" -C "$SCRIPT_DIR" status --porcelain 2>/dev/null); then
+                PP_BUILD_DIRTY=false
+                if [ -n "$PP_BUILD_STATUS" ]; then PP_BUILD_DIRTY=true; fi
+            fi
+        fi
         PP_BUILD_ARGS=(--build-arg "PROXYPILOT_BUILD_SHA=$PP_BUILD_SHA" --build-arg "PROXYPILOT_BUILD_TIME=$PP_BUILD_TIME" --build-arg "PROXYPILOT_BUILD_DIRTY=$PP_BUILD_DIRTY")
         if [ "${PROXYPILOT_DEP_CHANGED:-1}" = "0" ]; then
             log "No dependency/Dockerfile changes — building with the cache (reuses the native module compile)..."

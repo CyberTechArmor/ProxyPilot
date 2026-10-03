@@ -1219,7 +1219,7 @@ test('a never-admitted proof cannot replace existing launch pins or recover an a
    if(agent&&method==='selected_browser_launch')throw new Error('Fixture lost launch reply');
    if(method==='selected_browser_stop')return neverAdmittedReceipt(params);
   }});try{
-   w.session();if(agent)w.consent();const started=agent?await w.start():await openPublic(w);
+   w.session();if(agent)w.consent();else w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});const started=agent?await w.start():await openPublic(w);
    const stopped=agent?started:await w.runtime.runs.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
    assert.equal(stopped.run.uncertain,true);
    await assert.rejects(()=>w.runtime.runs.retryCleanup(w.owner,w.p.id,stopped.run.id,stopped.run.revision),e=>e.code==='SIGNED_CLEANUP_RECEIPT_REQUIRED');

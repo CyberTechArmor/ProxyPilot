@@ -5,6 +5,8 @@ The isolated browser supplies only opaque single-use tickets; page headers canno
 mint role, effect approval, network scope, or an attempt identity. No executable
 code, request body, cookie or credential belongs in control events/ledger rows.
 """
+import copy
+import datetime
 import hashlib
 import http.client
 import importlib.util
@@ -46,6 +48,9 @@ SESSION = frozenset(('cookie', 'authorization', 'x-api-key', 'x-auth-token', 'x-
 RESOURCE_HEADERS = frozenset(('accept', 'accept-language', 'user-agent', 'cache-control', 'pragma',
                               'if-none-match', 'if-modified-since', 'range', 'content-type'))
 ACTION_KEYS = ('ordinal', 'candidate_ref', 'snapshot_ref', 'approval_ref')
+AUTH_STATEMENT = ('I reviewed each selected request and confirm it was solely for sign-in or MFA. '
+    'I independently observed this browser complete authentication. This confirms authentication only, '
+    'and does not confirm other website changes.')
 LOADED_HELPER_HASHES = dict(selected_browser_gateway=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                            selected_browser_policy=hashlib.sha256(_policy_path.read_bytes()).hexdigest())
 
@@ -233,10 +238,13 @@ class AttemptGateway:
         self.route_reader = route_reader
         self.ticket_seconds = ticket_seconds
         self.lock = threading.RLock()
+        self.drained = threading.Condition(self.lock)
         self.started_at = clock()
         self.state, self.reason = 'running', None
         self.requests = self.response_bytes = 0
         self.effects_sent = self.effects_uncertain = self.inflight = 0
+        self.auth_effects, self.auth_confirmations = {}, {}
+        self.auth_effects_acknowledged = 0
         self.pending, self.tickets = {}, {}
         self.additions, self.extra_targets, self.purposes = {}, {}, {}
         self.connections = set()
@@ -245,7 +253,7 @@ class AttemptGateway:
 
     def _audit(self, kind, data):
         try:
-            self.ledger.append(kind, data)
+            return self.ledger.append(kind, data)
         except Exception:
             self.state, self.reason = 'revoked', 'LEDGER_WRITE_FAILED'
             self.tickets.clear()
@@ -264,6 +272,9 @@ class AttemptGateway:
 
     def _freeze(self, code, origin=None, request_ref=None):
         if self.state == 'revoked':
+            return
+        if self.state == 'paused' and self.reason == 'USER_PAUSED' and code == 'GATEWAY_PAUSED':
+            self._audit('paused_request_blocked', dict(code=code, origin=origin, request_ref=request_ref))
             return
         self.state, self.reason = 'paused', code
         for ticket in self.tickets.values():
@@ -298,6 +309,8 @@ class AttemptGateway:
             raise Denied('REQUEST_REF_INVALID')
         with self.lock:
             self._check(allow_paused=True)
+            if self.state == 'paused' and self.reason == 'USER_PAUSED':
+                raise Denied('GATEWAY_PAUSED')
             if request_ref in self.pending:
                 raise Denied('REQUEST_REF_REUSED')
             try:
@@ -343,7 +356,9 @@ class AttemptGateway:
             record = self.pending.get(request_ref)
             if not record or record.get('approval_id') or record['effect'] == 'read' or record['expires_at'] <= self.clock():
                 raise Denied('REQUEST_APPROVAL_STALE')
-            if (not exact(grant, ('schema', 'id', 'identity', 'request_ref', 'binding_sha256', 'expires_at', 'purpose_sha256')) or
+            fields = ('schema', 'id', 'identity', 'request_ref', 'binding_sha256', 'expires_at', 'purpose_sha256')
+            pinned = exact(grant, (*fields, 'approval_ref', 'human_context'))
+            if ((not exact(grant, fields) and not pinned) or
                     grant['schema'] != 'proxypilot.selected-browser.effect-grant.v1' or
                     not isinstance(grant['id'], str) or not UUID.fullmatch(grant['id']) or
                     grant['identity'] != self.policy.identity or grant['request_ref'] != request_ref or
@@ -351,6 +366,13 @@ class AttemptGateway:
                     not safe_int(grant['expires_at'], 1, 2**53 - 1) or grant['expires_at'] <= self.clock() or
                     grant['expires_at'] > self.clock() + 30 or
                     not isinstance(grant['purpose_sha256'], str) or not HEX.fullmatch(grant['purpose_sha256'])):
+                raise Denied('EFFECT_GRANT_INVALID')
+            if (record['metadata']['role'] == 'authentication' and not pinned) or (pinned and (
+                    not exact(grant['approval_ref'], ('id','sha256')) or
+                    grant['approval_ref']['id'] != grant['id'] or grant['approval_ref']['sha256'] != record['binding_sha256'] or
+                    not isinstance(grant['human_context'],str) or not 1 <= len(grant['human_context'].encode('utf-8')) <= 500 or
+                    digest(grant['human_context']) != grant['purpose_sha256'] or
+                    any(ord(ch)<32 or ord(ch)==127 for ch in grant['human_context']))):
                 raise Denied('EFFECT_GRANT_INVALID')
             # Approval is reserved durably BEFORE a ticket can be returned; a
             # lost reply consumes authority rather than enabling a replay.
@@ -365,6 +387,9 @@ class AttemptGateway:
                 self.state, self.reason = 'revoked', 'LEDGER_WRITE_FAILED'
                 raise Denied('LEDGER_WRITE_FAILED') from e
             record['approval_id'] = grant['id']
+            if pinned:
+                record.update(approval_ref=copy.deepcopy(grant['approval_ref']), human_context=grant['human_context'],
+                              purpose_sha256=grant['purpose_sha256'])
             record['expires_at'] = min(record['expires_at'], grant['expires_at'])
             self.state, self.reason = 'running', None
             return self._ticket(request_ref, record)
@@ -410,6 +435,113 @@ class AttemptGateway:
             # for the temporary destination. Previously blocked requests expire.
             self.state, self.reason = 'running', None
 
+    def deny_request(self, request_ref):
+        with self.lock:
+            self._check(allow_paused=True)
+            record = self.pending.get(request_ref)
+            if not record or record.get('approval_id') or record['effect'] == 'read':
+                raise Denied('REQUEST_DENIAL_STALE')
+            # A pending request has not reached admit(), which removes it before
+            # upstream resolution/contact. Denial is irreversible and revokes
+            # all held authority before the guest's paused command can unwind.
+            self._audit('request_denied', dict(request_ref=request_ref, binding_sha256=record['binding_sha256'],
+                                               no_contact=True, replay_allowed=False))
+            self.pause()
+            return dict(self.status(), request_ref=request_ref, denied=True, no_contact=True, paused=True)
+
+    @staticmethod
+    def _path_preview(path):
+        # Endpoint context is controller-private; retain only fixed benign
+        # authentication words. Arbitrary IDs, usernames and token segments are
+        # never retained as URL previews, and query/fragment are never included.
+        safe = {'api','v1','v2','v3','auth','authentication','account','accounts','login','signin','sign-in',
+                'logout','signout','oauth','oauth2','oidc','saml','sso','authorize','callback','token',
+                'mfa','challenge','verify','verification','otp','session','sessions'}
+        text = '/'.join(segment if segment.lower() in safe or not segment else '[redacted]'
+                        for segment in path.split('/'))
+        return text if len(text.encode()) <= 1000 else '/[redacted]'
+
+    def auth_inventory(self):
+        with self.lock:
+            self._check(allow_paused=True)
+            usage = self.status()
+            requests = [copy.deepcopy(v) for v in self.auth_effects.values()
+                        if v['transport_complete'] and not v.get('acknowledged')]
+            for value in requests:
+                value.pop('acknowledged',None)
+            if len(requests) > 64:
+                raise Denied('AUTH_INVENTORY_LIMIT')
+            out = dict(requests=requests, ledger_sha256=usage['ledger_sha256'], effects_sent=self.effects_sent,
+                effects_uncertain=self.effects_uncertain, inflight=self.inflight, pending_count=len(self.pending),
+                auth_effects_acknowledged=self.auth_effects_acknowledged)
+            out['inventory_sha256'] = digest(canonical(out))
+            return out
+
+    def confirm_authentication(self, packet):
+        with self.lock:
+            self._check(allow_paused=True)
+            fields = ('schema','run_id','attempt_id','fence','policy_sha256','controller_id','session_id',
+                'viewer_conn_sha256','inventory_sha256','ledger_sha256','request_refs','reviewed_statement','confirmation_ref','expires_at')
+            if (not exact(packet,fields) or packet['schema'] != 'selected-browser-auth-confirmation.v1' or
+                    any(packet[k] != self.policy.identity[k] for k in ('run_id','attempt_id','fence','policy_sha256')) or
+                    any(not isinstance(packet[k],str) or not UUID.fullmatch(packet[k]) for k in ('controller_id','session_id')) or
+                    not isinstance(packet['viewer_conn_sha256'],str) or not HEX.fullmatch(packet['viewer_conn_sha256']) or
+                    packet['reviewed_statement'] != AUTH_STATEMENT or
+                    not exact(packet['confirmation_ref'],('id','sha256')) or
+                    not isinstance(packet['confirmation_ref']['id'],str) or not UUID.fullmatch(packet['confirmation_ref']['id']) or
+                    packet['confirmation_ref']['sha256'] != digest(canonical({k:v for k,v in packet.items() if k!='confirmation_ref'}))):
+                raise Denied('AUTH_CONFIRMATION_INVALID')
+            try:
+                expires = datetime.datetime.fromisoformat(packet['expires_at'].replace('Z','+00:00'))
+                if expires.utcoffset() is None or not self.clock() < expires.timestamp() <= min(self.clock()+30,self.policy.expires_at):
+                    raise ValueError()
+            except (ValueError,TypeError,AttributeError):
+                raise Denied('AUTH_CONFIRMATION_EXPIRED') from None
+            request_sha = digest(canonical(packet))
+            prior = self.auth_confirmations.get(packet['confirmation_ref']['id'])
+            if prior:
+                if prior['request_sha256'] != request_sha:
+                    raise Denied('AUTH_CONFIRMATION_REPLAY')
+                return copy.deepcopy(prior)
+            inventory = self.auth_inventory()
+            if (packet['inventory_sha256'] != inventory['inventory_sha256'] or packet['ledger_sha256'] != inventory['ledger_sha256'] or
+                    inventory['inflight'] or inventory['pending_count'] or inventory['effects_uncertain']):
+                raise Denied('AUTH_INVENTORY_STALE_OR_UNSETTLED')
+            selected = packet['request_refs']
+            if (not isinstance(selected,list) or not 1 <= len(selected) <= 64 or
+                    any(not isinstance(v,dict) or v not in inventory['requests'] for v in selected) or
+                    len({v['request_ref'] for v in selected}) != len(selected)):
+                raise Denied('AUTH_CONFIRMATION_SCOPE_INVALID')
+            for value in selected:
+                parts = url_parts(value['origin'], origin_only=True)
+                self.policy.destination(parts,'authentication',self.additions)
+                temporary = self.purposes.get((parts['origin'],'authentication'))
+                if temporary and temporary['expires_at'] <= self.clock():
+                    raise Denied('DESTINATION_GRANT_EXPIRED')
+            count = self.auth_effects_acknowledged + len(selected)
+            if count > self.effects_sent:
+                raise Denied('AUTH_CONFIRMATION_COUNT_INVALID')
+            try:
+                self.ledger.consume(packet['confirmation_ref']['id'],request_sha)
+                ledger_sha = self._audit('authentication_human_readback',dict(request_sha256=request_sha,
+                    confirmation_ref=packet['confirmation_ref'],request_refs=[dict(request_ref=v['request_ref'],
+                        binding_sha256=v['binding_sha256'],ledger_send_ref=v['ledger_send_ref'],ledger_response_ref=v['ledger_response_ref']) for v in selected],
+                    controller_id=packet['controller_id'],session_id=packet['session_id'],viewer_conn_sha256=packet['viewer_conn_sha256'],
+                    prior_count=self.auth_effects_acknowledged,auth_effects_acknowledged=count,replay_allowed=False))
+            except Exception:
+                self.state,self.reason = 'revoked','AUTH_CONFIRMATION_LEDGER_FAILED'
+                self.tickets.clear()
+                raise Denied('AUTH_CONFIRMATION_LEDGER_FAILED') from None
+            for value in selected:
+                self.auth_effects[value['request_ref']]['acknowledged'] = True
+            self.auth_effects_acknowledged = count
+            out = {k:copy.deepcopy(packet[k]) for k in ('run_id','attempt_id','fence','policy_sha256','controller_id','session_id',
+                'viewer_conn_sha256','confirmation_ref','inventory_sha256')}
+            out.update(schema='selected-browser-auth-confirmation-ack.v1',request_sha256=request_sha,
+                ledger_sha256=ledger_sha,auth_effects_acknowledged=count,effects_sent=self.effects_sent,confirmed=True,replay_allowed=False)
+            self.auth_confirmations[packet['confirmation_ref']['id']] = out
+            return copy.deepcopy(out)
+
     def pause(self, reason='USER_PAUSED'):
         with self.lock:
             self._check(allow_paused=True)
@@ -437,7 +569,21 @@ class AttemptGateway:
                     conn.close()
                 except OSError:
                     pass
-            self._audit('revoked', dict(identity=self.policy.identity))
+            # Record the exact unsent authorities discarded at the cancellation
+            # boundary before pending_count can truthfully become zero.
+            self._audit('revoked', dict(identity=self.policy.identity,
+                discarded_requests=[dict(request_ref=ref,binding_sha256=value['binding_sha256'])
+                    for ref,value in self.pending.items()],replay_allowed=False))
+            self.pending.clear()
+            return self.status()
+
+    def final_status(self):
+        with self.drained:
+            if self.state != 'revoked':
+                raise Denied('GATEWAY_REVOKE_REQUIRED')
+            deadline = time.monotonic() + 2
+            while self.inflight and time.monotonic() < deadline:
+                self.drained.wait(max(0,deadline-time.monotonic()))
             return self.status()
 
     def status(self):
@@ -451,6 +597,7 @@ class AttemptGateway:
                         state=self.state, reason=self.reason, requests=self.requests,
                         response_bytes=self.response_bytes, ledger_sha256=self.ledger.sha256,
                         effects_sent=self.effects_sent, effects_uncertain=self.effects_uncertain, inflight=self.inflight,
+                        auth_effects_acknowledged=self.auth_effects_acknowledged,
                         outstanding_requests=len(self.pending),
                         network_plan_sha256=self.policy.network_plan_sha256,
                         destinations=len(self.policy.origins), temporary_destinations=len(self.additions))
@@ -491,7 +638,11 @@ class AttemptGateway:
             return record, p
 
     def forward(self, method, url, headers, body):
-        record, parts = self.admit(method, url, headers, body)
+        with self.lock:
+            record, parts = self.admit(method, url, headers, body)
+            # DNS/TLS preparation is outstanding work too. A model, auth
+            # readback, or cleanup cannot pass between admission and send.
+            self.inflight += 1
         conn = None
         sent = False
         try:
@@ -525,10 +676,20 @@ class AttemptGateway:
                 # private paths/query values cross-origin and is always omitted.
                 if headers.get('origin') == parts['origin']:
                     forward['Origin'] = parts['origin']
-                self._audit('send_started', dict(request_ref=record['request_ref'], binding_sha256=record['binding_sha256'],
-                                                address_sha256=digest(addresses[0])))
+                auth = None
+                if record['effect'] != 'read' and record['metadata']['role'] == 'authentication':
+                    meta = record['metadata']
+                    auth = dict(request_ref=record['request_ref'],binding_sha256=record['binding_sha256'],
+                        request_sha256=digest(canonical(meta)),url_sha256=digest(meta['url']),body_sha256=meta['body_sha256'],
+                        body_bytes=meta['body_bytes'],origin=parts['origin'],role='authentication',method=method,
+                        approval_ref=record['approval_ref'],purpose_sha256=record['purpose_sha256'],
+                        human_context=record['human_context'],path_preview=self._path_preview(parts['path']))
+                send_ref = self._audit('send_started', dict(request_ref=record['request_ref'], binding_sha256=record['binding_sha256'],
+                                                address_sha256=digest(addresses[0]),auth_request=auth))
+                if auth is not None:
+                    self.auth_effects[record['request_ref']] = dict(auth,ledger_send_ref=send_ref,
+                        ledger_response_ref=None,transport_complete=False,acknowledged=False)
                 sent = True
-                self.inflight += 1
                 if record['effect'] != 'read':
                     self.effects_sent += 1
                 conn.request(method, parts['target'], body=body, headers=forward)
@@ -576,8 +737,11 @@ class AttemptGateway:
                 if k.lower() in ('alt-svc', 'report-to', 'reporting-endpoints', 'nel', 'refresh'):
                     continue
                 clean.append((k, v))
-            self._audit('response_completed', dict(request_ref=record['request_ref'], status=response.status,
-                                                    bytes=sum(map(len, chunks)), effect=record['effect']))
+            with self.lock:
+                response_ref = self._audit('response_completed', dict(request_ref=record['request_ref'], status=response.status,
+                                                        bytes=sum(map(len, chunks)), effect=record['effect']))
+                if record['request_ref'] in self.auth_effects:
+                    self.auth_effects[record['request_ref']].update(ledger_response_ref=response_ref,transport_complete=True)
             return response.status, clean, b''.join(chunks)
         except Exception as e:
             code = e.code if isinstance(e, Denied) else 'UPSTREAM_FAILED'
@@ -592,11 +756,12 @@ class AttemptGateway:
                 raise
             raise Denied(code) from e
         finally:
-            if conn is not None:
-                with self.lock:
-                    if sent:
-                        self.inflight -= 1
+            with self.drained:
+                self.inflight -= 1
+                if conn is not None:
                     self.connections.discard(conn)
+                self.drained.notify_all()
+            if conn is not None:
                 conn.close()
 
 
@@ -642,7 +807,12 @@ def send_response(writer, status, headers=(), body=b''):
 
 def serve_selected_socket(request, gateway, tls):
     """Called only after the existing proxy authenticates the fixed guest peer."""
-    request.settimeout(10)
+    # Chromium can preconnect before Fetch pauses its request for human review.
+    # Idle local sockets share the finite attempt deadline; target contact still
+    # requires a fresh single-use ticket. TLS negotiation itself stays bounded.
+    idle_seconds = max(.1, min(gateway.policy.expires_at,
+        gateway.started_at + gateway.policy.configuration['budgets']['max_seconds']) - gateway.clock())
+    request.settimeout(idle_seconds)
     reader = request.makefile('rb')
     writer = request.makefile('wb')
     client = None
@@ -656,8 +826,10 @@ def serve_selected_socket(request, gateway, tls):
             writer.flush()
             reader.close()
             writer.close()
+            request.settimeout(10)
             client = tls.wrap_socket(request, server_side=True)
-            client.settimeout(10)
+            client.settimeout(max(.1, min(gateway.policy.expires_at,
+                gateway.started_at + gateway.policy.configuration['budgets']['max_seconds']) - gateway.clock()))
             reader, writer = client.makefile('rb'), client.makefile('wb')
             method, target, headers = read_request(reader)
             if (not target.startswith('/') or target.startswith('//') or '#' in target or
@@ -690,10 +862,14 @@ def serve_selected_socket(request, gateway, tls):
         except (OSError, ValueError):
             pass
     finally:
-        reader.close()
-        writer.close()
-        if client:
-            client.close()
+        for stream in (reader,writer,client):
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError,ValueError):
+                    # Peer TLS shutdown does not undo the already enforced
+                    # denial or change any ticket/ledger authority.
+                    pass
 
 
 class SelectedGatewayRegistry:
@@ -793,6 +969,8 @@ guest teardown. An absent active attempt never implies selected->demo fallback.
             if self.gateway:
                 if self.gateway.state != 'revoked':
                     raise Denied('GATEWAY_REVOKE_REQUIRED')
+                if self.gateway.inflight:
+                    raise Denied('GATEWAY_REQUEST_DRAIN_UNVERIFIED')
                 self.gateway.ledger.close()
                 self.gateway = None
             self.latch_path.unlink()
@@ -815,8 +993,10 @@ guest teardown. An absent active attempt never implies selected->demo fallback.
             return self.release(params)
         with self.lock:
             extras = {'request': ('request_ref', 'metadata'), 'approve': ('request_ref', 'grant'),
+                      'deny': ('request_ref',),
+                      'auth_inventory': (), 'auth_confirm': ('packet',),
                       'destination_grant': ('grant', 'destination', 'target'), 'pause': (),
-                      'resume': (), 'revoke': (), 'status': ()}
+                      'resume': (), 'revoke': (), 'status': (), 'final_status': ()}
             if method not in extras:
                 raise Denied('CONTROL_METHOD_INVALID')
             if (method in ('status', 'revoke') and self.gateway is None and self.latched_identity is not None and
@@ -828,6 +1008,10 @@ guest teardown. An absent active attempt never implies selected->demo fallback.
                 return gateway.review_request(params['request_ref'], params['metadata'])
             if method == 'approve':
                 return gateway.approve_request(params['request_ref'], params['grant'])
+            if method == 'deny':
+                return gateway.deny_request(params['request_ref'])
+            if method == 'auth_confirm':
+                return gateway.confirm_authentication(params['packet'])
             if method == 'destination_grant':
                 gateway.grant_destination(params['grant'], params['destination'], params['target'])
                 return gateway.status()

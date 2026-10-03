@@ -22,7 +22,8 @@ JavaScript, host filesystem paths, cookies, credentials, or caller schemas.
 | `selected_observe` | none | bounded observation and current references |
 | `selected_action` | `envelope` matching action-v1 | primitive outcome; remote writes require host readback |
 | `selected_auth` | boolean `active` | manual auth and capture/model availability |
-| `selected_pause`, `selected_resume` | none | fresh observation required after resume |
+| `selected_pause` | none | paused; opaque `discarded_request_refs` for host tombstones |
+| `selected_resume` | none | fresh observation required; no failed request replay |
 | `selected_control` | bounded typed `input` | existing A3 human input result |
 | `selected_stage` | `kind`, pinned `ref`, `mime_type`, `bytes_base64` | private staging confirmation |
 | `selected_offer_input` | `snapshot_ref`, `target_ref`, `input_ref` | minted type/paste candidate |
@@ -84,7 +85,15 @@ attempt deadline, retaining human approval across the legacy demo's ten-second
 CDP timeout. Host polling surfaces request approval before the action completes.
 Pause revokes network authority and fails held references through the reader
 relay before its queued pause command. Cancellation revokes/kills independently
-of that queue. Resume never replays failed requests.
+of that queue. The guest also returns the actual failed references, including
+requests whose events are still queued; the host persists tombstones before
+resume. Resume never replays failed requests.
+
+Native form submission retains its action refs while the first authoritative
+Fetch event and page load resolve. A submission with no network event within a
+bounded three-second trigger window is refused as unobserved; an intercepted
+request can remain held until the finite attempt deadline. DOM completion does
+not prove a site accepted or persisted a change.
 
 A destination grant is an exact attempt-only hint with typed roles, header
 policy and finite expiry. It does not edit configuration or authorize traffic.
@@ -114,3 +123,21 @@ must remain unavailable until the installed supervisor acceptance marker proves
 those boundaries for the reviewed sources and configuration. A DOM/HTTP outcome
 also does not prove a website persisted a business change; host readback is
 required before a receipt may claim successful external effects.
+
+The composed fixture in `scripts/tests/test_selected_browser_composition.py`
+runs the actual bundled guest, supervisor request pump, gateway TLS interception,
+wire body hash checks, and Chromium against pinned local HTTPS fixtures. It
+covers an off-list grant followed by a fresh action, a wire approval held beyond
+ten seconds, refusal to grant/replay after a POST was sent, signed agent and
+manual-mode Deny outcomes, and explicit website session cookies through auth
+pause. Its Incus/readback/signing and human transport boundaries are fixtures;
+it does not prove installed Neko custody or production acceptance.
+
+Selected startup uses fixed browser-service settings: disable
+`NetworkTimeServiceQuerying` and `AimEnabled`; disable browser signin; set the
+browser-owned GCM check-in URL and GaiaConfig ListAccounts URL to `about:blank`.
+These settings accept no caller argv, URL, JSON, or path and confer no gateway
+permission. They leave explicit website URLs untouched. The ordinary unique
+attempt profile and legacy managed policy remain in use; no Incognito, Guest,
+or separate CDP context is retained. Exact source and local proof details are in
+`docs/plans/evidence/selected-browser-20261002/worker-composition.md`.

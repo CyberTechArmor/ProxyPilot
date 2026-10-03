@@ -187,6 +187,16 @@ it does not authorize Duo fallback, production SSH or MCP execution.
 
 The dependency streams now have additive implementations and local proof fixtures. The integrated root has completed local authority rechecks, metering, source-memory/report suppression, live viewer lifetime, timer-driven execution and packaging regressions. The broader implementation is published as draft PR726 and remains gated by its reviewed installed-package contract and acceptance. PR725 merged independently reviewed browser viewport/fullscreen presentation at main `863ed48caa2ec9fff212b9e9a76ea0fc8e04d7c7`; it does not unlock general websites. Incremental repository publication/merge is authorized; production deployment remains outside authorization.
 
+2026-10-03 release checkpoint: the isolated C0 editor is committed and pushed at
+`24032ed714e823559a85902a1c15461f68961a0a` on
+`browser/configuration-import-20261002`. Automatic approval review refused its
+draft PR creation against `main`, citing the original withheld publication
+authorization. The later release authorization is recorded above; a restatement
+request is pending. Further external repository mutations are paused. PR726's
+published head remains `dc8080c44dca6c2db81842709b7b48a6edc3e743`; fresh source
+and local proof are recorded in the implementation report, not claimed as green
+CI or installed capability.
+
 The scope estimates above are engineering estimates, not elapsed implementation promises. Local Chromium can prove selected primitives, held-request approval and no external replay. It cannot establish the absent Incus/nft installation, operator-owned acceptance marker, Neko privacy/controller media, actual provider/multimodal path or selected public/authenticated/internal target acceptance. Those proofs and reviewed private storage/decoder wrappers remain the release activation gate. No Duo fallback or broad credentials are included.
 
 See the [source-backed Nodus alignment](fractionate-browser-nodus-alignment-20261002.md) for applicable lifecycle/provenance/storage and deferred embedding/S3 contracts.

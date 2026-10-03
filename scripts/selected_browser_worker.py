@@ -262,6 +262,7 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
             self.temporary_destinations = {}
             self.ticketed_documents = set()
             self.navigation_load = None
+            self.submission_network = None
             self.proposed_navigation = None
             super().__init__(spki, channel, live)
             self.owned_pages.add(self.main_target)
@@ -417,6 +418,10 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
                 self.requests[request_ref] = {'params': params, 'session': session, 'destination': dest,
                                               'expires': time.monotonic() + remaining, 'role': role,
                                               'resource_type': resource_type}
+                if self.submission_network is not None and self.current_action is not None:
+                    if resource_type == 'document':
+                        self.submission_network['document'] = True
+                    self.submission_network['observed'].set()
             self.channel.emit({'event': 'selected_request', 'request_ref': request_ref, 'metadata': metadata})
 
         def _expire_requests(self):
@@ -481,6 +486,15 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
                 self.cdp.notify('Target.closeTarget', {'targetId': params['targetInfo'].get('targetId')})
                 return
             info = params.get('targetInfo', {})
+            # Browser-level auto-attach also offers the main page that the base
+            # runner has already attached. Two Fetch agents on one target would
+            # mint two tickets for one wire request and strand unused authority.
+            # Keep its existing gated session and detach the redundant offer.
+            if (kind == 'page' and info.get('targetId') == self.main_target and
+                    hasattr(self, 'session') and child != self.session):
+                self.cdp.notify('Runtime.runIfWaitingForDebugger', {}, child)
+                self.cdp.notify('Target.detachFromTarget', {'sessionId': child})
+                return
             if kind == 'page' and info.get('targetId') != self.main_target and info.get('openerId') not in self.owned_pages:
                 self.cdp.notify('Target.closeTarget', {'targetId': info.get('targetId')})
                 return
@@ -936,9 +950,36 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
             else:
                 raise refused('INVALID_SELECTED_ACTION')
             target = op.get('form_ref') or op.get('element_ref')
-            if self._target_world(target, expression, user_gesture=True) is not True:
-                raise refused('ELEMENT_STALE')
-            return {'effect': 'unverified_until_gateway_and_site_readback'}
+            if kind != 'submit':
+                if self._target_world(target, expression, user_gesture=True) is not True:
+                    raise refused('ELEMENT_STALE')
+                return {'effect': 'unverified_until_gateway_and_site_readback'}
+            loaded = threading.Event()
+            network = {'observed': threading.Event(), 'document': False}
+            self.submission_network = network
+            self.navigation_load = (self.session, loaded)
+            try:
+                if self._target_world(target, expression, user_gesture=True) is not True:
+                    raise refused('ELEMENT_STALE')
+                # requestSubmit returns before Chromium emits Fetch. Keep this
+                # action's refs live through review and native page load; a DOM
+                # return alone cannot settle a submission or permit a replay.
+                trigger_deadline = time.monotonic()+min(3, self._remaining_seconds())
+                while not network['observed'].wait(.02):
+                    self._check()
+                    if time.monotonic() >= trigger_deadline:
+                        raise refused('SUBMISSION_NETWORK_NOT_OBSERVED')
+                while True:
+                    self._check()
+                    with self.request_lock:
+                        pending = bool(self.requests)
+                    if not pending and (not network['document'] or loaded.is_set()):
+                        break
+                    loaded.wait(min(.02,self._remaining_seconds()))
+                return {'effect': 'unverified_until_gateway_and_site_readback'}
+            finally:
+                self.submission_network = None
+                self.navigation_load = None
 
         def auth(self, active):
             if type(active) is not bool:
@@ -975,7 +1016,9 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
                 pending = list(self.requests)
             for ref in pending:
                 self.request_decision({'request_ref': ref, 'decision': 'block', 'code': 'SELECTED_PAUSED'})
-            return {'paused': True}
+            # The supervisor persists these tombstones before any resume so a
+            # queued pre-pause event cannot mint authority for a failed Fetch.
+            return {'paused': True, 'discarded_request_refs': pending}
 
         def resume_selected(self):
             self.paused = False

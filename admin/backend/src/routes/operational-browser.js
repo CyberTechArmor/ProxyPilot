@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { OperationsError, assertRevision, fail, parse, revision } from '../lib/operational-projects-logic.js';
 import { selectedConsentSchema, selectedStartSchema } from '../lib/operational-selected-browser-contract.js';
+import { selectedAuthConfirmationInputSchema } from '../lib/operational-selected-browser-auth-contract.js';
 
 const denied = (_req,res) => res.status(404).json({error:'Not found'});
 const noSudo = (_req,res) => res.status(401).json({error:'sudo_required',sudo_required:true,message:'This action requires sudo re-authentication.'});
@@ -132,6 +133,15 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
   },{status:202,action:'browser_run_start'}));
   router.get(`${runs}/:runId`,agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'runs'),'get')(a,r.params.id,r.params.runId);}));
   router.get(`${runs}/:runId/sources`,agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'runs'),'sources')(a,r.params.id,r.params.runId);}));
+  router.get(`${runs}/:runId/authentication-readback`,agentsOnly,runsOnly,elevated,run((r,a)=>{
+    query(r);return method(available(r,'runs'),'authenticationReadback')(a,r.params.id,r.params.runId);
+  },{action:'browser_authentication_readback'}));
+  router.post(`${runs}/:runId/authentication-readback`,agentsOnly,runsOnly,elevated,run((r,a)=>{
+    const {revision:bodyRevision,...input}=parse(selectedAuthConfirmationInputSchema.extend({revision:positive}).strict(),r.body);
+    assertRevision(expected(r),bodyRevision);
+    return method(available(r,'runs'),'confirmAuthentication')(a,r.params.id,r.params.runId,bodyRevision,input);
+  },
+  {action:'browser_authentication_confirmation'}));
   for(const [suffix,name,sudo] of [['refresh','refresh',false],['step','step',true],['pause','pause',false],['resume','resume',true],
     ['cancel','cancel',false],['takeover','takeover',true],['release','release',true],['retry-cleanup','retryCleanup',true]]) {
     router.post(`${runs}/:runId/${suffix}`,agentsOnly,runsOnly,...(sudo?[elevated]:[]),run((r,a)=>{

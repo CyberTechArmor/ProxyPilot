@@ -157,8 +157,9 @@ BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'step_record
                              'live', 'takeover', 'release', 'summarize',
                              'public_review_status', 'public_review_model', 'cancel_public_review'))
 SELECTED_METHODS = frozenset(('selected_browser_status', 'selected_browser_launch', 'selected_browser_observe',
-    'selected_browser_action', 'selected_browser_poll_action', 'selected_browser_pending', 'selected_browser_approve_request',
+    'selected_browser_action', 'selected_browser_poll_action', 'selected_browser_pending', 'selected_browser_approve_request', 'selected_browser_deny_request',
     'selected_browser_grant_destination', 'selected_browser_auth', 'selected_browser_pause', 'selected_browser_resume',
+    'selected_browser_auth_inventory', 'selected_browser_confirm_authentication',
     'selected_browser_takeover', 'selected_browser_release', 'selected_browser_view', 'selected_browser_stage', 'selected_browser_offer_input',
     'selected_browser_renew', 'selected_browser_stop', 'selected_browser_live', 'selected_browser_control',
     'selected_browser_model_status', 'selected_browser_model', 'cancel_selected_browser_model'))
@@ -1223,12 +1224,25 @@ class Supervisor:
                 self._note(attempt, 'teardown_unverified')
                 self._save()
             raise Refused('TEARDOWN_UNVERIFIED')
+        selected_network_closed = True
         if attempt.get('workload') == 'selected_browser_v1':
-            self._selected().after_teardown(attempt, descendants, workspace)
+            selected_network_closed = self._selected().after_teardown(attempt, descendants, workspace)
         evidence['exit'] = attempt.get('exit')
         if attempt.get('credential_submitted'):
             evidence['logout'] = attempt.get('logout', 'not_run')
         receipt = self._receipt(attempt, reason, evidence, True, True)
+        if selected_network_closed is False:
+            with self.lock:
+                # A bounded gateway drain can finish after browser closure.
+                # Preserve signed known meters, keep admission/latch closed,
+                # and allow only a fresh verified cleanup retry. No partial
+                # receipt is treated as a terminal or cached full closure.
+                attempt['receipt'] = receipt
+                attempt['teardown_evidence'] = evidence
+                self.workers.pop(attempt_id,None)
+                self._note(attempt,'partial_receipt')
+                self._save()
+            return receipt
         with self.lock:
             attempt['receipt'] = receipt
             attempt['teardown_evidence'] = evidence

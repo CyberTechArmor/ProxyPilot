@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {registerBrowserRoutes} from '../routes/operational-browser.js';
 import {OperationsError,assertOperation,assertRevision,parse} from '../lib/operational-projects-logic.js';
 import {selectedDecisionSchema,selectedReconcileSchema,selectedHumanInputSchema,SELECTED_BROWSER_CONSENT} from '../lib/operational-selected-browser-contract.js';
+import {selectedAuthConfirmationInputSchema,SELECTED_BROWSER_AUTH_STATEMENT} from '../lib/operational-selected-browser-auth-contract.js';
 import {csrfProtection} from '../middleware/csrf.js';
 import {fixtureRouter,operationsFixture} from './helpers/operations-fixture.js';
 
@@ -25,6 +26,8 @@ function fixture({assetBodyParser}={}) {
     get(actor,p,rid){access(actor,p);if(rid!==runId)throw new OperationsError(404,'Run not found');return current();},
     list(actor,p){access(actor,p);return{runs:[current().run]};},
     sources(actor,p,rid){access(actor,p);if(rid!==runId)throw new OperationsError(404,'Run not found');calls.push({name:'sources',p,rid});return{sources:[{id:assetId,state:'unavailable',code:'PRIVATE_SOURCE_UNAVAILABLE'}]};},
+    authenticationReadback(actor,p,rid){access(actor,p,'run');if(rid!==runId)throw new OperationsError(404,'Run not found');if(!actor.elevated||!actor.control_verified)throw new OperationsError(403,'Proof required');calls.push({name:'authenticationReadback'});return{revision,inventory:{inventory_sha256:'a'.repeat(64),requests:[]}};},
+    confirmAuthentication(actor,p,rid,rev,body){parse(selectedAuthConfirmationInputSchema,body);return mutator('confirmAuthentication',true)(actor,p,rid,rev,body);},
     readiness(actor,p,id){access(actor,p,'run');calls.push({name:'readiness',id});return{can_start:false,checks:[{code:'INSTALLED_PROOF_REQUIRED'}]};},
     start(actor,p,id,input){access(actor,p,'run');if(!actor.elevated||!actor.control_verified)throw new OperationsError(403,'Proof required');calls.push({name:'start',actor,id,input});return current();},
     consent(actor,p,id,input){const v=access(actor,p,'edit');if(v.own_role!=='owner'||!actor.elevated)throw new OperationsError(403,'Proof required');calls.push({name:'consent',actor,id,input});return{allowed:input.allow};},
@@ -192,5 +195,36 @@ test('async gate changes suppress response without replay and unknown errors nev
     f.runGate(true);f.runtime.conversion.convert=()=>{throw Error('raw credential private-value');};
     const result=await f.send('POST',`${f.base}/convert`,{});assert.equal(result.statusCode,500);assert.ok(!JSON.stringify(result.body).includes('private-value'));
     f.runtime.conversion=null;assert.equal((await f.send('POST',`${f.base}/convert`,{})).statusCode,503);
+  }finally{f.close();}
+});
+
+test('authentication readback requires metadata/run gates, elevation and current human authority',async()=>{
+  const f=fixture();try{
+    const path=`${f.root}/authentication-readback`;
+    assert.equal((await f.send('GET',path,{}, {sudo:false})).statusCode,401);
+    assert.equal((await f.send('GET',path,{}, {verified:false})).statusCode,403);
+    assert.equal((await f.send('GET',path,{}, {user:f.viewer})).statusCode,403);
+    f.runGate(false);assert.equal((await f.send('GET',path)).statusCode,404);f.runGate(true);
+    f.gate(false);assert.equal((await f.send('GET',path)).statusCode,404);f.gate(true);
+    assert.equal(f.calls.length,0);
+    const result=await f.send('GET',path);assert.equal(result.statusCode,200);assert.equal(result.body.revision,6);
+    assert.equal(f.calls[0].name,'authenticationReadback');
+  }finally{f.close();}
+});
+
+test('authentication confirmation strictly binds JSON and If-Match revisions and never forwards unknown authority',async()=>{
+  const f=fixture();try{
+    const path=`${f.root}/authentication-readback`,body={revision:6,inventory_sha256:'a'.repeat(64),
+      request_refs:[{request_ref:'req-1',binding_sha256:'b'.repeat(64)}],reviewed_statement:SELECTED_BROWSER_AUTH_STATEMENT};
+    for(const modified of [{...body,revision:5},{...body,session_id:randomUUID()},
+      {...body,reviewed_statement:'HTTP 200 means success'}, {...body,request_refs:[]}]){
+      const result=await f.send('POST',path,modified);assert.ok([400,412].includes(result.statusCode),JSON.stringify(result.body));
+    }
+    assert.equal((await f.send('POST',path,body,{verified:false})).statusCode,403);
+    assert.equal(f.calls.length,0);
+    const result=await f.send('POST',path,body);assert.equal(result.statusCode,200);
+    assert.equal(result.body.run.revision,7);assert.equal(f.calls[0].name,'confirmAuthentication');
+    assert.equal('revision' in f.calls[0].body,false);assert.equal(f.calls[0].rev,6);
+    assert.equal((await f.send('POST',path,body)).statusCode,412);assert.equal(f.calls.length,1);
   }finally{f.close();}
 });

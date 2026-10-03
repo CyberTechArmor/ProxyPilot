@@ -1,0 +1,326 @@
+......................................................................s.....s./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=5 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=7 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=4 mode='wb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=5 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=7 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=8 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=10 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=5 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=7 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=6 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=9 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=5 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=7 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=5 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=7 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=4 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=8 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=8 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=4 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=10 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=13 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=13 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=15 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:483: ResourceWarning: unclosed file <_io.FileIO name=8 mode='rb' closefd=True>
+  def __init__(self, file, name, delete=True, delete_on_close=True):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:483: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  def __init__(self, file, name, delete=True, delete_on_close=True):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..............sss....ss.../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py:2217: ResourceWarning: unclosed file <_io.FileIO name=5 mode='rb' closefd=True>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py:2217: ResourceWarning: unclosed file <_io.FileIO name=7 mode='rb' closefd=True>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py:2217: ResourceWarning: unclosed file <_io.FileIO name=6 mode='rb' closefd=True>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py:2217: ResourceWarning: unclosed file <_io.FileIO name=9 mode='rb' closefd=True>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py:2217: ResourceWarning: unclosed file <_io.FileIO name=10 mode='rb' closefd=True>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/mock.py:2217: ResourceWarning: unclosed file <_io.FileIO name=13 mode='rb' closefd=True>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.............{"case": "budget", "passed": false, "error": "ZeroDivisionError: division by zero", "seconds": 0.0}
+...s../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py:1356: ResourceWarning: unclosed file <_io.FileIO name=8 mode='wb' closefd=True>
+  def _make_invoke_excepthook():
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py:1356: ResourceWarning: unclosed file <_io.FileIO name=10 mode='rb' closefd=True>
+  def _make_invoke_excepthook():
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py:1356: ResourceWarning: unclosed file <_io.FileIO name=13 mode='rb' closefd=True>
+  def _make_invoke_excepthook():
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+...s.........s..../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=9 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=16 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=10 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=13 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=15 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=18 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=12 mode='wb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=17 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=20 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=24 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=26 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=22 mode='wb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=25 mode='wb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=27 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/functools.py:54: ResourceWarning: unclosed file <_io.FileIO name=29 mode='rb' closefd=True>
+  pass
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..ss............./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:638: ResourceWarning: unclosed <socket.socket fd=8, family=1, type=1, proto=0, laddr=/tmp/tmpz7vt_ahr/backend.sock>
+  self.doCleanups()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=9 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=13 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=16 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed <socket.socket fd=9, family=1, type=1, proto=0, laddr=/tmp/tmper4quoc1/backend.sock>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.FileIO name=17 mode='rb' closefd=True>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:669: ResourceWarning: unclosed file <_io.FileIO name=20 mode='rb' closefd=True>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:638: ResourceWarning: unclosed <socket.socket fd=8, family=1, type=1, proto=0, laddr=/tmp/tmp524w8jh5/backend.sock>
+  self.doCleanups()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:638: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  self.doCleanups()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:638: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  self.doCleanups()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=9 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/case.py:638: ResourceWarning: unclosed <socket.socket fd=8, family=1, type=1, proto=0, laddr=/tmp/tmpdwn5np74/backend.sock>
+  self.doCleanups()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:940: ResourceWarning: Implicitly cleaning up <TemporaryDirectory '/tmp/tmpp46rcjae'>
+  _warnings.warn(warn_message, ResourceWarning)
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:940: ResourceWarning: Implicitly cleaning up <TemporaryDirectory '/tmp/tmpc_ttf8c0'>
+  _warnings.warn(warn_message, ResourceWarning)
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:940: ResourceWarning: Implicitly cleaning up <TemporaryDirectory '/tmp/tmpayxjg4h_'>
+  _warnings.warn(warn_message, ResourceWarning)
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/tempfile.py:940: ResourceWarning: Implicitly cleaning up <TemporaryDirectory '/tmp/tmpj0jsn8cl'>
+  _warnings.warn(warn_message, ResourceWarning)
+........................sssss......sssssssssss.s.../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=37 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=38 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=40 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=37 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=38 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=40 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=37 mode='wb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=38 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=40 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py:1016: ResourceWarning: unclosed file <_io.FileIO name=9 mode='wb' closefd=True>
+  del self._target, self._args, self._kwargs
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py:1016: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  del self._target, self._args, self._kwargs
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/threading.py:1016: ResourceWarning: unclosed file <_io.FileIO name=14 mode='rb' closefd=True>
+  del self._target, self._args, self._kwargs
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+../opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:107: ResourceWarning: unclosed file <_io.FileIO name=37 mode='rb' closefd=True>
+  for index, test in enumerate(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:84: ResourceWarning: unclosed file <_io.FileIO name=9 mode='wb' closefd=True>
+  return self.run(*args, **kwds)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:84: ResourceWarning: unclosed file <_io.FileIO name=11 mode='rb' closefd=True>
+  return self.run(*args, **kwds)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/unittest/suite.py:84: ResourceWarning: unclosed file <_io.FileIO name=37 mode='rb' closefd=True>
+  return self.run(*args, **kwds)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+............................................../workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=19 mode='wb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=28 mode='wb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=31 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=34 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=21 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=23 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=30 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=32 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=10 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/workspace/ProxyPilot/scripts/tests/test_review_runtime_refresh.py:67: ResourceWarning: unclosed file <_io.FileIO name=12 mode='rb' closefd=True>
+  'log': [['2026-10-02T12:00:00Z', 'worker_stopped'] for _ in range(100)],
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.........................................................................................................................................usage: helper [-h] [--operation {install,update,recover,rollback,commit}]
+              [--plan-sha256 PLAN_SHA256]
+              {plan,review,apply,recover,rollback,commit}
+helper: error: Actual UID0 operator required
+usage: helper [-h] [--operation {install,update,recover,rollback,commit}]
+              [--plan-sha256 PLAN_SHA256]
+              {plan,review,apply,recover,rollback,commit}
+helper: error: Reviewed fixed installed source path required; no checkout execution
+.....................................s......ss.s
+----------------------------------------------------------------------
+Ran 465 tests in 169.778s
+
+OK (skipped=33)
+sys:1: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 45495)>
+sys:1: ResourceWarning: unclosed <ssl.SSLSocket fd=5, family=2, type=1, proto=0, laddr=('127.0.0.1', 36599)>
+sys:1: ResourceWarning: unclosed <ssl.SSLSocket fd=4, family=2, type=1, proto=0, laddr=('127.0.0.1', 33099)>
+sys:1: ResourceWarning: unclosed <ssl.SSLSocket fd=6, family=2, type=1, proto=0, laddr=('127.0.0.1', 43953)>

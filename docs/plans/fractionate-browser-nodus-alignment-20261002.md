@@ -59,6 +59,28 @@ may receive fresh human review; completion grants no model or execution access.
 Actual decoder isolation and installed browser-host isolation remain separate
 acceptance gates, regardless of local correctness tests.
 
+## Full storage/search parity status
+
+The browser implementation has **partial lifecycle/provenance alignment**, not
+full Nodus storage or search parity. The generic file adapter is a local synchronous
+private-files boundary; it is not a working S3 adapter.
+
+| Deliverable | ProxyPilot code and proof today | Remaining implementation |
+| --- | --- | --- |
+| Source identity and current access | SQLite immutable source/configuration/guide/consent pins; dedicated private files; current scoped access and disclosed-call citations; deletion/expiry suppress derived reports. | Nodus attachment/passages identity mapping and across-project retrieval are not implemented. |
+| Local persistence and cleanup | Service-owned0700/0600 files, SQL reservations/reviews/read leases, retryable cleanup planning and durable deletion outcomes. Local tests prove pagination and continued cleanup when run gates are off. | Installed filesystem/inode/resource/teardown acceptance is unproved. |
+| DB/S3 location and database-byte fallback | SQL stores metadata/provenance; artifact bytes remain in the private filesystem. | No browser database-blob location, S3 location column, configured bucket, SigV4 object client or save fallback exists. |
+| Migration and uncertain object writes | Local content hashes are verified before read/disclosure. | DB↔S3 copy/readback/hash-before-delete migration, pre-PUT orphan identity, unused-key deletion queue/backoff, endpoint/bucket/prefix migration guard and versioned-object deletion semantics are design requirements only. |
+| Document formats and extraction | Bounded PNG/JPEG/PDF/TXT/CSV admission;16MiB per artifact, finite byte quotas, reviewed fixed parser boundaries. | WebP/DOCX/Markdown-specific parsing, Nodus15MiB/50-file policy, page-aware2000/200 document chunks and attachment search are not implemented. |
+| Retrieval and embeddings | Recent bounded selected-browser page memory with actually-disclosed source references; no extra indexing/provider calls. | PostgreSQL/pgvector schema, lexicalGIN search, model/dimension-scoped vector indexes, localONNX/OpenAI embedding adapters, RRF, authorized cross-source filtering and visible semantic fallback are not implemented. |
+| Index lifecycle | Immutable browser evidence and report withholding after source loss are tested. | Durable indexing jobs/batches/retries, content-hash vector reuse, parallel index builds/atomic activation and deletion-during-indexing cancellation are not implemented. |
+
+Completing full parity requires an explicit storage/search implementation slice,
+reviewed persistence and credential boundaries, deletion/retention semantics and
+real adapter acceptance. Existing unrelated ProxyPilot S3 code does not establish
+browser artifact parity or authorize reuse of its credentials. No hidden bucket,
+index, embedding job or automatic provider activation is created by this build.
+
 ## Future adapters, outside this slice
 
 An embedding adapter must pin provider, exact model, dimensions, model version,

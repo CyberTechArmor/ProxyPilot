@@ -24,11 +24,12 @@ import time
 import zlib
 
 CONTRACT = 'selected-browser.v1'
-METHODS = frozenset('selected_browser_status selected_browser_launch selected_browser_observe selected_browser_action selected_browser_poll_action selected_browser_pending selected_browser_approve_request selected_browser_grant_destination selected_browser_auth selected_browser_pause selected_browser_resume selected_browser_takeover selected_browser_release selected_browser_view selected_browser_stage selected_browser_offer_input selected_browser_renew selected_browser_stop selected_browser_live selected_browser_control'.split())
+METHODS = frozenset('selected_browser_status selected_browser_launch selected_browser_observe selected_browser_action selected_browser_poll_action selected_browser_pending selected_browser_approve_request selected_browser_deny_request selected_browser_grant_destination selected_browser_auth selected_browser_auth_inventory selected_browser_confirm_authentication selected_browser_pause selected_browser_resume selected_browser_takeover selected_browser_release selected_browser_view selected_browser_stage selected_browser_offer_input selected_browser_renew selected_browser_stop selected_browser_live selected_browser_control'.split())
 MODEL_METHODS = frozenset(('selected_browser_model_status', 'selected_browser_model', 'cancel_selected_browser_model'))
 FILES = ('selected_browser_supervisor.py', 'selected_browser_policy.py', 'selected_browser_gateway.py',
          'selected_browser_worker.py', 'selected_browser_contract.py', 'selected-browser-schemas.json', 'selected-browser-model.py')
 ROOT_MARKER = 'selected-browser-acceptance.json'
+MAX_DISCARDED_REFS = 4096
 PROOFS = ('incus_identity', 'nft_effective', 'chromium_managed_policy', 'gateway_before_contact', 'selected_browser_lifecycle')
 
 
@@ -60,6 +61,7 @@ class SelectedBrowserSupervisor:
         self.results = {}
         self.controllers = {}
         self.live_viewers = {}
+        self.live_sessions = {}
         self.event_queues = {}
         self.pumps = {}
         self._bundle = None
@@ -358,6 +360,9 @@ class SelectedBrowserSupervisor:
                     self.s._save()
                 continue
             ref = event.get('request_ref')
+            if ref in a.get('selected_discarded_requests', ()):
+                worker.fire('selected_request_decision', request_ref=ref, decision='block', code='REQUEST_ALREADY_DISCARDED')
+                continue
             try:
                 with self.s.lock:
                     if event.get('metadata', {}).get('current_action') is not None:
@@ -365,25 +370,27 @@ class SelectedBrowserSupervisor:
                         record = next((r for r in a['actions'] if r['ordinal'] == context.get('ordinal')), None)
                         if not record or record.get('context') != context:
                             self.fail('REQUEST_ACTION_CONTEXT_MISMATCH')
-                    a['selected_pending'][ref] = dict(state='reviewing', metadata_sha256=self.policy.digest(self.policy.canonical(event['metadata'])))
+                    a['selected_pending'][ref] = dict(state='reviewing', current_action=event['metadata'].get('current_action'),
+                        metadata_sha256=self.policy.digest(self.policy.canonical(event['metadata'])))
                     self.s._save()
-                out = self.s.host.selected_gateway('request', dict(identity=a['selected_identity'], request_ref=ref, metadata=event['metadata']))
                 with self.s.lock:
+                    if a.get('selected_mode') == 'paused' and a.get('selected_code') == 'USER_PAUSED':
+                        self.fail('GATEWAY_PAUSED')
+                    out = self.s.host.selected_gateway('request', dict(identity=a['selected_identity'], request_ref=ref, metadata=event['metadata']))
                     if out['decision'] == 'approval_required':
                         meta = event['metadata']
                         public = dict(kind='network_effect', request_ref=ref, binding_sha256=out['binding_sha256'],
                             origin=out['origin'], role=meta['role'], method=meta['method'], body_sha256=meta['body_sha256'], body_bytes=meta['body_bytes'],
                             purpose='Review this %s request to %s' % (meta['method'], out['origin']),
-                            request_sha256=self.policy.digest(self.policy.canonical(meta)), no_contact=True)
+                            request_sha256=self.policy.digest(self.policy.canonical(meta)),url_sha256=self.policy.digest(meta['url']),no_contact=True)
                         if meta['current_action'] is not None:
                             public['current_action'] = {k: meta['current_action'][k] for k in ('ordinal', 'snapshot_ref', 'candidate_ref')}
                         a['selected_pending'][ref] = public
                         a['selected_mode'] = 'paused'
                         a['selected_code'] = out['code']
                     self.s._save()
-                if out['decision'] == 'allow':
-                    worker.fire('selected_request_decision', request_ref=ref, decision='allow', ticket=out['ticket'])
-                    with self.s.lock:
+                    if out['decision'] == 'allow':
+                        worker.fire('selected_request_decision', request_ref=ref, decision='allow', ticket=out['ticket'])
                         a['selected_pending'].pop(ref, None)
                         self.s._save()
             except Exception as e:
@@ -399,6 +406,7 @@ class SelectedBrowserSupervisor:
                         a.setdefault('selected_escalations', {})[ref] = dict(metadata=meta, state='blocked')
                     else:
                         a['selected_pending'].pop(ref, None)
+                    self._mark_blocked_request(a, ref, event.get('metadata', {}).get('current_action'))
                     self.s._save()
                 try:
                     worker.fire('selected_request_decision', request_ref=ref, decision='block', code=a['selected_code'])
@@ -409,6 +417,9 @@ class SelectedBrowserSupervisor:
         a = self._ref(params)
         if a.get('selected_mode') != 'agent':
             self.fail('BROWSER_OBSERVATION_PAUSED')
+        usage = self.s.host.selected_gateway('status',dict(identity=a['selected_identity']))
+        if usage['effects_sent'] != usage['auth_effects_acknowledged'] or usage['effects_uncertain']:
+            self.fail('AUTH_READBACK_REQUIRED')
         out = self._request(a, 'selected_observe')
         if not isinstance(out, dict) or not self.h.exact(out, ('snapshot_ref', 'observation', 'candidates', 'source_refs', 'input_targets', 'page')):
             self.fail('BROWSER_OBSERVATION_INVALID')
@@ -429,6 +440,8 @@ class SelectedBrowserSupervisor:
         with self.s.lock:
             if a.get('selected_mode') != 'agent' or any(r['state'] == 'started' for r in a['actions']):
                 self.fail('BROWSER_ACTION_PAUSED_OR_BUSY')
+            if any(r['state'] == 'uncertain' for r in a['actions']):
+                self.fail('BROWSER_ACTION_UNCERTAIN')
             if any(envelope[k] != params[k] for k in ('run_id', 'attempt_id', 'fence', 'policy_sha256')):
                 self.fail('BROWSER_ACTION_IDENTITY_MISMATCH')
             candidates = a.get('selected_candidates', [])
@@ -456,6 +469,75 @@ class SelectedBrowserSupervisor:
             self.actions[(a['attempt_id'], envelope['ordinal'])] = sent
         return dict(kind='pending', state='started', ordinal=envelope['ordinal'])
 
+    def _mark_blocked_request(self, a, ref, context):
+        if context is not None:
+            record = next((r for r in a['actions'] if r.get('context') == context), None)
+            if record and record['state'] == 'started':
+                refs = record.setdefault('blocked_request_refs', [])
+                if ref not in refs:
+                    refs.append(ref)
+
+    def _remember_discarded(self, a, refs):
+        if (not isinstance(refs, (list,tuple)) or len(refs) > MAX_DISCARDED_REFS or
+                any(not isinstance(ref,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',ref) for ref in refs)):
+            self.fail('BROWSER_PAUSE_PROOF_INVALID')
+        with self.s.lock:
+            previous = a.setdefault('selected_discarded_requests', [])
+            new = list(dict.fromkeys([*previous,*refs]))
+            if len(new) > MAX_DISCARDED_REFS:
+                self.fail('BROWSER_REQUEST_REFERENCE_LIMIT')
+            a['selected_discarded_requests'] = new
+            self.s._save()
+
+    def _guest_pause(self, a):
+        out = self._request(a, 'selected_pause')
+        if (not self.h.exact(out, ('paused','discarded_request_refs')) or out.get('paused') is not True or
+                not isinstance(out.get('discarded_request_refs'),list) or len(out['discarded_request_refs']) > 64):
+            self.fail('BROWSER_PAUSE_PROOF_INVALID')
+        self._remember_discarded(a, out['discarded_request_refs'])
+        return out
+
+    def _blocked_result(self, a, record, usage):
+        refs = record.get('blocked_request_refs', [])
+        if (not 1 <= len(refs) <= 64 or len(set(refs)) != len(refs) or
+                any(not isinstance(ref,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',ref) for ref in refs)):
+            self.fail('BROWSER_BLOCKED_ACTION_PROOF_INVALID')
+        self._remember_discarded(a, record['blocked_request_refs'])
+        proof = dict(kind='selected-browser-blocked-action', contract_version=CONTRACT,
+                     vm_uuid=self.h.VM_UUID, boot_id=a['boot_id'], workspace_id=a['workspace_id'],
+                     network_plan_sha256=a['network_plan_sha256'], original_fence=a['original_fence'],
+                     **{k:a[k] for k in ('run_id','attempt_id')},
+                     fence=a['selected_identity']['fence'], policy_sha256=a['selected_identity']['policy_sha256'],
+                     ordinal=record['ordinal'], envelope_sha256=record['envelope_sha256'],
+                     request_refs=record['blocked_request_refs'], no_effect_sent=True, replay_allowed=False,
+                     ledger_sha256=usage['ledger_sha256'], usage={k:usage[k] for k in ('requests','response_bytes')})
+        result = dict(kind='done', state='blocked', ordinal=record['ordinal'],
+                      code='BROWSER_OPERATION_BLOCKED_BEFORE_EFFECT',
+                      usage=dict(proof['usage'], artifact_bytes=0), usage_mode='cumulative',
+                      facts=[dict(code='BROWSER_OPERATION_BLOCKED_BEFORE_EFFECT', source_ref=None)],
+                      attestation=self._sign(proof))
+        record['state'], record['blocked_proof'] = 'blocked', result
+        self.s._save()
+        self.actions.pop((a['attempt_id'], record['ordinal']), None)
+        self.results[(a['attempt_id'], record['ordinal'])] = result
+        return result
+
+    def _settle_blocked_actions(self, a, refs):
+        records = [r for r in a['actions'] if r['state'] == 'started' and
+                   set(r.get('blocked_request_refs', ())) & set(refs)]
+        deadline = time.monotonic() + self.h.ACTION_SECONDS
+        for record in records:
+            sent = self.actions.get((a['attempt_id'], record['ordinal']))
+            if sent is None or not sent[1].wait(max(0, deadline - time.monotonic())):
+                self.fail('BROWSER_BLOCKED_ACTION_UNSETTLED')
+            usage = self.s.host.selected_gateway('status', dict(identity=a['selected_identity']))
+            with self.s.lock:
+                if (usage['inflight'] or usage['outstanding_requests'] or
+                        usage['effects_sent'] != record['usage_start']['effects_sent'] or
+                        usage['effects_uncertain'] != record['usage_start']['effects_uncertain']):
+                    self.fail('BROWSER_ACTION_UNCERTAIN')
+                self._blocked_result(a, record, usage)
+
     def poll_action(self, params):
         a = self._ref(params, ('ordinal',))
         if not self.h.safe_int(params['ordinal'], 1):
@@ -463,6 +545,8 @@ class SelectedBrowserSupervisor:
         record = next((r for r in a['actions'] if r['ordinal'] == params['ordinal']), None)
         if record is None:
             self.fail('UNKNOWN_ACTION')
+        if record.get('blocked_proof'):
+            return record['blocked_proof']
         sent = self.actions.get((a['attempt_id'], params['ordinal']))
         pending = self.pending({k:params[k] for k in ('run_id','attempt_id','fence','policy_sha256')})['pending']
         if pending:
@@ -471,7 +555,8 @@ class SelectedBrowserSupervisor:
                 return dict(kind='request_approval', request=request)
             return dict(kind='off_list', escalation={k:v for k,v in request.items() if k != 'kind'})
         if sent is None:
-            return self.results.get((a['attempt_id'], params['ordinal']), dict(kind='uncertain', state=record['state'], ordinal=params['ordinal']))
+            return self.results.get((a['attempt_id'], params['ordinal']), record.get('blocked_proof',
+                dict(kind='uncertain', state=record['state'], ordinal=params['ordinal'])))
         if not sent[1].is_set():
             return dict(kind='pending', state='started', ordinal=params['ordinal'])
         reply = sent[2].get('reply', {})
@@ -484,7 +569,17 @@ class SelectedBrowserSupervisor:
         with self.s.lock:
             # HTTP success and DOM click completion do not prove a site saved a
             # write. No generic readback can claim a business effect succeeded.
-            unverified_effect = current_usage['effects_sent'] > record['usage_start']['effects_sent']
+            sent_effect = current_usage['effects_sent'] > record['usage_start']['effects_sent']
+            local_dom_only = (isinstance(reply.get('result'),dict) and
+                reply['result'].get('effect') == 'unverified_until_gateway_and_site_readback')
+            # Local field/click completion is useful for preparing a form. It
+            # confirms no business effect. Explicit submit intent remains
+            # uncertain even if Chromium has emitted no attributable Fetch yet.
+            declared_unverified = record['action'] == 'submit'
+            if (record.get('blocked_request_refs') and not sent_effect and
+                    current_usage['effects_uncertain'] == record['usage_start']['effects_uncertain']):
+                return self._blocked_result(a, record, current_usage)
+            unverified_effect = sent_effect or declared_unverified
             uncertain = not reply.get('ok') or unverified_effect or current_usage['state'] != 'running'
             record['state'] = 'uncertain' if uncertain else 'completed'
             record['result_sha256'] = self.policy.digest(self.policy.canonical(reply.get('result')))
@@ -492,7 +587,8 @@ class SelectedBrowserSupervisor:
             self.actions.pop((a['attempt_id'], params['ordinal']), None)
             result = dict(kind='uncertain' if uncertain else 'done', state=record['state'], ordinal=params['ordinal'],
                           result=reply.get('result'), code='SITE_EFFECT_READBACK_REQUIRED' if unverified_effect else reply.get('error'), usage=usage,usage_mode='cumulative',
-                          facts=[dict(code='BROWSER_OPERATION_UNCERTAIN' if uncertain else 'BROWSER_OPERATION_COMPLETED', source_ref=None)])
+                          facts=[dict(code='BROWSER_OPERATION_UNCERTAIN' if uncertain else
+                              'BROWSER_LOCAL_OPERATION_COMPLETED' if local_dom_only else 'BROWSER_OPERATION_COMPLETED', source_ref=None)])
             self.results[(a['attempt_id'], params['ordinal'])] = result
         return result
 
@@ -503,7 +599,76 @@ class SelectedBrowserSupervisor:
                     if v.get('kind') in ('network_effect', 'off_list_destination')],
                     usage={k:usage[k] for k in ('requests','response_bytes')},
                     cumulativeusage={k:usage[k] for k in ('requests','response_bytes')},
-                    inflight=usage['inflight'], effects_sent=usage['effects_sent'], effects_uncertain=usage['effects_uncertain'])
+                    inflight=usage['inflight'], effects_sent=usage['effects_sent'], effects_uncertain=usage['effects_uncertain'],
+                    auth_effects_acknowledged=usage['auth_effects_acknowledged'])
+
+    def _auth_controller(self,a,controller_id,session_id,conn):
+        if (not isinstance(controller_id,str) or not self.h.UUID.fullmatch(controller_id) or
+                not isinstance(session_id,str) or not self.h.UUID.fullmatch(session_id) or
+                not isinstance(conn,str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,128}',conn) or
+                not a.get('manual_auth') or a.get('selected_controller') != controller_id or
+                a.get('selected_controller_session') != session_id or a.get('selected_live_conn') != conn or
+                a.get('selected_mode') not in ('human','paused') or
+                self.live_viewers.get((a['attempt_id'],conn)) != controller_id or
+                self.live_sessions.get((a['attempt_id'],conn)) != session_id or
+                conn not in self.s.workers[a['attempt_id']].live_sinks):
+            self.fail('AUTH_READBACK_CONTROLLER_MISMATCH')
+
+    def _auth_sign(self,a,kind,out,inventory=False):
+        proof = dict(kind=kind,contract_version=CONTRACT,vm_uuid=self.h.VM_UUID,boot_id=a['boot_id'],
+            workspace_id=a['workspace_id'],network_plan_sha256=a['network_plan_sha256'],original_fence=a['original_fence'],**out)
+        if inventory:
+            proof['replay_allowed'] = False
+            if len(self.h.canonical(proof)) > 196000:
+                self.fail('AUTH_INVENTORY_PROOF_LIMIT')
+        return self._sign(proof)
+
+    def auth_inventory(self,params):
+        a = self._ref(params,('controller_id','session_id','conn'))
+        with self.s.lock:
+            self._auth_controller(a,params['controller_id'],params['session_id'],params['conn'])
+            inventory = self.s.host.selected_gateway('auth_inventory',dict(identity=a['selected_identity']))
+            if inventory['inflight'] or inventory['pending_count'] or inventory['effects_uncertain']:
+                self.fail('AUTH_READBACK_NETWORK_UNSETTLED')
+            out = dict(schema='selected-browser-auth-inventory.v1',
+                **{k:params[k] for k in ('run_id','attempt_id','fence','policy_sha256','controller_id','session_id')},
+                viewer_conn_sha256=self.policy.digest(params['conn']),**inventory)
+            out['attestation'] = self._auth_sign(a,'selected-browser-auth-inventory',out,inventory=True)
+            return out
+
+    def confirm_authentication(self,params):
+        a = self._ref(params,('packet','conn'))
+        packet = params['packet']
+        if (not isinstance(packet,dict) or any(packet.get(k) != params[k] for k in ('run_id','attempt_id','fence','policy_sha256')) or
+                not isinstance(params['conn'],str) or
+                packet.get('viewer_conn_sha256') != self.policy.digest(params['conn'])):
+            self.fail('AUTH_CONFIRMATION_INVALID')
+        pin = packet.get('confirmation_ref')
+        if (not self.h.exact(pin,('id','sha256')) or not isinstance(pin['id'],str) or
+                not self.h.UUID.fullmatch(pin['id']) or not isinstance(pin['sha256'],str) or
+                not self.h.HEX64.fullmatch(pin['sha256'])):
+            self.fail('AUTH_CONFIRMATION_INVALID')
+        with self.s.lock:
+            self._auth_controller(a,packet.get('controller_id'),packet.get('session_id'),params['conn'])
+            # Persist the admission pin before the gateway can consume authority.
+            # A lost reply can retrieve only this same signed request's receipt;
+            # it cannot acknowledge a different set or replay any network effect.
+            digest = self.policy.digest(self.policy.canonical(packet))
+            prior = a.get('selected_auth_confirmations',{}).get(pin['id'])
+            if prior:
+                if prior['request_sha256'] != digest:
+                    self.fail('AUTH_CONFIRMATION_REPLAY')
+                return prior
+            a['selected_auth_confirmation_pending_sha256'] = digest
+            self.s._save()
+            out = self.s.host.selected_gateway('auth_confirm',dict(identity=a['selected_identity'],packet=packet))
+            self._auth_controller(a,packet['controller_id'],packet['session_id'],params['conn'])
+            out['attestation'] = self._auth_sign(a,'selected-browser-auth-confirmation',out)
+            a.setdefault('selected_auth_confirmations',{})[packet['confirmation_ref']['id']] = out
+            a['selected_auth_effects_acknowledged'] = out['auth_effects_acknowledged']
+            a.pop('selected_auth_confirmation_pending_sha256',None)
+            self.s._save()
+            return out
 
     def approve_request(self, params):
         a = self._ref(params, ('request_ref', 'grant'))
@@ -515,6 +680,66 @@ class SelectedBrowserSupervisor:
             self.s._save()
         self.s.workers[a['attempt_id']].fire('selected_request_decision', request_ref=params['request_ref'], decision='allow', ticket=out['ticket'])
         return dict(approved=True, request_ref=params['request_ref'])
+
+    def _block_held_requests(self, a, code):
+        worker = self.s.workers.get(a['attempt_id'])
+        with self.s.lock:
+            refs = tuple(a['selected_pending'])
+            for ref in refs:
+                p = a['selected_pending'][ref]
+                context = p.get('current_action')
+                if context is not None:
+                    record = next((r for r in a['actions'] if r['ordinal'] == context['ordinal']), None)
+                    if record:
+                        context = record.get('context')
+                self._mark_blocked_request(a, ref, context)
+            a['selected_mode'], a['selected_code'] = 'paused', code
+            a['selected_pending'] = {}
+            self.s._save()
+        self._remember_discarded(a, refs)
+        if worker is not None:
+            for ref in refs:
+                worker.fire('selected_request_decision', request_ref=ref, decision='block', code=code)
+        return refs
+
+    def deny_request(self, params):
+        a = self._ref(params, ('request_ref',))
+        ref = params['request_ref']
+        if not isinstance(ref, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', ref):
+            self.fail('INVALID_REQUEST')
+        with self.s.lock:
+            prior = a.get('selected_denials', {}).get(ref)
+            if prior:
+                if a.get('selected_mode') != ('human' if prior['manual_auth'] else 'paused'):
+                    self.fail('REQUEST_DENIAL_STALE')
+                return prior
+            if a['selected_pending'].get(ref, {}).get('kind') != 'network_effect':
+                self.fail('REQUEST_DENIAL_STALE')
+        proof = self.s.host.selected_gateway('deny', dict(identity=a['selected_identity'], request_ref=ref))
+        refs = self._block_held_requests(a, 'USER_PAUSED')
+        self._guest_pause(a)
+        self._settle_blocked_actions(a, refs)
+        usage = self.s.host.selected_gateway('status', dict(identity=a['selected_identity']))
+        if usage['inflight'] or usage['outstanding_requests'] or usage['effects_uncertain']:
+            self.fail('REQUEST_DENIAL_UNVERIFIED')
+        manual = a.get('manual_auth') is True and bool(a.get('selected_controller'))
+        if manual:
+            self.s.host.selected_gateway('resume', dict(identity=a['selected_identity']))
+            self._request(a, 'selected_resume')
+            with self.s.lock:
+                a['selected_mode'], a['selected_code'] = 'human', None
+                self.s._save()
+        out = dict(denied=True, paused=not manual, state='human_control' if manual else 'paused',
+                   manual_auth=manual, no_contact=True, request_ref=ref,
+                   **{k:params[k] for k in ('run_id','attempt_id','fence','policy_sha256')})
+        out['attestation'] = self._sign(dict(kind='selected-browser-request-denial', contract_version=CONTRACT,
+                                            vm_uuid=self.h.VM_UUID, boot_id=a['boot_id'], workspace_id=a['workspace_id'],
+                                            network_plan_sha256=a['network_plan_sha256'], original_fence=a['original_fence'], **out,
+                                            ledger_sha256=proof['ledger_sha256'], replay_allowed=False))
+        with self.s.lock:
+            a.setdefault('selected_denials', {})[ref] = out
+            self.s._save()
+        return out
 
     def grant_destination(self, params):
         a = self._ref(params, ('grant', 'destination'))
@@ -543,6 +768,11 @@ class SelectedBrowserSupervisor:
         if ((destination['roles'] == ['resource'] and destination['session_headers'] != 'omit') or
                 (parts['scheme'] == 'http' and ('authentication' in destination['roles'] or destination['session_headers'] != 'omit'))):
             self.fail('DESTINATION_GRANT_INVALID')
+        self._settle_blocked_actions(a, [p['request_ref'] for p in matching])
+        if any(r['state'] == 'started' for r in a['actions']):
+            self.fail('BROWSER_BLOCKED_ACTION_UNSETTLED')
+        if grant['expires_at'] <= self.s.clock():
+            self.fail('DESTINATION_GRANT_INVALID')
         scoped = copy.deepcopy(c)
         scoped['destinations']['allowed_origins'] = [destination]
         target = self._network_plan(scoped, marker, self.s.state['runs'][a['run_id']]['deadline'])['targets'][0]
@@ -564,6 +794,10 @@ class SelectedBrowserSupervisor:
         a = self._ref(params, ('active',))
         if type(params['active']) is not bool or (params['active'] and a.get('selected_mode') != 'human'):
             self.fail('AUTH_REQUIRES_TAKEOVER')
+        if not params['active']:
+            usage = self.s.host.selected_gateway('status',dict(identity=a['selected_identity']))
+            if usage['effects_sent'] != usage['auth_effects_acknowledged'] or usage['effects_uncertain']:
+                self.fail('AUTH_READBACK_REQUIRED')
         out = self._request(a, 'selected_auth', active=params['active'])
         with self.s.lock:
             a['manual_auth'] = params['active']
@@ -575,15 +809,10 @@ class SelectedBrowserSupervisor:
     def pause(self, params):
         a = self._ref(params)
         self.s.host.selected_gateway('pause', dict(identity=a['selected_identity']))
-        worker = self.s.workers.get(a['attempt_id'])
-        if worker is not None:
-            for ref in tuple(a['selected_pending']):
-                worker.fire('selected_request_decision', request_ref=ref, decision='block', code='USER_PAUSED')
-        with self.s.lock:
-            a['selected_mode'], a['selected_code'] = 'paused', 'USER_PAUSED'
-            a['selected_pending'] = {}
-            self.s._save()
-        return self._request(a, 'selected_pause')
+        refs = self._block_held_requests(a, 'USER_PAUSED')
+        out = self._guest_pause(a)
+        self._settle_blocked_actions(a, refs)
+        return out
 
     def resume(self, params):
         a = self._ref(params)
@@ -595,18 +824,21 @@ class SelectedBrowserSupervisor:
         return out
 
     def takeover(self, params):
-        a = self._ref(params, ('controller_id', 'manual_auth', 'conn'))
+        a = self._ref(params, ('controller_id', 'session_id', 'manual_auth', 'conn'))
         if (not isinstance(params['controller_id'], str) or not self.h.UUID.fullmatch(params['controller_id']) or
+                not isinstance(params['session_id'],str) or not self.h.UUID.fullmatch(params['session_id']) or
                 params['manual_auth'] is not True or a.get('selected_controller') or
                 any(r['state'] == 'started' for r in a['actions'])):
             self.fail('TAKEOVER_UNAVAILABLE')
         conn = params['conn']
-        if conn is not None and self.live_viewers.get((a['attempt_id'], conn)) != params['controller_id']:
+        if conn is not None and (self.live_viewers.get((a['attempt_id'], conn)) != params['controller_id'] or
+                self.live_sessions.get((a['attempt_id'],conn)) != params['session_id']):
             self.fail('LIVE_CONN_UNKNOWN')
         with self.s.lock:
             a['state'] = 'human'
             a['selected_mode'] = 'human'
             a['selected_controller'] = params['controller_id']
+            a['selected_controller_session'] = params['session_id']
             a['dashboard_takeover'] = dict(state='giving', at=self.h.stamp(self.s.clock()))
             self.s._save()
         worker = self.s.workers.get(a['attempt_id'])
@@ -628,11 +860,13 @@ class SelectedBrowserSupervisor:
         # Block old pending requests; takeover must not replay an abandoned
         # request or silently consume a model action's old grant.
         self.s.host.selected_gateway('pause', dict(identity=a['selected_identity']))
-        self._request(a, 'selected_pause')
+        self._block_held_requests(a, 'USER_PAUSED')
+        self._guest_pause(a)
         self.s.host.selected_gateway('resume', dict(identity=a['selected_identity']))
         self._request(a, 'selected_resume')
         with self.s.lock:
             a['manual_auth'] = True
+            a['selected_mode'], a['selected_code'] = 'human', None
             a['selected_pending'] = {}
             a.pop('selected_snapshot', None)
             a.pop('selected_candidates', None)
@@ -660,16 +894,26 @@ class SelectedBrowserSupervisor:
         a = self._ref(params, ('controller_id',))
         if params['controller_id'] != a.get('selected_controller'):
             self.fail('NOT_TAKEN_OVER')
+        status = self.s.host.selected_gateway('status',dict(identity=a['selected_identity']))
+        if (status['effects_sent'] != status['auth_effects_acknowledged'] or status['effects_uncertain'] or
+                status['inflight'] or status['outstanding_requests']):
+            self.fail('AUTH_READBACK_REQUIRED')
+        self.s.host.selected_gateway('pause', dict(identity=a['selected_identity']))
+        self._block_held_requests(a, 'USER_PAUSED')
         out = self._request(a, 'live_release') if a.get('selected_live_conn') else dict(inputs=dict(key=0, click=0, scroll=0))
         self._native_inputs(a,out)
+        self._guest_pause(a)
+        status = self.s.host.selected_gateway('status',dict(identity=a['selected_identity']))
+        if (status['effects_sent'] != status['auth_effects_acknowledged'] or status['effects_uncertain'] or
+                status['inflight'] or status['outstanding_requests']):
+            self.fail('AUTH_READBACK_REQUIRED')
         self._request(a, 'selected_auth', active=False)
-        self.s.host.selected_gateway('pause', dict(identity=a['selected_identity']))
-        self._request(a, 'selected_pause')
         # Continuation must observe fresh state after human input.
         with self.s.lock:
             a['state'], a['selected_mode'], a['selected_code'] = 'running', 'paused', 'USER_PAUSED'
             a['manual_auth'] = False
             a.pop('selected_controller', None)
+            a.pop('selected_controller_session',None)
             a.pop('selected_live_conn', None)
             a['dashboard_takeover']['state'] = 'released'
             a.pop('selected_snapshot', None)
@@ -689,16 +933,19 @@ class SelectedBrowserSupervisor:
             self.s._save()
 
     def live(self, params):
-        a = self._ref(params, ('viewer_id', 'controller_id', 'manual_auth'))
+        a = self._ref(params, ('viewer_id', 'session_id', 'controller_id', 'manual_auth'))
         if (not isinstance(params['viewer_id'], str) or not self.h.UUID.fullmatch(params['viewer_id']) or
+                not isinstance(params['session_id'],str) or not self.h.UUID.fullmatch(params['session_id']) or
                 type(params['manual_auth']) is not bool or params['manual_auth'] != bool(a.get('manual_auth')) or
                 (params['controller_id'] is not None and params['controller_id'] != params['viewer_id'])):
             self.fail('LIVE_IDENTITY_INVALID')
-        if a.get('manual_auth') and params['viewer_id'] != a.get('selected_controller'):
+        if a.get('manual_auth') and (params['viewer_id'] != a.get('selected_controller') or
+                params['session_id'] != a.get('selected_controller_session')):
             self.fail('MANUAL_AUTH_PRIVATE')
         stream = self.s.live_open({k: params[k] for k in ('run_id', 'attempt_id', 'fence')})
         self.controllers[(a['attempt_id'], params['viewer_id'])] = stream.conn
         self.live_viewers[(a['attempt_id'], stream.conn)] = params['viewer_id']
+        self.live_sessions[(a['attempt_id'],stream.conn)] = params['session_id']
         if a.get('selected_controller') == params['viewer_id']:
             self._give_control(a, stream.conn)
         return stream
@@ -823,6 +1070,27 @@ class SelectedBrowserSupervisor:
         if a.get('gateway_registered') and not a.get('gateway_released'):
             if not a.get('gateway_revoked'):
                 self.fail('TEARDOWN_UNVERIFIED')
+            # Authority is already revoked and the guest is closed. Capture
+            # actual settled counters before releasing the registry/ledger;
+            # socket closure itself does not confirm any website effect.
+            status = self.s.host.selected_gateway('final_status',dict(identity=a['selected_identity']))
+            fields = ('requests','response_bytes','effects_sent','effects_uncertain','auth_effects_acknowledged','inflight')
+            if (status.get('state') != 'revoked' or any(not self.h.safe_int(status.get(k)) for k in fields) or
+                    not self.h.safe_int(status.get('outstanding_requests')) or
+                    status['auth_effects_acknowledged'] > status['effects_sent'] or
+                    status['effects_uncertain'] > status['effects_sent'] or
+                    not isinstance(status.get('ledger_sha256'),str) or not self.h.HEX64.fullmatch(status['ledger_sha256'])):
+                self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+            a['selected_final_network'] = {k:status[k] for k in fields}
+            a['selected_final_network'].update(pending_count=status['outstanding_requests'],ledger_sha256=status['ledger_sha256'])
+            a['gateway_ledger_sha256'] = status['ledger_sha256']
+            self.s._save()
+            if status['inflight'] or status['outstanding_requests']:
+                # Sign known final meters with network closure explicitly
+                # false. Keep the latch/ledger so a fresh cleanup retry can
+                # drain and attest later bytes without restarting a browser.
+                self._forget_attempt_memory(a)
+                return False
             # Read the effective installed fence again after guest cleanup,
             # before releasing the durable selected-mode latch.
             self.s.host.light_boundary(a['qemu_pid'], a['fence_fingerprint'])
@@ -830,10 +1098,24 @@ class SelectedBrowserSupervisor:
                 cleanup=dict(descendants_gone=descendants, workspace_gone=workspace, fence_still_installed=True)))
             a['gateway_released'] = True
             self.s._save()
+        if not a.get('gateway_registered'):
+            # Registration may have failed after the proxy installed its latch.
+            # An unregistered flag alone is insufficient proof of no authority.
+            health = self.s.host.selected_gateway('health',{})
+            if health.get('active') is not False:
+                self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+            a['selected_final_network'] = dict(requests=0,response_bytes=0,effects_sent=0,effects_uncertain=0,
+                auth_effects_acknowledged=0,inflight=0,pending_count=0,ledger_sha256='0'*64)
+            a['gateway_ledger_sha256'] = '0'*64
+            self.s._save()
+        self._forget_attempt_memory(a)
+        return True
+
+    def _forget_attempt_memory(self,a):
         # Private artifact bytes live only in in-memory transport results until
         # staged into F1. They are not a resumable post-cleanup session cache.
         attempt_id = a['attempt_id']
-        for mapping in (self.actions,self.results,self.controllers,self.live_viewers):
+        for mapping in (self.actions,self.results,self.controllers,self.live_viewers,self.live_sessions):
             for key in tuple(mapping):
                 if key[0] == attempt_id:
                     mapping.pop(key,None)
@@ -841,8 +1123,11 @@ class SelectedBrowserSupervisor:
         self.pumps.pop(attempt_id,None)
 
     def receipt(self, a, reason, evidence, descendants, workspace):
+        if not a.get('selected_final_network'):
+            self.fail('TEARDOWN_NETWORK_UNVERIFIED')
         out = dict(contract_version=CONTRACT, run_id=a['run_id'], attempt_id=a['attempt_id'], fence=a['fence'],
-                   policy_sha256=a['policy_sha256'], closed=dict(browser=descendants, network=bool(a.get('gateway_released') or not a.get('gateway_registered')),
+                   policy_sha256=a['policy_sha256'], final_network=a['selected_final_network'],
+                   closed=dict(browser=descendants, network=bool(a.get('gateway_released') or not a.get('gateway_registered')),
                                                                 session=workspace, temporary_files=workspace))
         payload = dict(kind='selected-browser-teardown', **out, original_fence=a['original_fence'], reason=reason,
                        vm_uuid=self.h.VM_UUID, boot_id=a.get('boot_id'), workspace_id=a.get('workspace_id'),
@@ -870,6 +1155,10 @@ class SelectedBrowserSupervisor:
         ref = dict(run_id=params.get('run_id'), attempt_id=params.get('attempt_id'), fence=params.get('fence'),
                    policy_sha256=params.get('policy_hash'))
         a = self._ref(ref, allow_stopped=params['purpose'] == 'report')
+        if any(record['state']=='uncertain' for record in a['actions']):
+            self.fail('BROWSER_MODEL_ACTION_UNCERTAIN')
+        if any(record['state']=='started' for record in a['actions']):
+            self.fail('BROWSER_MODEL_ACTION_BUSY')
         run = self.s.state['runs'][a['run_id']]
         if (params.get('project_id') != run['project_id'] or params.get('project_limits_revision') != run['project_limits_revision'] or
                 params.get('guide_hash') != run['guide_hash'] or params.get('guide_version_id') != run['guide_version_id'] or
@@ -882,6 +1171,14 @@ class SelectedBrowserSupervisor:
                            receipt.get('closed') == dict(browser=True, network=True, session=True, temporary_files=True))
         if not terminal_report and (a.get('selected_mode') != 'agent' or a['state'] != 'running' or a.get('selected_pending')):
             self.fail('BROWSER_MODEL_INSPECTION_PAUSED')
+        if not terminal_report:
+            network = self.s.host.selected_gateway('status', dict(identity=a['selected_identity']))
+            if (network.get('state') != 'running' or
+                    any(not self.h.safe_int(network.get(k), 0) for k in
+                        ('inflight','outstanding_requests','effects_sent','effects_uncertain','auth_effects_acknowledged')) or
+                    any(network[k] for k in ('inflight','outstanding_requests','effects_uncertain')) or
+                    network['effects_sent'] != network['auth_effects_acknowledged']):
+                self.fail('BROWSER_MODEL_NETWORK_UNSETTLED')
         if not terminal_report and params.get('input', {}).get('snapshot_ref') != a.get('selected_snapshot'):
             self.fail('BROWSER_MODEL_SNAPSHOT_STALE')
         c = self.policy.strict_json(a['configuration_json'])

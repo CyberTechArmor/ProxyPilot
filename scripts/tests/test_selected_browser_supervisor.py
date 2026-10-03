@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ GUIDE = '2e5b6dfa-8b4b-4b21-a3f9-9a04b9fd1683'
 SNAPSHOT = '04eaab58-d66e-4a4a-8c1d-7f5308020ea6'
 CANDIDATE = 'f5fe4c2c-712d-4513-a7d9-08c7c56e4e24'
 APPROVAL = '1b12f9f3-e9e8-4cbe-8993-70b6317a2f36'
+SESSION = '91879474-4a50-4cf0-a22c-e739687442e1'
 
 FAKE_SELECTED = r'''
 import hashlib,json,sys,os
@@ -38,9 +40,10 @@ for raw in sys.stdin:
  if name=='selected_action':
   env=v['envelope'];context={k:env[k] for k in ('ordinal','snapshot_ref','candidate_ref','approval_ref')}
   m={'url':'https://selected.example/save','method':'POST','body_sha256':hashlib.sha256(b'fixture').hexdigest(),'body_bytes':7,'resource_type':'fetch','role':'resource','run_id':run,'attempt_id':attempt,'fence':fence,'policy_sha256':policy,'current_action':context}
-  print(json.dumps({'event':'selected_request','request_ref':'held_request','metadata':m}),flush=True);pending=v;continue
+  print(json.dumps({'event':'selected_request','request_ref':'held_request_'+str(env['ordinal']),'metadata':m}),flush=True);pending=v;continue
  if name=='selected_request_decision' and pending:
   print(json.dumps({'id':pending['id'],'ok':True,'result':{'kind':'navigate','status':'done','untrusted':True}}),flush=True);pending=None
+ if name=='selected_pause':reply['result']={'paused':True,'discarded_request_refs':[]}
  if name=='live_open':reply['result']={}
  if name=='live_give':reply['result']={'password_fields_empty':True,'uncontrolled_inputs':{'key':0,'click':0,'scroll':0}}
  if name=='live_release':reply['result']={'inputs':{'key':0,'click':0,'scroll':0}}
@@ -56,6 +59,7 @@ class SelectedHost(helpers.FakeHost):
         self.trace = []
         self.marker_missing = False
         self.marker_tamper = None
+        self.guest_program = FAKE_SELECTED
         self.gateway_module = s._module('pp_selected_test_gateway', 'selected_browser_gateway.py')
         self.registry = self.gateway_module.SelectedGatewayRegistry(root / 'gateway', require_root=False, clock=clock)
 
@@ -93,7 +97,7 @@ class SelectedHost(helpers.FakeHost):
         self.trace.append('spawn')
         self.spawns += 1
         self.props[unit] = properties
-        process = subprocess.Popen([sys.executable, '-c', FAKE_SELECTED, json.dumps(config)], stdin=subprocess.PIPE,
+        process = subprocess.Popen([sys.executable, '-c', self.guest_program, json.dumps(config)], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
         self.units[unit] = process
         return process
@@ -277,8 +281,104 @@ class SelectedSupervisorTests(unittest.TestCase):
         signed=self.decode(receipt['attestation'])
         self.assertEqual(signed['original_fence'],1)
         self.assertEqual(signed['kind'],'selected-browser-teardown')
+        self.assertEqual(signed['final_network'],receipt['final_network'])
+        self.assertEqual(receipt['final_network'],dict(requests=0,response_bytes=0,effects_sent=0,effects_uncertain=0,
+            auth_effects_acknowledged=0,inflight=0,pending_count=0,ledger_sha256=signed['gateway_ledger_sha256']))
+        self.assertLess(self.host.trace.index('stop_unit'),self.host.trace.index('gateway:final_status'))
+        self.assertLess(self.host.trace.index('gateway:final_status'),self.host.trace.index('gateway:release'))
         self.assertFalse(self.host.registry.selected()[0])
         self.assertEqual(self.runtime.stop(dict(self.ref,fence=2,reason='cancelled')),receipt)
+
+    def test_cleanup_signs_write_after_last_pending_without_claiming_website_success(self):
+        self.runtime.launch(self.spec)
+        stale=self.runtime.pending(self.ref)
+        self.assertEqual(stale['effects_sent'],0)
+        original=self.host.selected_gateway
+        def late_send(method,params):
+            if method=='revoke':
+                self.send_auth_wire_fixture('late-business',role='resource')
+            return original(method,params)
+        self.host.selected_gateway=late_send
+        receipt=self.runtime.stop(dict(self.ref,fence=2,reason='completed'))
+        final=receipt['final_network'];proof=self.decode(receipt['attestation'])
+        self.assertEqual((final['requests'],final['effects_sent'],final['auth_effects_acknowledged']),(1,1,0))
+        self.assertEqual(final['response_bytes'],len(b'fixture'))
+        self.assertEqual((final['inflight'],final['pending_count']),(0,0))
+        self.assertEqual(proof['final_network'],final)
+        self.assertEqual(receipt['closed'],dict(browser=True,network=True,session=True,temporary_files=True))
+        self.assertNotIn('website_success',proof)
+        self.assertEqual(self.runtime.stop(dict(self.ref,fence=2,reason='completed')),receipt)
+
+    def test_partial_cleanup_preserves_real_meters_and_fresh_retry_closes_without_replay(self):
+        self.runtime.launch(self.spec)
+        gate=self.host.registry.gateway
+        gate.requests=1;gate.effects_sent=1;gate.inflight=1
+        first=self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))
+        proof=self.decode(first['attestation'])
+        self.assertEqual(first['closed'],dict(browser=True,network=False,session=True,temporary_files=True))
+        self.assertEqual(proof['final_network'],first['final_network'])
+        self.assertEqual(first['final_network']['inflight'],1)
+        self.assertTrue(self.host.registry.latch_path.exists())
+        self.assertEqual(self.supervisor.state['attempts'][helpers.ATTEMPT]['state'],'stopping')
+        self.assertNotIn(helpers.ATTEMPT,self.supervisor.workers)
+        self.assertNotIn('gateway:release',self.host.trace)
+        # Fixture of the already revoked response thread unwinding. No browser
+        # is started, no new grant is issued and no request is replayed.
+        gate.response_bytes=17;gate.effects_uncertain=1;gate.inflight=0
+        gate._audit('request_uncertain',dict(request_ref='original',code='GATEWAY_REVOKED',sent=True,replay_allowed=False))
+        second=self.runtime.stop(dict(self.ref,fence=3,reason='cancelled'))
+        self.assertEqual(second['fence'],3)
+        self.assertEqual(second['closed'],dict(browser=True,network=True,session=True,temporary_files=True))
+        self.assertEqual((second['final_network']['response_bytes'],second['final_network']['effects_uncertain']),(17,1))
+        self.assertNotEqual(first['attestation'],second['attestation'])
+        self.assertEqual(self.host.spawns,1);self.assertFalse(self.host.registry.selected()[0])
+        self.assertEqual(self.runtime.stop(dict(self.ref,fence=3,reason='cancelled')),second)
+
+    def test_explicit_submit_cannot_complete_or_admit_next_action_or_model_without_wire_send(self):
+        wire="print(json.dumps({'event':'selected_request','request_ref':'held_request_'+str(env['ordinal']),'metadata':m}),flush=True);pending=v;continue"
+        self.host.guest_program=FAKE_SELECTED.replace(wire,"reply['result']={'effect':'unverified_until_gateway_and_site_readback'};print(json.dumps(reply),flush=True);continue")
+        self.host.guest_program=self.host.guest_program.replace("op={'kind':'navigate','destination_id':'site','url':'https://selected.example/'}",
+            "op={'kind':'submit','form_ref':'reviewed_form','field_set_sha256':'b'*64}")
+        self.host.guest_program=self.host.guest_program.replace("'effect':'read','label':'Open selected site'","'effect':'external_change','label':'Submit reviewed form'")
+        self.runtime.launch(self.spec)
+        observation=self.runtime.observe(self.ref);candidate=observation['candidates'][0]
+        envelope=dict(schema='proxypilot.browser-action.proposal.v1',**self.ref,ordinal=1,
+            snapshot_ref=observation['snapshot_ref'],candidate_ref=candidate['candidate_ref'],
+            approval_ref=dict(id=APPROVAL,sha256='d'*64),operation=candidate['operation'])
+        self.runtime.action(dict(self.ref,envelope=envelope))
+        sent=self.runtime.actions[(helpers.ATTEMPT,1)]
+        # Fixture the DOM completion before a delayed/native Fetch was emitted.
+        # No gateway request/effect exists; the worker still declares unverified.
+        self.assertTrue(sent[1].wait(2))
+        request=dict(purpose='decision',project_id=PROJECT,project_limits_revision=1,guide_version_id=GUIDE,
+            guide_hash='c'*64,consent_hash='d'*64,run_id=helpers.RUN,attempt_id=helpers.ATTEMPT,
+            fence=1,policy_hash=self.ref['policy_sha256'],input=dict(snapshot_ref=observation['snapshot_ref']))
+        self.assertCode('BROWSER_MODEL_ACTION_BUSY',self.runtime._model_guard,request)
+        result=self.runtime.poll_action(dict(self.ref,ordinal=1))
+        self.assertEqual(result['kind'],'uncertain');self.assertEqual(result['code'],'SITE_EFFECT_READBACK_REQUIRED')
+        self.assertEqual(result['usage']['requests'],0)
+        self.assertCode('BROWSER_ACTION_UNCERTAIN',self.runtime.action,dict(self.ref,envelope=dict(envelope,ordinal=2)))
+        self.assertCode('BROWSER_MODEL_ACTION_UNCERTAIN',self.runtime._model_guard,request)
+
+    def test_sequential_local_dom_primitives_retain_unverified_effect_without_business_success(self):
+        wire="print(json.dumps({'event':'selected_request','request_ref':'held_request_'+str(env['ordinal']),'metadata':m}),flush=True);pending=v;continue"
+        self.host.guest_program=FAKE_SELECTED.replace(wire,"reply['result']={'kind':'click','status':'done','effect':'unverified_until_gateway_and_site_readback'};print(json.dumps(reply),flush=True);continue")
+        self.host.guest_program=self.host.guest_program.replace("op={'kind':'navigate','destination_id':'site','url':'https://selected.example/'}",
+            "op={'kind':'click','element_ref':'reviewed_button'}")
+        self.host.guest_program=self.host.guest_program.replace("'effect':'read','label':'Open selected site'","'effect':'external_change','label':'Click reviewed button'")
+        self.runtime.launch(self.spec)
+        for ordinal in (1,2):
+            observed=self.runtime.observe(self.ref);candidate=observed['candidates'][0]
+            envelope=dict(schema='proxypilot.browser-action.proposal.v1',**self.ref,ordinal=ordinal,
+                snapshot_ref=observed['snapshot_ref'],candidate_ref=candidate['candidate_ref'],
+                approval_ref=dict(id=APPROVAL,sha256='d'*64),operation=candidate['operation'])
+            self.runtime.action(dict(self.ref,envelope=envelope))
+            self.assertTrue(self.runtime.actions[(helpers.ATTEMPT,ordinal)][1].wait(2))
+            result=self.runtime.poll_action(dict(self.ref,ordinal=ordinal))
+            self.assertEqual(result['kind'],'done');self.assertEqual(result['usage']['requests'],0)
+            self.assertEqual(result['facts'],[dict(code='BROWSER_LOCAL_OPERATION_COMPLETED',source_ref=None)])
+            self.assertEqual(result['result']['effect'],'unverified_until_gateway_and_site_readback')
+        self.assertEqual(self.host.registry.gateway.effects_sent,0)
 
     def test_legacy_method_cannot_bypass_selected_policy_privacy(self):
         self.runtime.launch(self.spec)
@@ -287,13 +387,13 @@ class SelectedSupervisorTests(unittest.TestCase):
 
     def test_manual_auth_requires_controller_closes_viewers_blocks_model_and_capture(self):
         self.runtime.launch(self.spec)
-        self.runtime.takeover(dict(self.ref,controller_id=PROJECT,manual_auth=True,conn=None))
+        self.runtime.takeover(dict(self.ref,controller_id=PROJECT,session_id=SESSION,manual_auth=True,conn=None))
         a=self.supervisor.state['attempts'][helpers.ATTEMPT]
         self.assertTrue(a['manual_auth'])
         self.assertEqual(a['selected_mode'],'human')
         self.assertCode('MANUAL_AUTH_CAPTURE_DISABLED',self.runtime.view,self.ref)
         self.assertCode('BROWSER_OBSERVATION_PAUSED',self.runtime.observe,self.ref)
-        self.assertCode('MANUAL_AUTH_PRIVATE',self.runtime.live,dict(self.ref,viewer_id=GUIDE,controller_id=None,manual_auth=True))
+        self.assertCode('MANUAL_AUTH_PRIVATE',self.runtime.live,dict(self.ref,viewer_id=GUIDE,session_id=SESSION,controller_id=None,manual_auth=True))
         self.assertCode('NOT_TAKEN_OVER',self.runtime.release,dict(self.ref,controller_id=GUIDE))
         self.runtime.release(dict(self.ref,controller_id=PROJECT))
         self.assertFalse(a['manual_auth'])
@@ -310,11 +410,12 @@ class SelectedSupervisorTests(unittest.TestCase):
         queues={conn:__import__('queue').Queue() for conn in (owner,old_owner,spectator)}
         worker.live_sinks.update(queues)
         for conn in (owner,old_owner):self.runtime.live_viewers[(helpers.ATTEMPT,conn)]=PROJECT
+        for conn in (owner,old_owner):self.runtime.live_sessions[(helpers.ATTEMPT,conn)]=SESSION
         self.runtime.live_viewers[(helpers.ATTEMPT,spectator)]=GUIDE
         # A different user's connection cannot be selected before any state change.
-        self.assertCode('LIVE_CONN_UNKNOWN',self.runtime.takeover,dict(self.ref,controller_id=PROJECT,manual_auth=True,conn=spectator))
+        self.assertCode('LIVE_CONN_UNKNOWN',self.runtime.takeover,dict(self.ref,controller_id=PROJECT,session_id=SESSION,manual_auth=True,conn=spectator))
         self.assertEqual(self.supervisor.state['attempts'][helpers.ATTEMPT]['selected_mode'],'agent')
-        self.runtime.takeover(dict(self.ref,controller_id=PROJECT,manual_auth=True,conn=owner))
+        self.runtime.takeover(dict(self.ref,controller_id=PROJECT,session_id=SESSION,manual_auth=True,conn=owner))
         self.assertEqual(set(worker.live_sinks),{owner})
         self.assertEqual(queues[spectator].get_nowait()['reason'],'manual_auth_private')
         self.assertEqual(queues[old_owner].get_nowait()['reason'],'manual_auth_private')
@@ -345,7 +446,7 @@ class SelectedSupervisorTests(unittest.TestCase):
     def test_sent_effect_requires_readback_even_worker_success_and_counters_are_cumulative(self):
         self.runtime.launch(self.spec)
         a=self.supervisor.state['attempts'][helpers.ATTEMPT]
-        a['actions'].append(dict(ordinal=1,state='started',usage_start=dict(requests=0,response_bytes=0,effects_sent=0,effects_uncertain=0)))
+        a['actions'].append(dict(ordinal=1,action='submit',state='started',usage_start=dict(requests=0,response_bytes=0,effects_sent=0,effects_uncertain=0)))
         done=__import__('threading').Event();done.set()
         self.runtime.actions[(helpers.ATTEMPT,1)]=(1,done,{'reply':{'ok':True,'result':{'status':'done'}}})
         gate=self.host.registry.gateway
@@ -356,6 +457,220 @@ class SelectedSupervisorTests(unittest.TestCase):
         self.assertEqual(out['usage'],dict(requests=3,response_bytes=12,artifact_bytes=0))
         self.assertEqual(out['usage_mode'],'cumulative')
         self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1)),out)
+
+    def begin_fixture_action(self):
+        observed=self.runtime.observe(self.ref);candidate=observed['candidates'][0]
+        envelope=dict(schema='proxypilot.browser-action.proposal.v1',**self.ref,
+            ordinal=self.supervisor.state['runs'][helpers.RUN]['action_count']+1,
+            snapshot_ref=observed['snapshot_ref'],candidate_ref=candidate['candidate_ref'],approval_ref=None,operation=candidate['operation'])
+        self.runtime.action(dict(self.ref,envelope=envelope))
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            pending=self.runtime.pending(self.ref)['pending']
+            if pending:return pending[0]
+            time.sleep(.01)
+        self.fail('fixture request never reached host')
+
+    def test_deny_exact_held_request_pauses_durably_settles_no_effect_and_can_resume(self):
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action()
+        self.assertCode('REQUEST_DENIAL_STALE',self.runtime.deny_request,dict(self.ref,request_ref='other'))
+        denied=self.supervisor.dispatch('selected_browser_deny_request',dict(self.ref,request_ref=pending['request_ref']))
+        self.assertTrue(denied['paused']);self.assertTrue(denied['no_contact'])
+        proof=self.decode(denied['attestation'])
+        self.assertEqual(proof['kind'],'selected-browser-request-denial')
+        self.assertEqual(proof['request_ref'],pending['request_ref'])
+        result=self.runtime.poll_action(dict(self.ref,ordinal=1))
+        self.assertEqual((result['kind'],result['state'],result['code']),('done','blocked','BROWSER_OPERATION_BLOCKED_BEFORE_EFFECT'))
+        self.assertTrue(self.decode(result['attestation'])['no_effect_sent'])
+        self.assertEqual(self.runtime.pending(self.ref)['pending'],[])
+        self.assertEqual(self.host.registry.gateway.pending,{})
+        self.assertEqual(self.supervisor.state['attempts'][helpers.ATTEMPT]['state'],'running')
+        self.assertEqual(self.supervisor.dispatch('selected_browser_deny_request',dict(self.ref,request_ref=pending['request_ref'])),denied)
+        self.runtime.pause(self.ref)  # service follows deny with an idempotent pause
+        self.runtime.resume(self.ref)
+        self.assertEqual(self.begin_fixture_action()['current_action']['ordinal'],2)
+        self.assertEqual(self.host.registry.gateway.status()['effects_sent'],0)
+
+    def test_offlist_grant_settles_started_slot_before_resolution_without_replay(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action()
+        self.assertEqual(pending['kind'],'off_list_destination')
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1))['kind'],'off_list')
+        a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        destination=dict(id='temporary',origin=pending['origin'],roles=[pending['role']],session_headers='omit')
+        grant=dict(schema='proxypilot.selected-browser.destination-grant.v1',id=APPROVAL,identity=a['selected_identity'],
+            origin=destination['origin'],roles=destination['roles'],purpose_sha256=self.runtime.policy.digest(pending['purpose']),
+            expires_at=int(self.clock()+60),persist_to_allowlist=False,wildcards=False)
+        self.runtime.grant_destination(dict(self.ref,grant=grant,destination=destination))
+        old=self.runtime.poll_action(dict(self.ref,ordinal=1))
+        self.assertEqual(old['state'],'blocked')
+        proof=self.decode(old['attestation'])
+        self.assertEqual(proof['ordinal'],1);self.assertEqual(proof['request_refs'],[pending['request_ref']])
+        self.assertFalse(proof['replay_allowed'])
+        self.assertEqual(self.host.registry.gateway.status()['requests'],0)
+        self.assertEqual(self.begin_fixture_action()['current_action']['ordinal'],2)
+
+    def test_offlist_after_sent_effect_refuses_grant_before_destination_resolution(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action();a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        self.host.registry.gateway.effects_sent=1
+        destination=dict(id='temporary',origin=pending['origin'],roles=[pending['role']],session_headers='omit')
+        grant=dict(schema='proxypilot.selected-browser.destination-grant.v1',id=APPROVAL,identity=a['selected_identity'],
+            origin=destination['origin'],roles=destination['roles'],purpose_sha256=self.runtime.policy.digest(pending['purpose']),
+            expires_at=int(self.clock()+60),persist_to_allowlist=False,wildcards=False)
+        before=list(self.host.trace)
+        self.assertCode('BROWSER_ACTION_UNCERTAIN',self.runtime.grant_destination,dict(self.ref,grant=grant,destination=destination))
+        self.assertNotIn('resolve:other.example',self.host.trace[len(before):])
+        self.assertEqual(a['actions'][0]['state'],'started')
+
+    def test_blocked_proof_refuses_more_than64_refs_without_dropping_or_signing(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action();a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        a['actions'][0]['blocked_request_refs']=[pending['request_ref']]+['ref'+str(i) for i in range(64)]
+        self.assertCode('BROWSER_BLOCKED_ACTION_PROOF_INVALID',self.runtime._settle_blocked_actions,a,[pending['request_ref']])
+        self.assertEqual(a['actions'][0]['state'],'started')
+        self.assertEqual(len(a['actions'][0]['blocked_request_refs']),65)
+
+    def test_manual_denial_preserves_sole_controller_and_auth_without_replaying_request(self):
+        self.runtime.launch(self.spec)
+        self.runtime.takeover(dict(self.ref,controller_id=PROJECT,session_id=SESSION,manual_auth=True,conn=None))
+        a=self.supervisor.state['attempts'][helpers.ATTEMPT];gate=self.host.registry.gateway
+        meta=dict(url='https://selected.example/save',method='POST',body_sha256=hashlib.sha256(b'x').hexdigest(),
+            body_bytes=1,resource_type='fetch',role='resource',current_action=None,**self.ref)
+        reply=gate.review_request('manual-save',meta)
+        a['selected_pending']['manual-save']=dict(kind='network_effect',request_ref='manual-save',binding_sha256=reply['binding_sha256'])
+        a['selected_mode']='paused'
+        out=self.runtime.deny_request(dict(self.ref,request_ref='manual-save'))
+        self.assertEqual((out['state'],out['manual_auth'],out['paused']),('human_control',True,False))
+        proof=self.decode(out['attestation'])
+        self.assertEqual(proof['boot_id'],a['boot_id']);self.assertEqual(proof['original_fence'],1)
+        self.assertEqual(a['selected_controller'],PROJECT);self.assertTrue(a['manual_auth'])
+        self.assertEqual(a['selected_mode'],'human');self.assertEqual(gate.state,'running')
+        self.assertIn('manual-save',a['selected_discarded_requests'])
+        self.assertEqual(gate.pending,{});self.assertEqual(gate.status()['effects_sent'],0)
+        self.assertCode('MANUAL_AUTH_CAPTURE_DISABLED',self.runtime.view,self.ref)
+        new=gate.review_request('fresh-save',meta)
+        self.assertEqual(new['decision'],'approval_required')
+
+    def test_late_pre_pause_request_event_is_tombstoned_without_ticket_or_new_contact(self):
+        self.runtime.launch(self.spec)
+        a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        self.runtime._remember_discarded(a,['already-failed'])
+        before=list(self.host.trace)
+        self.runtime.event_queues[helpers.ATTEMPT].put(dict(event='selected_request',request_ref='already-failed',metadata={}))
+        deadline=time.monotonic()+1
+        while time.monotonic()<deadline and not self.runtime.event_queues[helpers.ATTEMPT].empty():time.sleep(.01)
+        self.assertEqual(self.host.trace,before)
+        self.assertEqual(self.host.registry.gateway.tickets,{})
+
+    def test_model_admission_checks_actual_gateway_not_cached_pending(self):
+        self.runtime.launch(self.spec);observation=self.runtime.observe(self.ref)
+        params=dict(purpose='decision',project_id=PROJECT,project_limits_revision=1,guide_version_id=GUIDE,
+                    guide_hash='c'*64,consent_hash='d'*64,run_id=helpers.RUN,attempt_id=helpers.ATTEMPT,
+                    fence=1,policy_hash=self.ref['policy_sha256'],input=dict(snapshot_ref=observation['snapshot_ref']))
+        self.host.registry.gateway.inflight=1
+        self.assertCode('BROWSER_MODEL_NETWORK_UNSETTLED',self.runtime._model_guard,params)
+        self.host.registry.gateway.inflight=0
+        self.host.registry.gateway.effects_sent=1
+        self.assertCode('BROWSER_MODEL_NETWORK_UNSETTLED',self.runtime._model_guard,params)
+
+    def live_controller(self):
+        conn='a'*32
+        worker=self.supervisor.workers[helpers.ATTEMPT]
+        worker.live_sinks[conn]=__import__('queue').Queue()
+        self.runtime.live_viewers[(helpers.ATTEMPT,conn)]=PROJECT
+        self.runtime.live_sessions[(helpers.ATTEMPT,conn)]=SESSION
+        self.runtime.takeover(dict(self.ref,controller_id=PROJECT,session_id=SESSION,manual_auth=True,conn=conn))
+        return conn
+
+    def send_auth_wire_fixture(self,ref='auth',role='authentication'):
+        gate=self.host.registry.gateway
+        conn=Mock();response=Mock(status=200);response.getheaders.return_value=[]
+        response.read.side_effect=[b'fixture',b'']
+        conn.getresponse.return_value=response;gate.connection_factory=Mock(return_value=conn)
+        gate.resolver=lambda _:['1.1.1.1'];gate.route_reader=lambda _:'b'*64
+        body=b'password=local-only'
+        meta=dict(url='https://selected.example/api/login?token=private',method='POST',body_sha256=hashlib.sha256(body).hexdigest(),
+            body_bytes=len(body),resource_type='fetch',role=role,current_action=None,**self.ref)
+        review=gate.review_request(ref,meta)
+        context='Review this exact authentication request'
+        grant=dict(schema='proxypilot.selected-browser.effect-grant.v1',id=str(__import__('uuid').uuid4()),
+            identity=gate.policy.identity,request_ref=ref,binding_sha256=review['binding_sha256'],
+            expires_at=int(self.clock()+30),purpose_sha256=self.runtime.policy.digest(context),human_context=context)
+        grant['approval_ref']=dict(id=grant['id'],sha256=review['binding_sha256'])
+        allowed=gate.approve_request(ref,grant)
+        gate.forward('POST',meta['url'],{self.host.gateway_module.TICKET_HEADER:allowed['ticket']},body)
+        return grant
+
+    def confirmation(self,inventory,requests=None):
+        packet=dict(schema='selected-browser-auth-confirmation.v1',**self.ref,controller_id=PROJECT,session_id=SESSION,
+            viewer_conn_sha256=inventory['viewer_conn_sha256'],inventory_sha256=inventory['inventory_sha256'],
+            ledger_sha256=inventory['ledger_sha256'],request_refs=inventory['requests'] if requests is None else requests,
+            reviewed_statement=self.host.gateway_module.AUTH_STATEMENT,expires_at=s.stamp(self.clock()+30))
+        packet['confirmation_ref']=dict(id=str(__import__('uuid').uuid4()),sha256=self.runtime.policy.digest(self.runtime.policy.canonical(packet)))
+        return packet
+
+    def test_authentication_independent_confirm_then_giveback_pause_resume_read(self):
+        self.runtime.launch(self.spec);conn=self.live_controller();self.send_auth_wire_fixture()
+        self.assertCode('AUTH_READBACK_REQUIRED',self.runtime.release,dict(self.ref,controller_id=PROJECT))
+        self.assertCode('AUTH_READBACK_REQUIRED',self.runtime.auth,dict(self.ref,active=False))
+        a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        self.assertTrue(a['manual_auth']);self.assertEqual(a['selected_controller_session'],SESSION)
+        inventory=self.supervisor.dispatch('selected_browser_auth_inventory',dict(self.ref,controller_id=PROJECT,session_id=SESSION,conn=conn))
+        proof=self.decode(inventory['attestation'])
+        self.assertEqual(proof['kind'],'selected-browser-auth-inventory');self.assertEqual(proof['requests'],inventory['requests'])
+        self.assertEqual(proof['original_fence'],1);self.assertEqual(proof['viewer_conn_sha256'],hashlib.sha256(conn.encode()).hexdigest())
+        packet=self.confirmation(inventory)
+        ack=self.supervisor.dispatch('selected_browser_confirm_authentication',dict(self.ref,packet=packet,conn=conn))
+        self.assertEqual(ack['auth_effects_acknowledged'],1);self.assertFalse(ack['replay_allowed'])
+        self.assertEqual(self.decode(ack['attestation'])['request_sha256'],self.runtime.policy.digest(self.runtime.policy.canonical(packet)))
+        self.assertEqual(self.runtime.confirm_authentication(dict(self.ref,packet=packet,conn=conn)),ack)
+        self.assertTrue(a['manual_auth'])  # Confirmation itself grants no capture/control transition.
+        self.runtime.release(dict(self.ref,controller_id=PROJECT))
+        self.assertEqual(a['selected_mode'],'paused');self.assertFalse(a['manual_auth'])
+        self.runtime.resume(self.ref);observation=self.runtime.observe(self.ref)
+        candidate=observation['candidates'][0]
+        request=dict(purpose='decision',project_id=PROJECT,project_limits_revision=1,guide_version_id=GUIDE,
+            guide_hash='c'*64,consent_hash='d'*64,run_id=helpers.RUN,attempt_id=helpers.ATTEMPT,
+            fence=1,policy_hash=self.ref['policy_sha256'],limits=dict(max_tokens=10000,max_usd=.25,max_calls=20,max_output_tokens=128),
+            input=dict(snapshot_ref=observation['snapshot_ref'],candidates=[dict(id=candidate['candidate_ref']['id'],
+                sha256=candidate['candidate_ref']['sha256'],operation=candidate['operation']['kind'],effect=candidate['effect'],label=candidate['label'])]))
+        self.runtime._model_guard(request)
+        self.assertEqual(self.runtime.pending(self.ref)['auth_effects_acknowledged'],1)
+
+    def test_authentication_wrong_session_disconnected_viewer_forged_or_stale_request_refused(self):
+        self.runtime.launch(self.spec);conn=self.live_controller();self.send_auth_wire_fixture()
+        params=dict(self.ref,controller_id=PROJECT,session_id=SESSION,conn=conn)
+        self.assertCode('AUTH_READBACK_CONTROLLER_MISMATCH',self.runtime.auth_inventory,dict(params,session_id=GUIDE))
+        inventory=self.runtime.auth_inventory(params);packet=self.confirmation(inventory)
+        before=list(self.host.trace)
+        malformed=copy.deepcopy(packet);malformed['confirmation_ref']=[]
+        self.assertCode('AUTH_CONFIRMATION_INVALID',self.runtime.confirm_authentication,dict(self.ref,packet=malformed,conn=conn))
+        self.assertEqual(self.host.trace,before)
+        self.runtime.live_sessions[(helpers.ATTEMPT,conn)]=GUIDE
+        self.assertCode('AUTH_READBACK_CONTROLLER_MISMATCH',self.runtime.confirm_authentication,dict(self.ref,packet=packet,conn=conn))
+        self.runtime.live_sessions[(helpers.ATTEMPT,conn)]=SESSION
+        forged=copy.deepcopy(packet);forged['request_refs'][0]['body_sha256']='0'*64
+        forged['confirmation_ref']['sha256']=self.runtime.policy.digest(self.runtime.policy.canonical({k:v for k,v in forged.items() if k!='confirmation_ref'}))
+        self.assertCode('AUTH_CONFIRMATION_SCOPE_INVALID',self.runtime.confirm_authentication,dict(self.ref,packet=forged,conn=conn))
+        self.send_auth_wire_fixture('new')
+        self.assertCode('AUTH_INVENTORY_STALE_OR_UNSETTLED',self.runtime.confirm_authentication,dict(self.ref,packet=packet,conn=conn))
+        self.assertEqual(self.host.registry.gateway.auth_effects_acknowledged,0)
+        self.assertTrue(self.supervisor.state['attempts'][helpers.ATTEMPT]['manual_auth'])
+
+    def test_authentication_ack_never_reconciles_business_or_new_unselected_write(self):
+        self.runtime.launch(self.spec);conn=self.live_controller();self.send_auth_wire_fixture()
+        inventory=self.runtime.auth_inventory(dict(self.ref,controller_id=PROJECT,session_id=SESSION,conn=conn))
+        self.runtime.confirm_authentication(dict(self.ref,packet=self.confirmation(inventory),conn=conn))
+        self.send_auth_wire_fixture('business',role='resource')
+        self.assertCode('AUTH_READBACK_REQUIRED',self.runtime.release,dict(self.ref,controller_id=PROJECT))
+        self.assertEqual(self.host.registry.gateway.auth_effects_acknowledged,1)
+        self.assertTrue(self.supervisor.state['attempts'][helpers.ATTEMPT]['manual_auth'])
+        self.assertEqual(self.host.registry.gateway.auth_inventory()['requests'],[])
 
     def test_model_forged_candidate_target_or_budget_refused_before_bridge(self):
         self.runtime.launch(self.spec)

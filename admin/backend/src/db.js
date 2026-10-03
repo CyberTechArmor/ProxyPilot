@@ -4,6 +4,7 @@ import { operationalSelectedBrowserMigration1118 } from './lib/operational-selec
 import { operationalBrowserArtifactsMigration1119 } from './lib/operational-browser-artifacts-schema.js';
 import { operationalBrowserConversionMigration1120 } from './lib/operational-browser-conversion.js';
 import { operationalSelectedBrowserRuntimeMigration1121 } from './lib/operational-selected-browser-runtime.js';
+import { operationalSelectedBrowserAuthMigration1122 } from './lib/operational-selected-browser-auth-schema.js';
 import { brokerTaskProposalsMigration1115 } from './lib/broker-task-proposals.js';
 import { brokerTaskMigration1114 } from './lib/broker-task-dispatch.js';
 import { operationalConfigurationsMigration1113 } from './lib/operational-configurations.js';
@@ -2067,6 +2068,7 @@ export function initDatabase() {
   runMigration(db, 1119, 'private_browser_artifacts', operationalBrowserArtifactsMigration1119);
   runMigration(db, 1120, 'browser_agent_conversions', operationalBrowserConversionMigration1120);
   runMigration(db, 1121, 'selected_browser_host_pins', operationalSelectedBrowserRuntimeMigration1121);
+  runMigration(db, 1122, 'selected_browser_authentication_readback', operationalSelectedBrowserAuthMigration1122);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

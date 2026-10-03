@@ -18,7 +18,11 @@ export const selectedHumanInputSchema=z.union([
   z.object({kind:z.literal('text'),text:z.string().min(1).max(256).refine(s=>!/[\x00-\x1f\x7f]/.test(s))}).strict(),
 ]);
 export const selectedEscalationSchema=z.object({origin:z.string().min(8).max(300),role:z.enum(['navigation','resource','authentication']),purpose:z.string().trim().min(1).max(500),request_ref:z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),method:z.enum(['GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE']),url_sha256:hash,request_sha256:hash,no_contact:z.literal(true)}).strict();
-export const selectedNetworkRequestSchema=z.object({kind:z.literal('network_effect'),request_ref:z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),binding_sha256:hash,origin:z.string().min(8).max(300),role:z.enum(['navigation','resource','authentication']),method:z.enum(['GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE']),body_sha256:hash,body_bytes:z.number().int().min(0).max(67108864),purpose:z.string().trim().min(1).max(500),request_sha256:hash,no_contact:z.literal(true),current_action:z.object({ordinal:int,snapshot_ref:selectedRef,candidate_ref:selectedRef}).strict().optional()}).strict();
+export const selectedNetworkRequestSchema=z.object({kind:z.literal('network_effect'),request_ref:z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),binding_sha256:hash,url_sha256:hash,origin:z.string().min(8).max(300),role:z.enum(['navigation','resource','authentication']),method:z.enum(['GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE']),body_sha256:hash,body_bytes:z.number().int().min(0).max(67108864),purpose:z.string().trim().min(1).max(500),request_sha256:hash,no_contact:z.literal(true),current_action:z.object({ordinal:int,snapshot_ref:selectedRef,candidate_ref:selectedRef}).strict().optional()}).strict();
+const finalNetworkCount=z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const selectedFinalNetworkSchema=z.object({requests:finalNetworkCount,response_bytes:finalNetworkCount,
+  effects_sent:finalNetworkCount,effects_uncertain:finalNetworkCount,auth_effects_acknowledged:finalNetworkCount,
+  inflight:finalNetworkCount,pending_count:finalNetworkCount,ledger_sha256:hash}).strict();
 // The schema is static checked-in data; callers cannot submit validation code.
 function compile(s){
   if(Object.hasOwn(s,'const'))return z.literal(s.const);

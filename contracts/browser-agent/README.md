@@ -207,4 +207,17 @@ proofs remain required after implementation. All development stays cloud-only.
 
 See [worker contract](worker-adapter-v1.md), [scope/dependency plan](../../docs/plans/fractionate-browser-agent-scope-20261002.md), and [actual Nodus alignment](../../docs/plans/fractionate-browser-nodus-alignment-20261002.md). Browser readiness requires signed host/VM/configuration/installed-policy proofs plus current guide, owner consent, account/project access, finite caps and actual private source storage. Saving a draft remains non-executable. Manual takeover uses an attempt-private session; no broad broker credentials are activated.
 
+Authentication continuation requires explicit human readback of each selected
+completed request, bound to its consumed sign-in/MFA payload approval and signed
+ledger. The sole current controller confirms the fixed statement; confirmation,
+Release and Resume remain separate. Other writes stay unresolved. The readonly
+receipt display exposes identifiers and hashes, never authentication bytes or
+live-session authority.
+
+Selected cleanup receipts require signed final network meters and the matching
+gateway ledger hash after revocation. Partial authentic receipts retain costs
+and uncertainty; closure retry cannot establish business success or replay a
+write. The [coordinated runtime package contract](../../docs/plans/fractionate-selected-runtime-package-contract.md)
+keeps selected installation and recovery separate from the legacy refresher.
+
 `max_actions` counts automated and typed declared browser primitives. Native takeover mouse/key/scroll events are separately measured in signed cleanup receipts; finite time/network/resource and exact HTTP-effect approval rules remain active during takeover. Installed controller-only media, spectator closure, chooser isolation and receipt proof remain required before acceptance.

@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -71,6 +72,25 @@ def effect_grant(gateway, reply, approval=APPROVAL, expires_at=None):
     return dict(schema='proxypilot.selected-browser.effect-grant.v1', id=approval, identity=gateway.policy.identity,
                 request_ref=reply['request_ref'], binding_sha256=reply['binding_sha256'],
                 expires_at=expires_at if expires_at is not None else int(gateway.clock() + 30), purpose_sha256='d' * 64)
+
+
+def authentication_grant(gateway, reply):
+    context='Review this exact sign-in or MFA request'
+    grant=effect_grant(gateway,reply,approval=str(uuid.uuid4()))
+    grant.update(approval_ref=dict(id=grant['id'],sha256=reply['binding_sha256']),human_context=context,
+                 purpose_sha256=p.digest(context))
+    return grant
+
+
+def authentication_packet(gateway,inventory,selected=None):
+    packet=dict(schema='selected-browser-auth-confirmation.v1',
+        **{k:gateway.policy.identity[k] for k in ('run_id','attempt_id','fence','policy_sha256')},
+        controller_id=PROJECT,session_id=APPROVAL,viewer_conn_sha256=p.digest('fixture-live-connection'),
+        inventory_sha256=inventory['inventory_sha256'],ledger_sha256=inventory['ledger_sha256'],
+        request_refs=selected if selected is not None else inventory['requests'],reviewed_statement=g.AUTH_STATEMENT,
+        expires_at=g.datetime.datetime.fromtimestamp(gateway.clock()+30,g.datetime.timezone.utc).isoformat().replace('+00:00','Z'))
+    packet['confirmation_ref']=dict(id=str(uuid.uuid4()),sha256=p.digest(p.canonical(packet)))
+    return packet
 
 
 class PolicyTests(unittest.TestCase):
@@ -261,6 +281,22 @@ class GatewayTests(unittest.TestCase):
         self.assertDenied('REQUEST_TICKET_STALE', gate.admit, 'POST', 'https://site.example/save',
                           {g.TICKET_HEADER: allowed['ticket']}, b'x')
 
+    def test_exact_denial_is_durable_no_contact_no_replay_and_keeps_resumable_pause(self):
+        gate=self.make()
+        reply=gate.review_request('save',metadata(gate.policy,'/save','POST',b'x','fetch','resource'))
+        self.assertDenied('REQUEST_DENIAL_STALE',gate.deny_request,'unknown')
+        denied=gate.deny_request('save')
+        self.assertTrue(denied['no_contact']);self.assertTrue(denied['paused'])
+        self.assertEqual(gate.pending,{});self.assertEqual(gate.tickets,{})
+        self.assertEqual(gate.ledger.rows[-2]['kind'],'request_denied')
+        gate.resolver.assert_not_called();gate.connection_factory.assert_not_called()
+        self.assertDenied('REQUEST_APPROVAL_STALE',gate.approve_request,'save',effect_grant(gate,reply))
+        self.assertDenied('GATEWAY_PAUSED',gate.review_request,'later',metadata(gate.policy))
+        self.assertDenied('GATEWAY_PAUSED',gate.check_connect,'site.example:443')
+        self.assertEqual(gate.reason,'USER_PAUSED')
+        gate.resume()
+        self.assertDenied('REQUEST_APPROVAL_STALE',gate.approve_request,'save',effect_grant(gate,reply))
+
     def test_old_attempt_fence_action_and_resource_headers_cannot_grant(self):
         for field, value in (('attempt_id', APPROVAL), ('fence', 2), ('policy_sha256', 'a' * 64)):
             gate = self.make()
@@ -344,9 +380,37 @@ class GatewayTests(unittest.TestCase):
             try:gate.forward('GET','https://site.example/',{g.TICKET_HEADER:ticket},b'')
             except p.Denied as e:errors.append(e.code)
         thread=threading.Thread(target=forward);thread.start();self.assertTrue(entered.wait(1))
+        self.assertEqual(gate.status()['inflight'],1)
         gate.revoke();release.set();thread.join(2)
         self.assertFalse(thread.is_alive());self.assertEqual(errors,['GATEWAY_REVOKED'])
         gate.connection_factory.assert_not_called();self.assertEqual(gate.status()['effects_sent'],0)
+        self.assertEqual(gate.final_status()['inflight'],0)
+
+    def test_revocation_discards_unsent_authority_durably_and_final_counts_wait_for_late_response(self):
+        conn=Mock();response=Mock(status=200);response.getheaders.return_value=[]
+        entered,finish=threading.Event(),threading.Event()
+        def read(_):
+            entered.set();finish.wait(2);return b'late-response-bytes'
+        response.read.side_effect=read;conn.getresponse.return_value=response
+        gate=self.make(factory=Mock(return_value=conn));errors=[]
+        review=gate.review_request('sent',metadata(gate.policy,'/save','POST',b'x','fetch','resource'))
+        token=gate.approve_request('sent',effect_grant(gate,review))['ticket']
+        def forward():
+            try:gate.forward('POST','https://site.example/save',{g.TICKET_HEADER:token},b'x')
+            except p.Denied as error:errors.append(error.code)
+        worker=threading.Thread(target=forward);worker.start();self.assertTrue(entered.wait(1))
+        gate.review_request('unsent',metadata(gate.policy,'/autosave','POST',b'x','fetch','resource'))
+        snapshot=gate.revoke()
+        self.assertEqual((snapshot['inflight'],snapshot['effects_sent'],snapshot['response_bytes']),(1,1,0))
+        self.assertEqual(snapshot['outstanding_requests'],0);self.assertEqual(gate.tickets,{})
+        discarded=[row for row in gate.ledger.rows if row['kind']=='revoked'][-1]['data']['discarded_requests']
+        self.assertEqual([value['request_ref'] for value in discarded],['unsent'])
+        finish.set();final=gate.final_status();worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(errors,['GATEWAY_REVOKED'])
+        self.assertEqual((final['inflight'],final['effects_sent'],final['effects_uncertain']),(0,1,1))
+        self.assertEqual(final['response_bytes'],len(b'late-response-bytes'))
+        self.assertEqual(final['ledger_sha256'],gate.ledger.sha256)
+        self.assertEqual(conn.request.call_count,1)
 
     def test_auth_role_grant_is_exact_temporary_and_leaves_base_resource_policy(self):
         gate = self.make()
@@ -429,8 +493,8 @@ class LocalTransportTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=3)
 
-    def gate(self, c=None):
-        return g.AttemptGateway(policy(c), g.MemoryLedger(), resolver=lambda _: ['1.1.1.1'],
+    def gate(self, c=None, ledger=None):
+        return g.AttemptGateway(policy(c), ledger or g.MemoryLedger(), resolver=lambda _: ['1.1.1.1'],
                                 connection_factory=self.factory, clock=lambda: NOW, route_reader=lambda _: 'b' * 64)
 
     def test_real_tls_upstream_verifies_host_pinned_ip_and_strips_private_resource_headers(self):
@@ -462,6 +526,94 @@ class LocalTransportTests(unittest.TestCase):
             gate.forward('GET', 'https://other.example/', {g.TICKET_HEADER: reply['ticket']}, b'')
         self.assertEqual(self.received, [])
         self.assertEqual(len(self.connected), 1)
+
+    def authentication_gate(self,ledger=None):
+        c=configuration();c['destinations']['allowed_origins'][0]['roles'].append('authentication')
+        return self.gate(c,ledger)
+
+    def send_authentication(self,gate,ref='auth',path='/api/login/member-private?token=hidden'):
+        body=b'password=private-password'
+        meta=metadata(gate.policy,path,'POST',body,'fetch','authentication')
+        review=gate.review_request(ref,meta)
+        grant=authentication_grant(gate,review)
+        allowed=gate.approve_request(ref,grant)
+        status,_,_=gate.forward('POST',meta['url'],{g.TICKET_HEADER:allowed['ticket']},body)
+        self.assertEqual(status,200)
+        return grant
+
+    def test_authentication_http_success_requires_independent_human_claim_durable_once(self):
+        with tempfile.TemporaryDirectory(prefix='pp-auth-ledger-') as directory:
+            ledger=g.FileLedger(Path(directory)/'auth.ledger',require_root=False)
+            gate=self.authentication_gate(ledger)
+            grant=self.send_authentication(gate)
+            inventory=gate.auth_inventory()
+            self.assertEqual((inventory['effects_sent'],inventory['auth_effects_acknowledged']),(1,0))
+            request=inventory['requests'][0]
+            self.assertEqual(request['approval_ref'],grant['approval_ref'])
+            self.assertEqual(request['path_preview'],'/api/login/[redacted]')
+            self.assertTrue(request['transport_complete'])
+            self.assertNotEqual(request['ledger_send_ref'],request['ledger_response_ref'])
+            packet=authentication_packet(gate,inventory)
+            bad=copy.deepcopy(packet);bad['reviewed_statement']='HTTP200 or Giveback confirms auth'
+            bad['confirmation_ref']['sha256']=p.digest(p.canonical({k:v for k,v in bad.items() if k!='confirmation_ref'}))
+            with self.assertRaises(p.Denied):gate.confirm_authentication(bad)
+            self.assertEqual(gate.auth_effects_acknowledged,0)
+            ack=gate.confirm_authentication(packet)
+            self.assertEqual((ack['auth_effects_acknowledged'],ack['effects_sent']),(1,1))
+            self.assertFalse(ack['replay_allowed']);self.assertEqual(ack['request_sha256'],p.digest(p.canonical(packet)))
+            self.assertEqual(gate.confirm_authentication(packet),ack)
+            self.assertEqual(len(self.received),1)
+            self.assertEqual(gate.auth_inventory()['requests'],[])
+            ledger.close();reopened=g.FileLedger(Path(directory)/'auth.ledger',require_root=False)
+            self.assertIn(packet['confirmation_ref']['id'],reopened._approvals)
+            self.assertEqual(sum(row['kind']=='authentication_human_readback' for row in reopened.rows),1)
+            for private in ('private-password','member-private','token=hidden'):
+                self.assertNotIn(private,p.canonical(reopened.rows))
+            reopened.close()
+
+    def test_authentication_ack_does_not_clear_unselected_new_or_business_effect(self):
+        gate=self.authentication_gate()
+        self.send_authentication(gate,'first')
+        self.send_authentication(gate,'second')
+        inventory=gate.auth_inventory()
+        ack=gate.confirm_authentication(authentication_packet(gate,inventory,[inventory['requests'][0]]))
+        self.assertEqual((ack['auth_effects_acknowledged'],ack['effects_sent']),(1,2))
+        self.assertEqual([r['request_ref'] for r in gate.auth_inventory()['requests']],['second'])
+        review=gate.review_request('business',metadata(gate.policy,'/save','POST',b'x','fetch','resource'))
+        allowed=gate.approve_request('business',effect_grant(gate,review))
+        gate.forward('POST','https://site.example/save',{g.TICKET_HEADER:allowed['ticket']},b'x')
+        inventory=gate.auth_inventory()
+        ack=gate.confirm_authentication(authentication_packet(gate,inventory))
+        self.assertEqual((ack['auth_effects_acknowledged'],ack['effects_sent']),(2,3))
+        self.assertEqual(gate.auth_inventory()['requests'],[])
+        forged=dict(inventory['requests'][0],request_ref='business',role='resource')
+        with self.assertRaises(p.Denied):gate.confirm_authentication(authentication_packet(gate,gate.auth_inventory(),[forged]))
+
+    def test_authentication_grant_without_consumed_pin_and_uncertain_transport_cannot_ack(self):
+        gate=self.authentication_gate()
+        review=gate.review_request('auth',metadata(gate.policy,'/lost','POST',b'x','fetch','authentication'))
+        with self.assertRaises(p.Denied):gate.approve_request('auth',effect_grant(gate,review))
+        self.assertEqual(self.received,[]);self.assertEqual(self.connected,[])
+        allowed=gate.approve_request('auth',authentication_grant(gate,review))
+        with self.assertRaises(p.Denied):gate.forward('POST','https://site.example/lost',{g.TICKET_HEADER:allowed['ticket']},b'x')
+        inventory=gate.auth_inventory()
+        self.assertEqual(inventory['effects_uncertain'],1);self.assertEqual(inventory['requests'],[])
+        with self.assertRaises(p.Denied):gate.confirm_authentication(authentication_packet(gate,inventory,[]))
+
+    def test_authentication_confirmation_expiry_and_fsync_failure_leave_capture_authority_unacknowledged(self):
+        gate=self.authentication_gate();self.send_authentication(gate)
+        packet=authentication_packet(gate,gate.auth_inventory())
+        packet['expires_at']=g.datetime.datetime.fromtimestamp(gate.clock(),g.datetime.timezone.utc).isoformat().replace('+00:00','Z')
+        packet['confirmation_ref']['sha256']=p.digest(p.canonical({k:v for k,v in packet.items() if k!='confirmation_ref'}))
+        with self.assertRaises(p.Denied) as expired:gate.confirm_authentication(packet)
+        self.assertEqual(expired.exception.code,'AUTH_CONFIRMATION_EXPIRED')
+        self.assertEqual(gate.auth_effects_acknowledged,0)
+        packet=authentication_packet(gate,gate.auth_inventory())
+        gate.ledger._write=Mock(side_effect=OSError('fixture fsync failed'))
+        with self.assertRaises(p.Denied) as failed:gate.confirm_authentication(packet)
+        self.assertEqual(failed.exception.code,'AUTH_CONFIRMATION_LEDGER_FAILED')
+        self.assertEqual((gate.state,gate.auth_effects_acknowledged,gate.effects_sent),('revoked',0,1))
+        self.assertEqual(gate.tickets,{});self.assertEqual(len(self.received),1)
 
     def test_effect_timeout_is_uncertain_consumed_once_never_retried(self):
         gate = self.gate()
@@ -570,6 +722,12 @@ class DurableControlTests(unittest.TestCase):
             with self.assertRaises(p.Denied):
                 recovered.release(dict(identity=identity(c), cleanup={'descendants_gone': True}))
             registry.gateway.revoke()
+            registry.gateway.inflight=1
+            with self.assertRaises(p.Denied) as refused:
+                registry.release(dict(identity=identity(c),cleanup=dict(descendants_gone=True,workspace_gone=True,fence_still_installed=True)))
+            self.assertEqual(refused.exception.code,'GATEWAY_REQUEST_DRAIN_UNVERIFIED')
+            self.assertTrue(registry.latch_path.exists())
+            registry.gateway.inflight=0
             recovered.release(dict(identity=identity(c), cleanup=dict(descendants_gone=True,
                 workspace_gone=True, fence_still_installed=True)))
             self.assertEqual(recovered.selected(), (False, None))

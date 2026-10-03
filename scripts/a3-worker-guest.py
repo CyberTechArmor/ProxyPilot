@@ -1011,6 +1011,18 @@ class Browser:
         # A7 live: the same browser, drawn on the unit's private display in kiosk
         # mode (no address bar or tabs) under the managed policy; still the pipe.
         mode = ['--kiosk', '--ozone-platform=x11', '--window-position=0,0'] if live else ['--headless=new']
+        disabled_features = 'Translate,MediaRouter,OptimizationHints,AutofillServerCommunication'
+        selected_args = []
+        if hasattr(self, 'selected'):
+            # These browser-owned services can run outside page CDP Fetch.
+            # Fixed non-network service endpoints and the attempt-private profile
+            # suppress their traffic; the independent gateway remains strict.
+            # Chromium 151 GaiaConfig accepts this exact per-service valid GURL
+            # override (gaia-url itself accepts HTTP origins only).
+            disabled_features += ',NetworkTimeServiceQuerying,AimEnabled'
+            selected_args = ['--allow-browser-signin=false',
+                             '--gcm-checkin-url=about:blank',
+                             '--gaia-config-contents={"urls":{"list_accounts_url":{"url":"about:blank"}}}']
         argv = [CHROMIUM, *mode, '--remote-debugging-pipe',
                 '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check',
                 '--disable-background-networking', '--disable-component-update',
@@ -1018,11 +1030,11 @@ class Browser:
                 '--disable-domain-reliability', '--disable-client-side-phishing-detection',
                 '--disable-breakpad', '--no-pings', '--disable-quic', '--disable-gpu',
                 '--password-store=basic', '--use-mock-keychain',
-                '--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication',
+                '--disable-features=' + disabled_features,
                 '--proxy-server=http://' + PROXY, '--proxy-bypass-list=<-loopback>',
                 '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE ' + proxy_host,
                 '--ignore-certificate-errors-spki-list=' + spki,
-                '--window-size=%d,%d' % VIEWPORT, 'about:blank']
+                '--window-size=%d,%d' % VIEWPORT, *selected_args, 'about:blank']
         env = {'HOME': home, 'XDG_CONFIG_HOME': os.path.join(home, '.config'),
                'XDG_CACHE_HOME': os.path.join(home, '.cache'), 'TMPDIR': WORKSPACE,
                'LANG': 'C.UTF-8', 'PATH': '/usr/bin:/bin'}

@@ -90,6 +90,47 @@ class SelectedBrowserSupervisor:
     def _files(self):
         return tuple(self.h.HERE / f for f in FILES)
 
+    def _public_readiness(self):
+        self.s.host.verify_install(self.s.own_files)
+        for path in self._files():
+            if hashlib.sha256(path.read_bytes()).hexdigest()!=self.loaded_files[path.name]:
+                self.fail('BROWSER_INSTALLED_HELPER_CHANGED')
+        if hashlib.sha256(self.s.source.encode()).hexdigest()!=hashlib.sha256((self.h.HERE/'a3-worker-guest.py').read_bytes()).hexdigest():
+            self.fail('BROWSER_INSTALLED_HELPER_CHANGED')
+        if hasattr(self.s.host,'public_navigation_inventory'):
+            inventory=self.s.host.public_navigation_inventory()
+        else:
+            self.h.installer.secure(self.h.INSTALL_JOURNAL)
+            inventory=self.policy.strict_json(self.h.INSTALL_JOURNAL.read_text()).get('public_navigation_inventory')
+        if (not self.h.exact(inventory,('v','vm_uuid','protected_hosts','protected_addresses')) or inventory['v']!=1 or
+            inventory['vm_uuid']!=self.h.VM_UUID or not inventory['protected_hosts'] or not inventory['protected_addresses'] or
+            len(inventory['protected_hosts'])>512 or len(inventory['protected_addresses'])>4096):
+            self.fail('BROWSER_PROTECTED_INVENTORY_REQUIRED')
+        # Validate inventory even before DNS or a browser can be created.
+        for h in inventory['protected_hosts']:
+            if not isinstance(h,str) or not re.fullmatch(r'[a-z0-9.-]{1,253}',h):self.fail('BROWSER_PROTECTED_INVENTORY_INVALID')
+        for address in inventory['protected_addresses']:
+            if str(ipaddress.ip_address(address))!=address:self.fail('BROWSER_PROTECTED_INVENTORY_INVALID')
+        active=self.s._live()
+        if active:
+            a=self.s.state['attempts'][self.s.state['active']]
+            self.s.host.light_boundary(a['qemu_pid'],a['fence_fingerprint'])
+            boundary=dict(vm_uuid=self.h.VM_UUID,boot_id=a['boot_id'],pid=a['qemu_pid'],fence_fingerprint=a['fence_fingerprint'])
+        else:
+            boundary=self.s.host.full_boundary()
+            if hasattr(self.s.host,'selected_managed_policy_hash'):
+                policy_hash=self.s.host.selected_managed_policy_hash()
+            else:
+                policy_hash=self.s.host.guest("import hashlib,json;print(json.dumps({'sha256':hashlib.sha256(open('/etc/chromium/policies/managed/proxypilot-live.json','rb').read()).hexdigest()}))")['sha256']
+            if policy_hash!=hashlib.sha256(self.h.runner.live_policy_bytes()).hexdigest():self.fail('BROWSER_CHROMIUM_POLICY_UNVERIFIED')
+        if self.s.live_available() is None:self.fail('BROWSER_LIVE_INSTALL_UNVERIFIED')
+        self.s.turn_credentials('public-readiness')
+        health=self.s.host.selected_gateway('health',{})
+        expected={n:hashlib.sha256((self.h.HERE/n).read_bytes()).hexdigest() for n in ('selected_browser_gateway.py','selected_browser_policy.py','a3-origin-proxy.py')}
+        if (health.get('contract_version')!=CONTRACT or health.get('protocol')!='selected-gateway.v1' or health.get('files')!=expected or
+            type(health.get('active')) is not bool or health['active'] and not active):self.fail('BROWSER_GATEWAY_HELPER_UNVERIFIED')
+        return dict(inventory,expires_at=self.s.clock()+900,internal_policies=[]),boundary
+
     def _acceptance(self, boundary=None):
         """Fresh root proof inventory. Never create or update this marker."""
         self.s.host.verify_install(self.s.own_files)
@@ -143,7 +184,7 @@ class SelectedBrowserSupervisor:
                    policy_sha256=params['configuration_sha256'], available=False, verified_supervisor=False,
                    isolation=False, destinations=False, site_policy=False, reachability='pending_launch_check')
         try:
-            marker, boundary = self._acceptance()
+            marker, boundary = self._public_readiness() if c.get('mode')=='public_navigation' else self._acceptance()
             # Validate destinations against protected inventory without target
             # DNS. Dummy public pins are NOT installed or returned as authority.
             for d in c['destinations']['allowed_origins']:
@@ -161,6 +202,9 @@ class SelectedBrowserSupervisor:
                        isolation=True, destinations=True, site_policy=True, vm_uuid=boundary['vm_uuid'],
                        valid_until=self.h.stamp(min(marker['expires_at'], self.s.clock() + 30)),
                        code=None if not self.s._live() else 'ACTIVE_ATTEMPT')
+            if c.get('mode')=='public_navigation':
+                out.update(capabilities={k:'verified' for k in ('installed_helpers','loaded_helpers','vm','fence','chromium_policy','gateway','live_view','protected_inventory')},
+                           helper_hashes=self.loaded_files.copy(),protected_inventory_sha256=self.policy.digest(self.policy.canonical({k:marker[k] for k in ('protected_hosts','protected_addresses')})))
         except Exception as e:
             out['code'] = getattr(e, 'code', 'BROWSER_INSTALLED_ACCEPTANCE_UNVERIFIED')
         out['attestation'] = self._sign(dict(kind='selected-browser-status', **out))
@@ -191,7 +235,7 @@ class SelectedBrowserSupervisor:
                 route_sha = self.s.host.selected_route_hash(answers)
                 target = self.policy.build_public_target(d['origin'], answers, route_sha,
                     marker['protected_hosts'], marker['protected_addresses'])
-            elif scopes == {'internal'}:
+            elif scopes == {'internal'} and c.get('mode')!='public_navigation':
                 selected = [r for r in marker['internal_policies'] if r.get('ref') == c['destinations']['network_policy_ref']
                             and r.get('target', {}).get('origin') == d['origin']]
                 if len(selected) != 1:
@@ -223,15 +267,18 @@ class SelectedBrowserSupervisor:
         if (not isinstance(params, dict) or set(params) - set(fields + optional) or not set(fields) <= set(params) or
                 params['contract_version'] != CONTRACT or
                 any(not isinstance(params[k], str) or not self.h.UUID.fullmatch(params[k])
-                    for k in ('project_id', 'run_id', 'attempt_id', 'workspace_id', 'guide_version_id')) or
-                any(not isinstance(params[k], str) or not self.h.HEX64.fullmatch(params[k]) for k in ('guide_hash', 'consent_hash')) or
+                    for k in ('project_id', 'run_id', 'attempt_id', 'workspace_id')) or
                 not self.h.safe_int(params['fence'], 1) or not self.h.safe_int(params['project_limits_revision'], 1)):
             self.fail('INVALID_REQUEST')
         if (any(k in params and not self.h.safe_int(params[k], 1) for k in ('project_revision', 'configuration_revision')) or
                 ('configuration_id' in params and (not isinstance(params['configuration_id'], str) or not self.h.UUID.fullmatch(params['configuration_id'])))):
             self.fail('INVALID_REQUEST')
         c = self._configuration({k: params[k] for k in ('configuration_json', 'configuration_sha256')})
-        if c['work']['guide_ref'] != dict(id=params['guide_version_id'], sha256=params['guide_hash']):
+        if c.get('mode')=='public_navigation':
+            if any(params[k] is not None for k in ('guide_version_id','guide_hash','consent_hash')):self.fail('PUBLIC_MODEL_PINS_DISABLED')
+        elif (not isinstance(params['guide_version_id'],str) or not self.h.UUID.fullmatch(params['guide_version_id']) or
+              any(not isinstance(params[k],str) or not self.h.HEX64.fullmatch(params[k]) for k in ('guide_hash','consent_hash'))):self.fail('INVALID_REQUEST')
+        if c.get('mode')!='public_navigation' and c['work']['guide_ref'] != dict(id=params['guide_version_id'], sha256=params['guide_hash']):
             self.fail('BROWSER_GUIDE_PIN_MISMATCH')
         limits = self._limits(c, params['project_limits'])
         supplied_deadline = parse_deadline(params['deadline_at'], self.refused)
@@ -243,7 +290,7 @@ class SelectedBrowserSupervisor:
                     self.fail('ACTIVE_ATTEMPT')
                 if params['attempt_id'] in self.s.state['attempts'] or params['run_id'] in self.s.state['runs']:
                     self.fail('ATTEMPT_EXISTS')
-            marker, boundary = self._acceptance()
+            marker, boundary = self._public_readiness() if c.get('mode')=='public_navigation' else self._acceptance()
             deadline = min(supplied_deadline, self.s.clock() + limits['max_seconds'])
             network = self._network_plan(c, marker, deadline)
             ident = dict(project_id=params['project_id'], run_id=params['run_id'], attempt_id=params['attempt_id'],
@@ -355,7 +402,7 @@ class SelectedBrowserSupervisor:
                     # every popup request before upstream contact.
                     continue
                 with self.s.lock:
-                    a['selected_mode'] = 'paused'
+                    a['selected_mode'] = 'agent' if self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation' else 'paused'
                     a['selected_code'] = str(event.get('code', 'BROWSER_REQUEST_BLOCKED'))[:64]
                     self.s._save()
                 continue
@@ -395,7 +442,8 @@ class SelectedBrowserSupervisor:
                         self.s._save()
             except Exception as e:
                 with self.s.lock:
-                    a['selected_mode'], a['selected_code'] = 'paused', getattr(e, 'code', 'BROWSER_GATEWAY_UNAVAILABLE')
+                    public_mode=self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation'
+                    a['selected_mode'], a['selected_code'] = ('agent' if public_mode else 'paused'), getattr(e, 'code', 'BROWSER_GATEWAY_UNAVAILABLE')
                     if getattr(e, 'code', None) in ('OFF_LIST_DESTINATION', 'DESTINATION_ROLE_DENIED'):
                         meta = event['metadata']
                         parts = self.policy.url_parts(meta['url'])
@@ -1070,6 +1118,8 @@ class SelectedBrowserSupervisor:
         except Exception:
             a['gateway_revoked'] = False
         self.s._save()
+        if self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation':
+            a['selected_model_cancelled']=True
         if not a.get('selected_model_cancelled'):
             # Install the cancellation latch even before a first model record
             # exists. A call can pass its guard, then queue behind this fence;
@@ -1178,6 +1228,9 @@ class SelectedBrowserSupervisor:
             return {'selected_browser_model_status': self.model.status, 'selected_browser_model': self.model.model,
                     'cancel_selected_browser_model': self.model.cancel}[method](params)
         suffix = method.removeprefix('selected_browser_')
+        a=self.s.state['attempts'].get(params.get('attempt_id')) if isinstance(params,dict) else None
+        if a and self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation' and suffix in ('auth','auth_inventory','confirm_authentication','takeover','control','stage','offer_input','approve_request','grant_destination'):
+            self.fail('PUBLIC_OPTIONAL_CAPABILITY_UNAVAILABLE')
         return getattr(self, suffix)(params)
 
     def _model_guard(self, params):
@@ -1186,6 +1239,7 @@ class SelectedBrowserSupervisor:
         ref = dict(run_id=params.get('run_id'), attempt_id=params.get('attempt_id'), fence=params.get('fence'),
                    policy_sha256=params.get('policy_hash'))
         a = self._ref(ref, allow_stopped=params['purpose'] == 'report')
+        if self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation':self.fail('PUBLIC_MODEL_TASKS_UNAVAILABLE')
         if any(record['state']=='uncertain' for record in a['actions']):
             self.fail('BROWSER_MODEL_ACTION_UNCERTAIN')
         if any(record['state']=='started' for record in a['actions']):

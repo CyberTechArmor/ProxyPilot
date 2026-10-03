@@ -1,3 +1,4 @@
+import {isPublicNavigation} from './operational-public-navigation.js';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -220,7 +221,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
   };
   const runner=client?{
     async readiness(input){
-      try{files?.verify();}catch{return {contract_version:CONTRACT,available:false,code:'BROWSER_PRIVATE_STORAGE_UNAVAILABLE'};}
+      try{if(!isPublicNavigation(input.configuration))files?.verify();}catch{return {contract_version:CONTRACT,available:false,code:'BROWSER_PRIVATE_STORAGE_UNAVAILABLE'};}
       const raw=await request('selected_browser_status',{configuration_json:canonicalBrowserDraft(input.configuration),configuration_sha256:input.configuration_sha256});
       const p=attest(raw,'selected-browser-status');
       if(!p||p.policy_sha256!==input.configuration_sha256)return {contract_version:CONTRACT,available:false,code:'BROWSER_STATUS_UNVERIFIED'};
@@ -363,7 +364,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
           if(['running','paused','awaiting_approval','human_control'].includes(current.state))await runner?.renew(identity({run_id:r.id,attempt_id:r.attempt_id,fence:current.fence,policy_sha256:r.configuration_sha256}));
           // Only an explicitly started/resumed running run advances. Startup
           // recovery has already fenced every previous process's active row.
-          if(current.state==='running')void runs.pump(r.id).catch(e=>log({code:e?.code||'BROWSER_PUMP_REFUSED'}));
+          if(current.state==='running'&&current.execution_mode!=='public_navigation')void runs.pump(r.id).catch(e=>log({code:e?.code||'BROWSER_PUMP_REFUSED'}));
         }catch(e){log({code:e?.code||'BROWSER_MAINTENANCE_REFUSED'});}
       }
     }finally{

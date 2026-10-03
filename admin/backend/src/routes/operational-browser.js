@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import {publicNavigationInput} from '../lib/operational-public-navigation.js';
 import { OperationsError, assertRevision, fail, parse, revision } from '../lib/operational-projects-logic.js';
 import { selectedConsentSchema, selectedStartSchema } from '../lib/operational-selected-browser-contract.js';
 import { selectedAuthConfirmationInputSchema } from '../lib/operational-selected-browser-auth-contract.js';
@@ -110,6 +111,9 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
   };
   const agent=(fn,opts={})=>handle(fn,opts),run=(fn,opts={})=>handle(fn,{...opts,runGate:true});
   const base='/:id/browser-agent-configurations',runs='/:id/browser-agent-runs',assets='/:id/browser-assets';
+
+  router.get('/:id/public-browser',agentsOnly,runsOnly,run(async(r,a)=>{const input=parse(z.object({url:z.string().min(8).max(2048)}).strict(),r.query);return {readiness:await method(available(r,'runs'),'publicReadiness')(a,r.params.id,input.url)};}));
+  router.post('/:id/public-browser',agentsOnly,runsOnly,run((r,a)=>method(available(r,'runs'),'openPublic')(a,r.params.id,parse(publicNavigationInput,r.body)),{status:202,action:'public_browser_open'}));
 
   router.get(`${base}/convert/readiness`,agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'conversion'),'readiness')(a,r.params.id);}));
   router.post(`${base}/convert`,agentsOnly,runsOnly,elevated,run((r,a)=>method(available(r,'conversion'),'convert')(a,r.params.id,r.body),{status:202,action:'browser_conversion'}));

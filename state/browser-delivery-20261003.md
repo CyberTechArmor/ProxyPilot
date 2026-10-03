@@ -1,3 +1,32 @@
+# Public browsing delivery — current authorized scope
+
+The 2026-10-03 user authorization supersedes historical whole-feature acceptance,
+independent-terminal gates and documentation saying installation was uninvoked.
+The owner completed fixed runtime operation `58db87b2-8f9b-4200-b878-c2b9d31c62be`;
+its UI log reaches completed with acceptance_created/runtime_accepted false.
+Those are installation results, not browsing acceptance. Live app/host agent still
+`cad71e96f61b9640ba3c69fc4754ec1c1f2fffec`. Services observed active through scoped
+MCP: supervisor, origin proxy, fence, broker, TURN and host agent; installed helper
+identity and actual browsing remain unverified.
+
+| Item | Status | Evidence / deployment | What I should see or be able to do |
+|---|---|---|---|
+| Checkpoint/preservation | Verified | Isolated public-navigation worktree; delivery local/remote tree compared; prior checkouts untouched | Existing data/services/history retained |
+| Public navigation | In progress | Explicit schema/mode, nullable real pins, service navigation and optional-capability refusal | Open URL without model/guide/private storage |
+| Public redirects/resources/protection | In progress | Dynamic screened destinations, actual peer check; seven Python public tests pass | Public pages/resources load; protected/private/mixed DNS refused |
+| Measured readiness | In progress | Signed helper/VM/fence/policy/gateway/live prerequisites; root inventory in protected journal | Inspect actual helper hashes and capability results |
+| Frontend open/live/Stop | In progress | Public panel, existing LiveBrowser, Stop, active run restoration, readiness details; frontend build passed | Enter website, watch, stop and reopen |
+| Independent review/CI | In progress | Four review blockers corrected; public/legacy selected JS174 pass; final review/CI pending | Reviewed code with passing CI |
+| Merge/application deployment | Not started | No new merge/deployment | New dashboard plus delivered runtime source |
+| Runtime upgrade | Not started | Fixed Profile installer after app deployment | New installed helper generation |
+| Live browsing/lifecycle/update proof | Not started | No browsing acceptance claimed | Real non-demo redirects/resources, live view, Stop, cleanup, relaunch and recovery/update compatibility |
+
+Retained local test limitations: cloud workspace denies some AF_UNIX sockets and
+lacks /usr/bin/chromium. These failures/skips are not passes. Disposable CI installs
+the real browser; live infrastructure verification is still required.
+
+---
+
 # Browser delivery tracker
 
 | Item | Status | Evidence / deployment | What I should see or be able to do |

@@ -102,7 +102,7 @@ export function createBrowserConfigurationsStore({ one, all, run, tx, access, ev
     browserConfigurations(actor, projectId, query = {}) {
       access(actor, projectId);
       const q = parse(listSchema, query);
-      const rows = all('SELECT * FROM ops_browser_agent_configurations WHERE project_id=? AND id>? ORDER BY id LIMIT ?', projectId, q.after || '', q.limit + 1);
+      const rows = all("SELECT * FROM ops_browser_agent_configurations WHERE project_id=? AND id>? AND COALESCE(json_extract(configuration_json, '$.mode'),'agent')!='public_navigation' ORDER BY id LIMIT ?", projectId, q.after || '', q.limit + 1);
       return { contract_version: BROWSER_DRAFT_CONTRACT, configurations: rows.slice(0, q.limit).map(r => ({
         id: r.id, project_id: r.project_id, revision: r.revision, name: JSON.parse(r.configuration_json).name,
         lifecycle: 'draft', execution_enabled: false, workflow_type: r.workflow_type,

@@ -7,7 +7,7 @@ import path from 'node:path';
 import {operationsFixture} from './helpers/operations-fixture.js';
 import {operationalSelectedBrowserAuthMigration1122} from '../lib/operational-selected-browser-auth-schema.js';
 import {SELECTED_BROWSER_AUTH_STATEMENT,selectedAuthDigest,selectedAuthInventoryDigest} from '../lib/operational-selected-browser-auth-contract.js';
-import {operationalSelectedBrowserMigration1118} from '../lib/operational-selected-browser-schema.js';
+import {operationalSelectedBrowserMigration1118,operationalPublicNavigationMigration1123} from '../lib/operational-selected-browser-schema.js';
 import {createSelectedBrowserService,normalizeSelectedBrowserPending} from '../lib/operational-selected-browser-service.js';
 import {SELECTED_BROWSER_CONSENT} from '../lib/operational-selected-browser-contract.js';
 import {validateBrowserModelRequest,browserModelRequestDigest} from '../lib/operational-browser-model.js';
@@ -20,7 +20,7 @@ const draft=()=>JSON.parse(readFileSync(new URL('../../../../contracts/browser-a
 const ref=()=>({id:randomUUID(),sha256:'b'.repeat(64)});
 const pendingPacket=(overrides={})=>{const meters=overrides.cumulativeusage??{requests:0,response_bytes:0};return{pending:[],inflight:0,effects_sent:0,effects_uncertain:0,auth_effects_acknowledged:0,mode:'agent',code:null,...overrides,cumulativeusage:meters,usage:meters};};
 function world({runnerChanges={},modelChanges={},configurationChanges=()=>{},proof=true,receipt=true,artifacts=null}={}){
-  const f=operationsFixture();operationalSelectedBrowserMigration1118(f.adapter);operationalSelectedBrowserAuthMigration1122(f.adapter);
+  const f=operationsFixture();operationalSelectedBrowserMigration1118(f.adapter);operationalSelectedBrowserAuthMigration1122(f.adapter);operationalPublicNavigationMigration1123(f.adapter);
   const owner=f.addUser(),viewer=f.addUser(),outsider=f.addUser('admin'),p=f.store.create(owner,{name:'Selected-browser fixtures',members:[{user_id:viewer.id,role:'viewer'}]});
   const guide=f.store.saveDraft(owner,p.id,f.store.draft(owner,p.id).revision,{title:'Current guide',instructions:'Read selected pages and report sources.'}).version;
   const c=draft();c.work.guide_ref={id:guide.id,sha256:guide.content_hash};configurationChanges(c);
@@ -430,3 +430,63 @@ test('authentic partial cleanup retains measured traffic but a signature alone n
   w.runner.stop=async identity=>{const receipt=await stop(identity);return{...receipt,closed:{...receipt.closed,network:false},final_network:{...receipt.final_network,requests:3,response_bytes:220,inflight:1}};};await rejected(409,()=>w.service.retryCleanup(w.owner,w.p.id,run.run.id,out.run.revision),'SIGNED_CLEANUP_RECEIPT_REQUIRED');const partial=w.service.get(w.owner,w.p.id,run.run.id);assert.equal(partial.run.usage.requests,3);assert.equal(partial.run.usage.response_bytes,220);assert.equal(w.f.db.prepare('SELECT state FROM ops_selected_browser_attempts').get().state,'cleanup_unverified');assert(partial.uncertainties.some(item=>item.kind==='CLEANUP_UNVERIFIED'&&item.state==='unresolved'));
   w.runner.stop=async identity=>{const receipt=await stop(identity);return{...receipt,final_network:{...receipt.final_network,requests:3,response_bytes:220,inflight:0,ledger_sha256:'e'.repeat(64)}};};const closed=await w.service.retryCleanup(w.owner,w.p.id,run.run.id,partial.run.revision);assert.equal(w.f.db.prepare('SELECT state FROM ops_selected_browser_attempts').get().state,'closed');assert(closed.uncertainties.some(item=>item.kind==='CLEANUP_UNVERIFIED'&&item.state==='reconciled'));assert(closed.uncertainties.some(item=>item.kind==='NETWORK_IN_FLIGHT'&&item.state==='unresolved'));assert.equal(closed.run.usage.requests,3);assert.equal(closed.report,null);assert.equal(w.calls.filter(([kind])=>kind==='execute').length,0);
 }));
+
+function publicWorld(options={}){
+ const w=world({proof:false,artifacts:{cancelAttempt(){assert.fail('Public browsing touched private storage');}},...options});
+ w.runner.observe=async()=>({snapshot_ref:w.snapshot,observation:'Public page text',source_refs:[],input_targets:[],page:null,candidates:[{candidate_ref:w.candidate.candidate_ref,effect:'read',operation:{kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'}}]});
+ w.open=()=>w.service.openPublic(w.owner,w.p.id,{url:'https://selected.example/',project_revision:w.f.store.get(w.owner,w.p.id).revision,idempotency_key:randomUUID()});return w;
+}
+test('public mode navigates without guide, model consent, model calls, elevation or private storage; stops and relaunches',async()=>{
+ const w=publicWorld();try{
+  const started=await w.open();assert.equal(started.run.execution_mode,'public_navigation');assert.equal(started.run.state,'running');
+  assert.equal(w.calls.filter(c=>c[0]==='execute').length,1);assert.equal(w.calls.filter(c=>c[0]==='model').length,0);
+  const row=w.f.db.prepare('SELECT * FROM ops_selected_browser_runs WHERE id=?').get(started.run.id);
+  for(const key of ['guide_id','guide_sha256','consent_sha256'])assert.equal(row[key],null);
+  assert.equal(w.f.db.prepare('SELECT COUNT(*) AS n FROM ops_selected_browser_consents').get().n,0);
+  assert.equal(w.service.assertLive(w.owner,w.p.id,row.id).run_id,row.id);
+  assert.equal(started.controls.can_takeover,false);assert.equal(started.controls.can_clipboard,false);
+  for(const intent of ['artifact_capture','artifact_model','clipboard_import','clipboard_export'])check(409,()=>w.service.authorizeAttempt(w.owner,{project_id:w.p.id,run_id:row.id,attempt_id:row.attempt_id,fence:1},intent),'PUBLIC_ARTIFACTS_UNAVAILABLE');
+  await w.service.pump(row.id);assert.equal(w.calls.filter(c=>c[0]==='model').length,0);
+  await rejected(409,w.open,'ATTEMPT_ALREADY_ACTIVE');
+  const stopped=await w.service.cancel(w.owner,w.p.id,row.id,w.service.get(w.owner,w.p.id,row.id).run.revision);
+  assert.equal(stopped.run.state,'cancelled');assert.equal(stopped.run.uncertain,false);assert.equal(stopped.receipts[0].closed.network,true);
+  assert.equal((await w.open()).run.state,'running');
+ }finally{w.f.close();}
+});
+test('public pending read cancellation and process recovery fence attempts without replay',async()=>{
+ const w=publicWorld({runnerChanges:{execute:async()=>({kind:'pending'})}});try{
+  const started=await w.open();assert.equal(started.run.state,'running');await w.service.recover();
+  const stopped=w.service.get(w.owner,w.p.id,started.run.id);assert.equal(stopped.run.state,'failed');assert.equal(stopped.run.result_code,'PROCESS_RECOVERY_NO_REPLAY');assert.equal(stopped.run.uncertain,false);
+  assert.equal(w.calls.filter(c=>c[0]==='model').length,0);assert.equal((await w.open()).run.state,'running');
+ }finally{w.f.close();}
+});
+test('public cleanup failure remains recorded and prevents another launch',async()=>{
+ const w=publicWorld({receipt:false});try{
+  const started=await w.open(),stopped=await w.service.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
+  assert.equal(stopped.run.state,'uncertain');assert(stopped.uncertainties.some(u=>u.kind==='CLEANUP_UNVERIFIED'));
+  await rejected(409,w.open,'CLEANUP_UNVERIFIED');
+ }finally{w.f.close();}
+});
+test('public final signed effect counters remain uncertain even when closure is complete',async()=>{
+ const w=publicWorld();try{
+  const normal=w.runner.stop;w.runner.stop=async identity=>{const receipt=await normal(identity);receipt.final_network.effects_sent=1;return receipt;};
+  const started=await w.open(),stopped=await w.service.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
+  assert.equal(stopped.run.state,'uncertain');assert(stopped.uncertainties.some(u=>u.kind==='EXTERNAL_EFFECT_UNVERIFIED'));
+ }finally{w.f.close();}
+});
+test('1123 copies historical run pins and dependent records, retains triggers and enforces nullable public-only pins',()=>{
+ const f=operationsFixture();try{
+  operationalSelectedBrowserMigration1118(f.adapter);operationalSelectedBrowserAuthMigration1122(f.adapter);
+  const owner=f.addUser(),project=f.store.create(owner,{name:'Migration preservation'}),c=draft();
+  const saved=f.store.createBrowserConfiguration(owner,project.id,project.revision,{configuration:c}).configuration;
+  const run=randomUUID(),attempt=randomUUID(),at=new Date().toISOString();
+  f.db.prepare(`INSERT INTO ops_selected_browser_runs(id,project_id,configuration_id,idempotency_key,started_by,owner_user_id,configuration_revision,configuration_sha256,configuration_json,guide_id,guide_sha256,consent_sha256,project_revision,project_limits_revision,state,attempt_id,usage_json,started_at,deadline_at) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,1,1,'cancelled',?,?,?,?)`).run(run,project.id,saved.id,randomUUID(),owner.id,owner.id,saved.configuration_sha256,JSON.stringify(c),randomUUID(),'a'.repeat(64),'b'.repeat(64),attempt,'{}',at,at);
+  f.db.prepare("INSERT INTO ops_selected_browser_attempts VALUES(?,?,1,'closed',?,?,NULL)").run(attempt,run,at,at);
+  const before=f.db.prepare('SELECT * FROM ops_selected_browser_runs WHERE id=?').get(run);
+  f.db.exec('PRAGMA foreign_keys=OFF');f.adapter.transaction(()=>operationalPublicNavigationMigration1123(f.adapter))();f.db.exec('PRAGMA foreign_keys=ON');
+  const {execution_mode,...after}=f.db.prepare('SELECT * FROM ops_selected_browser_runs WHERE id=?').get(run);
+  assert.equal(execution_mode,'agent');assert.deepEqual(after,{...before});assert.equal(f.db.prepare('SELECT run_id FROM ops_selected_browser_attempts WHERE id=?').get(attempt).run_id,run);assert.deepEqual(f.db.prepare('PRAGMA foreign_key_check').all(),[]);
+  assert.throws(()=>f.db.prepare("UPDATE ops_selected_browser_runs SET execution_mode='public_navigation' WHERE id=?").run(run),/immutable/);
+  assert.throws(()=>f.db.prepare('UPDATE ops_selected_browser_runs SET guide_id=NULL WHERE id=?').run(run),/immutable/);
+ }finally{f.close();}
+});

@@ -144,7 +144,9 @@ def canonical_origin(value):
 
 
 def validate_configuration(c):
-    validate(SCHEMAS['configuration'], c)
+    validate(SCHEMAS['public_configuration'] if c.get('mode') == 'public_navigation' else SCHEMAS['configuration'], c)
+    if c.get('mode') == 'public_navigation' and any(d['session_headers'] != 'omit' or 'authentication' in d['roles'] for d in c['destinations']['allowed_origins']):
+        refuse('PUBLIC_CREDENTIALS_DISABLED')
     if len(canonical_json(c).encode('utf-8')) > 200000 or len(c['work']['instructions'].encode('utf-8')) > 100000:
         refuse('BROWSER_DRAFT_TOO_LARGE')
     if not c['name'].strip() or not c['work']['instructions'].strip() or any(not v.strip() for v in c['work']['success_criteria']):

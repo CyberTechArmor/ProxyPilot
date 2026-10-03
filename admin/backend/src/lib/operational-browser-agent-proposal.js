@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import proposal from './operational-browser-agent-proposal.schema.json' with { type: 'json' };
+import publicProposal from './operational-public-navigation.schema.json' with {type:'json'};
 import { OperationsError } from './operational-projects-logic.js';
 
 export const BROWSER_DRAFT_CONTRACT = 'browser-agent-draft.v1';
@@ -47,7 +48,7 @@ export function canonicalBrowserDraft(value) {
   return JSON.stringify(value);
 }
 export const browserDraftHash = text => createHash('sha256').update(text, 'utf8').digest('hex');
-export const browserAgentProposalSchema = compile(proposal);
+export const browserAgentProposalSchema = z.union([compile(proposal), compile(publicProposal)]);
 const source = z.string().min(1).refine(v => !!v.trim() && Buffer.byteLength(v, 'utf8') <= 100000);
 const inputSchema = z.object({ configuration: browserAgentProposalSchema, source_text: source.optional() }).strict();
 
@@ -71,6 +72,7 @@ export function validateBrowserDraftImport(input) {
   // User-selected policy is explicit destinations and per-action approval.
   // Imported network-policy references remain unverified metadata, never grants.
   const destinations = c.destinations.allowed_origins;
+  if(c.mode==='public_navigation'&&destinations.some(d=>d.session_headers!=='omit'||d.roles.includes('authentication')))refuse('PUBLIC_CREDENTIALS_DISABLED');
   if (new Set(destinations.map(d => d.id)).size !== destinations.length ||
       new Set(destinations.map(d => d.origin)).size !== destinations.length) refuse('BROWSER_DESTINATION_DUPLICATE');
   for (const d of destinations) {

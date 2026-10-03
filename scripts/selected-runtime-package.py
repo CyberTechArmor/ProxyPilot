@@ -14,6 +14,7 @@ import copy
 import fcntl
 import hashlib
 import json
+import ipaddress
 import os
 from pathlib import Path
 import re
@@ -365,7 +366,7 @@ def candidate_files(sources):
         if len(value) > MAX_FILE:
             refuse('Source file exceeds reviewed bound')
         if name.endswith('.json'):
-            if set(strict(value)) != {'configuration', 'action'}:
+            if set(strict(value)) not in ({'configuration', 'action'}, {'configuration','action','public_configuration'}):
                 refuse('Source schema owned set changed')
         else:
             compile(value.decode('utf-8'), name, 'exec')
@@ -428,6 +429,47 @@ class Host:
 
     def execute(self, args, timeout=30, input=None):
         return subprocess.run(args, check=True, capture_output=True, timeout=timeout, input=input, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}).stdout
+
+    def public_inventory(self):
+        # Stored in the existing root-private installation journal and retained
+        # generation. No new package target or acceptance marker is introduced.
+        hosts={'localhost','metadata.google.internal'}
+        addresses={'127.0.0.1','::1','169.254.169.254','10.185.17.1','10.185.17.179'}
+        for interface in strict(self.execute(['ip','-j','address','show'])):
+            for entry in interface.get('addr_info',[]):
+                addresses.add(str(ipaddress.ip_address(entry['local'])))
+        env=self.tree.read(SOURCE+'/.env').decode('utf-8')
+        texts=[line.split('=',1)[1] for line in env.splitlines() if re.match(r'^(?:DOMAIN|PROXYPILOT_PUBLIC_URL)=',line)]
+        for directory in ('/etc/caddy/sites','/etc/caddy/custom'):
+            self.tree.secure(directory)
+            paths=sorted(self.tree.path(directory).glob('*.caddy'))
+            if len(paths)>512:refuse('Protected host inventory exceeds bound')
+            texts.extend('\n'.join(line for line in self.tree.read(directory+'/'+path.name).decode('utf-8').splitlines() if line and not line[0].isspace() and not line.startswith('#') and line.rstrip().endswith('{')) for path in paths)
+        for text in texts:
+            hosts.update(re.findall(r'(?<![a-zA-Z0-9_.-])(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}(?![a-zA-Z0-9_.-])',text))
+        hosts={h.lower() for h in hosts}
+        prior=self.tree.read(ROOT+'/selected-browser-acceptance.json',missing=True)
+        if prior:
+            record=strict(prior)
+            hosts.update(record.get('protected_hosts',[]));addresses.update(record.get('protected_addresses',[]))
+        if len(hosts)>512:refuse('Protected host inventory exceeds bound')
+        fingerprint=sha(encoded(dict(hosts=sorted(hosts),addresses=sorted(addresses),texts=texts)))
+        cache_path=TRANSACTION+'/public-inventory-plan.json'
+        cached=self.tree.read(cache_path,missing=True)
+        if cached:
+            if self.tree.pin(cache_path)['mode']!=0o600:refuse('Protected inventory plan custody changed')
+            record=strict(cached)
+            if record.get('fingerprint')==fingerprint and type(record.get('expires_at')) in (int,float) and time.time()<record['expires_at']<=time.time()+900:
+                return record['inventory']
+        # DNS can stall in libc; use a bounded subprocess and no shell. Include
+        # managed public addresses so aliases to the same host cannot evade it.
+        program="import json,socket,sys;out=set();\nfor h in json.load(sys.stdin):\n try:out.update(s[4][0] for s in socket.getaddrinfo(h,None,type=socket.SOCK_STREAM))\n except socket.gaierror:pass\nprint(json.dumps(sorted(out)))"
+        addresses.update(strict(self.execute(['/usr/bin/python3','-I','-c',program],timeout=30,input=encoded(sorted(hosts)))))
+        addresses={str(ipaddress.ip_address(a)) for a in addresses}
+        inventory=dict(v=1,vm_uuid=VM_UUID,protected_hosts=sorted(hosts),protected_addresses=sorted(addresses))
+        self.tree.mkdir(TRANSACTION,0o700)
+        self.tree.write(cache_path,encoded(dict(fingerprint=fingerprint,expires_at=time.time()+900,inventory=inventory)),0o600)
+        return inventory
 
     def wiring(self,require_socket=False):
         validate_a8_wiring(self.tree.read(SOURCE+'/.env').decode('utf-8'),self.tree.read(SOURCE+'/docker-compose.yml').decode('utf-8'))
@@ -700,6 +742,8 @@ class Package:
             value = copy.deepcopy(current)
             allowed = set(value['files'])
             if path == JOURNALS[0]:
+                if 'public_configuration' in strict(sources['selected-browser-schemas.json']):
+                    value['public_navigation_inventory']=self.h.public_inventory()
                 allowed |= {SUPERVISOR + '/' + n for n in SELECTED}
             if path == JOURNALS[1]:
                 allowed |= {ROOT + '/selected_browser_gateway.py', ROOT + '/selected_browser_policy.py'}

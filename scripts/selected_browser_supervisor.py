@@ -199,6 +199,11 @@ class SelectedBrowserSupervisor:
                     a = None
                 if a is not None and (a in marker['protected_addresses'] or self.policy.address_scope(a) not in ('public', 'internal')):
                     self.fail('PROTECTED_DESTINATION')
+            # Public readiness verifies the same read-only DNS and route plan
+            # as launch. It admits no attempt, opens no target socket and grants
+            # no authority: launch must resolve and verify everything again.
+            if c.get('mode')=='public_navigation' and not self.s.stopping and not self.s._live():
+                self._network_plan(c, marker, min(marker['expires_at'], self.s.clock() + 30))
             out.update(available=not self.s.stopping and not self.s._live(), verified_supervisor=True,
                        isolation=True, destinations=True, site_policy=True, vm_uuid=boundary['vm_uuid'],
                        valid_until=self.h.stamp(min(marker['expires_at'], self.s.clock() + 30)),

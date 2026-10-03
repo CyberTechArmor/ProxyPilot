@@ -93,7 +93,7 @@ function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
   const root=`${paths.runs}/${run.id}`;
   return <section aria-label="Public browser activity" className="space-y-3 min-w-0">
     <p role="status" className="text-sm">{words(run.state)} · {active?words(liveState):'Browser closed'} · {run.usage.requests} requests · {run.usage.response_bytes.toLocaleString()} response bytes</p>
-    {run.result_code&&<p className="text-sm break-words">{words(run.result_code)}</p>}
+    {run.launch_failure_code?<p className="text-sm break-words">Browser launch refused: {words(run.launch_failure_code)}</p>:run.result_code&&<p className="text-sm break-words">{words(run.result_code)}</p>}
     <Action variant="outline" disabled={busy||!data.controls.can_cancel} onClick={()=>perform(async signal=>{
       setData(await api.write(`${root}/cancel`,{},run.revision,'POST',signal));
     },'Browser stopped. Inspect the cleanup receipt.')}>Stop browser</Action>

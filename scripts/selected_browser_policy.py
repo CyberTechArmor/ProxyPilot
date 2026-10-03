@@ -133,22 +133,14 @@ def address_scope(value):
     return 'public'
 
 
-def build_public_target(origin, answers, route_sha256, protected_hosts, protected_addresses):
-    """Pure helper AFTER explicit run/destination approval and host DNS/route readback.
-
-    No network access is performed here. A public host does not need a manually
-    enrolled network_policy_ref: the installed host can derive this exact plan
-    from screened DNS plus its fresh route observation. Internal addresses are
-    refused by this helper and need their separate exact reviewed route policy.
-    """
+def screen_public_answers(origin, answers, protected_hosts, protected_addresses):
+    """Screen the complete DNS answer set before any route candidate is omitted."""
     parts = url_parts(origin, origin_only=True)
     host = parts['host']
     if (not protected_hosts or not protected_addresses or PROTECTED_NAMES.search(host) or
             host == 'localhost' or host.endswith('.localhost') or
             any(host == h or host.endswith('.' + h) for h in protected_hosts)):
         raise Denied('PROTECTED_DESTINATION')
-    if not isinstance(route_sha256, str) or not HEX.fullmatch(route_sha256):
-        raise Denied('NETWORK_ROUTE_UNVERIFIED')
     if not isinstance(answers, list) or not 1 <= len(answers) <= 32:
         raise Denied('NETWORK_TARGET_UNVERIFIED')
     clean = []
@@ -165,6 +157,25 @@ def build_public_target(origin, answers, route_sha256, protected_hosts, protecte
         literal = None
     if literal is not None and clean != [literal]:
         raise Denied('NETWORK_LITERAL_MISMATCH')
+    return clean
+
+
+def build_public_target(origin, answers, route_sha256, protected_hosts, protected_addresses, routed_addresses=None):
+    """Derive an exact public plan from full screened DNS and fresh route proof.
+
+    Omitted route candidates never bypass the complete DNS security checks.
+    Internal targets still require their separate exact reviewed route policy.
+    """
+    clean = screen_public_answers(origin, answers, protected_hosts, protected_addresses)
+    if not isinstance(route_sha256, str) or not HEX.fullmatch(route_sha256):
+        raise Denied('NETWORK_ROUTE_UNVERIFIED')
+    if routed_addresses is not None:
+        if (not isinstance(routed_addresses, list) or not 1 <= len(routed_addresses) <= 16 or
+                any(not isinstance(a, str) or a not in clean for a in routed_addresses) or
+                len(set(routed_addresses)) != len(routed_addresses)):
+            raise Denied('NETWORK_TARGET_UNVERIFIED')
+        clean = list(routed_addresses)
+    parts = url_parts(origin, origin_only=True)
     return dict(origin=origin, scope='public', addresses=clean, port=parts['port'],
                 route_sha256=route_sha256, reviewed=True)
 

@@ -119,10 +119,14 @@ unknown or incomplete transactions cannot be superseded by preservation.
 The expanded preservation profile in `review-runtime-refresh.py` recognizes a
 separately committed selected package. It attests current delivered source to
 the updater's exact Git revision, checks the complete installed journals and
-25-file set, and requires every installed code/unit byte to match both the
-committed package and the current source-generated contract. A runtime code or
-unit change still requires the separately reviewed package workflow. Normal
-application-only updates preserve the runtime without restarting its daemons.
+25-file set, and requires every installed code/unit byte to match the committed
+package and its retained, private generation bytes. New delivered runtime
+source may differ: a normal application update does not install it. Runtime
+replacement uses the dedicated authenticated package operation after delivery.
+This lets the application deploy the next capability without first breaking
+ordinary updates or implicitly replacing its runtime. Normal updates preserve
+the runtime without restarting its daemons. A rolled-back package upgrade is
+verified against its retained original generation, even if newer source remains.
 The existing versioned browser/gateway/schema contracts remain unchanged.
 
 A version3 `preserve_selected` transaction records current source, complete

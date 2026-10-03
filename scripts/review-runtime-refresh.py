@@ -759,8 +759,10 @@ def verify_rolled_back_package(package, module):
 class SelectedRefresh:
     """Metadata-only preservation of a separately committed selected package.
 
-    Source equivalence is deliberately strict: a normal application update may
-    preserve the package, but changing its code/units requires package review.
+    A normal application update preserves the committed installed generation,
+    even when it delivers a newer package. Only the dedicated package operation
+    replaces runtime code/units. Installed bytes remain pinned to the retained
+    package transaction, independently of candidate source.
     No method starts/stops runtime services or restores runtime/business data.
     """
     def __init__(self, host, package, module, directory=TRANSACTION):
@@ -811,10 +813,18 @@ class SelectedRefresh:
         revision, sources, checkout = self.h.sources()
         if revision != profile['source_sha'] or checkout['path'] != profile['source_checkout']:
             raise ValueError('Selected package and updater source identity differ')
-        candidates = module.candidate_files(sources)
-        for path, value in candidates.items():
-            if (pins[path]['sha256'] != sha(value) or pins[path] != transaction['files'][path][side]):
-                raise ValueError('Selected runtime code/unit change requires a separately reviewed package update')
+        module.candidate_files(sources)  # validate delivery without installing it
+        generation = module.TRANSACTION + '/' + transaction['id']
+        if stat.S_IMODE(self.t.secure(generation).st_mode) != 0o700:
+            raise ValueError('Selected package generation custody changed')
+        for slot, path in enumerate(module.OWNED):
+            if path in module.JOURNALS:
+                continue  # narrowly verified certificate renewal below
+            expected = transaction['files'][path][side]
+            staged = self.t.pin(generation + '/' + side + '-' + str(slot))
+            if (expected is None or pins[path] != expected or staged['mode'] != 0o600 or
+                    staged['sha256'] != expected['sha256'] or staged['bytes'] != expected['bytes']):
+                raise ValueError('Selected runtime differs from committed package generation')
         # The certificate renewer may legitimately update the certificate/key
         # hashes in the proxy journal. Preserve all journal metadata; only that
         # documented pair may differ from the committed generation.

@@ -89,3 +89,47 @@ class PublicSupervisorTests(unittest.TestCase):
         self.host.selected_managed_policy_hash=lambda:'0'*64
         status=self.runtime.status(params);self.assertFalse(status['available']);self.assertEqual(status['code'],'BROWSER_CHROMIUM_POLICY_UNVERIFIED')
         self.assertEqual(self.host.spawns,0);self.assertEqual(self.host.trace,[])
+
+    def test_public_readiness_signed_route_refusal_never_admits_or_spawns(self):
+        self.public()
+        params={k:self.spec[k] for k in ('configuration_json','configuration_sha256')}
+        self.host.selected_resolve=Mock(return_value=['1.1.1.1','2606:4700:4700::1111'])
+        self.host.selected_route_hash=Mock(side_effect=supervisors.s.Refused('NETWORK_ROUTE_UNVERIFIED'))
+        out=self.runtime.status(params)
+        self.assertFalse(out['available']);self.assertEqual(out['code'],'NETWORK_ROUTE_UNVERIFIED')
+        proof=supervisors.SelectedSupervisorTests.decode(self,out['attestation'])
+        self.assertEqual(proof['code'],'NETWORK_ROUTE_UNVERIFIED');self.assertEqual(proof['vm_uuid'],supervisors.s.VM_UUID)
+        self.assertEqual(proof['valid_until'],supervisors.s.stamp(self.clock()+30))
+        self.host.selected_route_hash.assert_called_once_with(['1.1.1.1','2606:4700:4700::1111'])
+        self.assertEqual(self.host.spawns,0);self.assertEqual(self.supervisor.state['attempts'],{})
+        self.assertEqual(self.supervisor.state['runs'],{});self.assertNotIn('gateway:register',self.host.trace)
+
+    def test_public_readiness_retains_dns_refusal_and_rejects_mixed_private_answers(self):
+        self.public()
+        params={k:self.spec[k] for k in ('configuration_json','configuration_sha256')}
+        self.host.selected_resolve=Mock(side_effect=supervisors.s.Refused('DNS_LOOKUP_UNVERIFIED'))
+        out=self.runtime.status(params);self.assertEqual(out['code'],'DNS_LOOKUP_UNVERIFIED');self.assertFalse(out['available'])
+        self.host.selected_resolve=Mock(return_value=['1.1.1.1','10.0.0.1'])
+        self.host.selected_route_hash=Mock(side_effect=AssertionError('Route read after mixed DNS'))
+        out=self.runtime.status(params);self.assertEqual(out['code'],'DNS_ADDRESS_CHANGED');self.assertFalse(out['available'])
+        self.host.selected_route_hash.assert_not_called();self.assertEqual(self.host.spawns,0)
+        self.assertEqual(self.supervisor.state['attempts'],{})
+
+    def test_public_protected_name_refused_before_dns(self):
+        self.public();self.c['destinations']['allowed_origins'][0]['origin']='https://controller.example'
+        self.c['destinations']['entry_urls']=['https://controller.example/']
+        raw=self.runtime.contract.canonical_json(self.c)
+        self.host.selected_resolve=Mock(side_effect=AssertionError('Protected DNS lookup'))
+        out=self.runtime.status(dict(configuration_json=raw,configuration_sha256=hashlib.sha256(raw.encode()).hexdigest()))
+        self.assertEqual(out['code'],'PROTECTED_DESTINATION');self.host.selected_resolve.assert_not_called()
+        self.assertEqual(self.host.spawns,0)
+
+    def test_public_successful_preflight_never_authorizes_later_changed_route(self):
+        self.public();params={k:self.spec[k] for k in ('configuration_json','configuration_sha256')}
+        self.assertTrue(self.runtime.status(params)['available']);self.assertEqual(self.host.spawns,0)
+        self.assertEqual(self.supervisor.state['attempts'],{});self.host.trace.clear()
+        self.host.selected_route_hash=Mock(side_effect=supervisors.s.Refused('NETWORK_ROUTE_UNVERIFIED'))
+        self.assertCode('NETWORK_ROUTE_UNVERIFIED',self.runtime.launch,self.spec)
+        self.assertTrue(any(item.startswith('resolve:') for item in self.host.trace))
+        self.host.selected_route_hash.assert_called_once();self.assertEqual(self.host.spawns,0)
+        self.assertEqual(self.supervisor.state['attempts'],{});self.assertNotIn('gateway:register',self.host.trace)

@@ -104,7 +104,7 @@ try{
   await page.route('**/browser-agent-runs',r=>r.fulfill({json:{runs:[publicData.run]}}));
   await page.route('**/browser-agent-runs/'+publicId,r=>r.fulfill({json:publicData}));
   await page.route('**/browser-agent-runs/'+publicId+'/retry-cleanup',async r=>{
-    retries++;assert.equal(r.request().method(),'POST');assert.equal(r.request().headers()['if-match'],'3');
+    retries++;assert.equal(r.request().method(),'POST');assert.equal(r.request().headers()['if-match'],'"3"');
     if(retries===1)return r.fulfill({status:403,json:{error:'Cleanup needs a verified session.',code:'ELEVATION_REQUIRED'}});
     publicData={...publicData,run:{...publicData.run,revision:4,uncertain:false},
       receipts:[{closed:{browser:true,network:true,session:true,temporary_files:true}}],

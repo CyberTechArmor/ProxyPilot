@@ -24,7 +24,7 @@ const pending={id:'00000000-0000-4000-8000-000000000021',title:'Summarize',instr
 let role='owner',draftState='published',stale=false,denied=false,connectionState='normal',evidenceEnabled=false,draftRevision=1,serverText=guide.instructions;
 let evidenceReferences=[];
 const reviewedWebsite={website_review_enabled:true,website_review_contract:'website-review.v1',website_review_strategy:'http_extract_v1'};
-let websiteGate={...reviewedWebsite},demoRunsEnabled=false;
+let websiteGate={...reviewedWebsite},demoRunsEnabled=false,selectedBrowserEnabled=false;
 const retainedReference={demonstration_id:'00000000-0000-4000-8000-000000000041',revision_id:'00000000-0000-4000-8000-000000000042',item_position:0,object_id:'00000000-0000-4000-8000-000000000043',annotation_id:'00000000-0000-4000-8000-000000000044',available:false};
 const draft=()=>({title:draftState==='pending'?pending.title:guide.title,instructions:draftState==='pending'?pending.instructions:serverText,revision:draftRevision,status:draftState,pending_submission:draftState==='pending'?pending:null,contributors:[owner.id],evidence:{references:evidenceReferences}});
 const requests=[],errors=[],agents=[];
@@ -39,7 +39,7 @@ await page.route('**/api/**',async route=>{
  const answer=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
  if(path==='/api/auth/verify')return answer({user:owner});
  if(path==='/api/branding')return answer({name:'Fractionate',logo:null});
- if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled,can_manage_settings:false,...websiteGate});
+ if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled||selectedBrowserEnabled,can_manage_settings:false,...websiteGate,...(selectedBrowserEnabled?{selected_browser_contract:'selected-browser.v1'}:{})});
  if(path==='/api/connections/capabilities')return answer({mode:'disabled',intake_enabled:false,execution_enabled:false,adapters:[],reason:'BROKER_NOT_ACTIVATED'});
  if(path==='/api/connections')return answer({connections:connectionState==='empty'?[]:connectionState==='restricted'?[{...connection,status:'revoked',rights:['view','use'] }]:[connection]});
  if(path.endsWith('/enrollment-intents'))return answer({intent:{id:'metadata-only',status:'awaiting_activation'},intake_enabled:false});
@@ -180,6 +180,13 @@ try{
   assert(fit.columns[1].x>fit.columns[0].x+fit.columns[0].width,'The summary columns are side by side at reference width');
   for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])assert.equal(await page.getByRole('heading',{name:title,exact:true}).evaluate(node=>node.tagName),'H3','Summary sections follow the selected project H2');
   await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Details',exact:true}).click();await page.getByLabel('Purpose (optional)',{exact:true}).waitFor();
+ });
+ await journey('selected-browser Overview does not present demo-only runtime guidance',async()=>{
+  selectedBrowserEnabled=true;await loaded();
+  await page.getByText('Browser configurations use approved instructions, permitted websites and limits.',{exact:true}).waitFor();
+  assert.equal(await page.getByText(/Synthetic pilot: demo\.fractionate\.ai only/).count(),0);
+  assert(!requests.some(r=>r.method==='POST'&&/browser-agent-runs|agent-runs/.test(r.path)),'Overview starts no browser or demo run');
+  selectedBrowserEnabled=false;
  });
  await journey('responsive project search has unique labels and retains the filter across layouts',async()=>{
   await loaded();

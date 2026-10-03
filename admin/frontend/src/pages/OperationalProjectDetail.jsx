@@ -133,8 +133,8 @@ function Operation({id}) {
         </Panel>
         {agentCapability&&<Panel title="Agents" icon={Bot} contained={false} headingLevel={3} className="!space-y-2 border-t pt-4">
           <p className="text-sm text-muted-foreground">Runs need an approved guide, permitted connections and operator authority.</p>
-          <p className="text-xs text-muted-foreground">Synthetic pilot: demo.fractionate.ai only.{runsCapability&&!execution.available?' Runtime unavailable.':''}</p>
-          <details><summary className="min-h-11 cursor-pointer py-3 text-sm">Execution requirements</summary><div className="space-y-2 pb-2"><p className="text-sm text-muted-foreground">A configured task describes intended work. Execution needs a supported workflow and runtime, permitted connections and limits. Check readiness in Agents before starting work.</p>{runsCapability&&!execution.available&&execution.message&&<p className="text-sm text-muted-foreground">{execution.message}</p>}</div></details>
+          <p className="text-xs text-muted-foreground">{browserRuntimeCapability?'Browser configurations use approved instructions, permitted websites and limits.':'Synthetic pilot: demo.fractionate.ai only.'}{!browserRuntimeCapability&&runsCapability&&!execution.available?' Runtime unavailable.':''}</p>
+          <details><summary className="min-h-11 cursor-pointer py-3 text-sm">Execution requirements</summary><div className="space-y-2 pb-2"><p className="text-sm text-muted-foreground">A configured task describes intended work. Execution needs a supported workflow and runtime, permitted connections and limits. Check readiness in Agents before starting work.</p>{!browserRuntimeCapability&&runsCapability&&!execution.available&&execution.message&&<p className="text-sm text-muted-foreground">{execution.message}</p>}</div></details>
           <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Agents')}>Open agents<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
         </Panel>}
         </div>

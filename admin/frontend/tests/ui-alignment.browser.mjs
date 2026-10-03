@@ -102,6 +102,7 @@ async function accessibility(name){
  const failing=Object.values(lhr.audits).filter(a=>a.score===0&&a.scoreDisplayMode==='binary');
  const score=Math.round(lhr.categories.accessibility.score*100);
  report.accessibility??=[];report.accessibility.push({name,score,form_factor:lhr.configSettings.formFactor,failing:failing.map(a=>a.id),details:failing.map(a=>({id:a.id,items:a.details?.items}))});
+ console.log(`UI_ACCESSIBILITY:${JSON.stringify(report.accessibility.at(-1))}`);
  assert(score>=90,`${name}: mobile accessibility score ${score} is below 90`);
  assert(!failing.some(a=>['color-contrast','heading-order','duplicate-id-aria'].includes(a.id)),`${name}: unresolved accessibility findings ${JSON.stringify(failing.map(a=>a.id))}`);
 }

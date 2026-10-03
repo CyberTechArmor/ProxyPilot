@@ -120,7 +120,7 @@ try{
   await page.waitForTimeout(100);
   assert.equal(retries,1);assert.equal(await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).count(),1);
   await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
-  await page.getByText('Cleanup checked. Inspect the receipt and check browser readiness again.',{exact:true}).waitFor();
+  await runtime.getByText('Cleanup checked. Inspect the receipt and check browser readiness again.',{exact:true}).waitFor();
   assert.equal(retries,2);assert.equal(await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).count(),0);
   await publicRun.getByText('Cleanup: browser closed · network closed · session closed · temporary files closed',{exact:true}).waitFor();
   assert.equal(await page.getByText(publicId,{exact:true}).count(),1);

@@ -22,7 +22,7 @@ export function NewProjectButton() {
   }
   function close() {setOpen(false);setName('');setDescription('');setError('');}
   return <Dialog open={open} onOpenChange={value=>{if(!busy){if(value){setOpen(true);setError('');}else close();}}}>
-    <DialogTrigger asChild><Button className="min-h-11 gap-2 rounded-md px-4"><Plus className="h-4 w-4" aria-hidden="true"/>New project</Button></DialogTrigger>
+    <DialogTrigger asChild><Button className="min-h-11 gap-2 rounded-md px-4 bg-[color-mix(in_srgb,hsl(var(--primary)),black_25%)] hover:bg-[color-mix(in_srgb,hsl(var(--primary)),black_35%)]"><Plus className="h-4 w-4" aria-hidden="true"/>New project</Button></DialogTrigger>
     <DialogContent className="operations-dialog max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-md flex flex-col p-6 [&>button]:h-11 [&>button]:w-11 [&>button]:flex [&>button]:items-center [&>button]:justify-center">
       <DialogHeader className="pr-8"><DialogTitle className="operations-heading">New project</DialogTitle><DialogDescription>Give the work a name. Add guides and agents when you are ready.</DialogDescription></DialogHeader>
       <form onSubmit={create} className="space-y-4">
@@ -49,8 +49,9 @@ export function ProjectBrowser({projects,selectedId,section='Overview',collapsib
   const searchId=useId();
   const saved=projects.filter(p=>p.current_version&&!p.archived_at).length;
   const rows=projects.filter(p=>`${p.name} ${p.description||''} ${p.current_version?.title||''}`.toLowerCase().includes(search.toLowerCase())&&(filter==='all'||(filter==='saved'?p.current_version&&!p.archived_at:!p.current_version&&!p.archived_at)));
-  const list=<>
-    <div className="p-4 space-y-3"><div className="relative"><label htmlFor={searchId} className="sr-only">Search projects and procedures</label><Search className="pointer-events-none absolute left-3 top-3 h-5 w-5 text-muted-foreground" aria-hidden="true"/><input id={searchId} type="search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search projects and procedures…" className="min-h-11 w-full rounded-md border bg-background py-2 pl-10 pr-3 text-sm"/></div>
+  // Both responsive copies stay mounted; their labels need separate targets.
+  const list=surface=>{const mountedSearchId=`${searchId}-${surface}`;return <>
+    <div className="p-4 space-y-3"><div className="relative"><label htmlFor={mountedSearchId} className="sr-only">Search projects and procedures</label><Search className="pointer-events-none absolute left-3 top-3 h-5 w-5 text-muted-foreground" aria-hidden="true"/><input id={mountedSearchId} type="search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search projects and procedures…" className="min-h-11 w-full rounded-md border bg-background py-2 pl-10 pr-3 text-sm"/></div>
       <nav className="operations-tabs gap-4" aria-label="Filter projects">{[['all','All',projects.length],['saved','Guide saved',saved],['draft','No guide',projects.filter(p=>!p.current_version&&!p.archived_at).length]].map(([key,label,count])=><button type="button" key={key} aria-pressed={filter===key} onClick={()=>setFilter(key)} className={`min-h-11 shrink-0 border-b-2 pb-2 text-sm ${filter===key?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground'}`}>{label}<span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground">{count}</span></button>)}</nav>
     </div>
     <div className="flex items-center justify-between gap-2 border-y bg-muted/20 px-4 py-3 text-xs uppercase text-muted-foreground"><span>Project / SOP</span><span>Status</span></div>
@@ -59,9 +60,9 @@ export function ProjectBrowser({projects,selectedId,section='Overview',collapsib
     </Link>)}</nav>
     {!rows.length&&<div className="space-y-2 p-6 text-center text-muted-foreground"><FolderOpen className="mx-auto h-6 w-6" aria-hidden="true"/><p>{loading?'Loading projects…':search||filter!=='all'?'No matching projects.':'No projects yet.'}</p></div>}
     <footer className="border-t p-4 space-y-3"><p className="text-xs text-muted-foreground">{rows.length} permitted project{rows.length===1?'':'s'}</p>{cursor&&<Action variant="outline" disabled={loading} onClick={onMore}>Load more projects</Action>}</footer>
-  </>;
+  </>;};
   return <aside className={`operations-card min-w-0 rounded-md border bg-card ${collapsible?'min-h-0 max-h-[35dvh] overflow-y-auto overscroll-contain lg:max-h-none lg:h-full':'self-start'}`} data-project-browser>
-    {collapsible?<><div className="hidden lg:block">{list}</div><details className="lg:hidden"><summary className="flex min-h-11 cursor-pointer items-center gap-2 px-4 py-3 font-medium"><FolderOpen className="h-4 w-4" aria-hidden="true"/>Browse or switch project</summary>{list}</details></>:list}
+    {collapsible?<><div className="hidden lg:block">{list('desktop')}</div><details className="lg:hidden"><summary className="flex min-h-11 cursor-pointer items-center gap-2 px-4 py-3 font-medium"><FolderOpen className="h-4 w-4" aria-hidden="true"/>Browse or switch project</summary>{list('mobile')}</details></>:list('single')}
   </aside>;
 }
 

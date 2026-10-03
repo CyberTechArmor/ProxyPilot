@@ -69,7 +69,7 @@ PROTECTED = (ROOT + '/supervisor-key.pem', PUBLIC_KEY, '/etc/proxypilot-a8/super
 LEDGERS = (STATE + '/supervisor/state.json', '/var/lib/proxypilot-a4/broker/state.json', GATEWAY_STATE)
 OPTIONAL = {ROOT + '/selected-browser-acceptance.json', STATE + '/supervisor-keys', GATEWAY_STATE}
 SOURCE_NAMES = LEGACY + SELECTED + ('a4-credential-broker.py', 'a3-install-supervisor.py',
-                                   'a4-install-broker.py', 'selected-runtime-package.py')
+                                   'a4-install-broker.py', 'selected-runtime-package.py', 'browser-runtime-operation.py')
 MAX_FILE = 2 * 1024 * 1024
 MAX_LEDGER = 16 * 1024 * 1024
 HEX = re.compile('[0-9a-f]{64}\\Z')
@@ -795,20 +795,26 @@ class Package:
         value,_ = self.snapshot(operation)
         return dict(plan_sha256=sha(encoded(value)), plan=value, acceptance_created=False, runtime_accepted=False)
 
-    def review(self, operation, expected):
+    def review(self, operation, expected, authority="interactive-root"):
+        if authority not in {"interactive-root", "authenticated-host-runner"}:
+            refuse("Unknown package operation authority")
         result = self.plan(operation)
         if result['plan_sha256'] != expected:
             refuse('Operator review plan changed')
-        # No automated CLI flag can replace the production TTY confirmation.
+        # The fixed authenticated host operation may authorize its freshly measured
+        # plan. It records its own authority; this is not runtime acceptance.
         self.t.mkdir(TRANSACTION, 0o700)
+        now = self.clock()
         receipt = dict(schema=VERSION, operation=operation, plan_sha256=expected,
-                       reviewed_at=self.clock(), expires_at=self.clock()+900, token=secrets.token_hex(32))
+                       reviewed_at=now, expires_at=now+900, token=secrets.token_hex(32), authority=authority)
         self.save('review.json', receipt)
         return dict(reviewed=True, plan_sha256=expected, expires_at=receipt['expires_at'])
 
     def reviewed(self, operation, expected):
         receipt = strict(self.t.read(TRANSACTION + '/review.json'))
-        if (set(receipt) != {'schema','operation','plan_sha256','reviewed_at','expires_at','token'} or
+        if (set(receipt) not in ({'schema','operation','plan_sha256','reviewed_at','expires_at','token'},
+                                {'schema','operation','plan_sha256','reviewed_at','expires_at','token','authority'}) or
+                receipt.get('authority', 'interactive-root') not in {'interactive-root', 'authenticated-host-runner'} or
                 receipt['schema'] != VERSION or receipt['operation'] != operation or receipt['plan_sha256'] != expected or
                 not HEX.fullmatch(str(receipt['token'])) or type(receipt['reviewed_at']) not in (int,float) or
                 type(receipt['expires_at']) not in (int,float) or not receipt['reviewed_at'] <= self.clock() < receipt['expires_at'] <= receipt['reviewed_at']+900):

@@ -34,7 +34,9 @@ StartLimitBurst=10
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/proxypilot-update-runner
+ExecStopPost=/usr/bin/flock -w 30 /var/lock/proxypilot-update.lock /usr/bin/python3 /opt/proxypilot/scripts/browser-runtime-operation.py recover-if-needed
 TimeoutStartSec=21600
+TimeoutStopSec=360
 KillMode=control-group
 Environment=HOME=/root
 Environment=TERM=dumb

@@ -1,3 +1,12 @@
+> **Current delivery authorization — 2026-10-03:** See `state/decisions.md` and
+> `state/browser-delivery-20261003.md`. Public navigation/live viewing, model tasks,
+> manual sign-in, files and internal destinations are separate capabilities.
+> Historical all-capability acceptance and mandatory interactive root-terminal
+> prerequisites below are superseded. The fixed authenticated host operation
+> replaces the terminal ceremony; it retains source/identity checks, isolation,
+> protected state, locking, bounded execution and recovery. Installing a package
+> does not fabricate acceptance or claim a working browser.
+
 # Selected browser runtime package contract
 
 This is the separate repository contract for installing and subsequently
@@ -322,3 +331,28 @@ workspace and decoder isolation. The separate root-owned acceptance marker and
 each private artifact/decoder boundary must come from that actual proof. This
 package contract supplies reviewable installation/update/rollback behavior;
 it leaves those installed acceptance requirements intact.
+
+## Supported authenticated installation operation (2026-10-03)
+
+`POST /api/user/version/browser-runtime` accepts only `operation: install|recover|rollback`
+under the existing administrator, sudo and CSRF boundary. MCP `manage_browser_runtime`
+uses the same driver, its existing host-control scope and audited mutation wrapper.
+The Go agent writes only a dedicated `browser-runtime-*` request; arbitrary flags,
+paths and commands are rejected. The root systemd runner owns the update lock and
+starts the fixed installed helper with a 20-minute bound plus recovery grace.
+
+The helper attests delivered source before stopping the exact existing dashboard
+container. Under the runtime fence lock it measures a fresh plan and records
+`authenticated-host-runner` authority in a one-use, expiring private receipt. It
+runs the existing paired package transaction, commits and restarts that same
+container, then checks its actual `/api/health`. Raw plans stay root-private.
+No database, credential, Incus version or unrelated application is changed.
+
+An independent systemd stop hook and boot recovery unit inspect the private
+operation journal and recover an interrupted transaction without a dashboard
+session. Unrecognized drift remains a genuine recovery failure, never false
+success. The ordinary update status endpoint reports the operation's ID and
+result; the UI must not adopt an older operation when a new result is pending.
+
+The package acceptance marker is untouched. Public/model/auth/file/internal
+availability must come from each capability's real installed checks and journeys.

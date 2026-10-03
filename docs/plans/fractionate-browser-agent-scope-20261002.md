@@ -1,3 +1,12 @@
+> **Current delivery authorization — 2026-10-03:** See `state/decisions.md` and
+> `state/browser-delivery-20261003.md`. Public navigation/live viewing, model tasks,
+> manual sign-in, files and internal destinations are separate capabilities.
+> Historical all-capability acceptance and mandatory interactive root-terminal
+> prerequisites below are superseded. The fixed authenticated host operation
+> replaces the terminal ceremony; it retains source/identity checks, isolation,
+> protected state, locking, bounded execution and recovery. Installing a package
+> does not fabricate acceptance or claim a working browser.
+
 # Selected browser agents — expanded scope and implementation slices
 
 Base: `9b88f8f03925ee4c4cf097e40429897be9195e2f`, PR #724. Saved cloud environment

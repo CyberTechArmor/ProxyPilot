@@ -478,3 +478,20 @@ test('Docker context copy includes source and built frontend while preserving in
   assert.equal(existsSync(join(install, 'admin', 'backend', 'node_modules')), false);
   assert.equal(existsSync(join(install, 'admin', 'frontend', 'node_modules')), false);
 });
+
+
+test('browser runtime dispatch uses fixed argv and refuses caller flags', (t) => {
+  const s = setup(); t.after(s.cleanup);
+  const bin = join(s.root, 'bin'); mkdirSync(bin);
+  const argsFile = join(s.root, 'argv');
+  writeFileSync(join(bin, 'flock'), `#!/bin/bash\nprintf '%s\\n' "$@" > "${argsFile}"\n`, { mode: 0o755 });
+  for (const operation of ['install', 'recover', 'rollback']) {
+    const id = s.request({ action: `browser-runtime-${operation}` });
+    assert.equal(s.runner([], { PATH: `${bin}:${process.env.PATH}` }).status, 0);
+    const argv = readFileSync(argsFile, 'utf8').trim().split('\n');
+    assert.deepEqual(argv.slice(2), ['timeout', '--signal=TERM', '--kill-after=180', '1200', '/usr/bin/python3', '/opt/proxypilot/scripts/browser-runtime-operation.py', operation]);
+    assert.equal(s.readJson(`state.${id}.json`).status, 'success');
+    const bad = s.request({ action: `browser-runtime-${operation}`, flags: '--rebuild' });
+    s.runner(); assert.equal(s.readJson(`state.${bad}.json`).status, 'refused');
+  }
+});

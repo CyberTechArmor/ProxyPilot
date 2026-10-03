@@ -72,7 +72,7 @@ jobs:
         run: node --test src/__tests__/agent.test.js src/__tests__/caddy-driver.test.js
       - name: Update recovery and runner policy regressions
         working-directory: admin/backend
-        run: node --test src/__tests__/update-runner-maintenance.test.js src/__tests__/update-runner-policy.test.js src/__tests__/self-update-logic.test.js src/__tests__/self-update-runner.test.js
+        run: node --test src/__tests__/browser-runtime-install.test.js src/__tests__/update-runner-maintenance.test.js src/__tests__/update-runner-policy.test.js src/__tests__/self-update-logic.test.js src/__tests__/self-update-runner.test.js
       - name: Build identity and pinned standards guidance
         working-directory: admin/backend
         run: node --test src/__tests__/build-identity.test.js src/__tests__/upstream-guidance.test.js src/__tests__/self-update-driver.test.js src/__tests__/mock2-standards-seed.test.js src/__tests__/mock2-framework.test.js

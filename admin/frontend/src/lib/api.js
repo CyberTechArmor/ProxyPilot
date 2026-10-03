@@ -855,6 +855,7 @@ export const api = {
   // new backend is up, and fails while it is down (the panel tolerates that).
   getVersion: () => request('/user/version'),
   checkForUpdates: ({ force = false } = {}) => request(`/user/version/check${force ? '?force=1' : ''}`),
+  manageBrowserRuntime: (operation) => request('/user/version/browser-runtime', { method: 'POST', body: JSON.stringify({ operation }) }),
   startUpdate: ({ rebuild = false } = {}) => request('/user/version/update', {
     method: 'POST',
     body: JSON.stringify({ rebuild }),

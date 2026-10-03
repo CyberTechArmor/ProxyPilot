@@ -14,6 +14,7 @@
 // MOBILE_FIRST: single column, wrapping rows, 44px targets, the confirm
 // dialog is full-screen under sm, the log tail scrolls inside its own box.
 
+import BrowserRuntimeInstall from './BrowserRuntimeInstall';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -279,6 +280,8 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
           </div>
         </div>
       )}
+
+      <BrowserRuntimeInstall />
 
       {/* Action */}
       <div className="flex flex-wrap items-center gap-2">

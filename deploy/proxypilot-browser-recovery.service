@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover an interrupted ProxyPilot browser package operation
+After=docker.service proxypilot-a3-supervisor.service proxypilot-a4-broker.service
+Wants=docker.service
+ConditionPathExists=/var/lib/proxypilot/update/browser-runtime-operation/state.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock -w 30 /var/lock/proxypilot-update.lock /usr/bin/python3 /opt/proxypilot/scripts/browser-runtime-operation.py recover-if-needed
+TimeoutStartSec=360
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

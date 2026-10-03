@@ -1,0 +1,210 @@
+{
+  "commit": "bae85ff7409823bf242b8108157fdbd781be61ad",
+  "workflow_run_id": 37126162943,
+  "job_id": 111211754481,
+  "step": 8,
+  "assertion": {
+    "run": {
+      "state": "uncertain",
+      "result_code": "LAUNCH_UNCERTAIN",
+      "revision": 3,
+      "fence": 2,
+      "usage": {
+        "actions": 0,
+        "model_calls": 0,
+        "tokens": 0,
+        "usd": 0,
+        "requests": 0,
+        "response_bytes": 0,
+        "artifact_bytes": 0
+      }
+    },
+    "uncertainties": [
+      {
+        "id": "922d4e09-e133-4802-81bd-7f00ef62a93e",
+        "kind": "CLEANUP_UNVERIFIED",
+        "state": "unresolved",
+        "decision": null,
+        "created_at": "2026-10-03T13:27:30.125Z"
+      }
+    ],
+    "receipts": [],
+    "rpc_history": [
+      {
+        "method": "fixture_bootstrap",
+        "elapsed_ms": 3014,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_status",
+        "elapsed_ms": 8,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_model_status",
+        "elapsed_ms": 4,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_launch",
+        "elapsed_ms": 20002,
+        "status": "deadline",
+        "code": "FIXTURE_RPC_DEADLINE"
+      }
+    ],
+    "transport_failure": {
+      "code": "FIXTURE_RPC_DEADLINE",
+      "message": "Browser fixture deadline: selected_browser_launch\nSelected composition browser: Chromium 154.0.8037.0\n"
+    },
+    "launch_evidence": {
+      "phase": "launch_waiting",
+      "evidence": {
+        "browser_version": "Chromium 154.0.8037.0",
+        "gateway": {
+          "schema": "proxypilot.selected-browser.gateway-status.v1",
+          "identity": {
+            "project_id": "20aab8b0-9a87-4f9d-91ab-d9229552e945",
+            "run_id": "e40ca941-76ad-416f-a80f-502b8d7dce7e",
+            "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+            "fence": 1,
+            "policy_sha256": "9c5925d0c5b6a3f58e6b1fb6bc4b63f0133d5a3c941441c5f08b4ae73c5b3ff0"
+          },
+          "state": "running",
+          "reason": null,
+          "requests": 0,
+          "response_bytes": 0,
+          "ledger_sha256": "d30847701f93feca1b6a07292b9584d7d7f2a76f9d2a9186357bb6aa9bab8b90",
+          "effects_sent": 0,
+          "effects_uncertain": 0,
+          "inflight": 0,
+          "auth_effects_acknowledged": 0,
+          "outstanding_requests": 0,
+          "network_plan_sha256": "77fdccfa6b98a6920ef8455d61176e672164dbaf4140c4289bd14cde38bc6e8e",
+          "destinations": 1,
+          "temporary_destinations": 0
+        },
+        "attempts": [
+          {
+            "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+            "state": "launching",
+            "selected_mode": "agent",
+            "selected_code": null,
+            "stop_reason": null,
+            "exit": null,
+            "spawned": true,
+            "gateway_registered": true
+          }
+        ],
+        "workers": [
+          {
+            "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+            "ready": false,
+            "ended": false,
+            "stderr": ""
+          }
+        ],
+        "browser_process": {
+          "pid": 3456,
+          "start": 8418
+        },
+        "service_requests": [],
+        "chromium_log": "[3456:3477:1003/132718.785231:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[3456:3477:1003/132722.139665:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[3456:3477:1003/132727.565111:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n",
+        "fetch_log": "",
+        "received": [],
+        "upstream": [],
+        "contacts": [
+          [
+            "resolve",
+            "selected.example"
+          ]
+        ],
+        "trace": [
+          "gateway:health",
+          "gateway:health",
+          "resolve:selected.example",
+          "route",
+          "gateway:register",
+          "spawn"
+        ]
+      }
+    },
+    "bridge_evidence": {
+      "phase": "launch_waiting",
+      "evidence": {
+        "browser_version": "Chromium 154.0.8037.0",
+        "gateway": {
+          "schema": "proxypilot.selected-browser.gateway-status.v1",
+          "identity": {
+            "project_id": "20aab8b0-9a87-4f9d-91ab-d9229552e945",
+            "run_id": "e40ca941-76ad-416f-a80f-502b8d7dce7e",
+            "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+            "fence": 1,
+            "policy_sha256": "9c5925d0c5b6a3f58e6b1fb6bc4b63f0133d5a3c941441c5f08b4ae73c5b3ff0"
+          },
+          "state": "running",
+          "reason": null,
+          "requests": 0,
+          "response_bytes": 0,
+          "ledger_sha256": "d30847701f93feca1b6a07292b9584d7d7f2a76f9d2a9186357bb6aa9bab8b90",
+          "effects_sent": 0,
+          "effects_uncertain": 0,
+          "inflight": 0,
+          "auth_effects_acknowledged": 0,
+          "outstanding_requests": 0,
+          "network_plan_sha256": "77fdccfa6b98a6920ef8455d61176e672164dbaf4140c4289bd14cde38bc6e8e",
+          "destinations": 1,
+          "temporary_destinations": 0
+        },
+        "attempts": [
+          {
+            "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+            "state": "launching",
+            "selected_mode": "agent",
+            "selected_code": null,
+            "stop_reason": null,
+            "exit": null,
+            "spawned": true,
+            "gateway_registered": true
+          }
+        ],
+        "workers": [
+          {
+            "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+            "ready": false,
+            "ended": false,
+            "stderr": ""
+          }
+        ],
+        "browser_process": {
+          "pid": 3456,
+          "start": 8418
+        },
+        "service_requests": [],
+        "chromium_log": "[3456:3477:1003/132718.785231:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[3456:3477:1003/132722.139665:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[3456:3477:1003/132727.565111:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n",
+        "fetch_log": "",
+        "received": [],
+        "upstream": [],
+        "contacts": [
+          [
+            "resolve",
+            "selected.example"
+          ]
+        ],
+        "trace": [
+          "gateway:health",
+          "gateway:health",
+          "resolve:selected.example",
+          "route",
+          "gateway:register",
+          "spawn"
+        ]
+      }
+    },
+    "inspection": null,
+    "inspection_error": null,
+    "stderr": "Selected composition browser: Chromium 154.0.8037.0\n"
+  }
+}

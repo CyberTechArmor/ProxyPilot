@@ -1,0 +1,62 @@
+✔ storage-install: runs the checkout's installer, records state, and takes no arguments from the caller (143.134829ms)
+✔ storage-install: flags are refused outright, and a missing installer refuses instead of running anything (262.795588ms)
+✔ storage-install: the same forgery guards as update — unknown action, bad nonce, stale, wrong owner (186.935543ms)
+✔ record-source + check record the checkout facts, including dirtiness (111.257212ms)
+✔ check without a recorded checkout records configured:false with the fix (21.131567ms)
+✔ a valid update request runs update.sh --yes with the allowlisted flags and records the run (353.276122ms)
+✔ zero exit without completion or with wrong expected HEAD is failed, never success (709.18118ms)
+✔ pinned build request preserves exact SHA and rejects mixed or malformed targets (641.354992ms)
+✔ pinned build refuses the genuine pre-repair updater before executing it (100.290366ms)
+✔ a dirty legacy updater cannot bypass the committed capability check (90.877456ms)
+✔ phases are tracked from the [n/7] markers (3.5 included) and a failure keeps the last line as the reason (362.852197ms)
+✔ runtime provisioning failure is recorded before dependencies or service restart (329.861608ms)
+✔ an up-to-date checkout without --rebuild is a success flagged up_to_date (362.404274ms)
+✔ forged, stale, malformed and disallowed requests are refused with a reason and nothing runs (575.957951ms)
+✔ a refusal never clobbers state.json while another run is recorded as running (79.078438ms)
+✔ a check request refreshes installed.json without touching run state (82.915275ms)
+✔ no request file is a clean no-op; history is pruned to the newest 10 runs (4108.864582ms)
+✔ update.sh: every prompt is guarded by --yes, and --discard-local is the only way past local changes (1.832915ms)
+✔ the systemd units and the agent unit agree on the request directory (0.563287ms)
+✔ Docker context copy includes source and built frontend while preserving install data and omitting host dependencies (5.426324ms)
+﹣ Update refresh runs only after writers stop and paired rollback precedes recovery startup (1.352273ms) # update functions require root
+﹣ Docker success commits its refresh before the early exit and permits the next preflight (0.095514ms) # update functions require root
+﹣ Docker completion retains paired recovery when refresh commit fails (0.250626ms) # update functions require root
+﹣ An unverifiable runtime rollback leaves the dashboard stopped and does not report success (0.086069ms) # update functions require root
+﹣ A refresh apply failure enters paired recovery and completion cannot precede refresh commit (0.083516ms) # update functions require root
+﹣ U1: failed PM2/native startup restores the backup only after its database writer stops (0.081222ms) # update functions require root
+﹣ U1: current layout stops an open runner, rebuilds, restarts and checks the final path (0.121222ms) # update functions require root
+﹣ U1: current recovery for false closes both writers and restores the matching layout (0.101743ms) # update functions require root
+﹣ U1: current recovery for exit 17 closes both writers and restores the matching layout (0.105038ms) # update functions require root
+﹣ U1: current recovery for kill -TERM $$ closes both writers and restores the matching layout (0.135754ms) # update functions require root
+﹣ U1: current recovery for kill -INT $$ closes both writers and restores the matching layout (0.068993ms) # update functions require root
+﹣ U1: legacy layout stops an open runner, rebuilds, restarts and checks the final path (0.250727ms) # update functions require root
+﹣ U1: legacy recovery for false closes both writers and restores the matching layout (0.082143ms) # update functions require root
+﹣ U1: legacy recovery for exit 17 closes both writers and restores the matching layout (1.373595ms) # update functions require root
+﹣ U1: legacy recovery for kill -TERM $$ closes both writers and restores the matching layout (0.043996ms) # update functions require root
+﹣ U1: legacy recovery for kill -INT $$ closes both writers and restores the matching layout (0.032569ms) # update functions require root
+﹣ U1: unsafe stop {"refuseStop":true} refuses relocation AND restore with the connection active (0.1864ms) # update functions require root
+﹣ U1: unsafe stop {"falseStop":true} refuses relocation AND restore with the connection active (0.03938ms) # update functions require root
+﹣ U1: unsafe stop {"queryFail":true} refuses relocation AND restore with the connection active (0.02651ms) # update functions require root
+﹣ U1: no backup WAL, real failed-update WAL/SHM: restore removes stale sidecars after stopping the runner (0.022734ms) # update functions require root
+﹣ U1: a WAL-bearing backup restores its own WAL; SHM is rebuilt, never copied (0.020962ms) # update functions require root
+﹣ U1: legacy failure {"failBuild":true} restores original path and config before runner readiness (0.022073ms) # update functions require root
+﹣ U1: legacy failure {"failEnvWrite":true} restores original path and config before runner readiness (0.022093ms) # update functions require root
+﹣ U1: failure to stop Docker refuses restore and does not restart services (0.021362ms) # update functions require root
+﹣ U1: a runner that refuses to stop during failure recovery prevents restore (0.020772ms) # update functions require root
+﹣ U2: updating the unit preserves existing CLI data and configuration (0.020411ms) # update functions require root
+﹣ U1: a pre-runner installation can relocate and install its first runner (0.01976ms) # update functions require root
+✔ U2: unit grants only the existing CLI DB and atomic sysctl directory writes, preserving hardening (1.325402ms)
+﹣ policy absent, runner healthy: sync_env_keys adds every other key but not the policy; install_setup_runner records runner-required only after the restart and the readiness checks (0.875005ms) # the lifted functions skip themselves when not root (EUID is read-only)
+﹣ policy absent, runner failure: no premature promotion — the line is never introduced, the failure is red, and the legacy in-process executor is named (0.104877ms) # the lifted functions skip themselves when not root (EUID is read-only)
+﹣ explicit policies are preserved: backend-allowed stays on success and on failure; runner-required stays on failure and the failure says the installation requires the runner (0.12645ms) # the lifted functions skip themselves when not root (EUID is read-only)
+﹣ an active runner with an unchanged unit file is restarted onto the updated code (0.074392ms) # the lifted functions skip themselves when not root (EUID is read-only)
+﹣ a refused restart is never a ready result: an old process still active does not pass, nothing is promoted, and the failure is visible (0.070666ms) # the lifted functions skip themselves when not root (EUID is read-only)
+✔ ratchet: the policy key is excluded from the generic env sync, and the runner restart no longer depends on a changed unit file (1.075096ms)
+ℹ tests 54
+ℹ suites 0
+ℹ pass 22
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 32
+ℹ todo 0
+ℹ duration_ms 8608.589891

@@ -1,0 +1,22 @@
+{
+  "expected_failure": "FIXTURE_RPC_DEADLINE",
+  "elapsed_ms": 65001,
+  "limitation": "Guest watchdog20s already closed browser before65s; this is not active forced-cleanup proof.",
+  "ready": true,
+  "ended_before_deadline": true,
+  "usage": {
+    "actions": 0,
+    "model_calls": 0,
+    "tokens": 0,
+    "usd": 0,
+    "requests": 0,
+    "response_bytes": 0,
+    "artifact_bytes": 0
+  },
+  "rpc_after_deadline": 0,
+  "owned_browser_identity": {
+    "pid": 217440,
+    "start": 6358198
+  },
+  "live_owned_survivors": []
+}

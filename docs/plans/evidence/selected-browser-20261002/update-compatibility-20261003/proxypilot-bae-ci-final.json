@@ -1,0 +1,1161 @@
+{
+  "commit": "bae85ff7409823bf242b8108157fdbd781be61ad",
+  "workflow_runs": [
+    {
+      "id": 37126162943,
+      "name": "Credential broker configured boundary",
+      "status": "completed",
+      "conclusion": "failure",
+      "run_number": 39,
+      "jobs_url": "https://api.github.com/repos/CyberTechArmor/ProxyPilot/actions/runs/37126162943/jobs",
+      "logs_url": "https://api.github.com/repos/CyberTechArmor/ProxyPilot/actions/runs/37126162943/logs",
+      "workflow_id": 372300110
+    },
+    {
+      "id": 37126162901,
+      "name": "Security regression",
+      "status": "completed",
+      "conclusion": "failure",
+      "run_number": 200,
+      "jobs_url": "https://api.github.com/repos/CyberTechArmor/ProxyPilot/actions/runs/37126162901/jobs",
+      "logs_url": "https://api.github.com/repos/CyberTechArmor/ProxyPilot/actions/runs/37126162901/logs",
+      "workflow_id": 365687343
+    }
+  ],
+  "jobs": [
+    {
+      "run_id": 37126162901,
+      "jobs": [
+        {
+          "id": 111211754405,
+          "name": "backend",
+          "status": "completed",
+          "conclusion": "failure",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Run npm ci --no-audit --no-fund",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Run npm ci --no-audit --no-fund",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5
+            },
+            {
+              "name": "Install bounded PDF fixture tools on disposable runner",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 6
+            },
+            {
+              "name": "Authentication, authorization, upgrade and dependency regressions",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Pomerium route protection and Platform MCP integration",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8
+            },
+            {
+              "name": "Operations and supervised agent authorization, fencing and recovery",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 9
+            },
+            {
+              "name": "Actual Chromium lifecycle and signed host continuation",
+              "status": "completed",
+              "conclusion": "failure",
+              "number": 10
+            },
+            {
+              "name": "Root-only bootstrap integration (disposable runner and temporary databases)",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 11
+            },
+            {
+              "name": "Run python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 12
+            },
+            {
+              "name": "Terminal update handoff (disposable command boundaries, root entry)",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 13
+            },
+            {
+              "name": "Run python3 scripts/host-boundary-inventory.py",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 14
+            },
+            {
+              "name": "Reviewed Infisical and evidence decoder host contracts",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 15
+            },
+            {
+              "name": "Agent client and selected-agent outage behavior",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 16
+            },
+            {
+              "name": "Update recovery and runner policy regressions",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 17
+            },
+            {
+              "name": "Run bash -n install.sh update.sh scripts/install-incus-stable.sh scripts/incus-stable-candidate.sh scripts/upgrade-incus-stable.sh",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 18
+            },
+            {
+              "name": "Run bash scripts/tests/incus-upgrade-preflight.sh",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 19
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 37
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 38
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 39
+            }
+          ]
+        },
+        {
+          "id": 111211754514,
+          "name": "audit (admin/frontend)",
+          "status": "in_progress",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Dependency audit",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 9
+            }
+          ]
+        },
+        {
+          "id": 111211754515,
+          "name": "audit (admin/backend)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Dependency audit",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 9
+            }
+          ]
+        },
+        {
+          "id": 111211754561,
+          "name": "audit (cli)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Dependency audit",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 9
+            }
+          ]
+        },
+        {
+          "id": 111211754577,
+          "name": "agent",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-go@v5",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Run go vet ./... && go test -race ./...",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Run go run golang.org/x/vuln/cmd/govulncheck@latest ./...",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5
+            },
+            {
+              "name": "Post Run actions/setup-go@v5",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 9
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 10
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 11
+            }
+          ]
+        },
+        {
+          "id": 111211754578,
+          "name": "frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Run npm ci --no-audit --no-fund && npm run build",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "MCP access browser regression",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5
+            },
+            {
+              "name": "Supervised agent A6, A7 and A8 dashboard journeys",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 6
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 11
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 12
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 13
+            }
+          ]
+        },
+        {
+          "id": 111211754600,
+          "name": "audit (admin/backend/src/mock2/framework-seed/base-app)",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Dependency audit",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 9
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": 37126162943,
+      "jobs": [
+        {
+          "id": 111211754374,
+          "name": "broker",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Install dashboard dependencies for saved-agent integration",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Authority, durable state and hostile transport cases",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5
+            },
+            {
+              "name": "Real disposable OpenBao and synthetic upstream proof",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 6
+            },
+            {
+              "name": "Metadata-only migration refusals",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Paired runtime refresh and existing A3/A4/A7/A8 regressions",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 8
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 15
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 16
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 17
+            }
+          ]
+        },
+        {
+          "id": 111211754481,
+          "name": "dashboard",
+          "status": "completed",
+          "conclusion": "failure",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Run npm ci --no-audit --no-fund",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Run npm ci --no-audit --no-fund",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5
+            },
+            {
+              "name": "Install bounded PDF fixture tools on disposable runner",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 6
+            },
+            {
+              "name": "Broker dashboard and existing Operations boundaries",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 7
+            },
+            {
+              "name": "Actual Chromium lifecycle and signed host continuation",
+              "status": "completed",
+              "conclusion": "failure",
+              "number": 8
+            },
+            {
+              "name": "Run npm run build",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 9
+            },
+            {
+              "name": "Install disposable browser",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 10
+            },
+            {
+              "name": "Connection and agent setup browser journeys",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 11
+            },
+            {
+              "name": "Post Run actions/setup-node@v4",
+              "status": "completed",
+              "conclusion": "skipped",
+              "number": 21
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 22
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 23
+            }
+          ]
+        },
+        {
+          "id": 111211754558,
+          "name": "security-filesystem",
+          "status": "completed",
+          "conclusion": "success",
+          "steps": [
+            {
+              "name": "Set up job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 1
+            },
+            {
+              "name": "Initialize containers",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 2
+            },
+            {
+              "name": "Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 3
+            },
+            {
+              "name": "Install locked backend and CLI dependencies",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 4
+            },
+            {
+              "name": "Full authentication and security selection with canonical root custody",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 5
+            },
+            {
+              "name": "Root updater maintenance and paired runtime recovery",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 6
+            },
+            {
+              "name": "Post Run actions/checkout@v4",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 11
+            },
+            {
+              "name": "Stop containers",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 12
+            },
+            {
+              "name": "Complete job",
+              "status": "completed",
+              "conclusion": "success",
+              "number": 13
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "native": {
+    "broker": {
+      "pass": 0,
+      "fail": 1,
+      "skipped": 0,
+      "unit_pass": 462,
+      "duration_ms": 26148.696391
+    },
+    "security": {
+      "pass": 0,
+      "fail": 1,
+      "skipped": 0,
+      "unit_pass": 436,
+      "duration_ms": 31972.224275
+    }
+  },
+  "start_failures": [
+    {
+      "workflow": "broker",
+      "job_id": 111211754481,
+      "step": 8,
+      "run": {
+        "state": "uncertain",
+        "result_code": "LAUNCH_UNCERTAIN",
+        "revision": 3,
+        "fence": 2,
+        "usage": {
+          "actions": 0,
+          "model_calls": 0,
+          "tokens": 0,
+          "usd": 0,
+          "requests": 0,
+          "response_bytes": 0,
+          "artifact_bytes": 0
+        }
+      },
+      "rpc_history": [
+        {
+          "method": "fixture_bootstrap",
+          "elapsed_ms": 3014,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_status",
+          "elapsed_ms": 8,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_model_status",
+          "elapsed_ms": 4,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_launch",
+          "elapsed_ms": 20002,
+          "status": "deadline",
+          "code": "FIXTURE_RPC_DEADLINE"
+        }
+      ],
+      "transport_failure": {
+        "code": "FIXTURE_RPC_DEADLINE",
+        "message": "Browser fixture deadline: selected_browser_launch\nSelected composition browser: Chromium 154.0.8037.0\n"
+      },
+      "launch_phase": "launch_waiting",
+      "browser_version": "Chromium 154.0.8037.0",
+      "gateway": {
+        "schema": "proxypilot.selected-browser.gateway-status.v1",
+        "identity": {
+          "project_id": "20aab8b0-9a87-4f9d-91ab-d9229552e945",
+          "run_id": "e40ca941-76ad-416f-a80f-502b8d7dce7e",
+          "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+          "fence": 1,
+          "policy_sha256": "9c5925d0c5b6a3f58e6b1fb6bc4b63f0133d5a3c941441c5f08b4ae73c5b3ff0"
+        },
+        "state": "running",
+        "reason": null,
+        "requests": 0,
+        "response_bytes": 0,
+        "ledger_sha256": "d30847701f93feca1b6a07292b9584d7d7f2a76f9d2a9186357bb6aa9bab8b90",
+        "effects_sent": 0,
+        "effects_uncertain": 0,
+        "inflight": 0,
+        "auth_effects_acknowledged": 0,
+        "outstanding_requests": 0,
+        "network_plan_sha256": "77fdccfa6b98a6920ef8455d61176e672164dbaf4140c4289bd14cde38bc6e8e",
+        "destinations": 1,
+        "temporary_destinations": 0
+      },
+      "workers": [
+        {
+          "attempt_id": "d586c419-f9c7-4740-b3b6-0722fa14ff7c",
+          "ready": false,
+          "ended": false,
+          "stderr": ""
+        }
+      ],
+      "browser_process": {
+        "pid": 3456,
+        "start": 8418
+      },
+      "chromium_log": "[3456:3477:1003/132718.785231:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[3456:3477:1003/132722.139665:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n[3456:3477:1003/132727.565111:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \"tcp\" and on UNIX \"unix\")\n",
+      "service_requests": [],
+      "received": [],
+      "upstream": [],
+      "contacts": [
+        [
+          "resolve",
+          "selected.example"
+        ]
+      ],
+      "trace": [
+        "gateway:health",
+        "gateway:health",
+        "resolve:selected.example",
+        "route",
+        "gateway:register",
+        "spawn"
+      ],
+      "receipt_count": 0,
+      "uncertainty_kinds": [
+        "CLEANUP_UNVERIFIED"
+      ],
+      "bounded_original_local_path": "/tmp/proxypilot-bae-dashboard-start-failure.json"
+    },
+    {
+      "workflow": "security",
+      "job_id": 111211754405,
+      "step": 10,
+      "run": {
+        "state": "uncertain",
+        "result_code": "LAUNCH_UNCERTAIN",
+        "revision": 3,
+        "fence": 2,
+        "usage": {
+          "actions": 0,
+          "model_calls": 0,
+          "tokens": 0,
+          "usd": 0,
+          "requests": 0,
+          "response_bytes": 0,
+          "artifact_bytes": 0
+        }
+      },
+      "rpc_history": [
+        {
+          "method": "fixture_bootstrap",
+          "elapsed_ms": 8864,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_status",
+          "elapsed_ms": 7,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_model_status",
+          "elapsed_ms": 4,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_launch",
+          "elapsed_ms": 20003,
+          "status": "deadline",
+          "code": "FIXTURE_RPC_DEADLINE"
+        }
+      ],
+      "transport_failure": {
+        "code": "FIXTURE_RPC_DEADLINE",
+        "message": "Browser fixture deadline: selected_browser_launch\nSelected composition browser: Chromium 154.0.8037.0\n"
+      },
+      "launch_phase": "launch_waiting",
+      "browser_version": "Chromium 154.0.8037.0",
+      "gateway": {
+        "schema": "proxypilot.selected-browser.gateway-status.v1",
+        "identity": {
+          "project_id": "a36d8fae-91ca-4289-a7cc-fc7529210f12",
+          "run_id": "447a95f7-f235-46df-b11e-50c9b7d14c3b",
+          "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+          "fence": 1,
+          "policy_sha256": "d51e33ae9d6d3349cb5b12677b5afeb2cecc53a613892fb4d816bec07e55c6f2"
+        },
+        "state": "running",
+        "reason": null,
+        "requests": 0,
+        "response_bytes": 0,
+        "ledger_sha256": "984c9750112b50e40aa01baad0d3463a7320732e42c0579c09ed8eda68d2cfab",
+        "effects_sent": 0,
+        "effects_uncertain": 0,
+        "inflight": 0,
+        "auth_effects_acknowledged": 0,
+        "outstanding_requests": 0,
+        "network_plan_sha256": "db89c71064d3b8f07575118f4e1396fd9d2cefb3cad04c3a3d05d48bd31ee85a",
+        "destinations": 1,
+        "temporary_destinations": 0
+      },
+      "workers": [
+        {
+          "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+          "ready": false,
+          "ended": false,
+          "stderr": ""
+        }
+      ],
+      "browser_process": {
+        "pid": 4295,
+        "start": 15246
+      },
+      "chromium_log": "",
+      "service_requests": [],
+      "received": [],
+      "upstream": [],
+      "contacts": [
+        [
+          "resolve",
+          "selected.example"
+        ]
+      ],
+      "trace": [
+        "gateway:health",
+        "gateway:health",
+        "resolve:selected.example",
+        "route",
+        "gateway:register",
+        "spawn"
+      ],
+      "receipt_count": 0,
+      "uncertainty_kinds": [
+        "CLEANUP_UNVERIFIED"
+      ],
+      "bounded_original_local_path": "/tmp/proxypilot-bae-security-start-failure.json"
+    }
+  ],
+  "python": {
+    "broker": {
+      "status": "passed",
+      "tests": 484,
+      "existing_skips": 33,
+      "duration_seconds": 229.004,
+      "actual_browser": "Chromium154.0.8037.0"
+    },
+    "security": {
+      "status": "skipped after native failure"
+    }
+  },
+  "root_updater": {
+    "broker_job": 111211754558,
+    "updater_pass": 83,
+    "updater_fail": 0,
+    "updater_skip": 0,
+    "root_security_pass": 313,
+    "root_security_fail": 0,
+    "bounded_actual_entry_assertions_present": true,
+    "security_update_step": "skipped after native failure"
+  },
+  "logs": [
+    {
+      "name": "broker-dashboard",
+      "workflow_run_id": 37126162943,
+      "job_id": 111211754481,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37126162943/job/111211754481",
+      "decoded_utf8_log": {
+        "sha256": "d8def8e5e52be903d7521e42907f83483b603cf5b74e18f5b862f5d85a9f4f02",
+        "bytes": 93878
+      },
+      "raw_local_capture": "/tmp/proxypilot-bae-dashboard-decoded-job.json",
+      "bounded_lines": [
+        "2026-10-03T13:27:01.4766469Z ✔ ordinary source delivery with a preserved legacy runtime cannot admit selected execution (39.326974ms)",
+        "2026-10-03T13:27:06.9011916Z ℹ tests 462",
+        "2026-10-03T13:27:06.9012327Z ℹ pass 462",
+        "2026-10-03T13:27:06.9012524Z ℹ fail 0",
+        "2026-10-03T13:27:06.9013198Z ℹ skipped 0",
+        "2026-10-03T13:27:33.2030772Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (26148.696391ms)",
+        "2026-10-03T13:27:33.2144286Z ℹ tests 1",
+        "2026-10-03T13:27:33.2145338Z ℹ pass 0",
+        "2026-10-03T13:27:33.2145717Z ℹ fail 1",
+        "2026-10-03T13:27:33.2146521Z ℹ skipped 0",
+        "2026-10-03T13:27:33.2176426Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (26148.696391ms)",
+        "2026-10-03T13:27:33.2211994Z   AssertionError [ERR_ASSERTION]: Actual browser launch failed before step: {\"run\":{\"state\":\"uncertain\",\"result_code\":\"LAUNCH_UNCERTAIN\",\"revision\":3,\"fence\":2,\"usage\":{\"actions\":0,\"model_calls\":0,\"tokens\":0,\"usd\":0,\"requests\":0,\"response_bytes\":0,\"artifact_bytes\":0}},\"uncertainties\":[{\"id\":\"922d4e09-e133-4802-81bd-7f00ef62a93e\",\"kind\":\"CLEANUP_UNVERIFIED\",\"state\":\"unresolved\",\"decision\":null,\"created_at\":\"2026-10-03T13:27:30.125Z\"}],\"receipts\":[],\"rpc_history\":[{\"method\":\"fixture_bootstrap\",\"elapsed_ms\":3014,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_status\",\"elapsed_ms\":8,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_model_status\",\"elapsed_ms\":4,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_launch\",\"elapsed_ms\":20002,\"status\":\"deadline\",\"code\":\"FIXTURE_RPC_DEADLINE\"}],\"transport_failure\":{\"code\":\"FIXTURE_RPC_DEADLINE\",\"message\":\"Browser fixture deadline: selected_browser_launch\\nSelected composition browser: Chromium 154.0.8037.0\\n\"},\"launch_evidence\":{\"phase\":\"launch_waiting\",\"evidence\":{\"browser_version\":\"Chromium 154.0.8037.0\",\"gateway\":{\"schema\":\"proxypilot.selected-browser.gateway-status.v1\",\"identity\":{\"project_id\":\"20aab8b0-9a87-4f9d-91ab-d9229552e945\",\"run_id\":\"e40ca941-76ad-416f-a80f-502b8d7dce7e\",\"attempt_id\":\"d586c419-f9c7-4740-b3b6-0722fa14ff7c\",\"fence\":1,\"policy_sha256\":\"9c5925d0c5b6a3f58e6b1fb6bc4b63f0133d5a3c941441c5f08b4ae73c5b3ff0\"},\"state\":\"running\",\"reason\":null,\"requests\":0,\"response_bytes\":0,\"ledger_sha256\":\"d30847701f93feca1b6a07292b9584d7d7f2a76f9d2a9186357bb6aa9bab8b90\",\"effects_sent\":0,\"effects_uncertain\":0,\"inflight\":0,\"auth_effects_acknowledged\":0,\"outstanding_requests\":0,\"network_plan_sha256\":\"77fdccfa6b98a6920ef8455d61176e672164dbaf4140c4289bd14cde38bc6e8e\",\"destinations\":1,\"temporary_destinations\":0},\"attempts\":[{\"attempt_id\":\"d586c419-f9c7-4740-b3b6-0722fa14ff7c\",\"state\":\"launching\",\"selected_mode\":\"agent\",\"selected_code\":null,\"stop_reason\":null,\"exit\":null,\"spawned\":true,\"gateway_registered\":true}],\"workers\":[{\"attempt_id\":\"d586c419-f9c7-4740-b3b6-0722fa14ff7c\",\"ready\":false,\"ended\":false,\"stderr\":\"\"}],\"browser_process\":{\"pid\":3456,\"start\":8418},\"service_requests\":[],\"chromium_log\":\"[3456:3477:1003/132718.785231:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \\\"tcp\\\" and on UNIX \\\"unix\\\")\\n[3456:3477:1003/132722.139665:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \\\"tcp\\\" and on UNIX \\\"unix\\\")\\n[3456:3477:1003/132727.565111:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \\\"tcp\\\" and on UNIX \\\"unix\\\")\\n\",\"fetch_log\":\"\",\"received\":[],\"upstream\":[],\"contacts\":[[\"resolve\",\"selected.example\"]],\"trace\":[\"gateway:health\",\"gateway:health\",\"resolve:selected.example\",\"route\",\"gateway:register\",\"spawn\"]}},\"bridge_evidence\":{\"phase\":\"launch_waiting\",\"evidence\":{\"browser_version\":\"Chromium 154.0.8037.0\",\"gateway\":{\"schema\":\"proxypilot.selected-browser.gateway-status.v1\",\"identity\":{\"project_id\":\"20aab8b0-9a87-4f9d-91ab-d9229552e945\",\"run_id\":\"e40ca941-76ad-416f-a80f-502b8d7dce7e\",\"attempt_id\":\"d586c419-f9c7-4740-b3b6-0722fa14ff7c\",\"fence\":1,\"policy_sha256\":\"9c5925d0c5b6a3f58e6b1fb6bc4b63f0133d5a3c941441c5f08b4ae73c5b3ff0\"},\"state\":\"running\",\"reason\":null,\"requests\":0,\"response_bytes\":0,\"ledger_sha256\":\"d30847701f93feca1b6a07292b9584d7d7f2a76f9d2a9186357bb6aa9bab8b90\",\"effects_sent\":0,\"effects_uncertain\":0,\"inflight\":0,\"auth_effects_acknowledged\":0,\"outstanding_requests\":0,\"network_plan_sha256\":\"77fdccfa6b98a6920ef8455d61176e672164dbaf4140c4289bd14cde38bc6e8e\",\"destinations\":1,\"temporary_destinations\":0},\"attempts\":[{\"attempt_id\":\"d586c419-f9c7-4740-b3b6-0722fa14ff7c\",\"state\":\"launching\",\"selected_mode\":\"agent\",\"selected_code\":null,\"stop_reason\":null,\"exit\":null,\"spawned\":true,\"gateway_registered\":true}],\"workers\":[{\"attempt_id\":\"d586c419-f9c7-4740-b3b6-0722fa14ff7c\",\"ready\":false,\"ended\":false,\"stderr\":\"\"}],\"browser_process\":{\"pid\":3456,\"start\":8418},\"service_requests\":[],\"chromium_log\":\"[3456:3477:1003/132718.785231:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \\\"tcp\\\" and on UNIX \\\"unix\\\")\\n[3456:3477:1003/132722.139665:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \\\"tcp\\\" and on UNIX \\\"unix\\\")\\n[3456:3477:1003/132727.565111:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are \\\"tcp\\\" and on UNIX \\\"unix\\\")\\n\",\"fetch_log\":\"\",\"received\":[],\"upstream\":[],\"contacts\":[[\"resolve\",\"selected.example\"]],\"trace\":[\"gateway:health\",\"gateway:health\",\"resolve:selected.example\",\"route\",\"gateway:register\",\"spawn\"]}},\"inspection\":null,\"inspection_error\":null,\"stderr\":\"Selected composition browser: Chromium 154.0.8037.0\\n\"}"
+      ]
+    },
+    {
+      "name": "security-backend",
+      "workflow_run_id": 37126162901,
+      "job_id": 111211754405,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37126162901/job/111211754405",
+      "decoded_utf8_log": {
+        "sha256": "0b085cf78a2024eb51cde29ae49209c07bd1a1e7079330ba70a5327e07c883eb",
+        "bytes": 182945
+      },
+      "raw_local_capture": "/tmp/proxypilot-bae-security-backend-decoded-job.json",
+      "bounded_lines": [
+        "2026-10-03T13:27:50.3955862Z ℹ tests 308",
+        "2026-10-03T13:27:50.3956307Z ℹ pass 308",
+        "2026-10-03T13:27:50.3956520Z ℹ fail 0",
+        "2026-10-03T13:27:50.3956969Z ℹ skipped 0",
+        "2026-10-03T13:27:52.4901927Z ℹ tests 40",
+        "2026-10-03T13:27:52.4902714Z ℹ pass 40",
+        "2026-10-03T13:27:52.4903055Z ℹ fail 0",
+        "2026-10-03T13:27:52.4903893Z ℹ skipped 0",
+        "2026-10-03T13:28:00.4946633Z ✔ ordinary source delivery with a preserved legacy runtime cannot admit selected execution (33.786668ms)",
+        "2026-10-03T13:28:05.7044322Z ℹ tests 436",
+        "2026-10-03T13:28:05.7044758Z ℹ pass 436",
+        "2026-10-03T13:28:05.7045139Z ℹ fail 0",
+        "2026-10-03T13:28:05.7045796Z ℹ skipped 0",
+        "2026-10-03T13:28:37.8161375Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (31972.224275ms)",
+        "2026-10-03T13:28:37.8245424Z ℹ tests 1",
+        "2026-10-03T13:28:37.8329971Z ℹ pass 0",
+        "2026-10-03T13:28:37.8330412Z ℹ fail 1",
+        "2026-10-03T13:28:37.8331175Z ℹ skipped 0",
+        "2026-10-03T13:28:37.8334037Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (31972.224275ms)",
+        "2026-10-03T13:28:37.8348588Z   AssertionError [ERR_ASSERTION]: Actual browser launch failed before step: {\"run\":{\"state\":\"uncertain\",\"result_code\":\"LAUNCH_UNCERTAIN\",\"revision\":3,\"fence\":2,\"usage\":{\"actions\":0,\"model_calls\":0,\"tokens\":0,\"usd\":0,\"requests\":0,\"response_bytes\":0,\"artifact_bytes\":0}},\"uncertainties\":[{\"id\":\"5592687e-6dbd-4b44-8cee-54b13a421988\",\"kind\":\"CLEANUP_UNVERIFIED\",\"state\":\"unresolved\",\"decision\":null,\"created_at\":\"2026-10-03T13:28:34.763Z\"}],\"receipts\":[],\"rpc_history\":[{\"method\":\"fixture_bootstrap\",\"elapsed_ms\":8864,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_status\",\"elapsed_ms\":7,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_model_status\",\"elapsed_ms\":4,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_launch\",\"elapsed_ms\":20003,\"status\":\"deadline\",\"code\":\"FIXTURE_RPC_DEADLINE\"}],\"transport_failure\":{\"code\":\"FIXTURE_RPC_DEADLINE\",\"message\":\"Browser fixture deadline: selected_browser_launch\\nSelected composition browser: Chromium 154.0.8037.0\\n\"},\"launch_evidence\":{\"phase\":\"launch_waiting\",\"evidence\":{\"browser_version\":\"Chromium 154.0.8037.0\",\"gateway\":{\"schema\":\"proxypilot.selected-browser.gateway-status.v1\",\"identity\":{\"project_id\":\"a36d8fae-91ca-4289-a7cc-fc7529210f12\",\"run_id\":\"447a95f7-f235-46df-b11e-50c9b7d14c3b\",\"attempt_id\":\"9ef8dc8d-49ee-46cd-a014-f0be72126d74\",\"fence\":1,\"policy_sha256\":\"d51e33ae9d6d3349cb5b12677b5afeb2cecc53a613892fb4d816bec07e55c6f2\"},\"state\":\"running\",\"reason\":null,\"requests\":0,\"response_bytes\":0,\"ledger_sha256\":\"984c9750112b50e40aa01baad0d3463a7320732e42c0579c09ed8eda68d2cfab\",\"effects_sent\":0,\"effects_uncertain\":0,\"inflight\":0,\"auth_effects_acknowledged\":0,\"outstanding_requests\":0,\"network_plan_sha256\":\"db89c71064d3b8f07575118f4e1396fd9d2cefb3cad04c3a3d05d48bd31ee85a\",\"destinations\":1,\"temporary_destinations\":0},\"attempts\":[{\"attempt_id\":\"9ef8dc8d-49ee-46cd-a014-f0be72126d74\",\"state\":\"launching\",\"selected_mode\":\"agent\",\"selected_code\":null,\"stop_reason\":null,\"exit\":null,\"spawned\":true,\"gateway_registered\":true}],\"workers\":[{\"attempt_id\":\"9ef8dc8d-49ee-46cd-a014-f0be72126d74\",\"ready\":false,\"ended\":false,\"stderr\":\"\"}],\"browser_process\":{\"pid\":4295,\"start\":15246},\"service_requests\":[],\"chromium_log\":\"\",\"fetch_log\":\"\",\"received\":[],\"upstream\":[],\"contacts\":[[\"resolve\",\"selected.example\"]],\"trace\":[\"gateway:health\",\"gateway:health\",\"resolve:selected.example\",\"route\",\"gateway:register\",\"spawn\"]}},\"bridge_evidence\":{\"phase\":\"launch_waiting\",\"evidence\":{\"browser_version\":\"Chromium 154.0.8037.0\",\"gateway\":{\"schema\":\"proxypilot.selected-browser.gateway-status.v1\",\"identity\":{\"project_id\":\"a36d8fae-91ca-4289-a7cc-fc7529210f12\",\"run_id\":\"447a95f7-f235-46df-b11e-50c9b7d14c3b\",\"attempt_id\":\"9ef8dc8d-49ee-46cd-a014-f0be72126d74\",\"fence\":1,\"policy_sha256\":\"d51e33ae9d6d3349cb5b12677b5afeb2cecc53a613892fb4d816bec07e55c6f2\"},\"state\":\"running\",\"reason\":null,\"requests\":0,\"response_bytes\":0,\"ledger_sha256\":\"984c9750112b50e40aa01baad0d3463a7320732e42c0579c09ed8eda68d2cfab\",\"effects_sent\":0,\"effects_uncertain\":0,\"inflight\":0,\"auth_effects_acknowledged\":0,\"outstanding_requests\":0,\"network_plan_sha256\":\"db89c71064d3b8f07575118f4e1396fd9d2cefb3cad04c3a3d05d48bd31ee85a\",\"destinations\":1,\"temporary_destinations\":0},\"attempts\":[{\"attempt_id\":\"9ef8dc8d-49ee-46cd-a014-f0be72126d74\",\"state\":\"launching\",\"selected_mode\":\"agent\",\"selected_code\":null,\"stop_reason\":null,\"exit\":null,\"spawned\":true,\"gateway_registered\":true}],\"workers\":[{\"attempt_id\":\"9ef8dc8d-49ee-46cd-a014-f0be72126d74\",\"ready\":false,\"ended\":false,\"stderr\":\"\"}],\"browser_process\":{\"pid\":4295,\"start\":15246},\"service_requests\":[],\"chromium_log\":\"\",\"fetch_log\":\"\",\"received\":[],\"upstream\":[],\"contacts\":[[\"resolve\",\"selected.example\"]],\"trace\":[\"gateway:health\",\"gateway:health\",\"resolve:selected.example\",\"route\",\"gateway:register\",\"spawn\"]}},\"inspection\":null,\"inspection_error\":null,\"stderr\":\"Selected composition browser: Chromium 154.0.8037.0\\n\"}"
+      ]
+    },
+    {
+      "name": "broker-python",
+      "workflow_run_id": 37126162943,
+      "job_id": 111211754374,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37126162943/job/111211754374",
+      "decoded_utf8_log": {
+        "sha256": "60e86c1453277454c68ee0c6a440b08a4bf24ffb4bef0ddbb46c8a1464eb4e4e",
+        "bytes": 66210
+      },
+      "raw_local_capture": "/tmp/proxypilot-bae-111211754374-decoded-job.json",
+      "bounded_lines": [
+        "2026-10-03T13:26:51.9484573Z ℹ tests 85",
+        "2026-10-03T13:26:51.9485004Z ℹ pass 85",
+        "2026-10-03T13:26:51.9485216Z ℹ fail 0",
+        "2026-10-03T13:26:51.9485628Z ℹ skipped 0",
+        "2026-10-03T13:26:53.3551620Z ℹ tests 2",
+        "2026-10-03T13:26:53.3552497Z ℹ pass 2",
+        "2026-10-03T13:26:53.3552865Z ℹ fail 0",
+        "2026-10-03T13:26:53.3553729Z ℹ skipped 0",
+        "2026-10-03T13:26:53.5616191Z ℹ tests 5",
+        "2026-10-03T13:26:53.5616727Z ℹ pass 5",
+        "2026-10-03T13:26:53.5618389Z ℹ fail 0",
+        "2026-10-03T13:26:53.5619904Z ℹ skipped 0",
+        "2026-10-03T13:27:54.6916141Z ................Selected composition browser: Chromium 154.0.8037.0",
+        "2026-10-03T13:30:43.3338507Z Ran 484 tests in 229.004s",
+        "2026-10-03T13:30:43.3338835Z OK (skipped=33)"
+      ]
+    },
+    {
+      "name": "root-security-updater",
+      "workflow_run_id": 37126162943,
+      "job_id": 111211754558,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37126162943/job/111211754558",
+      "decoded_utf8_log": {
+        "sha256": "47fb2f39aec7803569f44189d7578624578cd6051fd955672a1dc2eadc15d2fb",
+        "bytes": 126195
+      },
+      "raw_local_capture": "/tmp/proxypilot-bae-111211754558-decoded-job.json",
+      "bounded_lines": [
+        "2026-10-03T13:27:05.1139732Z ℹ tests 313",
+        "2026-10-03T13:27:05.1140135Z ℹ pass 313",
+        "2026-10-03T13:27:05.1140326Z ℹ fail 0",
+        "2026-10-03T13:27:05.1140914Z ℹ skipped 0",
+        "2026-10-03T13:27:15.4843344Z ✔ U1: failed PM2/native startup restores the backup only after its database writer stops (413.114921ms)",
+        "2026-10-03T13:27:15.4844665Z ✔ U1: current layout stops an open runner, rebuilds, restarts and checks the final path (153.759925ms)",
+        "2026-10-03T13:27:15.4845909Z ✔ U1: current recovery for false closes both writers and restores the matching layout (227.555792ms)",
+        "2026-10-03T13:27:15.4847775Z ✔ U1: current recovery for exit 17 closes both writers and restores the matching layout (257.300689ms)",
+        "2026-10-03T13:27:15.4849214Z ✔ U1: current recovery for kill -TERM $$ closes both writers and restores the matching layout (246.835357ms)",
+        "2026-10-03T13:27:15.4849996Z ✔ U1: current recovery for kill -INT $$ closes both writers and restores the matching layout (1235.085326ms)",
+        "2026-10-03T13:27:15.4850721Z ✔ U1: legacy layout stops an open runner, rebuilds, restarts and checks the final path (489.277646ms)",
+        "2026-10-03T13:27:15.4851882Z ✔ U1: legacy recovery for false closes both writers and restores the matching layout (286.688862ms)",
+        "2026-10-03T13:27:15.4853908Z ✔ U1: legacy recovery for exit 17 closes both writers and restores the matching layout (323.371452ms)",
+        "2026-10-03T13:27:15.4855231Z ✔ U1: legacy recovery for kill -TERM $$ closes both writers and restores the matching layout (336.045533ms)",
+        "2026-10-03T13:27:15.4856502Z ✔ U1: legacy recovery for kill -INT $$ closes both writers and restores the matching layout (313.157214ms)",
+        "2026-10-03T13:27:15.4858449Z ✔ U1: unsafe stop {\"refuseStop\":true} refuses relocation AND restore with the connection active (59.534069ms)",
+        "2026-10-03T13:27:15.4859645Z ✔ U1: unsafe stop {\"falseStop\":true} refuses relocation AND restore with the connection active (63.209862ms)",
+        "2026-10-03T13:27:15.4860432Z ✔ U1: unsafe stop {\"queryFail\":true} refuses relocation AND restore with the connection active (56.341334ms)",
+        "2026-10-03T13:27:15.4861242Z ✔ U1: no backup WAL, real failed-update WAL/SHM: restore removes stale sidecars after stopping the runner (76.975771ms)",
+        "2026-10-03T13:27:15.4862010Z ✔ U1: a WAL-bearing backup restores its own WAL; SHM is rebuilt, never copied (84.246461ms)",
+        "2026-10-03T13:27:15.4862744Z ✔ U1: legacy failure {\"failBuild\":true} restores original path and config before runner readiness (246.938049ms)",
+        "2026-10-03T13:27:15.4864113Z ✔ U1: legacy failure {\"failEnvWrite\":true} restores original path and config before runner readiness (242.160511ms)",
+        "2026-10-03T13:27:15.4865437Z ✔ U1: failure to stop Docker refuses restore and does not restart services (100.923862ms)",
+        "2026-10-03T13:27:15.4866628Z ✔ U1: a runner that refuses to stop during failure recovery prevents restore (227.909306ms)",
+        "2026-10-03T13:27:15.4869349Z ✔ U1: a pre-runner installation can relocate and install its first runner (134.758851ms)",
+        "2026-10-03T13:27:15.4880971Z ℹ tests 83",
+        "2026-10-03T13:27:15.4881417Z ℹ pass 83",
+        "2026-10-03T13:27:15.4881605Z ℹ fail 0",
+        "2026-10-03T13:27:15.4882051Z ℹ skipped 0"
+      ]
+    }
+  ],
+  "source_comparison": {
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "6c1df0932655ab77284eb56b1dcf86cfa7e9cced8ca9610747b75713fe734a85",
+      "bae_sha256": "6c1df0932655ab77284eb56b1dcf86cfa7e9cced8ca9610747b75713fe734a85"
+    },
+    "scripts/tests/selected_browser_backend_bridge.py": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "448f8d0326a8ba4b651bbe2258b2292c3544c4d90889ca9e6051a54dc603e80b",
+      "bae_sha256": "448f8d0326a8ba4b651bbe2258b2292c3544c4d90889ca9e6051a54dc603e80b"
+    },
+    "scripts/selected_browser_supervisor.py": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab",
+      "bae_sha256": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab"
+    },
+    "scripts/a3-worker-guest.py": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f",
+      "bae_sha256": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f"
+    },
+    ".github/workflows/credential-broker.yml": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "5e9cfb7832be1027d05ab0ed7ef8f3e8783394a3dedf424466b2116559375603",
+      "bae_sha256": "5e9cfb7832be1027d05ab0ed7ef8f3e8783394a3dedf424466b2116559375603"
+    },
+    ".github/workflows/security-regression.yml": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "10881a1f30dc47f0cb8ac1aaf3bbff67e7c7d94594e609d5ea004fcf12dfc6e2",
+      "bae_sha256": "10881a1f30dc47f0cb8ac1aaf3bbff67e7c7d94594e609d5ea004fcf12dfc6e2"
+    }
+  },
+  "comparison": {
+    "cbd": "Launch20002ms deadline before workerready and zero effects under broad selection.",
+    "d4b6": "Both isolated native steps passed; launch7807ms/16048ms.",
+    "bae": "Both isolated native steps hit20002ms/20003ms launch deadlines before workerready; all actions/model/networkmeters0.",
+    "conclusion": "Scheduling isolation did not resolve variable startup delay deterministically. No evidence establishes Update compatibility as the cause."
+  },
+  "limits": [
+    "The original307 Start cause remains directly unproven.",
+    "Current evidence does not identify which startup CDP call is blocked.",
+    "Captured processPID/start and workerended:false do not establish renderer activity/CPU load.",
+    "Broker D-Bus errors alone do not establish D-Bus as the cause; Security Chromiumlog is empty.",
+    "API reports one audit cached status in_progress with success conclusion despite completed workflow; retained verbatim.",
+    "No source edits/reruns/timeout or skip changes, package or production operations performed."
+  ],
+  "next_diagnostic": "Test-only wrappers around fixed startup Cdp.call methods and fixture_spawn monotonic phases, without parameters/URLs/credentials/authority changes; production guest remains unchanged.",
+  "raw_log_hash_semantics": "SHA256 of complete authorized decoded job-log content re-encoded UTF-8, including supplied BOM/newlines, not archive bytes."
+}

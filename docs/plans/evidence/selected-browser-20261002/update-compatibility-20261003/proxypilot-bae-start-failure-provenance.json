@@ -1,0 +1,48 @@
+{
+  "commit": "bae85ff7409823bf242b8108157fdbd781be61ad",
+  "workflow_run_id": 37126162943,
+  "job_id": 111211754481,
+  "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37126162943/job/111211754481",
+  "decoded_utf8_job_log": {
+    "sha256": "d8def8e5e52be903d7521e42907f83483b603cf5b74e18f5b862f5d85a9f4f02",
+    "bytes": 93878
+  },
+  "source_pins": {
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "6c1df0932655ab77284eb56b1dcf86cfa7e9cced8ca9610747b75713fe734a85",
+      "bae_sha256": "6c1df0932655ab77284eb56b1dcf86cfa7e9cced8ca9610747b75713fe734a85"
+    },
+    "scripts/tests/selected_browser_backend_bridge.py": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "448f8d0326a8ba4b651bbe2258b2292c3544c4d90889ca9e6051a54dc603e80b",
+      "bae_sha256": "448f8d0326a8ba4b651bbe2258b2292c3544c4d90889ca9e6051a54dc603e80b"
+    },
+    "scripts/selected_browser_supervisor.py": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab",
+      "bae_sha256": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab"
+    },
+    "scripts/a3-worker-guest.py": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f",
+      "bae_sha256": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f"
+    },
+    ".github/workflows/credential-broker.yml": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "5e9cfb7832be1027d05ab0ed7ef8f3e8783394a3dedf424466b2116559375603",
+      "bae_sha256": "5e9cfb7832be1027d05ab0ed7ef8f3e8783394a3dedf424466b2116559375603"
+    },
+    ".github/workflows/security-regression.yml": {
+      "unchanged_from_d4b6": true,
+      "d4b6_sha256": "10881a1f30dc47f0cb8ac1aaf3bbff67e7c7d94594e609d5ea004fcf12dfc6e2",
+      "bae_sha256": "10881a1f30dc47f0cb8ac1aaf3bbff67e7c7d94594e609d5ea004fcf12dfc6e2"
+    }
+  },
+  "comparison": {
+    "cbd": "Launch20002ms deadline beforeworkerready, 0requests/effects; broadselection461/462.",
+    "d4b6": "Both isolatednativepass; actuallaunch7807ms/16048ms, fixed20000msRPC.",
+    "bae": "Isolatedbroker launch20002ms deadline beforeworkerready; 0actions/modelcalls/networkeffects, same pre-Step assertion.",
+    "inference": "Prior variable startup latency persisted after isolation. Specific Chromium readiness delay/rootcause unproven; no evidence this is caused by Update compatibility."
+  }
+}

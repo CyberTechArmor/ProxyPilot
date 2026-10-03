@@ -1,0 +1,53 @@
+{
+  "expected_failure": "FIXTURE_RPC_DEADLINE",
+  "launch_elapsed_ms": 65001,
+  "whole_case_elapsed_ms": 66908.054793,
+  "rpc_history": [
+    {
+      "method": "fixture_bootstrap",
+      "elapsed_ms": 295,
+      "status": "returned",
+      "code": null
+    },
+    {
+      "method": "selected_browser_status",
+      "elapsed_ms": 9,
+      "status": "returned",
+      "code": null
+    },
+    {
+      "method": "selected_browser_model_status",
+      "elapsed_ms": 6,
+      "status": "returned",
+      "code": null
+    },
+    {
+      "method": "selected_browser_launch",
+      "elapsed_ms": 65001,
+      "status": "deadline",
+      "code": "FIXTURE_RPC_DEADLINE"
+    }
+  ],
+  "ready_before_deadline": true,
+  "guest_ended_before_deadline": false,
+  "owned_browser_identity": {
+    "pid": 218281,
+    "start": 6420627
+  },
+  "owned_guest_pids": [
+    218276
+  ],
+  "live_owned_browser_members_before_deadline": 9,
+  "live_owned_browser_and_guest_survivors_after_cleanup": [],
+  "usage": {
+    "actions": 0,
+    "model_calls": 0,
+    "tokens": 0,
+    "usd": 0,
+    "requests": 0,
+    "response_bytes": 0,
+    "artifact_bytes": 0
+  },
+  "rpc_after_deadline": 0,
+  "production_deadlines_unchanged": true
+}

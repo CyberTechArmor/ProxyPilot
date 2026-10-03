@@ -1,0 +1,25 @@
+{
+  "expected_failure": "FIXTURE_RPC_DEADLINE",
+  "launch_elapsed_ms": 65001,
+  "cleanup_result": "FAILED before cleanup-order correction",
+  "captured_post_run_kernel_scan_live_survivors": 9,
+  "captured_post_run_survivor_pids": [
+    217924,
+    217945,
+    217947,
+    217967,
+    217982,
+    217983,
+    218016,
+    218025,
+    218026
+  ],
+  "owned_browser_identity": {
+    "pid": 217924,
+    "start": 6390044
+  },
+  "source": "Initial checker asserted the post-run PID/start/group/session scan empty; assertion printed these nine surviving processes.",
+  "raw_log": "/tmp/pp-startup-phase-new65-wedged-stall.log",
+  "remediation": "Only PID217924/start6390044 group/session and verified stopped fixture parent217919 were killed; subsequent scan found no live owned members.",
+  "final_corrected_proof": "/tmp/pp-startup-phase-final65-wedged-stall-proof.json"
+}

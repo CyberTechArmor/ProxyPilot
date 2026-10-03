@@ -1,0 +1,210 @@
+{
+  "commit": "bae85ff7409823bf242b8108157fdbd781be61ad",
+  "workflow_run_id": 37126162901,
+  "job_id": 111211754405,
+  "step": 10,
+  "assertion": {
+    "run": {
+      "state": "uncertain",
+      "result_code": "LAUNCH_UNCERTAIN",
+      "revision": 3,
+      "fence": 2,
+      "usage": {
+        "actions": 0,
+        "model_calls": 0,
+        "tokens": 0,
+        "usd": 0,
+        "requests": 0,
+        "response_bytes": 0,
+        "artifact_bytes": 0
+      }
+    },
+    "uncertainties": [
+      {
+        "id": "5592687e-6dbd-4b44-8cee-54b13a421988",
+        "kind": "CLEANUP_UNVERIFIED",
+        "state": "unresolved",
+        "decision": null,
+        "created_at": "2026-10-03T13:28:34.763Z"
+      }
+    ],
+    "receipts": [],
+    "rpc_history": [
+      {
+        "method": "fixture_bootstrap",
+        "elapsed_ms": 8864,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_status",
+        "elapsed_ms": 7,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_model_status",
+        "elapsed_ms": 4,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_launch",
+        "elapsed_ms": 20003,
+        "status": "deadline",
+        "code": "FIXTURE_RPC_DEADLINE"
+      }
+    ],
+    "transport_failure": {
+      "code": "FIXTURE_RPC_DEADLINE",
+      "message": "Browser fixture deadline: selected_browser_launch\nSelected composition browser: Chromium 154.0.8037.0\n"
+    },
+    "launch_evidence": {
+      "phase": "launch_waiting",
+      "evidence": {
+        "browser_version": "Chromium 154.0.8037.0",
+        "gateway": {
+          "schema": "proxypilot.selected-browser.gateway-status.v1",
+          "identity": {
+            "project_id": "a36d8fae-91ca-4289-a7cc-fc7529210f12",
+            "run_id": "447a95f7-f235-46df-b11e-50c9b7d14c3b",
+            "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+            "fence": 1,
+            "policy_sha256": "d51e33ae9d6d3349cb5b12677b5afeb2cecc53a613892fb4d816bec07e55c6f2"
+          },
+          "state": "running",
+          "reason": null,
+          "requests": 0,
+          "response_bytes": 0,
+          "ledger_sha256": "984c9750112b50e40aa01baad0d3463a7320732e42c0579c09ed8eda68d2cfab",
+          "effects_sent": 0,
+          "effects_uncertain": 0,
+          "inflight": 0,
+          "auth_effects_acknowledged": 0,
+          "outstanding_requests": 0,
+          "network_plan_sha256": "db89c71064d3b8f07575118f4e1396fd9d2cefb3cad04c3a3d05d48bd31ee85a",
+          "destinations": 1,
+          "temporary_destinations": 0
+        },
+        "attempts": [
+          {
+            "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+            "state": "launching",
+            "selected_mode": "agent",
+            "selected_code": null,
+            "stop_reason": null,
+            "exit": null,
+            "spawned": true,
+            "gateway_registered": true
+          }
+        ],
+        "workers": [
+          {
+            "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+            "ready": false,
+            "ended": false,
+            "stderr": ""
+          }
+        ],
+        "browser_process": {
+          "pid": 4295,
+          "start": 15246
+        },
+        "service_requests": [],
+        "chromium_log": "",
+        "fetch_log": "",
+        "received": [],
+        "upstream": [],
+        "contacts": [
+          [
+            "resolve",
+            "selected.example"
+          ]
+        ],
+        "trace": [
+          "gateway:health",
+          "gateway:health",
+          "resolve:selected.example",
+          "route",
+          "gateway:register",
+          "spawn"
+        ]
+      }
+    },
+    "bridge_evidence": {
+      "phase": "launch_waiting",
+      "evidence": {
+        "browser_version": "Chromium 154.0.8037.0",
+        "gateway": {
+          "schema": "proxypilot.selected-browser.gateway-status.v1",
+          "identity": {
+            "project_id": "a36d8fae-91ca-4289-a7cc-fc7529210f12",
+            "run_id": "447a95f7-f235-46df-b11e-50c9b7d14c3b",
+            "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+            "fence": 1,
+            "policy_sha256": "d51e33ae9d6d3349cb5b12677b5afeb2cecc53a613892fb4d816bec07e55c6f2"
+          },
+          "state": "running",
+          "reason": null,
+          "requests": 0,
+          "response_bytes": 0,
+          "ledger_sha256": "984c9750112b50e40aa01baad0d3463a7320732e42c0579c09ed8eda68d2cfab",
+          "effects_sent": 0,
+          "effects_uncertain": 0,
+          "inflight": 0,
+          "auth_effects_acknowledged": 0,
+          "outstanding_requests": 0,
+          "network_plan_sha256": "db89c71064d3b8f07575118f4e1396fd9d2cefb3cad04c3a3d05d48bd31ee85a",
+          "destinations": 1,
+          "temporary_destinations": 0
+        },
+        "attempts": [
+          {
+            "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+            "state": "launching",
+            "selected_mode": "agent",
+            "selected_code": null,
+            "stop_reason": null,
+            "exit": null,
+            "spawned": true,
+            "gateway_registered": true
+          }
+        ],
+        "workers": [
+          {
+            "attempt_id": "9ef8dc8d-49ee-46cd-a014-f0be72126d74",
+            "ready": false,
+            "ended": false,
+            "stderr": ""
+          }
+        ],
+        "browser_process": {
+          "pid": 4295,
+          "start": 15246
+        },
+        "service_requests": [],
+        "chromium_log": "",
+        "fetch_log": "",
+        "received": [],
+        "upstream": [],
+        "contacts": [
+          [
+            "resolve",
+            "selected.example"
+          ]
+        ],
+        "trace": [
+          "gateway:health",
+          "gateway:health",
+          "resolve:selected.example",
+          "route",
+          "gateway:register",
+          "spawn"
+        ]
+      }
+    },
+    "inspection": null,
+    "inspection_error": null,
+    "stderr": "Selected composition browser: Chromium 154.0.8037.0\n"
+  }
+}

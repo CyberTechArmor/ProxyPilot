@@ -1,0 +1,13 @@
+..usage: helper [-h] [--operation {install,update,recover,rollback,commit}]
+              [--plan-sha256 PLAN_SHA256]
+              {plan,review,apply,recover,rollback,commit}
+helper: error: Actual UID0 operator required
+usage: helper [-h] [--operation {install,update,recover,rollback,commit}]
+              [--plan-sha256 PLAN_SHA256]
+              {plan,review,apply,recover,rollback,commit}
+helper: error: Reviewed fixed installed source path required; no checkout execution
+.........................
+----------------------------------------------------------------------
+Ran 27 tests in 52.149s
+
+OK

@@ -98,7 +98,7 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   if (!response.ok && (noReplay || typeof data.error === 'object')) {
     const failure = data.error;
     const verificationCode = data.sudo_required === true ? 'ELEVATION_REQUIRED' : data.control_verification_required === true ? 'AGENT_CONTROL_VERIFICATION_REQUIRED' : undefined;
-    throw new ApiError(typeof failure === 'object' && failure?.message ? failure.message : typeof data.message === 'string' ? data.message : 'Request refused. Verify your session, then submit explicitly.', response.status, { code: failure?.code ?? (typeof data.code === 'string' && /^[A-Z_]{1,64}$/.test(data.code) ? data.code : verificationCode), next_action: failure?.next_action });
+    throw new ApiError(typeof failure === 'object' && failure?.message ? failure.message : typeof failure === 'string' && failure ? failure : typeof data.message === 'string' ? data.message : 'Request refused. Verify your session, then submit explicitly.', response.status, { code: failure?.code ?? (typeof data.code === 'string' && /^[A-Z_]{1,64}$/.test(data.code) ? data.code : verificationCode), next_action: failure?.next_action });
   }
 
   if (response.status === 401) {

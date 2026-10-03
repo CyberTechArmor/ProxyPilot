@@ -94,5 +94,36 @@ try{
       if(artifacts)writeFileSync(`${artifacts}/lighthouse-shared-runtime-mobile.json`,JSON.stringify(result.lhr,null,2)+'\n');
     }finally{await auditBrowser.disconnect();}
   }
+
+  // Exercise the real public-run component and non-replaying HTTP client with
+  // scripted cleanup replies. Host proof is covered by the runtime tests.
+  const publicId='10000000-0000-4000-8000-000000000001',attemptId='10000000-0000-4000-8000-000000000002';
+  let publicData={run:{id:publicId,attempt_id:attemptId,configuration_id:'10000000-0000-4000-8000-000000000003',revision:3,state:'uncertain',execution_mode:'public_navigation',result_code:'LAUNCH_UNCERTAIN',uncertain:true,usage:{requests:0,response_bytes:0}},
+    controls:{can_cancel:false,can_live:false},receipts:[],uncertainties:[{id:'cleanup-fixture',kind:'CLEANUP_UNVERIFIED',state:'unresolved'}]};
+  let retries=0;
+  await page.route('**/browser-agent-runs',r=>r.fulfill({json:{runs:[publicData.run]}}));
+  await page.route('**/browser-agent-runs/'+publicId,r=>r.fulfill({json:publicData}));
+  await page.route('**/browser-agent-runs/'+publicId+'/retry-cleanup',async r=>{
+    retries++;assert.equal(r.request().method(),'POST');assert.equal(r.request().headers()['if-match'],'"3"');
+    if(retries===1)return r.fulfill({status:403,json:{error:'Cleanup needs a verified session.',code:'ELEVATION_REQUIRED'}});
+    publicData={...publicData,run:{...publicData.run,revision:4,uncertain:false},
+      receipts:[{closed:{browser:true,network:true,session:true,temporary_files:true}}],
+      uncertainties:[{...publicData.uncertainties[0],state:'reconciled',decision:'signed_cleanup_verified'}]};
+    return r.fulfill({json:publicData});
+  });
+  await page.reload();
+  await page.getByRole('button',{name:'Inspect browser run',exact:true}).click();
+  const publicRun=page.getByRole('region',{name:'Public browser activity',exact:true});
+  await publicRun.getByRole('button',{name:'Verify session for cleanup',exact:true}).waitFor();
+  await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
+  await page.getByRole('alert').filter({hasText:'Cleanup needs a verified session. (ELEVATION_REQUIRED)'}).waitFor();
+  await page.waitForTimeout(100);
+  assert.equal(retries,1);assert.equal(await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).count(),1);
+  await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
+  await runtime.getByText('Cleanup checked. Inspect the receipt and check browser readiness again.',{exact:true}).waitFor();
+  assert.equal(retries,2);assert.equal(await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).count(),0);
+  await publicRun.getByText('Cleanup: browser closed · network closed · session closed · temporary files closed',{exact:true}).waitFor();
+  assert.equal(await page.getByText(publicId,{exact:true}).count(),1);
+  report.checks.push('uncertain public-run history offers explicit verified cleanup; elevation refusal stays visible with no replay; signed closure hides retry and retains the run');
   assert.deepEqual(report.page_errors,[]);assert.equal(h.requests.some(r=>r.method!=='GET'&&/\/start|\/model-consent|\/convert/.test(r.path)),false);assert.equal(h.world.supervisor.calls.length,0);report.passed=true;
 }finally{await context.close();await h.close();await browser.close();if(artifacts)writeFileSync(`${artifacts}/report.json`,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));}

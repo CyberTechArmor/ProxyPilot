@@ -987,6 +987,20 @@ guest teardown. An absent active attempt never implies selected->demo fallback.
             self.latched_identity = None
             return dict(released=True, selected_execution_enabled=False)
 
+    def never_registered(self, params):
+        if (not exact(params, ('attempt_id',)) or not isinstance(params['attempt_id'], str) or
+                not UUID.fullmatch(params['attempt_id'])):
+            raise Denied('CONTROL_ENVELOPE_INVALID')
+        with self.lock:
+            self._directory()
+            # A released ledger is permanent admission history, even with zero
+            # requests. Root journal loss cannot turn it into an absence proof.
+            ledger = self.directory / ('selected-' + params['attempt_id'] + '.ledger')
+            if (self.latched_identity is not None or self.gateway is not None or
+                    os.path.lexists(self.latch_path) or os.path.lexists(ledger)):
+                raise Denied('GATEWAY_ADMISSION_ABSENCE_UNVERIFIED')
+            return dict(attempt_id=params['attempt_id'], active=False, never_registered=True)
+
     def dispatch(self, value):
         if not exact(value, ('v', 'method', 'params')) or value['v'] != 1:
             raise Denied('CONTROL_ENVELOPE_INVALID')
@@ -996,6 +1010,8 @@ guest teardown. An absent active attempt never implies selected->demo fallback.
                 raise Denied('CONTROL_ENVELOPE_INVALID')
             return dict(contract_version='selected-browser.v1', protocol='selected-gateway.v1',
                         active=self.latched_identity is not None, files=dict(self.loaded_files))
+        if method == 'never_registered':
+            return self.never_registered(params)
         if method == 'register':
             return self.register(params)
         if method == 'release':

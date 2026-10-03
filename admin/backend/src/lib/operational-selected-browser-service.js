@@ -157,7 +157,14 @@ export function createSelectedBrowserService({db,runner=null,model=null,artifact
     const {p}=access(actor,projectId,'run'),c=publicNavigationConfiguration(url),validated=validateBrowserDraftImport({configuration:c});
     let status;try{status=await runner?.readiness?.({project_id:projectId,configuration:c,configuration_sha256:validated.configuration_sha256,policy_sha256:validated.configuration_sha256});}catch{/* explicit unreachable capability */}
     const ready=!!(status?.available&&status?.verified_supervisor&&status?.verified_isolation&&status?.verified_destinations&&status?.verified_site_policy&&status?.policy_sha256===validated.configuration_sha256);
-    return {can_start:ready&&limitsCheck(p,c),checks:[{kind:'runtime',state:ready?'ready':'blocked',code:ready?'READY':status?.code??'BROWSER_RUNTIME_UNAVAILABLE'},{kind:'project_limits',state:limitsCheck(p,c)?'ready':'blocked',code:limitsCheck(p,c)?'READY':'PROJECT_LIMITS_REQUIRED'}],capabilities:status?.capabilities??{},helper_hashes:status?.helper_hashes??{},protected_inventory_sha256:status?.protected_inventory_sha256??null,valid_until:status?.valid_until??null};
+    // The host is shared: use the same global admission blockers as openPublic.
+    // Return only the reason, never another project's run or user identity.
+    const cleanup=!!one("SELECT 1 FROM ops_selected_browser_uncertainties WHERE kind='CLEANUP_UNVERIFIED' AND state='unresolved'");
+    const active=!!one("SELECT 1 FROM ops_selected_browser_runs WHERE state IN('preparing','running','paused','awaiting_approval','human_control','stopping')");
+    const checks=[{kind:'runtime',state:ready?'ready':'blocked',code:ready?'READY':status?.code??'BROWSER_RUNTIME_UNAVAILABLE'},
+      {kind:'project_limits',state:limitsCheck(p,c)?'ready':'blocked',code:limitsCheck(p,c)?'READY':'PROJECT_LIMITS_REQUIRED'},
+      {kind:'browser_lifecycle',state:!cleanup&&!active?'ready':'blocked',code:cleanup?'CLEANUP_UNVERIFIED':active?'ATTEMPT_ALREADY_ACTIVE':'READY'}];
+    return {can_start:checks.every(check=>check.state==='ready'),checks,capabilities:status?.capabilities??{},helper_hashes:status?.helper_hashes??{},protected_inventory_sha256:status?.protected_inventory_sha256??null,valid_until:status?.valid_until??null};
   }
   async function openPublic(actor,projectId,input){
     const v=parse(publicNavigationInput,input);const {p}=access(actor,projectId,'run');assertRevision(v.project_revision,p.revision);

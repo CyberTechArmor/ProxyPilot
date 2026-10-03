@@ -1164,3 +1164,65 @@ test('metadata toggle revocation prevents project asset binary reads and new pri
     assert.equal(writes, 0); assert.equal(w.f.db.prepare('SELECT count(*) n FROM ops_browser_artifacts').get().n, count);
   } finally { await w.close(); }
 });
+
+function neverAdmittedReceipt(params,change=()=>{}){
+ const value={contract_version:'selected-browser.v1',run_id:params.run_id,attempt_id:params.attempt_id,fence:params.fence,policy_sha256:params.policy_sha256,
+   closed:{browser:true,network:true,session:true,temporary_files:true},
+   final_network:{requests:0,response_bytes:0,effects_sent:0,effects_uncertain:0,auth_effects_acknowledged:0,inflight:0,pending_count:0,ledger_sha256:'0'.repeat(64)},
+   vm_uuid:vm,boot_id:null,workspace_id:params.attempt_id,network_plan_sha256:null,gateway_ledger_sha256:'0'.repeat(64),
+   original_fence:1,no_launch:true,gateway_never_registered:true,evidence:{launched:false},uncertain_ordinals:[],
+   native_inputs:{measured:true,counts:{key:0,click:0,scroll:0}}};
+ change(value);const signed=attest(value,'selected-browser-teardown');
+ return Object.fromEntries(['contract_version','run_id','attempt_id','fence','policy_sha256','closed','final_network','attestation'].map(k=>[k,signed[k]]));
+}
+const openPublic=w=>w.runtime.runs.openPublic(w.owner,w.p.id,{url:'https://selected.example/',project_revision:w.f.store.get(w.owner,w.p.id).revision,idempotency_key:randomUUID()});
+test('signed never-admitted public cleanup resolves missing launch pins only on explicit verified retry',async()=>{
+ let recover=false,failLaunch=true;
+ const w=world({privateStorage:false,hostChange:(method,out,params)=>{
+  if(method==='selected_browser_launch'&&failLaunch)throw new Error('Fixture pre-admission failure');
+  if(method==='selected_browser_stop')return recover?neverAdmittedReceipt(params):{...out,attestation:'unverified'};
+ }});try{
+  const started=await openPublic(w);assert.equal(started.run.state,'uncertain');assert.equal(started.run.result_code,'LAUNCH_UNCERTAIN');
+  assert.equal(w.f.db.prepare('SELECT count(*) n FROM ops_selected_browser_host_pins').get().n,0);
+  assert.equal((await w.runtime.runs.publicReadiness(w.owner,w.p.id,'https://selected.example/')).can_start,false);
+  w.session();recover=true;
+  const resolved=await w.runtime.runs.retryCleanup(w.owner,w.p.id,started.run.id,started.run.revision);
+  assert.equal(resolved.run.uncertain,false);assert.equal(resolved.run.state,'uncertain');assert.equal(resolved.receipts.length,1);
+  assert.equal(w.executed.length,0);assert.equal(w.calls.filter(c=>c.method==='selected_browser_model').length,0);
+  failLaunch=false;w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});
+  const next=await openPublic(w);assert.equal(next.run.state,'running');assert.notEqual(next.run.id,started.run.id);
+ }finally{await w.close();}
+});
+for(const [name,change] of [
+ ['missing proof',p=>delete p.no_launch],['untyped proof',p=>p.no_launch='true'],
+ ['gateway history absent',p=>delete p.gateway_never_registered],['wrong VM',p=>p.vm_uuid=randomUUID()],
+ ['wrong run',p=>p.run_id=randomUUID()],['wrong attempt',p=>p.attempt_id=randomUUID()],['wrong fence',p=>p.fence++],
+ ['wrong policy',p=>p.policy_sha256='a'.repeat(64)],['invented boot',p=>p.boot_id=boot],
+ ['wrong workspace',p=>p.workspace_id=randomUUID()],['invented network plan',p=>p.network_plan_sha256='b'.repeat(64)],
+ ['browser launched',p=>p.evidence.launched=true],['partial closure',p=>p.closed.network=false],
+ ['untyped ordinals',p=>p.uncertain_ordinals=''],['uncertain action',p=>p.uncertain_ordinals=[1]],
+ ['native input',p=>p.native_inputs.counts.click=1],
+ ...['requests','response_bytes','effects_sent','effects_uncertain','auth_effects_acknowledged','inflight','pending_count'].map(k=>[k,p=>p.final_network[k]=1])
+])test('never-admitted cleanup rejects '+name,async()=>{
+ const w=world({privateStorage:false,hostChange:(method,out,params)=>{
+  if(method==='selected_browser_launch')throw new Error('Fixture pre-admission failure');
+  if(method==='selected_browser_stop')return neverAdmittedReceipt(params,change);
+ }});try{
+  const started=await openPublic(w);assert.equal(started.run.state,'uncertain');assert.equal(started.run.uncertain,true);
+  w.session();await assert.rejects(()=>w.runtime.runs.retryCleanup(w.owner,w.p.id,started.run.id,started.run.revision),e=>e.code==='SIGNED_CLEANUP_RECEIPT_REQUIRED');
+  assert.equal(w.get(started.run.id).run.uncertain,true);assert.equal(w.executed.length,0);
+ }finally{await w.close();}
+});
+test('a never-admitted proof cannot replace existing launch pins or recover an agent run',async()=>{
+ for(const agent of [false,true]){
+  const w=world({hostChange:(method,out,params)=>{
+   if(agent&&method==='selected_browser_launch')throw new Error('Fixture lost launch reply');
+   if(method==='selected_browser_stop')return neverAdmittedReceipt(params);
+  }});try{
+   w.session();if(agent)w.consent();else w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});const started=agent?await w.start():await openPublic(w);
+   const stopped=agent?started:await w.runtime.runs.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
+   assert.equal(stopped.run.uncertain,true);
+   await assert.rejects(()=>w.runtime.runs.retryCleanup(w.owner,w.p.id,stopped.run.id,stopped.run.revision),e=>e.code==='SIGNED_CLEANUP_RECEIPT_REQUIRED');
+  }finally{await w.close();}
+ }
+});

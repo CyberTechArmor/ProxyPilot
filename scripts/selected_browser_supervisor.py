@@ -182,7 +182,8 @@ class SelectedBrowserSupervisor:
         c = self._configuration(params)
         out = dict(contract_version=CONTRACT, supervisor_version=CONTRACT,
                    policy_sha256=params['configuration_sha256'], available=False, verified_supervisor=False,
-                   isolation=False, destinations=False, site_policy=False, reachability='pending_launch_check')
+                   isolation=False, destinations=False, site_policy=False, reachability='pending_launch_check',
+                   vm_uuid=self.h.VM_UUID, valid_until=self.h.stamp(self.s.clock() + 30))
         try:
             marker, boundary = self._public_readiness() if c.get('mode')=='public_navigation' else self._acceptance()
             # Validate destinations against protected inventory without target
@@ -1093,20 +1094,59 @@ class SelectedBrowserSupervisor:
         return self.s.renew({k: params[k] for k in ('run_id', 'attempt_id', 'fence')})
 
     def stop(self, params):
-        if not self.h.exact(params, ('run_id', 'attempt_id', 'fence', 'policy_sha256', 'reason')):
+        if (not self.h.exact(params, ('run_id', 'attempt_id', 'fence', 'policy_sha256', 'reason')) or
+                any(not isinstance(params[k], str) or not self.h.UUID.fullmatch(params[k]) for k in ('run_id', 'attempt_id')) or
+                not isinstance(params['policy_sha256'], str) or not self.h.HEX64.fullmatch(params['policy_sha256']) or
+                not self.h.safe_int(params['fence'], 1) or params['reason'] not in self.h.BACKEND_STOP_REASONS):
             self.fail('INVALID_REQUEST')
-        with self.s.lock:
-            a = self.s.state['attempts'].get(params['attempt_id'])
-            if (a is None or a.get('workload') != 'selected_browser_v1' or a['run_id'] != params['run_id'] or
-                    a['policy_sha256'] != params['policy_sha256'] or not self.h.safe_int(params['fence'], a['fence']) or
-                    params['reason'] not in self.h.BACKEND_STOP_REASONS):
-                self.fail('INVALID_REQUEST')
-            if a['state'] in self.h.TERMINAL:
-                return a['receipt']
-            a['fence'] = params['fence']
-            self.s.state['runs'][a['run_id']]['max_fence'] = params['fence']
-            self.s._save()
-        return self.s._teardown(a['attempt_id'], params['reason'])
+        # A queued launch and absence proof must share admission serialization.
+        # The permanent run/attempt tombstone is saved before any closure proof.
+        with self.s.launch_lock:
+            with self.s.lock:
+                a = self.s.state['attempts'].get(params['attempt_id'])
+                run = self.s.state['runs'].get(params['run_id'])
+                if a is None:
+                    if run or any(v.get('run_id') == params['run_id'] for v in self.s.state['attempts'].values()):
+                        self.fail('INVALID_REQUEST')
+                    if self.s._live():
+                        self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+                    a = dict(attempt_id=params['attempt_id'], run_id=params['run_id'], fence=params['fence'],
+                        original_fence=1, policy_sha256=params['policy_sha256'], workspace_id=params['attempt_id'],
+                        state='stopping', stop_reason=params['reason'], spawned=False, unit=None, actions=[],
+                        workload='selected_browser_v1', no_launch=True, gateway_registered=False)
+                    self.s.state['attempts'][params['attempt_id']] = a
+                    self.s.state['runs'][params['run_id']] = dict(attempts=[params['attempt_id']],
+                        policy_digest=params['policy_sha256'], configuration_sha256=params['policy_sha256'],
+                        max_fence=params['fence'], no_launch=True, deadline=None, max_actions=0,
+                        action_count=0, credential=None)
+                    self.s.state['active'] = params['attempt_id']
+                    self.s._save()
+                elif (a.get('workload') != 'selected_browser_v1' or a['run_id'] != params['run_id'] or
+                        a['policy_sha256'] != params['policy_sha256'] or not self.h.safe_int(params['fence'], a['fence']) or
+                        not run or run.get('attempts') != [params['attempt_id']] or
+                        run.get('configuration_sha256') != params['policy_sha256']):
+                    self.fail('INVALID_REQUEST')
+                gate = self.s.gates.setdefault(params['attempt_id'], threading.Lock())
+            with gate:
+                with self.s.lock:
+                    a['fence'] = params['fence']
+                    self.s.state['runs'][a['run_id']]['max_fence'] = params['fence']
+                    if a['state'] in self.h.TERMINAL:
+                        # Rebind an already closed receipt to a later fence,
+                        # preserving measured evidence, counters and timestamp.
+                        receipt = copy.deepcopy(a['receipt'])
+                        body = receipt['attestation'].split('.')[1]
+                        payload = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
+                        if (payload.get('kind') != 'selected-browser-teardown' or
+                                any(payload.get(k) != receipt[k] for k in ('run_id','attempt_id','policy_sha256'))):
+                            self.fail('TEARDOWN_UNVERIFIED')
+                        payload['fence'] = receipt['fence'] = params['fence']
+                        receipt['attestation'] = self._sign(payload)
+                        a['receipt'] = receipt
+                        self.s._save()
+                        return receipt
+                    self.s._save()
+                return self.s._teardown_once(a['attempt_id'], params['reason'])
 
     def before_teardown(self, a):
         if not a.get('gateway_registered') or a.get('gateway_released'):
@@ -1182,6 +1222,12 @@ class SelectedBrowserSupervisor:
         if not a.get('gateway_registered'):
             # Registration may have failed after the proxy installed its latch.
             # An unregistered flag alone is insufficient proof of no authority.
+            if a.get('no_launch'):
+                proof = self.s.host.selected_gateway('never_registered',dict(attempt_id=a['attempt_id']))
+                if (proof.get('attempt_id') != a['attempt_id'] or proof.get('active') is not False or
+                        proof.get('never_registered') is not True):
+                    self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+                a['gateway_never_registered'] = True
             health = self.s.host.selected_gateway('health',{})
             if health.get('active') is not False:
                 self.fail('TEARDOWN_NETWORK_UNVERIFIED')
@@ -1218,6 +1264,10 @@ class SelectedBrowserSupervisor:
                                           measured=a.get('selected_native_inputs_measured',not a.get('manual_auth'))),
                        action_budget_unit='automated_and_typed_browser_primitives',
                        stopped_at=self.h.stamp(self.s.clock()))
+        if a.get('no_launch'):
+            if a.get('gateway_never_registered') is not True:
+                self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+            payload.update(no_launch=True, gateway_never_registered=True)
         out['attestation'] = self._sign(payload)
         return out
 
@@ -1229,7 +1279,9 @@ class SelectedBrowserSupervisor:
                     'cancel_selected_browser_model': self.model.cancel}[method](params)
         suffix = method.removeprefix('selected_browser_')
         a=self.s.state['attempts'].get(params.get('attempt_id')) if isinstance(params,dict) else None
-        if a and self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation' and suffix in ('auth','auth_inventory','confirm_authentication','takeover','control','stage','offer_input','approve_request','grant_destination'):
+        if a and a.get('no_launch') and suffix != 'stop':
+            self.fail('ATTEMPT_EXISTS')
+        if a and not a.get('no_launch') and self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation' and suffix in ('auth','auth_inventory','confirm_authentication','takeover','control','stage','offer_input','approve_request','grant_destination'):
             self.fail('PUBLIC_OPTIONAL_CAPABILITY_UNAVAILABLE')
         return getattr(self, suffix)(params)
 

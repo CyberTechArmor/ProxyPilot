@@ -289,6 +289,21 @@ test('forged host available booleans cannot enable start despite working private
   } finally { await w.close(); }
 });
 
+test('ordinary source delivery with a preserved legacy runtime cannot admit selected execution', async () => {
+  const w = world({ hostChange: (method, out) => {
+    if (method === 'selected_browser_status') throw Object.assign(new Error('METHOD_NOT_ALLOWED'), { code: 'METHOD_NOT_ALLOWED' });
+    return out;
+  } });
+  try {
+    w.consent();
+    const ready = await w.runtime.runs.readiness(w.owner, w.p.id, w.config.id);
+    assert.equal(ready.can_start, false);
+    await assert.rejects(w.start, e => e.code === 'INSTALLED_SELECTED_BROWSER_PROOF_REQUIRED');
+    assert.equal(w.calls.some(x => x.method === 'selected_browser_launch'), false);
+    assert.equal(w.f.db.prepare('SELECT count(*) n FROM ops_selected_browser_runs').get().n, 0);
+  } finally { await w.close(); }
+});
+
 test('signed launch pins authoritative config, guide, consent and boot with real private storage', async () => {
   const w = world();
   try {

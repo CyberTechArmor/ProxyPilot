@@ -45,6 +45,22 @@ missing/mismatched completion with exit 98. These fields and the refusal
 reason are included in progress. Already-current remains a successful no-op;
 an explicit build remains success with `up_to_date: false`.
 
+For an enrolled legacy Operations pilot, a selected-browser source release
+updates the dashboard and copied operator scripts while preserving the
+recognized legacy A3/A4 runtime byte-for-byte. The updater verifies the copied
+refresh helper, and preservation pins its committed source, existing package,
+keys, journals, modes, wiring and serving identity through completion. Busy,
+unknown or partial runtime state refuses Update. Completely unenrolled hosts
+require positive absence of the fixed runtime artifacts before skipping that
+check. Selected-browser Start stays blocked until a separate reviewed package
+installation and target acceptance establish readiness. The normal updater
+does not invoke `selected-runtime-package.py`, create acceptance or install its
+runtime helpers. See the [package contract](../plans/fractionate-selected-runtime-package-contract.md)
+for exact source delivery, preservation and recovery checks.
+Ordinary Update after a separate selected package attempt or activation remains
+unsupported and refuses before runtime changes; an expanded preservation and
+protocol compatibility profile is a separate gate before activation.
+
 Bootstrap compatibility: an older updater that re-execs this version without
 a pinned target stops safely before application work. Run the new updater
 again from SSH/console after inspecting the checkout; do not keep retrying an

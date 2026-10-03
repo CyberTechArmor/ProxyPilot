@@ -5,6 +5,10 @@ No installation, opt-in, key generation, configuration, ledger restore or run
 replay. Only two installed Python files and their two digest journals may change.
 The dashboard must be stopped before apply/rollback. Incomplete transactions
 require rollback; neither a new update nor a repeated apply resumes them.
+
+An expanded selected-browser source release instead preserves the recognized
+legacy installation. Its distinct metadata-only transaction never replaces
+runtime files, stops daemons, installs selected helpers or grants acceptance.
 """
 import argparse
 import fcntl
@@ -28,11 +32,40 @@ ACTIVE_DB = {
     'ops_agent_runs': {'prepared', 'starting', 'running', 'cancelling'},
     'ops_website_review_runs': {'queued', 'extracting', 'reviewing'},
 }
+TERMINAL_DB = {
+    'ops_agent_runs': ('completed', 'cancelled', 'failed', 'blocked'),
+    'ops_selected_browser_runs': ('completed', 'cancelled', 'failed', 'uncertain'),
+    'ops_website_review_runs': ('completed', 'cancelled', 'failed', 'blocked', 'interrupted'),
+    'ops_browser_conversions': ('completed', 'blocked', 'cancelled', 'interrupted'),
+    'ops_agent_model_calls': ('chosen', 'refused', 'uncertain'),
+    'ops_selected_browser_model_reservations': ('settled', 'uncertain', 'suppressed'),
+}
 MAX_FILE = 2 * 1024 * 1024
 # Runtime journals retain terminal attempts/calls and can legitimately outgrow
 # a source/config file. This separate cap covers both ledgers at every read;
 # it does not authorize pruning, migration, replay or rewriting their history.
 MAX_LEDGER = 16 * 1024 * 1024
+SOURCE_RECORD = Path('/var/lib/proxypilot/update/source-dir')
+SELECTED = ('selected_browser_supervisor.py', 'selected_browser_policy.py', 'selected_browser_gateway.py',
+            'selected_browser_worker.py', 'selected_browser_contract.py', 'selected-browser-schemas.json',
+            'selected-browser-model.py')
+# Authentic PR724 public-review runtime, not mutually agreeing mutable journals.
+# The previously approved PR710 guest may remain installed unchanged.
+LEGACY_SOURCE_HASHES = {
+    'a3-worker-supervisor.py': 'd672c404e04faf75a8dd1e5ef9c7cfb60002271f8dea24fd04def84d235bc7ae',
+    'a3-install-proxy.py': '59ae252ee010f0ff0484e952880188404aa90ff3d6ca241c09d76be98d7c7af2',
+    'a3-install-fence.py': 'bb396c84f85448cd60710c71ae917cec52482d3a4d51591425ba52d2b529f4e3',
+    'a3-network-fence.py': 'e7208d606aec742f46a3742db772445600a2558f3144ed45f946799b89d1237b',
+    'a3-origin-proxy.py': '6c86bc369abbf3b9f25261f19b156a6ff1a98c8be94d937324eb663d2704ba5c',
+    'a4-credential-broker.py': '7ea1610e46058d7dbac48090cec51a0bb03fe3f1379b8adba6ca7053ba2e44ef',
+}
+LEGACY_UNIT_HASHES = {
+    'supervisor': '4d34825a89d9336b4ae40386ba9bd6b1403a0e6344d1c7a5b7165747c06c61ec',
+    'broker': '23aeff46dadf4a7d3591fe779459182783e3fb4530b4379fa0a697dc0c8f11e4',
+    'proxy': 'e2dbdd3c2e708062a8581090d622441783b8003802fdcb2d6767dfacbd39666f',
+    'renew_service': 'cfd074a814f28052a6d799a0f1d3f097c472e8d76ec6ec5416ffe1e7a5d2d88d',
+    'renew_timer': '058e2af8a0bc992bc73d336d72eb919feaece125e956546343b96fbd1b820af9',
+}
 # PR #710's installed Demo worker is protocol-compatible with this review
 # bridge. 39ada2b only corrects bound-session/sign-out observations; that guest
 # refresh remains deferred. Retain its bytes and pin, never copy the candidate.
@@ -116,7 +149,7 @@ def idle(supervisor, broker):
                 raise ValueError('Unverifiable review reservation; inspect it before Update')
 
 
-def database_idle(path):
+def database_idle(path, selected=False):
     if not path.is_file():
         raise ValueError('Dashboard database is missing; cannot verify active work')
     with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5) as db:
@@ -128,6 +161,12 @@ def database_idle(path):
                     f'SELECT 1 FROM {table} WHERE state IN ({",".join("?" for _ in states)}) LIMIT 1',
                     sorted(states)).fetchone():
                 raise ValueError('Active dashboard work; finish or cancel it before Update')
+        if selected:
+            for table, terminal in TERMINAL_DB.items():
+                if table in tables and db.execute(
+                        f'SELECT 1 FROM {table} WHERE state IS NULL OR state NOT IN ({",".join("?" for _ in terminal)}) LIMIT 1',
+                        terminal).fetchone():
+                    raise ValueError('Active or unknown dashboard namespace; inspect it before Update')
 
 
 class Host:
@@ -135,6 +174,7 @@ class Host:
     def __init__(self, install, source, source_sha, database):
         self.install, self.source, self.source_sha = install, source, source_sha
         self.database = database
+        self.source_record = SOURCE_RECORD
         self.a8 = load('a8-wire-dashboard', install / 'scripts')
         self.a3 = load('a3-install-supervisor', install / 'scripts')
         self.a4 = load('a4-install-broker', install / 'scripts')
@@ -160,6 +200,154 @@ class Host:
         if not (self.install / '.env').exists():
             return False
         return self.a8.configured(bounded(self.install / '.env').decode())
+
+    def selected_absent(self):
+        root, state = self.a3.TARGET.parent, self.a3.STATE_DIR.parent
+        paths = tuple(self.a3.TARGET / name for name in SELECTED) + (
+            root / 'selected_browser_gateway.py', root / 'selected_browser_policy.py',
+            root / 'selected-browser-acceptance.json', state / 'selected-gateway',
+            TRANSACTION.parent / 'selected-runtime-package')
+        for path in paths:
+            self.secure(path)
+            if path.exists():
+                raise ValueError(f'Selected runtime state requires separate package review: {path}')
+
+    def unconfigured_absent(self):
+        # Expanded source may be delivered to a completely unenrolled host.
+        # Missing A8 settings cannot hide an existing or partial installation.
+        if not hasattr(self.a3, 'SELECTED_SOURCES'):
+            return
+        self.selected_absent()
+        for path in (self.a3.TARGET.parent, self.a3.STATE_DIR.parent,
+                     self.a4.TARGET.parent.parent, self.a4.JOURNAL.parent, self.a8.KEY.parent,
+                     self.a3.UNIT, self.a4.UNIT, self.a3.RENEW_SERVICE, self.a3.RENEW_TIMER,
+                     self.a3.proxy.UNIT, self.a3.proxy.i.UNIT):
+            self.secure(path)
+            if path.exists():
+                raise ValueError(f'Runtime artifacts exist without the reviewed A8 opt-in: {path}')
+
+    def source_profile(self):
+        if not hasattr(self.a3, 'SELECTED_SOURCES'):
+            return None  # Retain the historical public-review-only refresh.
+        if tuple(self.a3.SELECTED_SOURCES) != SELECTED:
+            raise ValueError('Selected source owned set is unknown')
+        names = self.a3.SOURCES + SELECTED + ('a4-credential-broker.py', 'a3-install-supervisor.py',
+                                            'a4-install-broker.py', 'selected-runtime-package.py')
+        if not re.fullmatch('[0-9a-f]{40}', self.source_sha or ''):
+            raise ValueError('Verified checkout SHA is required')
+        self.secure(self.source)
+        self.secure(self.source_record)
+        record = bounded(self.source_record, 4096)
+        if (record != (str(self.source) + '\n').encode() or
+                stat.S_IMODE(self.source_record.stat().st_mode) not in {0o600, 0o644}):
+            raise ValueError('Update source differs from the root-recorded checkout')
+        head = lambda: self.execute(['git', '-C', str(self.source), 'rev-parse', '--verify', 'HEAD']).strip()
+        if head() != self.source_sha:
+            raise ValueError('Checkout changed after Update pinned its commit')
+        pins, modes = {}, {}
+        for name in names:
+            path = self.install / 'scripts' / name
+            self.secure(path)
+            value = bounded(path)
+            committed = subprocess.run(['git', '-C', str(self.source), 'show',
+                self.source_sha + ':scripts/' + name], check=True, capture_output=True, timeout=15).stdout
+            source_path = self.source / 'scripts' / name
+            self.secure(source_path)
+            if (value != committed or bounded(source_path) != committed or
+                    stat.S_IMODE(path.stat().st_mode) not in {0o600, 0o644, 0o700, 0o755}):
+                raise ValueError('Delivered source differs from the pinned checkout contract')
+            pins[name] = sha(value)
+            modes[name] = stat.S_IMODE(path.stat().st_mode)
+        if (head() != self.source_sha or bounded(self.source_record, 4096) != record or
+                any(sha(bounded(self.install/'scripts'/name)) != pins[name] or
+                    stat.S_IMODE((self.install/'scripts'/name).stat().st_mode) != modes[name] for name in names)):
+            raise ValueError('Source identity changed during Update verification')
+        helper = self.install / 'scripts/review-runtime-refresh.py'
+        self.secure(helper)
+        helper_bytes = bounded(helper)
+        committed = subprocess.run(['git', '-C', str(self.source), 'show',
+            self.source_sha + ':scripts/review-runtime-refresh.py'], check=True, capture_output=True, timeout=15).stdout
+        helper_source = self.source / 'scripts/review-runtime-refresh.py'
+        self.secure(helper_source)
+        helper_mode = stat.S_IMODE(helper.stat().st_mode)
+        if (helper_bytes != committed or bounded(helper_source) != committed or
+                helper_mode not in {0o600, 0o644, 0o700, 0o755} or head() != self.source_sha or
+                bounded(self.source_record, 4096) != record):
+            raise ValueError('Refresh helper differs from the pinned source delivery')
+        self.selected_absent()
+        return {'source_sha': self.source_sha, 'source_checkout': str(self.source),
+                'source_record_sha256': sha(record), 'source_files': pins, 'source_modes': modes,
+                'refresh_helper_sha256': sha(helper_bytes), 'refresh_helper_mode': helper_mode}
+
+    def preservation(self):
+        """Positive legacy recognition, including proxy and its dynamic cert pins."""
+        self.selected_absent()
+        files = {}
+        for name, digest in LEGACY_SOURCE_HASHES.items():
+            path = self.a4.TARGET if name == 'a4-credential-broker.py' else self.a3.TARGET / name
+            files[path] = digest
+        guest = self.a3.TARGET / 'a3-worker-guest.py'
+        self.secure(guest)
+        if sha(bounded(guest)) not in GUEST_REVIEW_COMPATIBILITY:
+            raise ValueError(f'Legacy runtime source is unrecognized: {guest}')
+        files[guest] = sha(bounded(guest))
+        files.update({self.a3.UNIT: LEGACY_UNIT_HASHES['supervisor'], self.a4.UNIT: LEGACY_UNIT_HASHES['broker']})
+        recorded = self.a3.read_journal()['files']
+        for path, digest in ((self.a3.RENEW_SERVICE, LEGACY_UNIT_HASHES['renew_service']),
+                            (self.a3.RENEW_TIMER, LEGACY_UNIT_HASHES['renew_timer'])):
+            if str(path) in recorded:
+                files[path] = digest
+            elif path.exists():
+                raise ValueError(f'Unowned renewal file requires separate review: {path}')
+        proxy = self.a3.proxy
+        journal = json.loads(bounded(proxy.JOURNAL))
+        expected = {str(p) for p in (proxy.INSTALLED, proxy.CERT, proxy.KEY, proxy.UNIT)}
+        if (journal.get('version') != 1 or journal.get('phase') != 'installed' or
+                journal.get('vm_uuid') != self.vm or set(journal.get('files', {})) != expected):
+            raise ValueError('Legacy proxy installation journal is unrecognized')
+        files[proxy.INSTALLED] = LEGACY_SOURCE_HASHES['a3-origin-proxy.py']
+        files[proxy.UNIT] = LEGACY_UNIT_HASHES['proxy']
+        for path in (proxy.CERT, proxy.KEY):
+            digest = journal['files'][str(path)]
+            if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+                raise ValueError('Proxy certificate/key journal digest is unknown')
+            files[path] = digest
+        for path, digest in files.items():
+            self.secure(path)
+            if sha(bounded(path)) != digest:
+                raise ValueError(f'Legacy runtime source is unrecognized: {path}')
+            if path in (proxy.INSTALLED, proxy.CERT, proxy.KEY, proxy.UNIT) and journal['files'][str(path)] != digest:
+                raise ValueError('Legacy proxy installation digest mismatch')
+        # A3 identity already validates each code/journal digest and receipt key.
+        # Verify proxy service, target VM and certificate without a mutation.
+        proxy.status()
+        private = subprocess.run(['openssl', 'pkey', '-in', str(proxy.KEY), '-pubout', '-outform', 'DER'],
+                                 check=True, capture_output=True, timeout=10).stdout
+        public = subprocess.run(['openssl', 'x509', '-in', str(proxy.CERT), '-pubkey', '-noout'],
+                                check=True, capture_output=True, timeout=10).stdout
+        cert_der = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public,
+                                  check=True, capture_output=True, timeout=10).stdout
+        if private != cert_der:
+            raise ValueError('Existing proxy certificate/key identity mismatch')
+        # Journals/certificate/key are preservation pins, not rollback backups.
+        for path in self.targets[2:] + (proxy.JOURNAL, self.a3.PUBLIC_KEY):
+            self.secure(path)
+            files[path] = sha(bounded(path))
+        result = {}
+        for path, digest in files.items():
+            mode = 0o600 if path in self.targets[2:] + (proxy.JOURNAL, proxy.KEY) else 0o644
+            if stat.S_IMODE(path.stat().st_mode) != mode:
+                raise ValueError(f'Legacy runtime file mode changed: {path}')
+            result[str(path)] = [digest, mode]
+        return result
+
+    def preservation_paths(self):
+        proxy = self.a3.proxy
+        timers = tuple(p for p in (self.a3.RENEW_SERVICE, self.a3.RENEW_TIMER) if str(p) in self.a3.read_journal()['files'])
+        return tuple(self.a3.TARGET / n for n in self.a3.SOURCES) + timers + (
+            self.a4.TARGET, self.a3.UNIT, self.a4.UNIT,
+            proxy.INSTALLED, proxy.UNIT, proxy.CERT, proxy.KEY, proxy.JOURNAL,
+            self.targets[2], self.targets[3], self.a3.PUBLIC_KEY)
 
     def candidates(self):
         if not re.fullmatch('[0-9a-f]{40}', self.source_sha or ''):
@@ -226,15 +414,17 @@ class Host:
             raise ValueError('Existing A8 settings/mounts are not the reviewed opt-in')
         return key
 
-    def healthy(self, digests, key, new=False):
+    def healthy(self, digests, key, new=False, allow_work=False):
         self.a3.unit_checks()
         self.a4.unit_checks()
         self.a3.renew_timer_checks(self.a3.read_journal())
         a = self.a3.wait_status(key)
         b = self.a4.wait_status(digests[1])
+        active_work = (allow_work and isinstance(a.get('active'), dict) and
+                       a['active'].get('state') in LIVE and a.get('blockers') == [])
         if (a['supervisor'].get('supervisor_sha256') != digests[0] or
-                a.get('vm_uuid') != self.vm or a.get('active') is not None or
-                not a.get('accepting_launch') or b.get('vm_uuid') != self.vm):
+                a.get('vm_uuid') != self.vm or (not allow_work and a.get('active') is not None) or
+                (not a.get('accepting_launch') and not active_work) or b.get('vm_uuid') != self.vm):
             raise ValueError('Serving identity/source or idle boundary verification failed')
         if new:
             result = self.a3.call('public_review_status', timeout=10)
@@ -260,6 +450,10 @@ class Host:
         self.secure(self.database)
         database_idle(self.database)
 
+    def preservation_db_idle(self):
+        self.secure(self.database)
+        database_idle(self.database, selected=True)
+
     def stop(self):
         for unit in (self.a3.UNIT, self.a4.UNIT):
             self.execute(['systemctl', 'stop', unit.name])
@@ -283,8 +477,22 @@ class Refresh:
                 stat.S_IMODE(self.journal.stat().st_mode) != 0o600):
             raise ValueError('Refresh transaction custody/mode changed')
         data = json.loads(bounded(self.journal))
+        if data.get('version') == 2:
+            fields = {'version', 'mode', 'phase', 'vm_uuid', 'source', 'key_id', 'protected', 'ledgers', 'files'}
+            if data.get('phase') == 'committed':
+                fields.add('completed_at')
+            if (set(data) != fields or data.get('mode') != 'preserve_legacy' or
+                    data.get('phase') not in {'applied', 'committed', 'rolled_back'} or data.get('vm_uuid') != self.host.vm or
+                    not re.fullmatch('[0-9a-f]{64}', str(data.get('key_id'))) or
+                    set(data.get('files', {})) != {str(p) for p in self.host.preservation_paths()} or
+                    set(data.get('protected', {})) != {str(p) for p in self.host.protected} or
+                    any(not isinstance(v, list) or len(v) != 2 or not re.fullmatch('[0-9a-f]{64}', str(v[0])) or
+                        type(v[1]) is not int or v[1] not in {0o600, 0o644} for v in data['files'].values())):
+                raise ValueError('Preservation transaction is unknown; refusing recovery')
+            return data
         records = data.get('files', [])
-        if (data.get('version') != 1 or data.get('vm_uuid') != self.host.vm or
+        if (data.get('version') != 1 or not isinstance(records, list) or
+                any(not isinstance(record, dict) for record in records) or data.get('vm_uuid') != self.host.vm or
                 data.get('phase') not in {'prepared', 'replacing', 'applied', 'committed', 'rolled_back'} or
                 [r.get('path') for r in records] != [str(p) for p in self.host.targets] or
                 any(not re.fullmatch('[0-9a-f]{64}', r.get(k, '')) for r in records for k in ('old', 'new')) or
@@ -303,12 +511,17 @@ class Refresh:
             result[str(path)] = [sha(bounded(path)), stat.S_IMODE(path.stat().st_mode)]
         return result
 
-    def ledgers(self):
+    def ledgers(self, selected=False):
         values = []
         for path, field in zip(self.host.ledgers, ('supervisor_sha256', 'broker_sha256')):
             self.host.secure(path)
             values.append(ledger(path, self.host.vm, field))
         idle(*values)
+        if selected:
+            for record in values[0].get('selected_browser_model_runs', {}).values():
+                if (record.get('state') not in {'active', 'cancelled'} or not isinstance(record.get('calls'), dict) or
+                        any(call.get('state') not in {'completed', 'refused'} for call in record['calls'].values())):
+                    raise ValueError('Active or unknown selected model reservation; inspect it before Update')
         return [sha(encoded(v)) for v in values]
 
     def unchanged(self, data):
@@ -317,6 +530,7 @@ class Refresh:
 
     def preflight(self):
         if not self.host.opted_in():
+            getattr(self.host, 'unconfigured_absent', lambda: None)()
             return {'skipped': True, 'reason': 'not_opted_in'}
         if self.journal.exists() and self.read()['phase'] not in {'committed', 'rolled_back'}:
             raise ValueError('Incomplete refresh; rollback required before another Update')
@@ -325,11 +539,18 @@ class Refresh:
             self.host.secure(path)
             if stat.S_IMODE(path.stat().st_mode) != (0o644 if n < 2 else 0o600):
                 raise ValueError('Installed code/journal permissions are unknown')
-        candidates = self.host.candidates()
         digests = [sha(bounded(p)) for p in self.host.targets[:2]]
         self.host.healthy(digests, key)
         self.host.db_idle()
         self.ledgers()
+        profile = getattr(self.host, 'source_profile', lambda: None)()
+        if profile is not None:
+            self.host.preservation_db_idle()
+            self.ledgers(selected=True)
+            return {'skipped': False, 'preserved': True, 'key_id': key, 'old': digests,
+                    'source': profile, 'files': self.host.preservation(),
+                    'selected_browser_available': False, 'reason': 'separate_runtime_package_required'}
+        candidates = self.host.candidates()
         return {'skipped': False, 'key_id': key, 'old': digests,
                 'new': [sha(candidates[p]) for p in self.host.targets[:2]]}
 
@@ -339,6 +560,18 @@ class Refresh:
             return result
         self.host.backend_stopped()
         self.host.db_idle()
+        if result.get('preserved'):
+            data = {'version': 2, 'mode': 'preserve_legacy', 'phase': 'applied', 'vm_uuid': self.host.vm,
+                    'source': result['source'], 'key_id': result['key_id'], 'protected': self.protected(),
+                    'ledgers': self.ledgers(selected=True), 'files': result['files']}
+            self.verify_preservation(data)
+            self.host.secure(self.directory)
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if stat.S_IMODE(self.directory.stat().st_mode) != 0o700:
+                raise ValueError('Preservation metadata directory must be private')
+            self.save(data)
+            self.verify_preservation(data)
+            return dict(result, awaiting_dashboard_health=True, runtime_changed=False)
         if result['old'] == result['new']:
             readiness = self.host.healthy(result['new'], result['key_id'], new=True)
             return {'unchanged': True, 'key_id': result['key_id'], 'readiness': readiness}
@@ -396,6 +629,13 @@ class Refresh:
             return {'skipped': True, 'reason': data['phase']}
         self.host.backend_stopped()
         self.host.db_idle()
+        if data.get('version') == 2:
+            self.host.preservation_db_idle()
+            self.ledgers(selected=True)  # Check current idle state; never restore old history.
+            self.verify_preservation(data)
+            data['phase'] = 'rolled_back'
+            self.save(data)
+            return {'preserved': True, 'rolled_back': True, 'runtime_changed': False, 'replayed': False}
         self.unchanged(data)
         backups = []
         for n, record in enumerate(data['files']):
@@ -430,6 +670,15 @@ class Refresh:
             return {'skipped': True, 'reason': data['phase']}
         if data['phase'] != 'applied':
             raise ValueError('Only a verified applied refresh can commit')
+        if data.get('version') == 2:
+            # Dashboard may have admitted legitimate work. Runtime history is
+            # not compared with the pre-update snapshot and is never restored.
+            self.verify_preservation(data, allow_work=True)
+            data['phase'] = 'committed'
+            data['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+            self.save(data)
+            return {'committed': True, 'preserved': True, 'runtime_changed': False,
+                    'selected_browser_available': False, 'reason': 'separate_runtime_package_required'}
         # After dashboard startup, legitimate new work may have updated its
         # ledgers. Never compare/restore a stale runtime ledger at this point.
         if self.protected() != data['protected'] or self.host.identity() != data['key_id']:
@@ -441,6 +690,16 @@ class Refresh:
         data['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         self.save(data)
         return {'committed': True, 'key_id': data['key_id']}
+
+    def verify_preservation(self, data, allow_work=False):
+        if (self.host.identity() != data['key_id'] or self.protected() != data['protected'] or
+                self.host.source_profile() != data['source'] or self.host.preservation() != data['files']):
+            raise ValueError('Preserved runtime/source identity drift; no runtime restoration authorized')
+        if not allow_work:
+            self.host.preservation_db_idle()
+            if self.ledgers(selected=True) != data['ledgers']:
+                raise ValueError('Runtime ledger changed during preservation admission')
+        self.host.healthy([sha(bounded(p)) for p in self.host.targets[:2]], data['key_id'], allow_work=allow_work)
 
 
 def main():
@@ -462,6 +721,7 @@ def main():
         print(json.dumps({'skipped': True, 'reason': 'no_transaction'}))
         return
     if args.action in ('preflight', 'apply') and not host.opted_in():
+        getattr(host, 'unconfigured_absent', lambda: None)()
         print(json.dumps({'skipped': True, 'reason': 'not_opted_in'}))
         return
     lock = Path('/run/proxypilot-a3-fence.lock')

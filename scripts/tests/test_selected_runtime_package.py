@@ -80,7 +80,7 @@ class FixtureHost:
         out.write_bytes(value);out.chmod(mode)
 
     def sources(self):
-        return self.revision,copy.deepcopy(self.source)
+        return self.revision,copy.deepcopy(self.source),dict(path='/reviewed-checkout',record_sha256='9'*64)
 
     def identity(self):
         return {'machine_id':self.machine,'host_boot_id':self.boot,'vm_uuid':p.VM_UUID,'key_id':self.key_id,
@@ -149,6 +149,83 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(before,{str(f):f.read_bytes() for f in Path(self.temp.name).rglob('*') if f.is_file()})
         self.assertFalse(result['acceptance_created']);self.assertEqual(self.host.events,[])
         self.assertIn('ReadWritePaths=/run/proxypilot-a3 /var/lib/proxypilot-a3-proof/selected-gateway',p.candidate_files(self.host.source)[p.PROXY_UNIT].decode())
+
+    def production_source_fixture(self, linked=False):
+        tree=self.host.tree
+        checkout=tree.path('/checkout');(checkout/'scripts').mkdir(parents=True)
+        for name,value in self.host.source.items():
+            (checkout/'scripts'/name).write_bytes(value)
+            self.host.put(p.SOURCE+'/scripts/'+name,value,0o600)
+        def git(*args):
+            return subprocess.run(['git','-C',str(checkout),*args],check=True,capture_output=True).stdout
+        git('init','-q');git('add','scripts')
+        git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','Reviewed main source')
+        revision=git('rev-parse','HEAD').decode().strip()
+        logical='/checkout'
+        if linked:
+            git('worktree','add','--detach',str(tree.path('/linked')),revision);logical='/linked'
+        self.host.put(p.SOURCE_RECORD,(logical+'\n').encode(),0o644)
+        real=p.Host.__new__(p.Host);real.tree=tree
+        real.execute=lambda argv,timeout=30,input=None:subprocess.run(argv,check=True,capture_output=True,
+            timeout=timeout,input=input,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin'}).stdout
+        return real,checkout,revision
+
+    def test_recorded_checkout_attests_all_copied_sources_without_opt_git_and_safe_worktree(self):
+        real,checkout,revision=self.production_source_fixture(linked=True)
+        actual,sources,binding=real.sources()
+        self.assertEqual(actual,revision);self.assertEqual(sources,self.host.source)
+        self.assertEqual(binding['path'],'/linked')
+        self.assertEqual(binding['record_sha256'],p.sha(b'/linked\n'))
+        self.assertEqual(binding['delivered_modes'],{n:0o600 for n in p.SOURCE_NAMES})
+        self.assertFalse(self.host.tree.path(p.SOURCE+'/.git').exists())
+        (checkout/'.git').chmod(0o777)
+        with self.assertRaisesRegex(ValueError,'custody'):real.sources()
+
+    def test_record_missing_malformed_mode_symlink_owner_and_source_drift_refuse(self):
+        real,checkout,_=self.production_source_fixture()
+        record=self.host.tree.path(p.SOURCE_RECORD);original=record.read_bytes()
+        for value in (b'/checkout\n/other\n',b'/checkout/../checkout\n',b'relative\n',b'/checkout\r\n',b'/missing\n'):
+            record.write_bytes(value)
+            with self.assertRaises(ValueError):real.sources()
+        record.write_bytes(original);record.chmod(0o640)
+        with self.assertRaisesRegex(ValueError,'mode'):real.sources()
+        record.chmod(0o644);record.unlink()
+        with self.assertRaisesRegex(ValueError,'missing'):real.sources()
+        record.symlink_to(checkout/'scripts/a3-worker-guest.py')
+        with self.assertRaisesRegex(ValueError,'custody'):real.sources()
+        record.unlink();record.write_bytes(original);record.chmod(0o644)
+        with patch.object(self.host.tree,'owner',os.geteuid()+1):
+            with self.assertRaisesRegex(ValueError,'custody'):real.sources()
+        for path in (checkout/'scripts/selected_browser_worker.py',self.host.tree.path(p.SOURCE+'/scripts/selected_browser_worker.py')):
+            before=path.read_bytes();path.write_bytes(before+b'\n# unreviewed source\n')
+            with self.assertRaisesRegex(ValueError,'pinned checkout'):real.sources()
+            path.write_bytes(before)
+        installed=self.host.tree.path(p.SOURCE+'/scripts/a3-worker-guest.py');installed.chmod(0o660)
+        with self.assertRaisesRegex(ValueError,'custody'):real.sources()
+
+    def test_head_record_and_prior_delivered_file_races_refuse_before_plan_effects(self):
+        real,checkout,_=self.production_source_fixture();execute=real.execute
+        record=self.host.tree.path(p.SOURCE_RECORD)
+        for kind in ('record','delivery','mode','head'):
+            with self.subTest(kind=kind):
+                fired=False;record.write_bytes(b'/checkout\n')
+                target=self.host.tree.path(p.SOURCE+'/scripts/'+p.SOURCE_NAMES[0])
+                target.write_bytes(self.host.source[p.SOURCE_NAMES[0]]);target.chmod(0o600)
+                def race(argv,**kw):
+                    nonlocal fired
+                    result=execute(argv,**kw)
+                    if not fired and 'show' in argv:
+                        fired=True
+                        if kind=='record':record.write_bytes(b'/different\n')
+                        elif kind=='delivery':target.write_bytes(target.read_bytes()+b'\n# changed\n')
+                        elif kind=='mode':target.chmod(0o644)
+                        else:
+                            subprocess.run(['git','-C',str(checkout),'-c','user.name=Fixture',
+                                '-c','user.email=fixture@example.invalid','commit','--allow-empty','-qm','Raced HEAD'],check=True,capture_output=True)
+                    return result
+                real.execute=race
+                with self.assertRaisesRegex(ValueError,'changed during attestation'):real.sources()
+                self.assertEqual(self.host.events,[])
 
     def test_initial_separate_install_and_rollback_preserve_real_key_identity_and_state(self):
         old={f:self.host.tree.pin(f,missing=True) for f in p.OWNED}

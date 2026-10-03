@@ -115,6 +115,8 @@ function harness(t, { runtime = false, runtimeFailure = '', legacy = false, refu
   if (runtime) {
     mkdirSync(join(install, 'scripts'), { recursive: true });
     writeFileSync(join(install, 'scripts/review-runtime-refresh.py'), '# simulated service adapter\n');
+    mkdirSync(join(root, 'src/scripts'), { recursive: true });
+    copyFileSync(join(install, 'scripts/review-runtime-refresh.py'), join(root, 'src/scripts/review-runtime-refresh.py'));
     writeExe('python3', `
 test "$1" = ${quote(join(install, 'scripts/review-runtime-refresh.py'))}
 echo "runtime $2 $*" >> "$FAKE_STATE/calls"

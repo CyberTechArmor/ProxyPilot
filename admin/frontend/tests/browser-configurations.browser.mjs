@@ -55,10 +55,47 @@ try{
     await validate(owner);await review(owner).check();await save(owner).click();await panel(owner).getByText('Configuration revision 2',{exact:true}).waitFor();
     const versions=h.world.f.db.prepare('SELECT * FROM ops_browser_agent_configuration_versions WHERE configuration_id=? ORDER BY revision').all(record.id);
     assert.equal(versions.length,2);assert.equal(versions[0].source_text,source);assert.equal(JSON.parse(versions[0].configuration_json).name,'First reviewed browser configuration');
-    h.world.f.store.updateBrowserConfiguration(h.world.users.owner,h.world.p.id,record.id,2,{configuration:JSON.parse(versions[1].configuration_json)});
+    const concurrent=JSON.parse(versions[1].configuration_json);concurrent.name='Concurrent reviewed revision';concurrent.budgets.max_seconds=180;
+    h.world.f.store.updateBrowserConfiguration(h.world.users.owner,h.world.p.id,record.id,2,{configuration:concurrent});
     await panel(owner).getByLabel('Configuration name',{exact:true}).fill('Local retained edit');await validate(owner);await review(owner).check();await save(owner).click();
     await panel(owner).getByRole('alert').filter({hasText:'Your edits are retained'}).waitFor();assert.equal(JSON.parse(await json(owner).inputValue()).name,'Local retained edit');assert.equal(await save(owner).isDisabled(),true);
-    await panel(owner).getByRole('button',{name:'Reload saved configuration',exact:true}).click();await panel(owner).getByText('Configuration revision 3',{exact:true}).waitFor();assert.equal(JSON.parse(await json(owner).inputValue()).name,'Second reviewed revision');
+    const retained=await json(owner).inputValue(),retainedSource=await panel(owner).getByLabel('Original source',{exact:true}).inputValue();
+    const patches=h.requests.filter(r=>r.path===`/api/operational-projects${path}/${record.id}`&&r.method==='PATCH').length;
+    await panel(owner).getByRole('button',{name:'Refresh project details',exact:true}).click();
+    await panel(owner).getByText('Project and configuration list refreshed. Local edits retained; any revision conflict still requires reconciliation.',{exact:true}).waitFor();
+    assert.equal(await json(owner).inputValue(),retained);assert.equal(await panel(owner).getByLabel('Original source',{exact:true}).inputValue(),retainedSource);
+    await panel(owner).getByRole('button',{name:'Review configuration Concurrent reviewed revision',exact:true}).waitFor();
+    assert.equal(await panel(owner).getByRole('button',{name:'Validate configuration',exact:true}).isDisabled(),true);assert.equal(await review(owner).isDisabled(),true);assert.equal(await save(owner).isDisabled(),true);
+    assert.equal(h.requests.filter(r=>r.path===`/api/operational-projects${path}/${record.id}`&&r.method==='PATCH').length,patches);
+    assert.equal(h.world.f.db.prepare('SELECT revision FROM ops_browser_agent_configurations WHERE id=?').get(record.id).revision,3);
+    await panel(owner).getByRole('button',{name:'Reload saved configuration',exact:true}).click();await panel(owner).getByText('Configuration revision 3',{exact:true}).waitFor();assert.equal(JSON.parse(await json(owner).inputValue()).name,'Concurrent reviewed revision');
+    assert.equal(JSON.parse(await json(owner).inputValue()).budgets.max_seconds,180);
+    await panel(owner).getByLabel('Configuration name',{exact:true}).fill('Reviewed after reconciliation');await validate(owner);await review(owner).check();
+    const updated=owner.waitForRequest(r=>r.method()==='PATCH'&&r.url().endsWith(`${path}/${record.id}`));await save(owner).click();
+    assert.equal((await updated).headers()['if-match'],'"3"');await panel(owner).getByText('Configuration revision 4',{exact:true}).waitFor();
+    const reconciled=JSON.parse(h.world.f.db.prepare('SELECT configuration_json FROM ops_browser_agent_configurations WHERE id=?').get(record.id).configuration_json);
+    assert.equal(reconciled.name,'Reviewed after reconciliation');assert.equal(reconciled.budgets.max_seconds,180);
+  });
+  await journey('new draft conflict requires explicit refreshed-project acceptance and retains edits',async()=>{
+    await panel(owner).getByRole('button',{name:'New browser configuration',exact:true}).click();await json(owner).fill(wrap);
+    await panel(owner).getByRole('button',{name:'Use current approved guide',exact:true}).click();
+    await panel(owner).getByLabel('Configuration name',{exact:true}).fill('Unsaved retained draft');await validate(owner);await review(owner).check();
+    const project=h.world.f.store.get(h.world.users.owner,h.world.p.id);
+    h.world.f.store.update(h.world.users.owner,h.world.p.id,project.revision,{description:'Concurrent project metadata edit'});
+    await save(owner).click();await panel(owner).getByRole('alert').filter({hasText:'Your edits are retained'}).waitFor();
+    const retained=await json(owner).inputValue(),original=await panel(owner).getByLabel('Original source',{exact:true}).inputValue();
+    const accept=panel(owner).getByRole('button',{name:'Accept refreshed project revision for this draft',exact:true});assert.equal(await accept.isDisabled(),true);
+    await panel(owner).getByRole('button',{name:'Refresh project details',exact:true}).click();
+    await panel(owner).getByText('Project and configuration list refreshed. Local edits retained; any revision conflict still requires reconciliation.',{exact:true}).waitFor();
+    assert.equal(await json(owner).inputValue(),retained);assert.equal(await panel(owner).getByLabel('Original source',{exact:true}).inputValue(),original);
+    assert.equal(await panel(owner).getByRole('button',{name:'Validate configuration',exact:true}).isDisabled(),true);assert.equal(await review(owner).isDisabled(),true);assert.equal(await save(owner).isDisabled(),true);assert.equal(count('ops_browser_agent_configurations'),1);
+    await owner.setViewportSize({width:360,height:640});await owner.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
+    await accept.scrollIntoViewIfNeeded();const control=await accept.boundingBox();assert.ok(control.x>=0&&control.x+control.width<=360&&control.height>=44);
+    assert.equal(await owner.evaluate(()=>document.documentElement.scrollWidth),360);
+    await accept.click();assert.equal(await json(owner).inputValue(),retained);assert.equal(await panel(owner).getByLabel('Original source',{exact:true}).inputValue(),original);
+    assert.equal(await review(owner).isDisabled(),true);await validate(owner);await review(owner).check();assert.equal(await save(owner).isDisabled(),false);
+    assert.equal(count('ops_browser_agent_configurations'),1);
+    await owner.setViewportSize({width:1280,height:800});
   });
   await journey('exact paste provenance survives structured editing and example load never saves',async()=>{
     await panel(owner).getByRole('button',{name:'New browser configuration',exact:true}).click();
@@ -83,7 +120,7 @@ try{
       if(AxeBuilder){const results=await new AxeBuilder({page:owner}).include('.browser-configurations').analyze();assert.deepEqual(results.violations.map(v=>v.id),[]);report.a11y.push({width,height,violations:0});}
       if(artifacts){await panel(owner).getByRole('heading',{name:'Browser configurations',exact:true}).scrollIntoViewIfNeeded();await owner.screenshot({path:`${artifacts}/configuration-${width}.png`});}
     }
-    await owner.reload();await panel(owner).getByRole('button',{name:/Review configuration First reviewed|Review configuration Second reviewed/}).waitFor();assert.equal(count('ops_browser_agent_configurations'),1);
+    await owner.reload();await panel(owner).getByRole('button',{name:'Review configuration Reviewed after reconciliation',exact:true}).waitFor();assert.equal(count('ops_browser_agent_configurations'),1);
   });
   await journey('current guide changes block validation; readonly roles cannot edit; revocation clears private input',async()=>{
     const editor=await as('editor');await json(editor).fill(wrap);await panel(editor).getByRole('button',{name:'Use current approved guide',exact:true}).click();

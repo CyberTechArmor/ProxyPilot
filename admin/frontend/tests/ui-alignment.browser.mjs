@@ -4,13 +4,14 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { createServer } from 'vite';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 
 const vite = await createServer({root:fileURLToPath(new URL('..',import.meta.url)),server:{host:'127.0.0.1',port:0}});
 await vite.listen();
 const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
-const browser = await chromium.launch({executablePath:process.env.BROWSER_EXE || '/usr/bin/chromium',args:['--no-sandbox']});
+const browser = await chromium.launch({executablePath:process.env.BROWSER_EXE || '/usr/bin/chromium',args:['--no-sandbox',...(process.env.LIGHTHOUSE_DIR?['--remote-debugging-port=9341']:[])]});
 const artifacts = process.env.BROWSER_ARTIFACTS;
 const demoNavigationOnly = process.argv.includes('--demo-navigation-only');
 if (artifacts) mkdirSync(artifacts,{recursive:true});
@@ -23,11 +24,12 @@ const pending={id:'00000000-0000-4000-8000-000000000021',title:'Summarize',instr
 let role='owner',draftState='published',stale=false,denied=false,connectionState='normal',evidenceEnabled=false,draftRevision=1,serverText=guide.instructions;
 let evidenceReferences=[];
 const reviewedWebsite={website_review_enabled:true,website_review_contract:'website-review.v1',website_review_strategy:'http_extract_v1'};
-let websiteGate={...reviewedWebsite},demoRunsEnabled=false;
+let websiteGate={...reviewedWebsite},demoRunsEnabled=false,selectedBrowserEnabled=false;
 const retainedReference={demonstration_id:'00000000-0000-4000-8000-000000000041',revision_id:'00000000-0000-4000-8000-000000000042',item_position:0,object_id:'00000000-0000-4000-8000-000000000043',annotation_id:'00000000-0000-4000-8000-000000000044',available:false};
 const draft=()=>({title:draftState==='pending'?pending.title:guide.title,instructions:draftState==='pending'?pending.instructions:serverText,revision:draftRevision,status:draftState,pending_submission:draftState==='pending'?pending:null,contributors:[owner.id],evidence:{references:evidenceReferences}});
 const requests=[],errors=[],agents=[];
 const report={synthetic:true,source_commit:process.env.SOURCE_COMMIT || execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),generated_at:new Date().toISOString(),journeys:[],layout:[],screenshots:[],geometry:[],reference_fit:{}};
+let lighthouseBrowser=null,accessibilityFlow=null;
 const context=await browser.newContext({viewport:{width:1536,height:1024}});
 await context.addInitScript(()=>{if(!localStorage.getItem('pp-theme'))localStorage.setItem('pp-theme','office');});
 const page=await context.newPage();page.setDefaultTimeout(30000);page.setDefaultNavigationTimeout(90000);page.on('pageerror',e=>errors.push(e.message));
@@ -37,7 +39,7 @@ await page.route('**/api/**',async route=>{
  const answer=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
  if(path==='/api/auth/verify')return answer({user:owner});
  if(path==='/api/branding')return answer({name:'Fractionate',logo:null});
- if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled,can_manage_settings:false,...websiteGate});
+ if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled||selectedBrowserEnabled,can_manage_settings:false,...websiteGate,...(selectedBrowserEnabled?{selected_browser_contract:'selected-browser.v1'}:{})});
  if(path==='/api/connections/capabilities')return answer({mode:'disabled',intake_enabled:false,execution_enabled:false,adapters:[],reason:'BROKER_NOT_ACTIVATED'});
  if(path==='/api/connections')return answer({connections:connectionState==='empty'?[]:connectionState==='restricted'?[{...connection,status:'revoked',rights:['view','use'] }]:[connection]});
  if(path.endsWith('/enrollment-intents'))return answer({intent:{id:'metadata-only',status:'awaiting_activation'},intake_enabled:false});
@@ -76,7 +78,34 @@ await page.route('**/api/**',async route=>{
  return answer({notifications:[],unread_count:0,settings:{},status:'ok'});
 });
 const detail=section=>`${origin}/operational-projects/${project.id}?section=${encodeURIComponent(section)}`;
-async function shot(name){if(!artifacts)return;await page.evaluate(()=>{window.scrollTo(0,0);document.querySelectorAll('main, main>div').forEach(e=>e.scrollTop=0);});await page.screenshot({path:`${artifacts}/${name}.png`,animations:'disabled',fullPage:true});report.screenshots.push(`${name}.png`);}
+const visualLogged=new Set();
+async function shot(name){
+ const visual=process.env.UI_VISUAL_LOG==='1'&&['overview-office-1536','overview-office-375'].includes(name)&&!visualLogged.has(name);
+ if(!artifacts&&!visual)return;
+ await page.evaluate(()=>{window.scrollTo(0,0);document.querySelectorAll('main, main>div').forEach(e=>e.scrollTop=0);});
+ const pixels=await page.screenshot({...(artifacts?{path:`${artifacts}/${name}.png`}:{}),animations:'disabled',fullPage:true});
+ if(artifacts)report.screenshots.push(`${name}.png`);
+ if(visual){visualLogged.add(name);console.log(`UI_VISUAL_BASE64:${JSON.stringify({name,mime_type:'image/png',source_commit:report.source_commit,base64:pixels.toString('base64')})}`);}
+}
+async function accessibility(name){
+ if(!process.env.LIGHTHOUSE_DIR)return;
+ if(!accessibilityFlow){
+  const {startFlow}=await import(join(process.env.LIGHTHOUSE_DIR,'node_modules/lighthouse/core/index.js'));
+  const {default:puppeteer}=await import(join(process.env.LIGHTHOUSE_DIR,'node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js'));
+  lighthouseBrowser=await puppeteer.connect({browserURL:'http://127.0.0.1:9341'});
+  const pages=await lighthouseBrowser.pages();
+  const target=pages.find(item=>item.url()===page.url());assert(target,'Lighthouse should inspect the mounted fixture');
+  accessibilityFlow=await startFlow(target,{config:{extends:'lighthouse:default',settings:{onlyCategories:['accessibility'],formFactor:'mobile',screenEmulation:{disabled:true}}}});
+ }
+ await accessibilityFlow.snapshot({name});
+ const result=await accessibilityFlow.createFlowResult(),lhr=result.steps.at(-1).lhr;
+ const failing=Object.values(lhr.audits).filter(a=>a.score===0&&a.scoreDisplayMode==='binary');
+ const score=Math.round(lhr.categories.accessibility.score*100);
+ report.accessibility??=[];report.accessibility.push({name,score,form_factor:lhr.configSettings.formFactor,failing:failing.map(a=>a.id),details:failing.map(a=>({id:a.id,items:a.details?.items}))});
+ console.log(`UI_ACCESSIBILITY:${JSON.stringify(report.accessibility.at(-1))}`);
+ assert(score>=90,`${name}: mobile accessibility score ${score} is below 90`);
+ assert(!failing.some(a=>['color-contrast','heading-order','duplicate-id-aria'].includes(a.id)),`${name}: unresolved accessibility findings ${JSON.stringify(failing.map(a=>a.id))}`);
+}
 async function journey(name,fn){await fn();report.journeys.push({name,passed:true});console.log(`ok - ${name}`);}
 async function loaded(section='Overview'){await page.goto(detail(section));await page.locator('[data-selected-project]').waitFor();await page.getByRole('heading',{name:project.name,exact:true}).waitFor();}
 async function audit(width,state){
@@ -139,12 +168,41 @@ try{
   await shot('overview-office-1536');
   const fit=await page.evaluate(()=>{
    const list=document.querySelector('[data-project-browser]').getBoundingClientRect(),detail=document.querySelector('[data-selected-project]').getBoundingClientRect();
-   const access=[...document.querySelectorAll('h2')].find(h=>h.textContent==='Access & connections').closest('section').getBoundingClientRect();
-   return {width:innerWidth,height:innerHeight,list_width:list.width,detail_width:detail.width,list_fraction:list.width/(list.width+detail.width),access_bottom:access.bottom};
+   const access=[...document.querySelectorAll('h3')].find(h=>h.textContent==='Access & connections').closest('section').getBoundingClientRect();
+   const columns=[...document.querySelectorAll('[data-overview-column]')].map(node=>{const box=node.getBoundingClientRect();return {name:node.dataset.overviewColumn,x:box.x,y:box.y,width:box.width,height:box.height};});
+   return {width:innerWidth,height:innerHeight,list_width:list.width,detail_width:detail.width,list_fraction:list.width/(list.width+detail.width),access_bottom:access.bottom,columns};
   });report.reference_fit.overview=fit;
   assert(fit.list_fraction>=0.38&&fit.list_fraction<=0.42,`Reference project-list proportion: ${JSON.stringify(fit)}`);
   assert(fit.access_bottom<=fit.height,`Overview Access card should fit the first reference-size viewport: ${JSON.stringify(fit)}`);
+  assert.equal(fit.columns.length,2,'Overview has two outlined summary columns');
+  assert.equal(fit.columns[0].y,fit.columns[1].y,'The reference summary columns share a top edge');
+  assert.equal(fit.columns[0].height,fit.columns[1].height,'The reference summary columns share a bottom edge');
+  assert(fit.columns[1].x>fit.columns[0].x+fit.columns[0].width,'The summary columns are side by side at reference width');
+  for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])assert.equal(await page.getByRole('heading',{name:title,exact:true}).evaluate(node=>node.tagName),'H3','Summary sections follow the selected project H2');
   await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Details',exact:true}).click();await page.getByLabel('Purpose (optional)',{exact:true}).waitFor();
+ });
+ await journey('selected-browser Overview does not present demo-only runtime guidance',async()=>{
+  selectedBrowserEnabled=true;await loaded();
+  await page.getByText('Browser configurations use approved instructions, permitted websites and limits.',{exact:true}).waitFor();
+  assert.equal(await page.getByText(/Synthetic pilot: demo\.fractionate\.ai only/).count(),0);
+  assert(!requests.some(r=>r.method==='POST'&&/browser-agent-runs|agent-runs/.test(r.path)),'Overview starts no browser or demo run');
+  selectedBrowserEnabled=false;
+ });
+ await journey('responsive project search has unique labels and retains the filter across layouts',async()=>{
+  await loaded();
+  const mounted=await page.locator('[data-project-browser] input[type="search"]').evaluateAll(nodes=>nodes.map(node=>({id:node.id,labels:[...node.labels].map(label=>label.htmlFor)})));
+  assert.equal(mounted.length,2,'Desktop and collapsed phone lists are both mounted');
+  assert.equal(new Set(mounted.map(node=>node.id)).size,2,'Mounted search controls have unique IDs');
+  for(const item of mounted)assert.deepEqual(item.labels,[item.id],'Each mounted search has its own associated label');
+  const search=page.getByRole('searchbox',{name:'Search projects and procedures',exact:true});
+  await search.fill('Weekly');assert.equal(await page.getByRole('navigation',{name:'Projects',exact:true}).getByRole('link').count(),1);
+  await page.setViewportSize({width:375,height:812});
+  await page.getByText('Browse or switch project',{exact:true}).click();
+  assert.equal(await search.inputValue(),'Weekly','The search survives the responsive switch');
+  assert.equal(await page.getByRole('navigation',{name:'Projects',exact:true}).getByRole('link').count(),1);
+  await search.fill('');await page.getByText('Browse or switch project',{exact:true}).click();
+  await page.setViewportSize({width:1536,height:1024});
+  assert.equal(await search.inputValue(),'');
  });
  await journey('pending guide has explicit save-to-approved action with no reviewer blocker',async()=>{
   draftState='pending';await loaded('Guide');const save=page.getByRole('button',{name:'Save and approve',exact:true});assert(await save.isEnabled());assert.equal(await page.getByText(/submitter or contributor cannot approve/i).count(),0);await shot('guide-pending-office-1536');await save.click();await page.getByText(/Guide saved and approved|Guide approved/i).first().waitFor();assert(requests.some(r=>r.path.endsWith(`/submissions/${pending.id}/approve`)&&r.method==='POST'));assert(!requests.some(r=>r.method==='POST'&&r.path.endsWith('/agent-runs')));
@@ -167,8 +225,16 @@ try{
   evidenceEnabled=false;evidenceReferences=[];draftRevision=1;serverText=guide.instructions;draftState='published';
  });
  await journey('same frozen project state has identical theme geometry',async()=>{
-  let baseline;const palettes=[];for(const theme of ['office','latte','midnight']){await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),theme);palettes.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();const geometry=await page.evaluate(()=>[...document.querySelectorAll('[data-project-workspace], [data-project-browser], [data-selected-project], main h1, main h2')].map(e=>({tag:e.tagName,text:e.tagName==='H1'||e.tagName==='H2'?e.textContent:null,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));if(baseline)assert.deepEqual(geometry,baseline);else baseline=geometry;report.geometry.push({theme,geometry});await shot(`overview-${theme}-1536`);}
+  let baseline;const palettes=[];for(const theme of ['office','latte','midnight']){await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),theme);palettes.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();const geometry=await page.evaluate(()=>[...document.querySelectorAll('[data-project-workspace], [data-project-browser], [data-selected-project], main h1, main h2, main h3')].map(e=>({tag:e.tagName,text:/^H[123]$/.test(e.tagName)?e.textContent:null,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));if(baseline)assert.deepEqual(geometry,baseline);else baseline=geometry;report.geometry.push({theme,geometry});await shot(`overview-${theme}-1536`);}
   assert.equal(new Set(palettes).size,3,'Each selected theme must render its own palette');report.theme_palettes=palettes;
+ });
+ if(process.env.LIGHTHOUSE_DIR)await journey('Overview passes mobile accessibility across all palettes',async()=>{
+  await page.setViewportSize({width:375,height:812});
+  for(const theme of ['office','latte','midnight']){
+   await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();
+   await audit(375,`overview-accessibility-${theme}`);await accessibility(`overview-${theme}`);await shot(`overview-${theme}-375`);
+  }
+  await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await page.setViewportSize({width:1536,height:1024});
  });
  await journey('setup geometry, draft save separation and unsupported capability',async()=>{
   await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByLabel('Agent name',{exact:true}).fill('Invoice assistant');await shot('setup-work-office-1536');
@@ -191,4 +257,4 @@ try{
  }
  assert.deepEqual(errors,[]);console.log(demoNavigationOnly?'PASS demo labels, strict website navigation gate and desktop/phone overflow audit':'PASS UI alignment fixture journeys and seven-width overflow audit');
 }catch(error){if(artifacts){await shot('failure');writeFileSync(`${artifacts}/failure.html`,await page.content());}throw error;}
-finally{if(artifacts)writeFileSync(`${artifacts}/ui-alignment-report.json`,JSON.stringify({...report,errors},null,2));await browser.close();await vite.close();}
+finally{if(artifacts)writeFileSync(`${artifacts}/ui-alignment-report.json`,JSON.stringify({...report,errors},null,2));if(lighthouseBrowser)await lighthouseBrowser.disconnect();await browser.close();await vite.close();}

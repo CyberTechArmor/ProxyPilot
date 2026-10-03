@@ -517,3 +517,33 @@ test('explicit public cleanup recovery retains the failed run and permits a fres
   assert.equal(w.calls.filter(c=>c[0]==='model').length,0);
  }finally{w.f.close();}
 });
+
+for(const [provided,expected] of [['NETWORK_ROUTE_UNVERIFIED','NETWORK_ROUTE_UNVERIFIED'],['DNS_LOOKUP_UNVERIFIED','DNS_LOOKUP_UNVERIFIED'],['PRIVATE_TOKEN_SENTINEL','BROWSER_LAUNCH_FAILED'],['secret\nstack','BROWSER_LAUNCH_FAILED'],[undefined,'BROWSER_LAUNCH_FAILED']])test('public launch retains only a fixed refusal code: '+String(provided),async()=>{
+ let launches=0;const w=publicWorld({runnerChanges:{launch:async()=>{launches++;throw Object.assign(new Error('private-url-and-secret-sentinel'),{code:provided,detail:'private-host-sentinel'});}}});
+ try{
+  const out=await w.open();assert.equal(out.run.state,'failed');assert.equal(out.run.result_code,'LAUNCH_UNCERTAIN');assert.equal(out.run.launch_failure_code,expected);assert.equal(out.run.uncertain,false);assert(out.receipts.length);
+  assert.equal(w.service.get(w.viewer,w.p.id,out.run.id).run.launch_failure_code,expected);
+  const metadata=w.f.db.prepare("SELECT metadata_json FROM ops_selected_browser_events WHERE run_id=? AND kind='LAUNCH_REFUSED'").get(out.run.id);
+  assert.deepEqual(JSON.parse(metadata.metadata_json),{code:expected});assert(!JSON.stringify(out).includes('sentinel'));
+  assert.equal(launches,1);assert.equal(w.calls.filter(c=>['execute','model'].includes(c[0])).length,0);
+  assert.equal((await w.service.publicReadiness(w.owner,w.p.id,'https://selected.example/')).can_start,true);
+ }finally{w.f.close();}
+});
+test('public launch diagnostic never substitutes for unverified cleanup or permits another launch',async()=>{
+ const w=publicWorld({receipt:false,runnerChanges:{launch:async()=>{throw Object.assign(new Error('hidden detail'),{code:'NETWORK_ROUTE_UNVERIFIED'});}}});try{
+  const out=await w.open();assert.equal(out.run.state,'uncertain');assert.equal(out.run.launch_failure_code,'NETWORK_ROUTE_UNVERIFIED');assert.equal(out.run.uncertain,true);
+  assert.equal(out.receipts.length,0);assert(out.uncertainties.some(u=>u.kind==='CLEANUP_UNVERIFIED'&&u.state==='unresolved'));
+  const ready=await w.service.publicReadiness(w.owner,w.p.id,'https://selected.example/');assert.equal(ready.can_start,false);assert(ready.checks.some(c=>c.code==='CLEANUP_UNVERIFIED'));
+  await rejected(409,w.open,'CLEANUP_UNVERIFIED');
+ }finally{w.f.close();}
+});
+
+test('a failed launch diagnostic write still performs fenced cleanup',async()=>{
+ const w=publicWorld({runnerChanges:{launch:async()=>{throw Object.assign(new Error('launch refusal'),{code:'NETWORK_ROUTE_UNVERIFIED'});}}});try{
+  w.f.db.exec("CREATE TRIGGER refuse_launch_diagnostic BEFORE INSERT ON ops_selected_browser_events WHEN NEW.kind='LAUNCH_REFUSED' BEGIN SELECT RAISE(ABORT,'diagnostic write refused'); END");
+  await assert.rejects(w.open,/diagnostic write refused/);
+  const run=w.service.list(w.owner,w.p.id).runs[0],record=w.service.get(w.owner,w.p.id,run.id);
+  assert.equal(run.state,'failed');assert.equal(run.uncertain,false);assert.equal(run.launch_failure_code,null);
+  assert.equal(record.receipts.length,1);assert(record.receipts[0].closed.network);assert.equal(w.calls.filter(c=>c[0]==='stop').length,1);
+ }finally{w.f.close();}
+});

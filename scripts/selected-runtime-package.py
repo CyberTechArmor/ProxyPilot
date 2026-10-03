@@ -600,20 +600,52 @@ class Host:
     def stopped_backend(self):
         if self.execute(['docker', 'compose', '-f', SOURCE + '/docker-compose.yml', 'ps', '--status', 'running', '--quiet', 'proxypilot']).strip():
             refuse('Dashboard must be stopped by its authorized operator')
+        with self.database_admission() as db:
+            self.dashboard_idle(db)
+
+    @contextlib.contextmanager
+    def database_admission(self, writer_barrier=False):
+        """Pin the existing DB; a short writer barrier prevents new reservations.
+
+        No SQL write, migration or history restore is performed. Maintenance
+        holds BEGIN IMMEDIATE only through the exact dashboard stop, then rolls
+        it back before package planning and any replacement service starts.
+        """
         database = SOURCE + '/data/db/proxypilot.db'
-        self.tree.read(database, 128 * 1024 * 1024)
-        with sqlite3.connect(self.tree.path(database).as_uri() + '?mode=ro', uri=True, timeout=5) as db:
-            tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'ops_agent_runs' not in tables:
-                refuse('Dashboard schema unknown')
-            for table, terminal in (('ops_agent_runs', ('completed','cancelled','failed','blocked')),
-                                    ('ops_selected_browser_runs', ('completed','cancelled','failed','uncertain')),
-                                    ('ops_website_review_runs', ('completed','cancelled','failed','blocked','interrupted')),
-                                    ('ops_browser_conversions', ('completed','blocked','cancelled','interrupted')),
-                                    ('ops_agent_model_calls', ('chosen','refused','uncertain')),
-                                    ('ops_selected_browser_model_reservations', ('settled','uncertain','suppressed'))):
-                if table in tables and db.execute(f'SELECT 1 FROM {table} WHERE state NOT IN ({",".join("?" for _ in terminal)}) LIMIT 1', terminal).fetchone():
-                    refuse('Dashboard work active or unknown')
+        info = self.tree.secure(database)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            refuse('Dashboard database custody changed')
+        mode = 'rw' if writer_barrier else 'ro'
+        db = sqlite3.connect(self.tree.path(database).as_uri() + '?mode=' + mode, uri=True, timeout=0)
+        released = False
+        def release():
+            nonlocal released
+            if not released:
+                db.rollback()
+                db.close()
+                released = True
+        try:
+            if writer_barrier:
+                db.execute('BEGIN IMMEDIATE')
+            if inode(self.tree.secure(database)) != inode(info):
+                refuse('Dashboard database identity changed')
+            yield db, release
+        finally:
+            release()
+
+    def dashboard_idle(self, connection):
+        db = connection[0] if isinstance(connection, tuple) else connection
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'ops_agent_runs' not in tables:
+            refuse('Dashboard schema unknown')
+        for table, terminal in (('ops_agent_runs', ('completed','cancelled','failed','blocked')),
+                                ('ops_selected_browser_runs', ('completed','cancelled','failed','uncertain')),
+                                ('ops_website_review_runs', ('completed','cancelled','failed','blocked','interrupted')),
+                                ('ops_browser_conversions', ('completed','blocked','cancelled','interrupted')),
+                                ('ops_agent_model_calls', ('chosen','refused','uncertain')),
+                                ('ops_selected_browser_model_reservations', ('settled','uncertain','suppressed'))):
+            if table in tables and db.execute(f'SELECT 1 FROM {table} WHERE state IS NULL OR state NOT IN ({",".join("?" for _ in terminal)}) LIMIT 1', terminal).fetchone():
+                refuse('Dashboard work active or unknown')
 
     def rpc(self, path, method, gateway=False):
         with socket.socket(socket.AF_UNIX) as client:

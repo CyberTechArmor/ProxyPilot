@@ -415,7 +415,7 @@ func TestDefaultRegistryHasUpdateMethods(t *testing.T) {
 }
 
 func TestBrowserRuntimeRequest(t *testing.T) {
-	for _, operation := range []string{"install", "recover", "rollback"} {
+	for _, operation := range []string{"install", "recover", "rollback", "maintenance-enable", "maintenance-disable"} {
 		t.Run(operation, func(t *testing.T) {
 			runDir, _ := withUpdateDirs(t)
 			_, err := BrowserRuntimeRequest(json.RawMessage(`{"requested_by":"admin","operation":"` + operation + `"}`))
@@ -443,5 +443,36 @@ func TestBrowserRuntimeRequest(t *testing.T) {
 				t.Fatal("invalid request accepted")
 			}
 		})
+	}
+}
+
+func TestBrowserMaintenanceStatusProjection(t *testing.T) {
+	_, dir := withUpdateDirs(t)
+	result, err := BrowserMaintenanceStatus()
+	if err != nil || result.(map[string]any)["enabled"] != false {
+		t.Fatalf("absent maintenance was not off: %v %v", result, err)
+	}
+	path := filepath.Join(dir, "browser-runtime-maintenance-status.json")
+	writeJSON(t, path, map[string]any{
+		"schema": "browser-runtime-maintenance.v1", "enabled": true, "status": "up_to_date",
+		"checked_at": "2026-10-03T23:00:00Z", "installed_generation": strings.Repeat("a", 64),
+		"delivered_generation": strings.Repeat("a", 64), "delivered_revision": strings.Repeat("b", 40),
+		"runtime_accepted": true, "private": "must not project", "reason": nil,
+	})
+	result, err = BrowserMaintenanceStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.(map[string]any)
+	if got["runtime_accepted"] != false || got["private"] != nil || got["enabled"] != true {
+		t.Fatalf("unsafe projection: %+v", got)
+	}
+	writeJSON(t, path, map[string]any{"schema": "foreign", "enabled": true, "status": "up_to_date"})
+	if _, err := BrowserMaintenanceStatus(); err == nil {
+		t.Fatal("foreign status accepted")
+	}
+	writeJSON(t, path, map[string]any{"schema": "browser-runtime-maintenance.v1", "enabled": "true", "status": "up_to_date"})
+	if _, err := BrowserMaintenanceStatus(); err == nil {
+		t.Fatal("untyped preference accepted")
 	}
 }

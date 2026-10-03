@@ -395,10 +395,10 @@ func BrowserRuntimeRequest(params json.RawMessage) (any, *Error) {
 	}
 	if len(params) > 0 {
 		if err := decodeParams(params, &p); err != nil {
-			return nil, &Error{Code: "invalid_params", Message: "browser.runtime_request params must be {requested_by:string, operation:install|recover|rollback}: " + err.Error()}
+			return nil, &Error{Code: "invalid_params", Message: "browser.runtime_request params must be {requested_by:string, operation:install|recover|rollback|maintenance-enable|maintenance-disable}: " + err.Error()}
 		}
 	}
-	if p.Operation != "install" && p.Operation != "recover" && p.Operation != "rollback" {
+	if p.Operation != "install" && p.Operation != "recover" && p.Operation != "rollback" && p.Operation != "maintenance-enable" && p.Operation != "maintenance-disable" {
 		return nil, &Error{Code: "invalid_params", Message: "unknown browser runtime operation"}
 	}
 	if !updateRequestedByRe.MatchString(p.RequestedBy) {
@@ -612,6 +612,62 @@ func UpdateStatus(params json.RawMessage) (any, *Error) {
 			out["log_total_bytes"] = total
 			out["log_truncated"] = truncated || cut
 		}
+	}
+	return out, nil
+}
+
+// BrowserMaintenanceStatus returns only the root runner's typed public status.
+// It never reads private preference/attempt journals or asks the runner to act.
+func BrowserMaintenanceStatus() (any, *Error) {
+	st, err := readJSONObject(filepath.Join(updateStateDir, "browser-runtime-maintenance-status.json"))
+	if err != nil {
+		return nil, &Error{Code: "state_unreadable", Message: "browser maintenance status unavailable"}
+	}
+	out := map[string]any{
+		"schema": "browser-runtime-maintenance.v1", "enabled": false,
+		"status": "disabled", "reason": nil, "checked_at": nil,
+		"installed_generation": nil, "delivered_generation": nil,
+		"delivered_revision": nil, "operation_id": nil, "runtime_accepted": false,
+	}
+	if st == nil {
+		return out, nil
+	}
+	enabled, ok := st["enabled"].(bool)
+	status := stringField(st, "status")
+	if !ok || stringField(st, "schema") != "browser-runtime-maintenance.v1" ||
+		(status != "disabled" && status != "up_to_date" && status != "deferred" && status != "updating" && status != "needs_repair") {
+		return nil, &Error{Code: "state_unreadable", Message: "browser maintenance status invalid"}
+	}
+	out["enabled"], out["status"] = enabled, status
+	if checked := stringField(st, "checked_at"); checked != "" {
+		if _, err := time.Parse(time.RFC3339, checked); err != nil {
+			return nil, &Error{Code: "state_unreadable", Message: "browser maintenance timestamp invalid"}
+		}
+		out["checked_at"] = checked
+	}
+	for _, field := range []string{"installed_generation", "delivered_generation", "delivered_revision", "operation_id"} {
+		value := stringField(st, field)
+		if value == "" {
+			continue
+		}
+		length := 64
+		if field == "delivered_revision" {
+			length = 40
+		}
+		valid := len(value) == length && regexp.MustCompile(`^[a-f0-9]+$`).MatchString(value)
+		if field == "operation_id" {
+			valid = updateIDRe.MatchString(value)
+		}
+		if !valid {
+			return nil, &Error{Code: "state_unreadable", Message: "browser maintenance identity invalid"}
+		}
+		out[field] = value
+	}
+	if reason := stringField(st, "reason"); reason != "" {
+		if reason != "waiting_for_check" && reason != "previous_attempt_failed" && reason != "browser_work_active" && reason != "host_checks_failed" {
+			return nil, &Error{Code: "state_unreadable", Message: "browser maintenance reason invalid"}
+		}
+		out["reason"] = reason
 	}
 	return out, nil
 }

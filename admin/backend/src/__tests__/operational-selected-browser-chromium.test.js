@@ -18,15 +18,18 @@ import { recordControlGrant } from '../lib/operational-control-grants.js';
 import { SELECTED_BROWSER_CONSENT } from '../lib/operational-selected-browser-contract.js';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
+// Match the real supervisor's 60s readiness wait plus a bounded reply margin.
+// The guest's 30s initial CDP call and all production deadlines are unchanged.
+const launchRpcDeadlineMs = 65000;
 
 // Cross-language local composition, never installed isolation acceptance. This
 // test injects only the supervisor transport, provider and installed OS boundary;
 // there are no synthetic blocked polls or direct-host destination grants.
-test('service approval settles actual Chromium off-list action before a temporary grant and fresh next action',
-  { skip: !process.env.CI && !existsSync('/usr/bin/chromium') && 'Local Chromium is required', timeout: 60000 }, async t => {
+async function actualBrowserContinuation(t, slowSetup = false) {
   assert.equal(existsSync('/usr/bin/chromium'),true,'CI must install the fixed /usr/bin/chromium test browser');
   const child = spawn('python3', ['-u', path.join(root, 'scripts/tests/selected_browser_backend_bridge.py')],
-    { cwd: root, stdio: ['pipe','pipe','pipe'] });
+    { cwd: root, stdio: ['pipe','pipe','pipe'],
+      env: slowSetup ? { ...process.env, PROXYPILOT_TEST_BROWSER_LAUNCH_FAULT: 'slow_setup' } : process.env });
   const pending = new Map(), rpcHistory=[], stageTimings=[]; let sequence = 0, stderr = '', ended = false, transportFailure = null, bridgeEvidence=null, launchEvidence=null;
   const remember = value => { rpcHistory.push(value);if(rpcHistory.length>32)rpcHistory.shift();
     if(['fixture_bootstrap','selected_browser_status','selected_browser_model_status','selected_browser_launch','selected_browser_stop'].includes(value.method)){stageTimings.push(value);if(stageTimings.length>8)stageTimings.shift();} };
@@ -63,7 +66,7 @@ test('service approval settles actual Chromium off-list action before a temporar
         // A timed-out command may still be running. Never reuse its stream or
         // enqueue cleanup/diagnostics behind it; the owned child performs cleanup.
         rejectPending(transportFailure);child.kill('SIGTERM');
-      }, method==='fixture_close'?5000:20000);
+      }, method==='selected_browser_launch'?launchRpcDeadlineMs:method==='fixture_close'?5000:20000);
       pending.set(id, {resolve, reject, timer,method,started});
       child.stdin.write(JSON.stringify({id,method,params})+'\n',error=>{if(error){transportFailure??=error;rejectPending(transportFailure);}});
     });
@@ -103,6 +106,15 @@ test('service approval settles actual Chromium off-list action before a temporar
         launch_evidence:launchEvidence,bridge_evidence:bridgeEvidence,inspection,inspection_error:inspectionError,stderr}));
     };
     await assertRunning(started,'launch');
+    if(slowSetup){
+      const records=launchEvidence?.evidence?.startup_phases?.records??[];
+      const start=records.find(row=>row.phase==='controlled_setup_delay'&&row.status==='start');
+      const end=records.find(row=>row.phase==='controlled_setup_delay'&&row.status==='end');
+      assert.ok(start&&end,'The delayed scenario must exercise its real fixed guest setup control');
+      assert.ok(end.elapsed_ms-start.elapsed_ms>=22000);
+      assert.ok(records.find(row=>row.phase==='serve'&&row.status==='start')?.elapsed_ms>=end.elapsed_ms);
+      assert.ok(records.find(row=>row.phase==='cdp_call'&&row.status==='start')?.elapsed_ms>=end.elapsed_ms);
+    }
     const step=async()=>{const current=get();await assertRunning(current,'continuation');return runtime.runs.step(owner,p.id,runId,current.run.revision);};
     const settle=async predicate=>{
       const until=Date.now()+5000;
@@ -173,7 +185,8 @@ test('service approval settles actual Chromium off-list action before a temporar
     assert.equal(get().report,null);
     t.diagnostic('Cross-language browser stages: '+JSON.stringify({browser_version:launchEvidence?.evidence?.browser_version??null,
       startup_phases:launchEvidence?.evidence?.startup_phases??null,browser_processes:launchEvidence?.evidence?.browser_processes??[],
-      rpc_deadline_ms:20000,stages:stageTimings,final_state:get().run.state,actions:get().run.usage.actions}));
+      launch_rpc_deadline_ms:launchRpcDeadlineMs,rpc_deadline_ms:20000,setup_delay_ms:slowSetup?22000:0,
+      stages:stageTimings,final_state:get().run.state,actions:get().run.usage.actions}));
     runId=null;
   } finally {
     if (runId&&runtime) {
@@ -193,4 +206,13 @@ test('service approval settles actual Chromium off-list action before a temporar
       if(closeConfirmed)assert.equal(child.exitCode,0,'Fixture must verify its owned Chromium group was cleaned up\n'+stderr);
     }
   }
-});
+}
+
+const browserFixtureOptions = {
+  skip: !process.env.CI && !existsSync('/usr/bin/chromium') && 'Local Chromium is required',
+  concurrency: false, timeout: 120000,
+};
+test('service approval settles actual Chromium off-list action before a temporary grant and fresh next action',
+  browserFixtureOptions, t => actualBrowserContinuation(t));
+test('the same actual Chromium continuation survives 22s guest setup within production readiness bounds',
+  browserFixtureOptions, t => actualBrowserContinuation(t, true));

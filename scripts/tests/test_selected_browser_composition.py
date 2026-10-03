@@ -40,7 +40,7 @@ STARTUP_METHODS = ('Target.setDiscoverTargets', 'Target.getTargets', 'Target.cre
     'Network.enable', 'Network.setBypassServiceWorker', 'Network.setCacheDisabled',
     'Emulation.setDeviceMetricsOverride', 'Target.setAutoAttach')
 STARTUP_PHASES = ('guest_loading', 'guest_loaded', 'serve', 'spawn', 'cdp_call',
-    'guest_ready', 'controlled_reply_hold')
+    'guest_ready', 'controlled_reply_hold', 'controlled_setup_delay')
 
 
 def startup_phases(root):
@@ -319,13 +319,18 @@ def diagnostic_emit(self,value):
  return emit(self,value)
 namespace['Channel'].emit=diagnostic_emit
 config=json.loads(sys.argv[1]);config.pop('live',None)
+if DELAY_SETUP:
+ phase('controlled_setup_delay','start')
+ threading.Event().wait(22)
+ phase('controlled_setup_delay','end')
 phase('serve','start')
 sys.exit(namespace['serve'](config,namespace['Channel']()))
 """
         values = dict(SOURCE=source, PROXY='127.0.0.1:%d' % self.proxy_port,
                       CHROMIUM=str(self.chromium), WORKSPACE=str(workspace),
                       PHASE_LIMIT=STARTUP_PHASE_LIMIT, STARTUP_METHODS=STARTUP_METHODS,
-                      HOLD_DISCOVERY=getattr(self, 'hold_startup_discovery', False))
+                      HOLD_DISCOVERY=getattr(self, 'hold_startup_discovery', False),
+                      DELAY_SETUP=getattr(self, 'delay_startup_setup', False))
         program = '\n'.join(name + '=' + repr(value) for name, value in values.items()) + '\n' + code
         process = subprocess.Popen([sys.executable, '-c', program, json.dumps(config)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
@@ -511,8 +516,8 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         return spec
 
     def test_real_discovery_reply_hold_reports_phase_at_transport_deadline_and_cleans_owned_browser(self):
-        # Exercise the same 20s disposable JSONL deadline as the Node fixture,
-        # before readiness, without changing the original CDP or host bounds.
+        # Exercise an explicit short 20s diagnostic transport deadline (the
+        # prior Node launch bound), without changing the CDP or host bounds.
         env = dict(os.environ, PROXYPILOT_TEST_BROWSER_LAUNCH_FAULT='stall_discovery')
         messages, events, sent = queue.Queue(), [], []
         fenced = False

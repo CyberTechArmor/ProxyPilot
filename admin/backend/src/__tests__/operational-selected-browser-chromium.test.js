@@ -172,6 +172,7 @@ test('service approval settles actual Chromium off-list action before a temporar
     assert.equal(get().run.state,'uncertain'); // Unclassified GET has no generic business readback.
     assert.equal(get().report,null);
     t.diagnostic('Cross-language browser stages: '+JSON.stringify({browser_version:launchEvidence?.evidence?.browser_version??null,
+      startup_phases:launchEvidence?.evidence?.startup_phases??null,browser_processes:launchEvidence?.evidence?.browser_processes??[],
       rpc_deadline_ms:20000,stages:stageTimings,final_state:get().run.state,actions:get().run.usage.actions}));
     runId=null;
   } finally {

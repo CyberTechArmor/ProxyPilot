@@ -1,0 +1,60 @@
+{
+  "ci_logs": [
+    {
+      "repository": "CyberTechArmor/ProxyPilot",
+      "commit": "cbd0c9e141a2ccf7ff5f7ce913f08f83c2490161",
+      "workflow_run_id": 37123538738,
+      "job_id": 111204210208,
+      "target_step": 7,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37123538738/job/111204210208",
+      "retrieval": "Authorized GitHub fetch_workflow_job_logs; SHA256 covers the complete decoded content encoded as UTF-8, including its supplied BOM/newlines. It is not a ZIP/archive hash.",
+      "decoded_utf8_job_log": {
+        "sha256": "459c247c7b6380c5406f63735d40fd8c8e247a46a1e8cea95ca5bbec91d6feda",
+        "bytes": 95061
+      },
+      "retention": "Only bounded parsed launch/summary evidence is committed; complete decoded job log remains a temporary local capture."
+    },
+    {
+      "repository": "CyberTechArmor/ProxyPilot",
+      "commit": "cbd0c9e141a2ccf7ff5f7ce913f08f83c2490161",
+      "workflow_run_id": 37123538735,
+      "job_id": 111204210206,
+      "target_step": 9,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37123538735/job/111204210206",
+      "retrieval": "Authorized GitHub fetch_workflow_job_logs; SHA256 covers the complete decoded content encoded as UTF-8, including its supplied BOM/newlines. It is not a ZIP/archive hash.",
+      "decoded_utf8_job_log": {
+        "sha256": "466e35f190ca8429cd80aef6dfcee0aade8e45647273f6f2029ee135c2978b12",
+        "bytes": 241472
+      },
+      "retention": "Only bounded parsed launch/summary evidence is committed; complete decoded job log remains a temporary local capture."
+    },
+    {
+      "repository": "CyberTechArmor/ProxyPilot",
+      "commit": "cbd0c9e141a2ccf7ff5f7ce913f08f83c2490161",
+      "workflow_run_id": 37123538738,
+      "job_id": 111204210250,
+      "target_step": 8,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37123538738/job/111204210250",
+      "retrieval": "Authorized GitHub fetch_workflow_job_logs; SHA256 covers the complete decoded content encoded as UTF-8, including its supplied BOM/newlines. It is not a ZIP/archive hash.",
+      "decoded_utf8_job_log": {
+        "sha256": "6ddff2a58f75194ac00a2c9f6855e48d2d57d689348a903374cefd491e76cb08",
+        "bytes": 65380
+      },
+      "retention": "Only bounded parsed launch/summary evidence is committed; complete decoded job log remains a temporary local capture."
+    }
+  ],
+  "local_proof": {
+    "path": "/tmp/proxypilot-native-ci-isolated-proof.log",
+    "command": "CI=true node --test src/__tests__/operational-selected-browser-chromium.test.js",
+    "working_directory": "admin/backend",
+    "original": {
+      "sha256": "8b66cbcdc9f5a3370856c118c200bcaae32085a03e9129e5d5fa383e21fde335",
+      "bytes": 856
+    },
+    "copied_without_normalization": true
+  },
+  "bounded_derivation": {
+    "ci-comparison.json": "Selected public test summaries, exact stage timings and browser versions from the complete decoded CI job logs. Unrelated suite totals are omitted.",
+    "ci-start-failure.json": "Exact parsed failed-Start assertion and test totals; the duplicate unparsed assertion line is omitted."
+  }
+}

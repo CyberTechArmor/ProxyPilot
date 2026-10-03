@@ -1,0 +1,20 @@
+[
+  {
+    "workflow": ".github/workflows/credential-broker.yml",
+    "before_files": 47,
+    "unit_files": 46,
+    "native_files": 1,
+    "each_original_file_exactly_once": true,
+    "unrelated_workflow_changes": false,
+    "expanded_selection_sha256": "fe18672d46496ca7ee1f75c168da9ee4884cd0b021d52311ab75d7c48bd020cd"
+  },
+  {
+    "workflow": ".github/workflows/security-regression.yml",
+    "before_files": 34,
+    "unit_files": 33,
+    "native_files": 1,
+    "each_original_file_exactly_once": true,
+    "unrelated_workflow_changes": false,
+    "expanded_selection_sha256": "a15ba6f486ef8db60998d3db7b85302654110587162edd0f4663d3045c26df3b"
+  }
+]

@@ -1,0 +1,30 @@
+{
+  "README.md": {
+    "sha256": "ba5e0e76148d4d1339c2557379c2fd0d1408ee3165e06e9086d3c68153dca392",
+    "bytes": 2562
+  },
+  "ci-comparison.json": {
+    "sha256": "cc2d92ec420a0d4fab4b0e9db33e6a818d59c4340525d394b669cd2fd13fed32",
+    "bytes": 3390
+  },
+  "ci-start-failure.json": {
+    "sha256": "ee84425d009eb86e847789eaf861c53f176dc0c5ef502836f1cce570a204e27e",
+    "bytes": 10070
+  },
+  "isolated-actual-proof.txt": {
+    "sha256": "8b66cbcdc9f5a3370856c118c200bcaae32085a03e9129e5d5fa383e21fde335",
+    "bytes": 856
+  },
+  "log-provenance.json": {
+    "sha256": "afeb13c0a8c967ae0c494c279dd460d34efa28fda5725bf02622dd7bce35de0d",
+    "bytes": 3155
+  },
+  "selection-validation.json": {
+    "sha256": "8919fea9ba1f92a35bd32630869ce08c78821773b621e960eff15d0329d8ce58",
+    "bytes": 651
+  },
+  "verification.json": {
+    "sha256": "1f2b14b1e70397d5ae68fe4bccd38ed2f375eea8136b21f9e1312546092245fb",
+    "bytes": 2895
+  }
+}

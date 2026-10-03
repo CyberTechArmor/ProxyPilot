@@ -1,0 +1,68 @@
+{
+  "commit": "cbd0c9e141a2ccf7ff5f7ce913f08f83c2490161",
+  "broker": {
+    "run_id": 37123538738,
+    "dashboard_job_id": 111204210208,
+    "node": [
+      "2026-10-03T12:39:57.1605856Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (25048.322745ms)",
+      "2026-10-03T12:39:57.1973153Z ℹ tests 462",
+      "2026-10-03T12:39:57.1973568Z ℹ pass 461",
+      "2026-10-03T12:39:57.1973769Z ℹ fail 1",
+      "2026-10-03T12:39:57.1974601Z ℹ duration_ms 32040.765001",
+      "2026-10-03T12:39:57.1976183Z ✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (25048.322745ms)"
+    ],
+    "launch": [
+      {
+        "method": "fixture_bootstrap",
+        "elapsed_ms": 1925,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_status",
+        "elapsed_ms": 12,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_model_status",
+        "elapsed_ms": 6,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_launch",
+        "elapsed_ms": 20002,
+        "status": "deadline",
+        "code": "FIXTURE_RPC_DEADLINE"
+      }
+    ],
+    "python_job_id": 111204210250,
+    "python": [
+      "2026-10-03T12:40:25.2735703Z ................Selected composition browser: Chromium 154.0.8037.0",
+      "2026-10-03T12:43:20.9634846Z Ran 474 tests in 230.764s",
+      "2026-10-03T12:43:20.9635494Z OK (skipped=33)"
+    ]
+  },
+  "security": {
+    "run_id": 37123538735,
+    "job_id": 111204210206,
+    "node": [
+      "2026-10-03T12:39:55.9971130Z ✔ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (14375.148795ms)",
+      "2026-10-03T12:39:55.9975589Z ℹ Cross-language browser stages: {\"browser_version\":\"Chromium 154.0.8037.0\",\"rpc_deadline_ms\":20000,\"stages\":[{\"method\":\"fixture_bootstrap\",\"elapsed_ms\":3317,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_status\",\"elapsed_ms\":10,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_model_status\",\"elapsed_ms\":4,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_launch\",\"elapsed_ms\":9126,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_stop\",\"elapsed_ms\":69,\"status\":\"returned\",\"code\":null}],\"final_state\":\"uncertain\",\"actions\":4}",
+      "2026-10-03T12:39:56.0311982Z ℹ tests 436",
+      "2026-10-03T12:39:56.0312411Z ℹ pass 436",
+      "2026-10-03T12:39:56.0312620Z ℹ fail 0"
+    ],
+    "python": [
+      "2026-10-03T12:40:47.5693634Z ................Selected composition browser: Chromium 154.0.8037.0",
+      "2026-10-03T12:43:17.1160525Z Ran 474 tests in 198.580s",
+      "2026-10-03T12:43:17.1160971Z OK (skipped=33)"
+    ]
+  },
+  "conclusion": {
+    "proved": "Broker fixture selected_browser_launch reached its unchanged 20000ms deadline before real Chromium worker readiness; no website or native-service traffic reached the gateway.",
+    "inferred": "Startup contention under the concurrent native Node test selection is plausible; no CPU-pressure measurements exist in this evidence.",
+    "original_307_cause": "Not directly proven; prior failed step masked start reason."
+  }
+}

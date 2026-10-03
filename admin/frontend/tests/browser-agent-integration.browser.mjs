@@ -98,7 +98,7 @@ try{
   // Exercise the real public-run component and non-replaying HTTP client with
   // scripted cleanup replies. Host proof is covered by the runtime tests.
   const publicId='10000000-0000-4000-8000-000000000001',attemptId='10000000-0000-4000-8000-000000000002';
-  let publicData={run:{id:publicId,attempt_id:attemptId,configuration_id:'10000000-0000-4000-8000-000000000003',revision:3,state:'uncertain',execution_mode:'public_navigation',result_code:'LAUNCH_UNCERTAIN',uncertain:true,usage:{requests:0,response_bytes:0}},
+  let publicData={run:{id:publicId,attempt_id:attemptId,configuration_id:'10000000-0000-4000-8000-000000000003',revision:3,state:'uncertain',execution_mode:'public_navigation',result_code:'LAUNCH_UNCERTAIN',launch_failure_code:'NETWORK_ROUTE_UNVERIFIED',uncertain:true,usage:{requests:0,response_bytes:0}},
     controls:{can_cancel:false,can_live:false},receipts:[],uncertainties:[{id:'cleanup-fixture',kind:'CLEANUP_UNVERIFIED',state:'unresolved'}]};
   let retries=0;
   await page.route('**/browser-agent-runs',r=>r.fulfill({json:{runs:[publicData.run]}}));
@@ -114,6 +114,7 @@ try{
   await page.reload();
   await page.getByRole('button',{name:'Inspect browser run',exact:true}).click();
   const publicRun=page.getByRole('region',{name:'Public browser activity',exact:true});
+  await publicRun.getByText('Browser launch refused: NETWORK ROUTE UNVERIFIED',{exact:true}).waitFor();
   await publicRun.getByRole('button',{name:'Verify session for cleanup',exact:true}).waitFor();
   await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
   await page.getByRole('alert').filter({hasText:'Cleanup needs a verified session. (ELEVATION_REQUIRED)'}).waitFor();

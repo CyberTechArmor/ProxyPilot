@@ -35,7 +35,7 @@ if _policy is None or Path(_policy.__file__).resolve() != _policy_path.resolve()
     _policy = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_policy)
 for _name in ('Denied', 'GatewayPolicy', 'HEX', 'METHODS', 'RESOURCE_TYPES', 'UUID', 'canonical',
-              'build_public_target', 'digest', 'exact', 'safe_int', 'strict_json', 'url_parts'):
+              'build_public_target', 'screen_public_answers', 'address_scope', 'digest', 'exact', 'safe_int', 'strict_json', 'url_parts'):
     globals()[_name] = getattr(_policy, _name)
 
 TICKET_HEADER = 'x-proxypilot-request-token'
@@ -211,33 +211,58 @@ def resolve_host(parts):
         return answers
 
 
-def route_hash(addresses):
-    routes = []
-    deadline = time.monotonic() + 5
-    for address in sorted(set(addresses)):
-        ipaddress.ip_address(address)
-        try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise Denied('NETWORK_ROUTE_UNVERIFIED')
-            out = subprocess.run(['ip', '-j', 'route', 'get', address], stdin=subprocess.DEVNULL,
-                                 capture_output=True, timeout=remaining, check=True)
-            value = strict_json(out.stdout.decode())
-        except Exception:
-            raise Denied('NETWORK_ROUTE_UNVERIFIED') from None
-        if not isinstance(value, list) or len(value) != 1 or value[0].get('type', 'unicast') != 'unicast':
+def _route_record(address, deadline):
+    ipaddress.ip_address(address)
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise Denied('NETWORK_ROUTE_UNVERIFIED')
-        routes.append(dict(address=address, route={k:value[0][k] for k in
-            ('dst', 'gateway', 'dev', 'prefsrc', 'src', 'table') if k in value[0]}))
-    return digest(canonical(routes))
+        out = subprocess.run(['ip', '-j', 'route', 'get', address], stdin=subprocess.DEVNULL,
+                             capture_output=True, timeout=remaining, check=True)
+        value = strict_json(out.stdout.decode())
+        if (not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict) or
+                value[0].get('type', 'unicast') != 'unicast'):
+            raise Denied('NETWORK_ROUTE_UNVERIFIED')
+        return dict(address=address, route={k:value[0][k] for k in
+            ('dst', 'gateway', 'dev', 'prefsrc', 'src', 'table') if k in value[0]})
+    except Exception:
+        raise Denied('NETWORK_ROUTE_UNVERIFIED') from None
+
+
+def route_hash(addresses):
+    # Selected-agent plans still require a verified route for every pinned address.
+    deadline = time.monotonic() + 5
+    return digest(canonical([_route_record(a, deadline) for a in sorted(set(addresses))]))
+
+
+def public_route_plan(addresses):
+    # Called only after complete DNS/protected-inventory screening. Also refuse
+    # malformed or non-public inputs at this boundary, before route observation.
+    if (not isinstance(addresses, list) or not 1 <= len(addresses) <= 16 or
+            any(not isinstance(a, str) or address_scope(a) != 'public' for a in addresses) or
+            len(set(addresses)) != len(addresses)):
+        raise Denied('NETWORK_TARGET_UNVERIFIED')
+    deadline = time.monotonic() + 5
+    routes = []
+    for address in sorted(addresses):
+        try:
+            routes.append(_route_record(address, deadline))
+        except Denied:
+            # A missing family/route is not authority to contact that address.
+            # A global timeout remains a refusal, even if another route worked.
+            if time.monotonic() >= deadline:
+                raise Denied('NETWORK_ROUTE_UNVERIFIED') from None
+    if not routes:
+        raise Denied('NETWORK_ROUTE_UNVERIFIED')
+    return dict(addresses=[r['address'] for r in routes], route_sha256=digest(canonical(routes)))
 
 
 class AttemptGateway:
     def __init__(self, policy, ledger, resolver=resolve_host, connection_factory=PinnedConnection,
-                 clock=time.time, ticket_seconds=15, route_reader=route_hash):
+                 clock=time.time, ticket_seconds=15, route_reader=route_hash, public_route_reader=public_route_plan):
         self.policy, self.ledger, self.resolver = policy, ledger, resolver
         self.connection_factory, self.clock = connection_factory, clock
-        self.route_reader = route_reader
+        self.route_reader, self.public_route_reader = route_reader, public_route_reader
         self.ticket_seconds = ticket_seconds
         self.lock = threading.RLock()
         self.drained = threading.Condition(self.lock)
@@ -656,7 +681,14 @@ class AttemptGateway:
             with self.lock:
                 self._check()
                 if self.policy.public_navigation:
-                    target=build_public_target(parts['origin'],answers,self.route_reader(answers),self.policy.protected_hosts,self.policy.protected_addresses)
+                    screened = screen_public_answers(parts['origin'], answers,
+                        self.policy.protected_hosts, self.policy.protected_addresses)
+                    routes = self.public_route_reader(screened)
+                    target = build_public_target(parts['origin'], answers, routes['route_sha256'],
+                        self.policy.protected_hosts, self.policy.protected_addresses, routes['addresses'])
+                    # All original answers were screened above; connect only to
+                    # the verified subset, rechecking its strict route hash below.
+                    answers = target['addresses']
                 else:
                     target = self.extra_targets.get(parts['origin']) or self.policy.targets[parts['origin']]
                 addresses = self.policy.screen_answers(parts, answers, target)

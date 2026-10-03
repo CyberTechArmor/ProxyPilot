@@ -73,12 +73,31 @@ class SelectedPreservationTests(unittest.TestCase):
         self.assertFalse(result['acceptance_created'])
         self.assertNotIn('selected_browser_available', result)
 
-    def test_changed_runtime_source_refuses_without_effects(self):
+    def test_new_runtime_delivery_preserves_installed_generation_until_package_update(self):
         before = self.runtime_bytes()
         self.host.source['selected_browser_gateway.py'] += b'\n# changed protocol implementation\n'
-        with self.assertRaisesRegex(ValueError, 'separately reviewed'):
-            self.refresh.apply()
+        self.host.revision = '2' * 40
+        self.refresh.apply()
+        self.refresh.commit()
         self.assertEqual(before, self.runtime_bytes())
+        self.assertEqual(self.host.events, [])
+        plan = self.package.plan('update')
+        self.package.review('update', plan['plan_sha256'])
+        self.package.apply(plan['plan_sha256'])
+        plan = self.package.plan('commit')
+        self.package.review('commit', plan['plan_sha256'])
+        self.package.commit(plan['plan_sha256'])
+        path = p.SUPERVISOR + '/selected_browser_gateway.py'
+        self.assertEqual(self.host.tree.read(path), self.host.source['selected_browser_gateway.py'])
+        self.refresh.preflight()
+
+    def test_retained_generation_tampering_refuses_even_when_installed_journal_matches(self):
+        tx = self.package.tx()
+        path = p.SUPERVISOR + '/selected_browser_gateway.py'
+        staged = p.TRANSACTION + '/' + tx['id'] + '/new-' + str(list(p.OWNED).index(path))
+        self.host.put(staged, b'foreign retained source\n', 0o600)
+        with self.assertRaisesRegex(ValueError, 'committed package generation'):
+            self.refresh.preflight()
         self.assertEqual(self.host.events, [])
 
     def test_incomplete_package_never_admitted(self):
@@ -239,9 +258,8 @@ class SelectedPreservationTests(unittest.TestCase):
         plan = self.package.plan('rollback')
         self.package.review('rollback', plan['plan_sha256'])
         self.package.restore('rollback', plan['plan_sha256'])
-        with self.assertRaisesRegex(ValueError, 'separately reviewed'):
-            self.refresh.preflight()
-        self.host.source['selected_browser_gateway.py'] = original
+        # The delivered upgrade may remain newer than the restored generation.
+        self.refresh.preflight()
         before = self.runtime_bytes()
         self.host.events.clear()
         self.refresh.apply()

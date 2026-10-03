@@ -52,3 +52,32 @@ commit, private storage/decoder and provider setup, actual public/authenticated/
 authorized-internal tasks, live viewing/privacy and recovery proofs, followed by
 a real ordinary update preserving the activated runtime. Source and fixture
 tests do not certify those host outcomes. Phase 2 remains pending Phase 1.
+
+## Independent review handoff
+
+PR: https://github.com/CyberTechArmor/ProxyPilot/pull/731
+Implementation candidate: `ecdce70f78cd81f2090591eccafb13bba04ef20c`.
+Base and merge base: main `fcd0bd32fcdcb0ce9692b615a2d2998e6e540c43`.
+Compare the current PR head to that base; subsequent documentation-only handoff
+changes do not replace the implementation identity above. No dependency,
+database schema, runtime protocol or unit content change is shipped.
+
+Read the user's browser-runtime requirements, this package contract, the pinned
+Mock2 1.14 guidance/CPR, `scripts/review-runtime-refresh.py`,
+`scripts/selected-runtime-package.py`, `scripts/tests/test_selected_runtime_preservation.py`,
+and the existing package/refresh tests. Check update.sh's preflight/apply/commit
+and failure-recovery call order, the read-only package import after source
+attestation, transaction routing, old/new pin selection after both rollback
+kinds, certificate renewal, active work after restart, protected state and
+metadata durability. Challenge the implementation; do not treat test fixtures as
+real host acceptance. Inspect exact-head CI and reproduce concrete gaps. Report
+findings without modifying application code. Independent review has not run in
+this implementation context and must not be represented as complete.
+
+The operational handoff must use a real root TTY independent of the dashboard
+for interactive package review: the dashboard has to be stopped first. The
+browser Host Shell cannot be assumed to survive that stop. Do not pipe a digest
+into review, fabricate a TTY approval, or reuse the historical host plan after
+source delivery changes. A fresh bounded plan, recorded exact container
+recovery path and real root review precede installation. No acceptance marker
+is created by this change.

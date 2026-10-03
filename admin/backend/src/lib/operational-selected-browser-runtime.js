@@ -131,7 +131,21 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
     const closed=receipt?.closed,keys=['browser','network','session','temporary_files'];
     // Authentic partial shutdown facts still settle known cumulative traffic.
     // The lifecycle requires every flag true before it accepts closure.
-    return !!p&&!!pins&&!!closed&&Object.keys(closed).length===keys.length&&keys.every(k=>typeof closed[k]==='boolean')&&selectedFinalNetworkSchema.safeParse(receipt.final_network).success&&p.gateway_ledger_sha256===receipt.final_network.ledger_sha256&&same(identity(receipt),identity(expected))&&p.original_fence===pins.original_fence&&p.vm_uuid===pins.vm_uuid&&p.boot_id===pins.boot_id&&p.workspace_id===pins.workspace_id&&p.network_plan_sha256===pins.network_plan_sha256;
+    const authentic=!!p&&!!closed&&Object.keys(closed).length===keys.length&&keys.every(k=>typeof closed[k]==='boolean')&&selectedFinalNetworkSchema.safeParse(receipt.final_network).success&&p.gateway_ledger_sha256===receipt.final_network.ledger_sha256&&same(identity(receipt),identity(expected));
+    if(!authentic)return false;
+    if(pins)return p.original_fence===pins.original_fence&&p.vm_uuid===pins.vm_uuid&&p.boot_id===pins.boot_id&&p.workspace_id===pins.workspace_id&&p.network_plan_sha256===pins.network_plan_sha256;
+    // Only a signed, permanently tombstoned never-admitted public launch may
+    // lack host pins. Zero backend usage alone never proves host cleanup.
+    const r=one('SELECT * FROM ops_selected_browser_runs WHERE id=? AND attempt_id=?',expected.run_id,expected.attempt_id);
+    if(!r||r.execution_mode!=='public_navigation'||r.result_code!=='LAUNCH_UNCERTAIN'||r.configuration_sha256!==expected.policy_sha256||r.fence!==expected.fence||r.manual_auth||r.controller_user_id||
+      !isPublicNavigation(JSON.parse(r.configuration_json))||r.guide_id||r.guide_sha256||r.consent_sha256||
+      one('SELECT 1 FROM ops_selected_browser_steps WHERE run_id=?',r.id)||one('SELECT 1 FROM ops_selected_browser_model_reservations WHERE run_id=?',r.id)||
+      Object.values(JSON.parse(r.usage_json)).some(value=>value!==0))return false;
+    const n=receipt.final_network;
+    return p.no_launch===true&&p.gateway_never_registered===true&&p.original_fence===1&&p.workspace_id===expected.attempt_id&&p.boot_id===null&&p.network_plan_sha256===null&&
+      p.evidence?.launched===false&&keys.every(k=>closed[k]===true)&&Array.isArray(p.uncertain_ordinals)&&p.uncertain_ordinals.length===0&&
+      p.native_inputs?.measured===true&&same(p.native_inputs.counts,{key:0,click:0,scroll:0})&&
+      ['requests','response_bytes','effects_sent','effects_uncertain','auth_effects_acknowledged','inflight','pending_count'].every(k=>n[k]===0)&&n.ledger_sha256==='0'.repeat(64);
   };
   const verifiedActionContext=(proof,ref)=>{
     const pins=one('SELECT * FROM ops_selected_browser_host_pins WHERE attempt_id=?',ref.attempt_id);

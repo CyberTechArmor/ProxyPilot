@@ -495,7 +495,7 @@ class Host:
             refuse('Recorded source/delivery changed during attestation')
         return revision, files, dict(path=checkout, record_sha256=sha(record), delivered_modes=modes)
 
-    def identity(self):
+    def identity(self, allow_work=False):
         self.wiring()
         query = lambda p: strict(self.execute(['incus', 'query', p]))
         vm = query('/1.0/instances/' + VM)
@@ -503,7 +503,7 @@ class Host:
         if vm.get('type') != 'virtual-machine' or vm.get('config', {}).get('volatile.uuid') != VM_UUID or running.get('status') != 'Running':
             refuse('Current proof VM identity is unverified')
         groups=self.execute(['incus','exec',VM,'--','/usr/bin/ls','-1','/sys/fs/cgroup/system.slice']).decode('utf-8').splitlines()
-        if any(name.startswith('pp-a3-worker-') and name.endswith('.service') for name in groups):
+        if not allow_work and any(name.startswith('pp-a3-worker-') and name.endswith('.service') for name in groups):
             refuse('Guest worker cgroup remains; package must not trigger runtime cleanup')
         policy = self.execute(['incus', 'exec', VM, '--', 'sha256sum', '/etc/chromium/policies/managed/proxypilot-live.json']).decode().split()[0]
         der=self.execute(['openssl','pkey','-pubin','-in',PUBLIC_KEY,'-outform','DER'])
@@ -586,7 +586,7 @@ class Host:
             refuse('Runtime health refused')
         return reply['result']
 
-    def health(self, pins, key_id, selected):
+    def health(self, pins, key_id, selected, allow_work=False):
         self.wiring(require_socket=True)
         self.unit_check()
         def wait(path,method,gateway=False):
@@ -600,7 +600,9 @@ class Host:
                     time.sleep(.25)
         a = wait('/run/proxypilot-a3/operator.sock', 'status')
         b = wait('/run/proxypilot-a4/broker.sock', 'status')
-        if (a.get('active') is not None or a.get('accepting_launch') is not True or a.get('vm_uuid') != VM_UUID or
+        active_work = (allow_work and isinstance(a.get('active'), dict) and a.get('blockers') == [])
+        if ((not allow_work and a.get('active') is not None) or
+                (a.get('accepting_launch') is not True and not active_work) or a.get('vm_uuid') != VM_UUID or
                 a['supervisor'].get('key_id') != key_id or a['supervisor'].get('supervisor_sha256') != pins[SUPERVISOR + '/a3-worker-supervisor.py']['sha256'] or
                 a['supervisor'].get('runner_sha256') != pins[SUPERVISOR + '/a3-worker-guest.py']['sha256'] or
                 b.get('vm_uuid') != VM_UUID or b['broker'].get('broker_sha256') != pins[BROKER]['sha256']):
@@ -609,8 +611,36 @@ class Host:
             g = wait('/run/proxypilot-a3/selected-proxy.sock', 'health', True)
             expected = {n:pins[ROOT + '/' + n]['sha256'] for n in ('selected_browser_gateway.py','selected_browser_policy.py')}
             expected['a3-origin-proxy.py'] = pins[ROOT + '/origin-proxy.py']['sha256']
-            if g.get('active') is not False or g.get('files') != expected or g.get('protocol') != 'selected-gateway.v1':
+            if (type(g.get('active')) is not bool or (g['active'] and not allow_work) or
+                    g.get('files') != expected or g.get('protocol') != 'selected-gateway.v1'):
                 refuse('Serving gateway identity changed or latched')
+
+    def verified_turn_pair(self):
+        # Read-only validation of the separately owned A7 Caddy/coturn renewal.
+        # Never relax the rest of /etc/proxypilot-a7 or write enrollment evidence.
+        certificate = '/etc/proxypilot-a7/turn-cert.pem'
+        key = '/etc/proxypilot-a7/turn-key.pem'
+        pins = {path:self.tree.pin(path) for path in (certificate, key)}
+        if any(pin['mode'] != 0o640 for pin in pins.values()):
+            refuse('TURN certificate custody changed')
+        journal = strict(self.tree.read('/var/lib/proxypilot-a7/live-install.json'))
+        hostname = journal.get('turn', {}).get('hostname', '')
+        if not isinstance(hostname, str) or not re.fullmatch(r'(?=.{4,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}', hostname):
+            refuse('TURN certificate hostname is unverified')
+        for unit, active in (('proxypilot-a7-turn-cert.service', 'inactive'), ('proxypilot-a7-turn.service', 'active')):
+            for field, expected in (('FragmentPath', '/etc/systemd/system/' + unit),
+                                    ('DropInPaths', ''), ('NeedDaemonReload', 'no'), ('ActiveState', active)):
+                if self.execute(['systemctl', 'show', unit, '--property=' + field, '--value']).decode().strip() != expected:
+                    refuse('TURN renewal/service state is not stable')
+        self.execute(['openssl', 'x509', '-in', certificate, '-checkend', '86400', '-noout'])
+        self.execute(['openssl', 'verify', '-purpose', 'sslserver', '-verify_hostname', hostname,
+                      '-CApath', '/etc/ssl/certs', '-untrusted', certificate, certificate])
+        public = self.execute(['openssl', 'x509', '-in', certificate, '-pubkey', '-noout'])
+        certificate_der = self.execute(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public)
+        key_der = self.execute(['openssl', 'pkey', '-in', key, '-pubout', '-outform', 'DER'])
+        if certificate_der != key_der or any(self.tree.pin(path) != pin for path, pin in pins.items()):
+            refuse('TURN certificate/key pair changed during verification')
+        return pins
 
     def stop(self):
         for path in (RENEW_TIMER, RENEW_SERVICE, SUP_UNIT, PROXY_UNIT, BROKER_UNIT):

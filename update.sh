@@ -16,6 +16,7 @@ DB_BACKUP_FILE=""
 DB_BACKUP_SOURCE=""
 BACKUPS_TO_KEEP=5
 DB_MAINTENANCE_STARTED=false
+DB_WRITERS_RESTARTED=false
 REVIEW_RUNTIME_REFRESH_STARTED=false
 NATIVE_BACKEND_MODE=""
 DB_LAYOUT_NEW_PATH=""
@@ -842,6 +843,12 @@ on_error() {
     # maintenance starts, no database was relocated or migrated by this run.
     [ "$exit_code" -ne 0 ] || exit 0
     [ "$DB_MAINTENANCE_STARTED" = true ] || exit "$exit_code"
+    if [ "${DB_WRITERS_RESTARTED:-false}" = true ]; then
+        log "${RED}Update failed after new database writers could start (exit ${exit_code}).${NC}"
+        log "${YELLOW}Current database and runtime history retained; automatic rollback is not safe after new work may have been accepted.${NC}"
+        log "${YELLOW}Inspect dashboard health and the runtime refresh transaction before recovery. Pre-update backup: ${DB_BACKUP_FILE}${NC}"
+        exit "$exit_code"
+    fi
     log "${RED}Update failed (exit ${exit_code}). Attempting recovery...${NC}"
     if ! restore_db; then
         log "${RED}Recovery refused or failed; services are not restarted. Backup: $DB_BACKUP_FILE${NC}"
@@ -1484,6 +1491,9 @@ install_setup_runner() {
     local restart_ok=true restart_out=""
     # Captured, not piped through tee: without pipefail a pipeline's status
     # is tee's, and a refused restart would read as a success.
+    # The runner can write before dashboard startup. From this point a failure
+    # must never restore an older database over newly accepted work.
+    DB_WRITERS_RESTARTED=true
     if ! restart_out="$(systemctl restart "$unit" 2>&1)"; then
         restart_ok=false
         log "${RED}Could not restart ${unit}${restart_out:+: ${restart_out}} — the runner is still on the previous version's code.${NC}"
@@ -2061,6 +2071,7 @@ PYEOF
         # The database is now at its final path. Restart on refreshed code
         # and record readiness before the backend reads the executor policy.
         install_setup_runner
+        DB_WRITERS_RESTARTED=true
         $DC_CMD up -d
 
         # docker compose up -d returns 0 once the daemon accepts the
@@ -2091,7 +2102,7 @@ PYEOF
         if [ "$HEALTHY" != "true" ]; then
             log "${RED}Container did not become healthy within 60s. Last 50 log lines:${NC}"
             docker logs proxypilot-admin --tail 50 2>&1 || true
-            log "${RED}Update will be rolled back via the EXIT trap.${NC}"
+            log "${RED}Current database will be retained; inspect startup failure before recovery.${NC}"
             exit 1
         fi
 
@@ -2238,6 +2249,7 @@ PYEOF
         pm2 delete proxypilot 2>/dev/null || true
         NATIVE_BACKEND_MODE=pm2
         DB_MAINTENANCE_STARTED=true
+        DB_WRITERS_RESTARTED=true
         pm2 start src/index.js --name proxypilot
         pm2 save
         log "${GREEN}Started with PM2${NC}"
@@ -2245,6 +2257,7 @@ PYEOF
         log "Using nohup..."
         NATIVE_BACKEND_MODE=nohup
         DB_MAINTENANCE_STARTED=true
+        DB_WRITERS_RESTARTED=true
         nohup $NODE_CMD src/index.js > /tmp/proxypilot.log 2>&1 &
         NEW_PID=$!
         sleep 3
@@ -2285,7 +2298,7 @@ PYEOF
         log "${RED}Backend did not respond to /api/health within 60s.${NC}"
         log "${YELLOW}Last 30 lines from /tmp/proxypilot.log:${NC}"
         tail -30 /tmp/proxypilot.log 2>/dev/null || log "  (no log output)"
-        log "${RED}Update will be rolled back via the EXIT trap.${NC}"
+        log "${RED}Current database will be retained; inspect startup failure before recovery.${NC}"
         exit 1
     fi
     log "${GREEN}Backend is healthy on port ${PORT_TO_FREE}${NC}"

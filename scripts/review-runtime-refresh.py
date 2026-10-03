@@ -209,6 +209,9 @@ class Host:
             TRANSACTION.parent / 'selected-runtime-package')
         for path in paths:
             self.secure(path)
+            if path == TRANSACTION.parent / 'selected-runtime-package' and hasattr(self, 'rolled_back_check'):
+                self.rolled_back_check()
+                continue
             if path.exists():
                 raise ValueError(f'Selected runtime state requires separate package review: {path}')
 
@@ -226,7 +229,7 @@ class Host:
             if path.exists():
                 raise ValueError(f'Runtime artifacts exist without the reviewed A8 opt-in: {path}')
 
-    def source_profile(self):
+    def source_profile(self, require_legacy=True):
         if not hasattr(self.a3, 'SELECTED_SOURCES'):
             return None  # Retain the historical public-review-only refresh.
         if tuple(self.a3.SELECTED_SOURCES) != SELECTED:
@@ -274,7 +277,8 @@ class Host:
                 helper_mode not in {0o600, 0o644, 0o700, 0o755} or head() != self.source_sha or
                 bounded(self.source_record, 4096) != record):
             raise ValueError('Refresh helper differs from the pinned source delivery')
-        self.selected_absent()
+        if require_legacy:
+            self.selected_absent()
         return {'source_sha': self.source_sha, 'source_checkout': str(self.source),
                 'source_record_sha256': sha(record), 'source_files': pins, 'source_modes': modes,
                 'refresh_helper_sha256': sha(helper_bytes), 'refresh_helper_mode': helper_mode}
@@ -477,6 +481,14 @@ class Refresh:
                 stat.S_IMODE(self.journal.stat().st_mode) != 0o600):
             raise ValueError('Refresh transaction custody/mode changed')
         data = json.loads(bounded(self.journal))
+        if data.get('version') == 3:
+            # A subsequently rolled-back package may return to the positively
+            # recognized legacy profile. Only terminal preservation metadata
+            # can be superseded; an interrupted selected update still refuses.
+            validate_selected_preservation(data)
+            if data['phase'] not in {'committed', 'rolled_back'}:
+                raise ValueError('Incomplete selected preservation requires recovery')
+            return data
         if data.get('version') == 2:
             fields = {'version', 'mode', 'phase', 'vm_uuid', 'source', 'key_id', 'protected', 'ledgers', 'files'}
             if data.get('phase') == 'committed':
@@ -702,6 +714,222 @@ class Refresh:
         self.host.healthy([sha(bounded(p)) for p in self.host.targets[:2]], data['key_id'], allow_work=allow_work)
 
 
+def validate_selected_preservation(value):
+    fields = {'version', 'mode', 'phase', 'snapshot'}
+    if value.get('phase') == 'committed':
+        fields.add('completed_at')
+    if (set(value) != fields or value.get('version') != 3 or value['mode'] != 'preserve_selected' or
+            value['phase'] not in {'applied', 'committed', 'rolled_back'} or
+            not isinstance(value['snapshot'], dict) or
+            set(value['snapshot']) != {'source', 'package_transaction', 'identity', 'files', 'protected', 'units', 'ledgers'}):
+        raise ValueError('Selected preservation transaction is unknown')
+
+
+def verify_package_journals(package, module, transaction, journals, side):
+    """Only the owned certificate renewal may alter journal metadata."""
+    for index, path in enumerate(module.JOURNALS):
+        slot = list(module.OWNED).index(path)
+        staged = module.TRANSACTION + '/' + transaction['id'] + '/' + side + '-' + str(slot)
+        original_bytes = package.t.read(staged)
+        original_pin = transaction['files'][path][side]
+        if sha(original_bytes) != original_pin['sha256'] or len(original_bytes) != original_pin['bytes']:
+            raise ValueError('Selected package journal evidence changed')
+        original, current = json.loads(original_bytes), json.loads(json.dumps(journals[index]))
+        if index == 1:
+            for cert in (module.ROOT + '/proxy-cert.pem', module.ROOT + '/proxy-key.pem'):
+                original['files'].pop(cert)
+                current['files'].pop(cert)
+        if original != current:
+            raise ValueError('Selected installation journal metadata changed')
+
+
+def verify_rolled_back_package(package, module):
+    transaction = package.tx()
+    if transaction['phase'] != 'rolled_back':
+        raise ValueError('Retained package transaction is not rolled back')
+    journals, pins = package.installed('install')
+    for path, pin in pins.items():
+        if path not in module.JOURNALS and pin != transaction['files'][path]['old']:
+            raise ValueError('Rolled-back package differs from its original files')
+    verify_package_journals(package, module, transaction, journals, 'old')
+    # Legacy positive recognition independently verifies the old code, current
+    # certificate/key, VM and serving identity. Retained metadata is not deleted.
+
+
+class SelectedRefresh:
+    """Metadata-only preservation of a separately committed selected package.
+
+    Source equivalence is deliberately strict: a normal application update may
+    preserve the package, but changing its code/units requires package review.
+    No method starts/stops runtime services or restores runtime/business data.
+    """
+    def __init__(self, host, package, module, directory=TRANSACTION):
+        self.host, self.package = host, package
+        self.module = module
+        self.h, self.t = package.h, package.t
+        self.directory = str(directory)
+        self.journal = self.directory + '/transaction.json'
+
+    def read(self):
+        if self.t.read(self.journal, missing=True) is None:
+            return None
+        if (stat.S_IMODE(self.t.secure(self.directory).st_mode) != 0o700 or
+                self.t.pin(self.journal)['mode'] != 0o600):
+            raise ValueError('Selected preservation metadata custody changed')
+        value = json.loads(self.t.read(self.journal))
+        if value.get('version') != 3:
+            # The legacy update immediately preceding package enrollment may
+            # leave a completed metadata record. Never supersede an incomplete
+            # or structurally unknown historical transaction.
+            prior = Refresh(self.host, Path(self.directory)).read()
+            if prior['phase'] not in {'committed', 'rolled_back'}:
+                raise ValueError('Incomplete legacy refresh requires recovery')
+            return prior
+        validate_selected_preservation(value)
+        return value
+
+    def save(self, value):
+        self.t.mkdir(self.directory, 0o700)
+        if stat.S_IMODE(self.t.secure(self.directory).st_mode) != 0o700:
+            raise ValueError('Selected preservation directory must remain private')
+        self.t.write(self.journal, encoded(value), 0o600)
+
+    def snapshot(self, allow_work=False):
+        profile = self.host.source_profile(require_legacy=False)
+        if profile is None:
+            raise ValueError('Selected runtime requires its reviewed source contract')
+        # Import is performed only after source_profile attests the delivered
+        # package helper and refresh helper against the pinned Git revision.
+        module = self.module
+        transaction = self.package.tx()
+        side = 'new'
+        if transaction['phase'] == 'rolled_back' and transaction['operation'] == 'update':
+            side = 'old'
+        elif transaction['phase'] != 'committed':
+            raise ValueError('Selected package must be committed or its upgrade fully rolled back before ordinary Update')
+        journals, pins = self.package.installed('update')
+        revision, sources, checkout = self.h.sources()
+        if revision != profile['source_sha'] or checkout['path'] != profile['source_checkout']:
+            raise ValueError('Selected package and updater source identity differ')
+        candidates = module.candidate_files(sources)
+        for path, value in candidates.items():
+            if (pins[path]['sha256'] != sha(value) or pins[path] != transaction['files'][path][side]):
+                raise ValueError('Selected runtime code/unit change requires a separately reviewed package update')
+        # The certificate renewer may legitimately update the certificate/key
+        # hashes in the proxy journal. Preserve all journal metadata; only that
+        # documented pair may differ from the committed generation.
+        verify_package_journals(self.package, module, transaction, journals, side)
+        identity = self.h.identity(allow_work=allow_work)
+        # Reboots and the owned renewal job do not change the enrolled machine,
+        # VM, effective network/Chromium policy or receipt signing identity.
+        stable = ('machine_id', 'vm_uuid', 'vm_configuration_sha256', 'nft_sha256', 'managed_policy_sha256', 'key_id')
+        if any(identity.get(k) != transaction['identity'].get(k) for k in stable):
+            raise ValueError('Selected enrollment identity/policy changed')
+        protected = self.package.protected()
+        units = self.h.unit_check()
+        self.h.health(pins, identity['key_id'], True, allow_work=allow_work)
+        ledgers = None
+        if not allow_work:
+            self.host.preservation_db_idle()
+            ledgers = module.idle_ledgers(self.t)
+        return dict(source=profile,
+                    package_transaction=self.t.pin(module.TRANSACTION + '/transaction.json'),
+                    identity=identity, files=pins, protected=protected, units=units, ledgers=ledgers)
+
+    def preflight(self):
+        prior = self.read()
+        if prior is not None and prior['phase'] not in {'committed', 'rolled_back'}:
+            raise ValueError('Incomplete selected preservation requires rollback before Update')
+        return self.snapshot()
+
+    @staticmethod
+    def result(**extra):
+        # Runtime acceptance/readiness is evaluated by the real runtime API.
+        # Installation preservation must not invent availability or proof.
+        return dict(preserved=True, runtime_changed=False, mode='preserve_selected',
+                    acceptance_created=False, readiness_recheck_required=True, **extra)
+
+    def apply(self):
+        self.preflight()
+        self.h.stopped_backend()
+        snapshot = self.snapshot()
+        data = dict(version=3, mode='preserve_selected', phase='applied', snapshot=snapshot)
+        self.save(data)
+        if self.snapshot() != snapshot:
+            raise ValueError('Selected runtime/source changed during preservation')
+        return self.result(awaiting_dashboard_health=True)
+
+    def completion_comparison(self, snapshot, expected, operation):
+        # snapshot() already checked current certificate/key equality, lifetime,
+        # custody, all serving bytes, and the complete retained journal metadata.
+        # The separately owned timer may renew while the dashboard rebuilds.
+        value = json.loads(json.dumps(snapshot))
+        value['identity'].pop('proxy_spki_sha256')
+        if operation == 'rollback':
+            # Recovery across reboot is read-only and still checks the exact
+            # machine, VM, policy, keys, installed bytes and current idle state.
+            value['identity'].pop('host_boot_id')
+        for path in (self.module.ROOT + '/proxy-cert.pem', self.module.ROOT + '/proxy-key.pem'):
+            value['protected'][path] = {'mode': value['protected'][path]['mode']}
+        journal = self.module.JOURNALS[1]
+        value['files'][journal] = {'mode': value['files'][journal]['mode']}
+        value['ledgers'] = None  # Never rewind even completed post-start history.
+        turn_root = '/etc/proxypilot-a7'
+        entries = value['protected'][turn_root]['entries']
+        previous = expected['protected'][turn_root]['entries']
+        turn_paths = (turn_root + '/turn-cert.pem', turn_root + '/turn-key.pem')
+        if any(entries.get(path) != previous.get(path) for path in turn_paths):
+            # A7 renews independently of the A3 lock. Require a trusted chain for
+            # the retained hostname, matching private key, fixed loaded services,
+            # and unchanged root custody; only this measured pair is normalized.
+            pair = self.h.verified_turn_pair()
+            if any(path not in previous or previous[path]['mode'] != 0o640 or entries.get(path) != pair[path] for path in turn_paths):
+                raise ValueError('TURN renewal changed during preservation')
+            for path in turn_paths:
+                entries[path] = previous[path]
+        env_path = self.module.SOURCE + '/.env'
+        original = expected['protected'][env_path]
+        if value['protected'][env_path] != original:
+            # install_setup_runner owns exactly this absent-key enrollment.
+            # No other environment edits are accepted or copied back.
+            suffix = (b'\n# Who executes setup jobs (docs/features/setup-engine.md '
+                      b'\xc2\xa7 "Who executes").\nSETUP_EXECUTOR_POLICY=runner-required\n')
+            current = self.t.read(env_path)
+            prefix = current[:-len(suffix)] if current.endswith(suffix) else None
+            if (prefix is not None and not re.search(rb'^[ \t]*(?:export[ \t]+)?SETUP_EXECUTOR_POLICY[ \t]*=', prefix, re.M) and
+                    sha(prefix) == original['sha256'] and len(prefix) == original['bytes'] and
+                    value['protected'][env_path]['mode'] == original['mode']):
+                value['protected'][env_path] = original
+        return value
+
+    def finish(self, operation):
+        data = self.read()
+        if data is None:
+            return {'skipped': True, 'reason': 'no_transaction'}
+        if data['phase'] in {'committed', 'rolled_back'}:
+            return {'skipped': True, 'reason': data['phase']}
+        if data.get('version') != 3 or data['phase'] != 'applied':
+            raise ValueError('Unknown selected preservation recovery')
+        if operation == 'rollback':
+            self.h.stopped_backend()
+        current = self.snapshot(allow_work=operation == 'commit')
+        expected = data['snapshot']
+        if (self.completion_comparison(current, expected, operation) !=
+                self.completion_comparison(expected, expected, operation)):
+            raise ValueError('Selected preservation drift; no runtime restoration authorized')
+        data['phase'] = 'committed' if operation == 'commit' else 'rolled_back'
+        if operation == 'commit':
+            data['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        self.save(data)
+        return self.result(**{data['phase']: True})
+
+    def commit(self):
+        return self.finish('commit')
+
+    def rollback(self):
+        return self.finish('rollback')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('preflight', 'apply', 'rollback', 'commit'))
@@ -728,7 +956,23 @@ def main():
     host.secure(lock)
     with lock.open('a') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print(json.dumps(getattr(Refresh(host), args.action)()))
+        selected = TRANSACTION.parent / 'selected-runtime-package'
+        host.secure(selected)
+        if selected.exists():
+            host.source_profile(require_legacy=False)
+            package_module = load('selected-runtime-package', args.install_dir / 'scripts')
+            package_host = package_module.Host()
+            package = package_module.Package(package_host)
+            transaction = package.tx()
+            if transaction['phase'] == 'rolled_back' and transaction['operation'] == 'install':
+                host.rolled_back_check = lambda: verify_rolled_back_package(package, package_module)
+                host.rolled_back_check()
+                flow = Refresh(host)
+            else:
+                flow = SelectedRefresh(host, package, package_module)
+        else:
+            flow = Refresh(host)
+        print(json.dumps(getattr(flow, args.action)()))
 
 
 if __name__ == '__main__':

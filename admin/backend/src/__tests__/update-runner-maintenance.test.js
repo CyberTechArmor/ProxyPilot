@@ -31,7 +31,7 @@ assert.ok(nativeStartup.includes('pm2 start src/index.js'));
 const traps = SOURCE.match(/^trap 'on_error' EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM/m)?.[0];
 assert.ok(traps, 'the production exit/signal handlers');
 
-function harness(t, { runtime = false, runtimeFailure = '', legacy = false, refuseStop = false, falseStop = false, queryFail = false, absent = false, failBuild = false, failDown = false, restartFail = false, staleSidecars = false, failEnvWrite = false, nativeStop = 'stopped', nativeMode = 'pm2' } = {}) {
+function harness(t, { runtime = false, runtimeFailure = '', writeAfterRestart = false, legacy = false, refuseStop = false, falseStop = false, queryFail = false, absent = false, failBuild = false, failDown = false, restartFail = false, staleSidecars = false, failEnvWrite = false, nativeStop = 'stopped', nativeMode = 'pm2' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pp-maintenance-'));
   const install = join(root, 'opt/proxypilot');
   const bin = join(root, 'bin');
@@ -93,9 +93,10 @@ function harness(t, { runtime = false, runtimeFailure = '', legacy = false, refu
         // All declared namespace paths must exist BEFORE service startup.
         for (const p of ['opt/proxypilot/data', 'var/lib/proxypilot', 'root/.proxypilot', 'etc/sysctl.d']) assert.ok(existsSync(join(root, p)), p);
         closeRunner(); openRunner();
+        if (writeAfterRestart) runner.exec("INSERT INTO changes VALUES ('new-runner-work');");
       }
       if (action === 'down') { assert.equal(runner, null, 'runner must stop before Docker down'); closeBackend(); }
-      if (action === 'up') { closeBackend(); backend = open(envDb()); }
+      if (action === 'up') { closeBackend(); backend = open(envDb()); if (writeAfterRestart) backend.exec("INSERT INTO changes VALUES ('new-dashboard-work');"); }
       if (action === 'native-start') {
         backend = open(envDb());
         backend.exec("INSERT INTO changes VALUES ('failed-native-start');");
@@ -282,15 +283,28 @@ test('Docker success commits its refresh before the early exit and permits the n
   }
 });
 
-test('Docker completion retains paired recovery when refresh commit fails', { skip }, async (t) => {
-  const h = harness(t, { runtime: true, runtimeFailure: 'commit' }); h.openRunner();
+test('Docker completion failure preserves live database and incomplete runtime metadata', { skip }, async (t) => {
+  const h = harness(t, { runtime: true, runtimeFailure: 'commit', writeAfterRestart: true }); h.openRunner();
   const completion = `pp_complete_update() { echo complete >> "$FAKE_STATE/calls"; }\npp_report_update_completion() { echo report >> "$FAKE_STATE/calls"; }\n`;
   const result = await h.run(completion + h.snapshot + traps + '\n' + maintenance + '\n' + dockerCompletion);
   assert.equal(result.status, 29, result.stdout + result.stderr);
-  assert.equal(h.runtimePhase(), 'rolled_back');
-  assert.match(h.calls(), /runtime rollback/);
-  assert.doesNotMatch(h.calls(), /^report$/m);
-  assert.ok(h.calls().lastIndexOf('runtime rollback') < h.calls().lastIndexOf('docker compose up'));
+  assert.equal(h.runtimePhase(), 'applied');
+  assert.deepEqual(h.rows(), ['backup-state', 'new-runner-work', 'new-dashboard-work']);
+  assert.doesNotMatch(h.calls(), /runtime rollback|^report$/m);
+  assert.match(result.stdout, /Current database and runtime history retained/);
+  assert.equal(h.trace.filter(x => x === 'up').length, 1);
+  assert.doesNotMatch(result.stdout, /Database restored/);
+});
+
+test('Failure after setup runner starts but before dashboard launch retains its new writes', { skip }, async (t) => {
+  const h = harness(t, { writeAfterRestart: true }); h.openRunner();
+  const beforeDashboard = maintenance.slice(0, maintenance.indexOf('        DB_WRITERS_RESTARTED=true'));
+  const result = await h.run(h.snapshot + traps + '\n' + beforeDashboard + '\nexit 32');
+  assert.equal(result.status, 32, result.stdout + result.stderr);
+  assert.match(result.stdout, /Current database and runtime history retained/);
+  assert.deepEqual(h.rows(), ['backup-state', 'new-runner-work']);
+  assert.ok(h.runnerOpen());
+  assert.doesNotMatch(h.calls(), /docker compose up/);
 });
 
 test('An unverifiable runtime rollback leaves the dashboard stopped and does not report success', { skip }, async (t) => {
@@ -311,33 +325,20 @@ test('A refresh apply failure enters paired recovery and completion cannot prece
   assert.ok(final.indexOf('review_runtime_refresh commit') < final.indexOf('pp_report_update_completion'));
 });
 
-test('U1: failed PM2/native startup restores the backup only after its database writer stops', { skip }, async (t) => {
-  for (const [nativeMode, nativeStop] of [['pm2', 'stopped'], ['pm2', 'refused'], ['pm2', 'still-running'], ['nohup', 'stopped']]) {
-    const h = harness(t, { nativeStop, nativeMode }); h.openRunner();
-    // Execute the real startup branch and handlers with no Docker install.
-    // PM2 writes to real SQLite and reports a failed start while still open.
+test('U1: failed native startup retains possible new writes and never restores stale backup', { skip }, async (t) => {
+  for (const nativeMode of ['pm2', 'nohup']) {
+    const h = harness(t, { nativeMode }); h.openRunner();
     const selectNohup = nativeMode === 'nohup' ? 'command() { if [ "$*" = "-v pm2" ]; then return 1; fi; builtin command "$@"; }\n' : '';
     const startup = nativeStartup.replaceAll('/tmp/proxypilot.log', join(h.root, 'native.log'));
     const r = await h.run(h.snapshot + 'INSTALL_DIR=""\n' + traps + '\n' + selectNohup + startup + '\nexit 31');
     assert.equal(r.status, 31, r.stdout + r.stderr);
     assert.ok(h.trace.includes('native-start'));
-    if (nativeMode === 'pm2') assert.ok(h.calls().includes('pm2 stop proxypilot'));
-    assert.doesNotMatch(h.calls(), /docker compose/);
+    assert.doesNotMatch(h.calls(), /pm2 stop|docker compose/);
     assert.doesNotMatch(r.stderr, /UNSAFE/);
-    assert.equal(readFileSync(h.env, 'utf8'), h.originalEnv);
-    if (nativeStop === 'stopped') {
-      assert.match(r.stdout, /Database restored/);
-      assert.deepEqual(h.rows(), ['backup-state'], 'failed-start changes must not survive rollback');
-      const calls = h.calls();
-      if (nativeMode === 'pm2') assert.ok(calls.indexOf('pm2 stop proxypilot') < calls.indexOf(`cp ${h.original}`), 'stop before real restore copy');
-      assert.ok(h.trace.indexOf('backend closed') < h.trace.indexOf('restart'), 'writer closed before runner recovery');
-      assert.ok(h.trace.includes('status'), 'runner readiness checked after recovery');
-    } else {
-      assert.match(r.stdout, /Recovery refused or failed/);
-      assert.doesNotMatch(r.stdout, /Database restored/);
-      assert.deepEqual(h.rows(), ['backup-state', 'failed-native-start']);
-      assert.ok(!h.trace.includes('restart'));
-    }
+    assert.match(r.stdout, /Current database and runtime history retained/);
+    assert.doesNotMatch(r.stdout, /Database restored/);
+    assert.deepEqual(h.rows(), ['backup-state', 'failed-native-start']);
+    assert.ok(!h.trace.includes('restart'));
   }
 });
 
@@ -358,7 +359,7 @@ for (const legacy of [false, true]) {
     if (legacy) assert.equal(existsSync(h.original), false);
   });
   for (const ending of ['false', 'exit 17', 'kill -TERM $$', 'kill -INT $$']) {
-    test(`U1: ${legacy ? 'legacy' : 'current'} recovery for ${ending} closes both writers and restores the matching layout`, { skip }, async (t) => {
+    test(`U1: ${legacy ? 'legacy' : 'current'} post-start failure ${ending} retains new data and the current layout`, { skip }, async (t) => {
       const h = harness(t, { legacy });
       // Snapshot first, then keep a real runner connection with newer data.
       // Re-use backup paths across separate shell invocations.
@@ -367,12 +368,13 @@ for (const legacy of [false, true]) {
       h.openRunner(); h.mutate();
       const r = await h.run(`DB_BACKUP_FILE=$(cat ${quote(join(h.root, 'backup-path'))})\nDB_BACKUP_SOURCE=${quote(h.original)}\n${traps}\n${maintenance}\n${ending}`);
       assert.notEqual(r.status, 0, r.stdout + r.stderr);
-      assert.match(r.stdout, /Database restored/);
-      assert.deepEqual(h.rows(), ['backup-state'], 'no post-backup rows survive');
-      assert.equal(readFileSync(h.env, 'utf8'), h.originalEnv, 'configuration and encryption keys unchanged');
-      if (legacy) assert.equal(existsSync(h.current), false, 'no second DB left after layout recovery');
-      assert.ok(h.trace.includes('backend closed'), 'failed backend stopped for restore');
-      assert.equal(h.trace.filter((x) => x === 'status').length, 2, 'readiness after update and after recovery');
+      assert.match(r.stdout, /Current database and runtime history retained/);
+      assert.doesNotMatch(r.stdout, /Database restored/);
+      assert.deepEqual(h.rows(h.current), ['backup-state', 'post-backup'], 'newer data survives failure');
+      assert.match(readFileSync(h.env, 'utf8'), /^DATABASE_PATH=\/data\/db\/proxypilot.db$/m);
+      if (legacy) assert.equal(existsSync(h.original), false, 'current layout is retained');
+      assert.ok(!h.trace.includes('backend closed'), 'healthy backend is left running');
+      assert.equal(h.trace.filter((x) => x === 'status').length, 1, 'no destructive recovery restart');
       assert.ok(!h.trace.some((x) => x.startsWith('ERROR:')), h.trace.join('\n'));
       assert.doesNotMatch(r.stderr, /UNSAFE/);
     });
@@ -445,11 +447,11 @@ test('U1: failure to stop Docker refuses restore and does not restart services',
   assert.ok(!h.trace.includes('restart'));
 });
 
-test('U1: a runner that refuses to stop during failure recovery prevents restore', { skip }, async (t) => {
+test('U1: post-start failure leaves a live runner and current database intact', { skip }, async (t) => {
   const h = harness(t, { legacy: true }); h.openRunner(); h.mutate();
   const r = await h.run(h.snapshot + traps + '\n' + maintenance + '\n: > "$FAKE_STATE/refuse-stop"\nexit 19');
   assert.equal(r.status, 19);
-  assert.match(r.stdout, /Recovery refused or failed/);
+  assert.match(r.stdout, /Current database and runtime history retained/);
   assert.doesNotMatch(r.stdout, /Database restored/);
   assert.ok(h.runnerOpen());
   assert.deepEqual(h.rows(h.current), ['backup-state', 'post-backup']);

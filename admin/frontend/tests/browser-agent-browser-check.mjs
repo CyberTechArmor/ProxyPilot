@@ -13,7 +13,7 @@ page.setDefaultTimeout(15000);
 const fixture=`${process.env.BROWSER_FIXTURE_ORIGIN||'http://127.0.0.1:5177'}/tests/fixtures/browser-agents.html`;
 const authEvidence=process.env.BROWSER_AUTH_ARTIFACTS;if(authEvidence)mkdirSync(authEvidence,{recursive:true});
 async function assertEditorLocked() {
-  for(const label of ['Browser configuration JSON','Original source','Configuration name'])assert.equal(await page.getByRole('textbox',{name:label,exact:true}).isDisabled(),true,`Runtime wait locks ${label}`);
+  for(const label of ['Browser configuration JSON','Original source','Configuration name'])assert.equal(await page.getByLabel(label,{exact:true}).isDisabled(),true,`Runtime wait locks ${label}`);
   for(const name of ['New browser configuration','Load example for editing','Reload saved configuration','Refresh project details','Validate configuration','Save browser configuration'])assert.equal(await page.getByRole('button',{name,exact:true}).isDisabled(),true,`Runtime wait locks ${name}`);
   assert.equal(await page.getByRole('button',{name:/Review configuration/}).isDisabled(),true,'Runtime wait locks list selection');
 }
@@ -58,7 +58,7 @@ try{
   await page.evaluate(()=>window.browserFixtureRejectNext={status:403,body:{error:'Project membership revoked'}});
   await page.getByRole('button',{name:'Validate configuration',exact:true}).click();await page.getByRole('alert').waitFor();
   assert.equal(await page.getByRole('textbox',{name:'Original source',exact:true}).count(),0,'Lost authorization removes private editors');
-  assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),0);
+  assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).count(),0);
   await page.goto(`${fixture}?private=1`);await page.getByRole('button',{name:/Review configuration/}).click();await page.getByText('Private image and file inputs',{exact:true}).click();await page.getByRole('button',{name:'List private inputs'}).click();
   assert.equal(await page.getByRole('button',{name:'Approve input',exact:true}).isDisabled(),true);
   await page.getByRole('button',{name:'Open exact private input for review'}).click();await page.getByText('Synthetic private review text.',{exact:true}).waitFor();await page.getByRole('checkbox',{name:'I reviewed this private file and approve its use as a browser upload or task input'}).check();await page.getByRole('button',{name:'Approve input',exact:true}).click();
@@ -76,13 +76,13 @@ try{
   const consentReview=()=>page.getByRole('checkbox',{name:/I reviewed: Send this approved guide and bounded selected-site content/});
   const writeCount=()=>page.evaluate(()=>window.browserFixtureRequests.filter(r=>r.method!=='GET').length);
   await page.goto(`${fixture}?runtime=absent`);await page.getByRole('button',{name:/Review configuration/}).click();
-  assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),1);
+  assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).count(),1);
   assert.equal(await page.getByRole('region',{name:'Selected browser runtime',exact:true}).count(),0);
   assert.equal(await page.getByRole('button',{name:'Start browser run',exact:true}).count(),0);
   assert.equal(await page.evaluate(()=>window.browserFixtureRequests.some(r=>r.path.includes('/browser-agent-runs')||r.path.includes('/convert'))),false);
   sharedEditorChecks.push('inert editor retains no runtime, conversion or run calls');
   await page.goto(`${fixture}?ready=1`);await page.getByRole('button',{name:/Review configuration/}).click();
-  assert.equal(await page.locator('.browser-configurations').count(),1);assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),1);
+  assert.equal(await page.locator('.browser-configurations').count(),1);assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).count(),1);
   assert.equal(await page.getByRole('textbox',{name:'Original source',exact:true}).count(),1);
   assert.equal(await page.getByRole('button',{name:'Save browser configuration',exact:true}).count(),1);
   assert.equal(await page.evaluate(()=>window.browserFixtureRequests.filter(r=>r.path==='/browser-agent-configurations'&&r.method==='GET').length),1);
@@ -101,10 +101,10 @@ try{
   await page.getByRole('checkbox',{name:/I reviewed: Send the original instructions/}).check();await page.getByRole('button',{name:'Suggest editable draft'}).click();await page.getByRole('button',{name:'Place suggestion in editor for review'}).waitFor();
   await page.getByRole('textbox',{name:'Configuration name',exact:true}).fill('Conflict must retain this edit');await validateConfiguration();await configReview().check();
   await page.evaluate(()=>window.browserFixtureRejectNext={status:412,body:{error:{code:'REVISION_CONFLICT',message:'Saved configuration changed'}}});await page.getByRole('button',{name:'Save browser configuration',exact:true}).click();await page.getByRole('alert').filter({hasText:'Your edits are retained'}).waitFor();
-  const retained=await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).inputValue(),writesAtConflict=await writeCount();
+  const retained=await page.getByLabel('Browser configuration JSON',{exact:true}).inputValue(),writesAtConflict=await writeCount();
   await page.getByRole('button',{name:'Refresh project details',exact:true}).click();await page.getByText('Project and configuration list refreshed. Local edits retained; any revision conflict still requires reconciliation.',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Refresh browser runs',exact:true}).click();await page.getByText('Browser runs refreshed.',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).inputValue(),retained);assert.equal(await writeCount(),writesAtConflict);
+  assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).inputValue(),retained);assert.equal(await writeCount(),writesAtConflict);
   for(const name of ['Validate configuration','Save browser configuration','Check readiness','Give model consent','Start browser run','Place suggestion in editor for review'])assert.equal(await page.getByRole('button',{name,exact:true}).isDisabled(),true,`Conflict blocks ${name}`);
   await page.getByRole('button',{name:'Reload saved configuration',exact:true}).click();await page.getByText('Saved configuration loaded for review.',{exact:true}).waitFor();
   assert.equal(await page.getByRole('textbox',{name:'Configuration name',exact:true}).inputValue(),'Canonical local draft');
@@ -129,15 +129,15 @@ try{
   sharedEditorChecks.push('provider/action waits lock canonical editor/list/reload; late queued conversion cannot overwrite another draft generation');
   await page.evaluate(()=>window.browserFixtureHoldRead='/browser-agent-configurations');await page.getByRole('button',{name:'Refresh project details',exact:true}).click();await page.waitForFunction(()=>!!window.browserFixtureReleaseRead);
   await page.evaluate(()=>window.browserFixtureRejectRunReads=true);await page.getByRole('alert').filter({hasText:'Synthetic runtime membership revoked.'}).waitFor();
-  assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),0);await page.evaluate(()=>window.browserFixtureReleaseRead());
+  assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).count(),0);await page.evaluate(()=>window.browserFixtureReleaseRead());
   await page.waitForFunction(()=>window.browserFixtureReadReturned===true);
   await page.locator('.browser-configurations').getByRole('status').filter({hasText:'Working…'}).waitFor({state:'hidden'});
-  assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),0,'Late canonical list response cannot restore private editors after runtime authorization denial');
+  assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).count(),0,'Late canonical list response cannot restore private editors after runtime authorization denial');
   assert.equal(await page.getByRole('button',{name:/Review configuration/}).count(),0,'Late canonical list response cannot restore private names');
   sharedEditorChecks.push('runtime authorization denial fences a delayed canonical list response and private editor state');
   await page.goto(`${fixture}?ready=1`);await page.getByRole('button',{name:/Review configuration/}).click();await page.getByText('Prepare a draft from instructions, images or files',{exact:true}).click();await page.getByRole('button',{name:'Check conversion readiness'}).click();
   await page.getByRole('checkbox',{name:/I reviewed: Send the original instructions/}).check();await page.evaluate(()=>{window.browserFixtureQueueConversion=true;window.browserFixtureRejectConversionReads=true;});await page.getByRole('button',{name:'Suggest editable draft'}).click();
-  await page.getByRole('alert').filter({hasText:'Synthetic conversion-only membership revoked.'}).waitFor();assert.equal(await page.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),0);assert.equal(await page.getByRole('textbox',{name:'Original source',exact:true}).count(),0);assert.equal(await page.getByRole('button',{name:/Review configuration/}).count(),0);
+  await page.getByRole('alert').filter({hasText:'Synthetic conversion-only membership revoked.'}).waitFor();assert.equal(await page.getByLabel('Browser configuration JSON',{exact:true}).count(),0);assert.equal(await page.getByRole('textbox',{name:'Original source',exact:true}).count(),0);assert.equal(await page.getByRole('button',{name:/Review configuration/}).count(),0);
   assert.equal(await page.evaluate(()=>window.browserFixtureRequests.some(r=>r.path==='/browser-agent-runs/33333333-3333-4333-8333-333333333333')),false,'Conversion-only denial clears private state with no selected-run poll');sharedEditorChecks.push('conversion-only polling denial clears private source/editor/assets without a selected run');
   const authRegion=()=>page.getByRole('region',{name:'Authentication readback',exact:true});
   const loadAuth=()=>authRegion().getByRole('button',{name:'Load authentication request evidence',exact:true});
@@ -187,7 +187,7 @@ try{
     await page.setViewportSize({width,height});await page.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
     const measured=await page.evaluate(()=>({width:innerWidth,height:innerHeight,documentWidth:document.documentElement.scrollWidth}));assert.equal(measured.documentWidth,width,`Authentication horizontal overflow at ${width}×${height}`);
     await requestChoices.nth(1).scrollIntoViewIfNeeded();await requestChoices.nth(1).check();await confirmation.scrollIntoViewIfNeeded();await confirmation.check();
-    await confirmAuth().scrollIntoViewIfNeeded();const box=await confirmAuth().boundingBox();assert.ok(box.y>=0&&box.y+box.height<=height,'Authentication confirmation reachable at the actual viewport height');
+    await confirmAuth().evaluate(el=>el.scrollIntoView({block:'center',behavior:'instant'}));const box=await confirmAuth().boundingBox();assert.ok(box.y>=0&&box.y+box.height<=height,'Authentication confirmation reachable at the actual viewport height');
     const accessibility=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21aa']).analyze();assert.deepEqual(accessibility.violations.map(v=>({id:v.id,nodes:v.nodes.length})),[],`Authentication accessibility at ${width}×${height}`);
     authLayouts.push({...measured,horizontal_overflow:false,accessibility_violations:0});
     if(authEvidence)await page.screenshot({path:`${authEvidence}/authentication-${width}x${height}.png`});

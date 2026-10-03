@@ -2106,7 +2106,7 @@ const MCP_BASE_TOOLS = [
   },
   {
     name: 'run_proxypilot_update',
-    description: 'Update ProxyPilot and host Incus through the root-owned update.sh runner. It backs up ProxyPilot and Incus data, checkpoints supported Incus storage, upgrades Incus to the current signed stable package, enables cached-image updates, then rebuilds ProxyPilot. Incus management and guests may be interrupted; a failed Incus schema upgrade can require operator recovery. The dashboard API is unavailable during restart and the full update can take longer than that restart. Confirm with the user first; without confirm: true the call refuses. Runs refuse uncommitted local changes, concurrent updates, unreachable agents and missing source checkouts. rebuild: true forces a rebuild when code is current. Poll get_proxypilot_update_status. Policy: lib/mcp-policy/self-update-allowlist.json.',
+    description: 'Update ProxyPilot through the root-owned update.sh runner. It backs up ProxyPilot data, updates the source and host agent, then rebuilds ProxyPilot. Incus package and image settings are unchanged: the separate --upgrade-incus option is not available through this tool. The dashboard API is unavailable during restart and the full update can take longer than that restart. Confirm with the user first; without confirm: true the call refuses. Runs refuse uncommitted local changes, concurrent updates, unreachable agents and missing source checkouts. rebuild: true forces a rebuild when code is current. Poll get_proxypilot_update_status. Policy: lib/mcp-policy/self-update-allowlist.json.',
     inputSchema: {
       type: 'object',
       properties: {

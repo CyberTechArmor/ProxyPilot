@@ -34,6 +34,7 @@ BROKER = '/etc/proxypilot-a4/broker/a4-credential-broker.py'
 VM = 'pp-agents-a3-debian13-proof-20260927'
 VM_UUID = '49592202-a8b0-45af-9ac6-5439761d73e4'
 SOURCE = '/opt/proxypilot'
+SOURCE_RECORD = '/var/lib/proxypilot/update/source-dir'
 TRANSACTION = '/var/lib/proxypilot/update/selected-runtime-package'
 LOCK = '/run/proxypilot-a3-fence.lock'
 GATEWAY_STATE = STATE + '/selected-gateway'
@@ -64,7 +65,7 @@ PROTECTED = (ROOT + '/supervisor-key.pem', PUBLIC_KEY, '/etc/proxypilot-a8/super
              '/var/lib/proxypilot-a7/live-install.json', UNIT_ROOT + 'proxypilot-a3-fence.service',
              UNIT_ROOT+'proxypilot-a7-turn.service',UNIT_ROOT+'proxypilot-a7-turn-cert.service',
              UNIT_ROOT+'proxypilot-a7-turn-cert.timer','/etc/caddy/custom/pp-a7-turn.caddy',
-             SOURCE + '/.env', SOURCE + '/docker-compose.yml')
+             SOURCE + '/.env', SOURCE + '/docker-compose.yml', SOURCE_RECORD)
 LEDGERS = (STATE + '/supervisor/state.json', '/var/lib/proxypilot-a4/broker/state.json', GATEWAY_STATE)
 OPTIONAL = {ROOT + '/selected-browser-acceptance.json', STATE + '/supervisor-keys', GATEWAY_STATE}
 SOURCE_NAMES = LEGACY + SELECTED + ('a4-credential-broker.py', 'a3-install-supervisor.py',
@@ -440,16 +441,59 @@ class Host:
             refuse('A8 root-only backend socket identity changed')
 
     def sources(self):
-        revision = self.execute(['git', '-C', SOURCE, 'rev-parse', '--verify', 'HEAD']).decode().strip()
+        # Ordinary install/update copies /opt from the root runner's recorded
+        # checkout. Never guess a Git root from the copied install or a branch.
+        record = self.tree.read(SOURCE_RECORD, 4096)
+        if self.tree.pin(SOURCE_RECORD)['mode'] not in {0o600, 0o644}:
+            refuse('Recorded source custody/mode changed')
+        try:
+            checkout = record.decode('utf-8').removesuffix('\n')
+        except UnicodeError:
+            refuse('Recorded source is not UTF-8')
+        path = Path(checkout)
+        if (not checkout or '\n' in checkout or '\r' in checkout or '\x00' in checkout or
+                not path.is_absolute() or str(path) != checkout or '..' in path.parts):
+            refuse('Recorded source is not one canonical checkout')
+        if not stat.S_ISDIR(self.tree.secure(checkout).st_mode):
+            refuse('Recorded source is not a directory')
+        self.tree.secure(checkout + '/.git')
+        git = ['git', '-C', str(self.tree.path(checkout))]
+        top = self.execute(git + ['rev-parse', '--show-toplevel']).decode().strip()
+        if top != str(self.tree.path(checkout)):
+            refuse('Recorded source Git root differs')
+        # Worktrees may use a .git pointer. Its target and shared Git state must
+        # have the same root-only custody as the recorded checkout.
+        for argument in ('--git-dir', '--git-common-dir'):
+            directory = self.execute(git + ['rev-parse', '--path-format=absolute', argument]).decode().strip()
+            try:
+                logical = '/' + str(Path(directory).relative_to(self.tree.prefix))
+            except ValueError:
+                refuse('Recorded Git state is outside the trusted tree')
+            if not stat.S_ISDIR(self.tree.secure(logical).st_mode):
+                refuse('Recorded Git state custody changed')
+        revision = self.execute(git + ['rev-parse', '--verify', 'HEAD']).decode().strip()
         if not re.fullmatch('[0-9a-f]{40}', revision):
             refuse('Exact reviewed source revision required')
-        files = {}
+        files, modes = {}, {}
         for name in SOURCE_NAMES:
-            value = self.tree.read(SOURCE + '/scripts/' + name)
-            if value != self.execute(['git', '-C', SOURCE, 'show', revision + ':scripts/' + name]):
+            installed = SOURCE + '/scripts/' + name
+            value = self.tree.read(installed)
+            # Copying into the install honors the root updater's umask.
+            # Recognize ordinary/private source modes, never writable ones.
+            mode = self.tree.pin(installed)['mode']
+            if mode not in {0o600, 0o644, 0o700, 0o755}:
+                refuse('Delivered source file mode differs from the reviewed contract')
+            committed = self.execute(git + ['show', revision + ':scripts/' + name])
+            if value != committed or self.tree.read(checkout + '/scripts/' + name) != committed:
                 refuse('Source file differs from pinned checkout')
             files[name] = value
-        return revision, files
+            modes[name] = mode
+        if (self.tree.read(SOURCE_RECORD, 4096) != record or
+                self.execute(git + ['rev-parse', '--verify', 'HEAD']).decode().strip() != revision or
+                any(self.tree.read(SOURCE+'/scripts/'+name) != value or
+                    self.tree.pin(SOURCE+'/scripts/'+name)['mode'] != modes[name] for name, value in files.items())):
+            refuse('Recorded source/delivery changed during attestation')
+        return revision, files, dict(path=checkout, record_sha256=sha(record), delivered_modes=modes)
 
     def identity(self):
         self.wiring()
@@ -675,14 +719,14 @@ class Package:
             journals, pins = self.installed(operation)
             if journals[0].get('key_id') != identity['key_id']:
                 refuse('Existing installation receipt key differs')
-            revision, sources = self.h.sources()
+            revision, sources, checkout = self.h.sources()
             files = self.candidates(sources, journals)
             new = {p:dict(sha256=sha(b), bytes=len(b), mode=0o600 if p in JOURNALS else 0o644) for p,b in files.items()}
             if self.t.read(TRANSACTION + '/transaction.json', missing=True) is not None and self.tx()['phase'] not in {'committed','rolled_back'}:
                 refuse('Incomplete package transaction requires separately reviewed recovery')
             self.h.health(pins, identity['key_id'], operation == 'update')
             units = self.h.unit_check()
-            plan = dict(schema=VERSION, operation=operation, source_revision=revision,
+            plan = dict(schema=VERSION, operation=operation, source_revision=revision, source_checkout=checkout,
                         source_files={n:sha(b) for n,b in sources.items()}, identity=identity, protected=protected,
                         ledgers=ledgers, units=units, files={p:dict(old=pins[p],new=new[p]) for p in OWNED})
             return plan, files
@@ -699,14 +743,14 @@ class Package:
         elif operation == 'rollback' and data['phase'] not in {'applied','committed'}:
             refuse('Only applied package may roll back')
         current = self.verify_transaction(data, require_new=operation == 'commit')
-        revision,sources=self.h.sources()
+        revision,sources,checkout=self.h.sources()
         candidate_files(sources)
         units=self.h.unit_inventory(recovery=True)
         if {u:s['enabled'] for u,s in units.items()}!={u:s['enabled'] for u,s in data['units'].items()}:
             refuse('Fixed unit enablement changed before recovery')
         return dict(schema=VERSION, operation=operation, transaction_id=data['id'], transaction_sha256=sha(encoded(data)),
                     identity=identity, protected=protected, ledgers=ledgers, files=current,units=units,
-                    source_revision=revision,source_files={n:sha(b) for n,b in sources.items()}), None
+                    source_revision=revision,source_checkout=checkout,source_files={n:sha(b) for n,b in sources.items()}), None
 
     @staticmethod
     def ledger_equal(current, previous):

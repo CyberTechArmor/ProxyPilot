@@ -8,10 +8,13 @@ services in `scripts/tests/test_selected_runtime_package.py`.
 
 No installation was performed by writing or testing this contract. It does not
 enroll a host, activate credentials, modify Incus/firewalls/Chromium, create an
-acceptance marker, or authorize production execution. The ordinary
-`review-runtime-refresh.py` file set, guest compatibility exception and refusal
-behavior remain unchanged. The ordinary Settings → Update flow does not invoke
-this helper. A source merge or dashboard update cannot make the runtime ready.
+acceptance marker, or authorize production execution. Ordinary Settings → Update
+delivers current source and this helper, while the capability-aware
+`review-runtime-refresh.py` preserves a positively recognized legacy runtime.
+The historical two-file public-review refresh and exact guest compatibility
+exception remain available for historical source releases. Ordinary Update does
+not invoke this package helper. A source merge or dashboard update cannot make
+the selected runtime ready.
 
 ## Exact package and immutable identity
 
@@ -43,13 +46,81 @@ changed file modes, an incomplete journal, or unowned selected helper files
 refuse before service operations. This helper does not silently repair or
 enroll an unfamiliar host.
 
-All source bytes come from the fixed `/opt/proxypilot` checkout. Every one of the
+All source bytes come from the fixed `/opt/proxypilot/scripts` delivery, which
+does not need a `.git` directory. The helper reads only the fixed root-owned
+`/var/lib/proxypilot/update/source-dir` record written by ordinary install/update;
+it has no source-path flag, environment override or copied-install Git fallback.
+The record must contain one canonical absolute root-owned checkout path, with
+nonsymlink root-owned ancestors and Git/worktree common state. Every one of the
 17 source inputs, including the package helper and installer unit constants,
-must match `git show HEAD:scripts/<fixed-name>`. The plan binds that exact commit
-and each input hash. Python syntax and JSON structure are checked; unit strings
+must match both that checkout's working bytes and
+`git show <pinned-HEAD>:scripts/<fixed-name>`. HEAD and the source record are
+checked before/after attestation, and all delivered bytes/modes are read back.
+Copied source modes0600/0644/0700/0755 accommodate the root updater's umask;
+root custody and the plan's exact observed mode still apply. The plan binds
+the checkout path, record hash, immutable commit, delivered modes and each input
+hash for install, update, commit and recovery. Python syntax and JSON structure are checked; unit strings
 are read as AST literals. Candidate Python is never imported or executed while
 building a plan. No downloaded package, caller-supplied path, shell fragment,
 environment root override or CLI adapter is accepted.
+
+The normal updater resolves fetched `refs/heads/main` once and verifies its
+exact SHA and the original checkout branch through re-exec and completion.
+Package planning uses that recorded delivery and immutable SHA, without fetching
+or resolving a mutable branch. The existing separately authorized exact
+`--build-current=<SHA>` behavior remains unchanged; this helper provides no new
+route for choosing a source commit.
+
+## Ordinary Update compatibility
+
+When the delivered source includes the expanded selected package, Update
+requires the authentic PR724 legacy supervisor/broker/adjacent-code hashes, the
+exact PR710 or PR724 guest, existing installed digest journals and fixed units.
+The exact pre-renewal owned set remains recognized with both renewal files
+absent; no timer is enrolled. Proxy code, certificate/key equality, certificate
+lifetime, target/service health, receipt keys, A8 wiring, modes and idle ledgers
+remain checked. Mutually consistent unknown code/journal hashes are refused.
+Any selected helper, acceptance marker, gateway state or selected-package
+transaction directory requires separate review. Unknown/partial selected
+installation is not an unavailable-runtime success.
+
+A completely unenrolled host skips runtime work only after positive absence of
+the fixed configuration/state roots and supervisor/proxy/broker/fence/renewal
+units. Existing artifacts without reviewed A8 settings refuse; Update never
+repairs or enrolls them. Current selected runs, conversions and model reservation
+database namespaces must contain only recognized terminal states. Unknown/null
+states and active selected model-ledger reservations also refuse before effects.
+
+Preservation uses a distinct version2 `preserve_legacy` metadata transaction in
+the existing root-private refresh directory. Apply rechecks admission after the
+dashboard stops and records complete legacy code/unit/journal pins, protected
+identity and exact source delivery. It writes only that private metadata, with
+no installed runtime/ledger replacements, daemon stops/restarts or acceptance.
+Commit verifies those same preserved source/runtime identities and serving
+bytes after dashboard health, while permitting legitimate newly admitted Demo
+or provider work. It never restores an earlier runtime ledger.
+
+Interrupted preservation requires its verified rollback before another Update;
+that rollback checks current idle admission and retained identities, marks only
+the preservation metadata, and performs no runtime restore or service effect.
+Drift refuses recovery with the dashboard stopped for inspection. Older
+version1 refresh transactions keep their exact four-target rollback behavior;
+unknown or incomplete transactions cannot be superseded by preservation.
+
+This compatibility profile covers the recognized legacy host before separate
+selected installation. An expanded installed package, acceptance/gateway state,
+or any retained selected-package transaction directory (including a completed
+or rolled-back attempt) refuses ordinary Update. A future preservation profile
+for that expanded installation and its backend protocol compatibility is
+pre-activation work requiring separate review. This release does not claim the
+future expanded-runtime ordinary-update lifecycle is accepted.
+
+Before a future installation approval, obtain the current complete read-only
+package plan on the actual host. Record its exact `plan_sha256`, source revision,
+source checkout/record/delivered hashes, machine/boot/VM/network/policy identity,
+key/SPKI, installed/new25-file pins, protected state, ledgers and unit state.
+Approval names those measured values and the exact operation. Repository hashes
+or an earlier plan are not a substitute for this action-time measurement.
 
 The following data are protected by fresh file/directory inventories and are
 never backed up for restoration, rewritten, pruned or regenerated:

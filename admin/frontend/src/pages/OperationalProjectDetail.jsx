@@ -10,6 +10,7 @@ import { BrokerAgents } from '@/components/operational-projects/BrokerAgents';
 import { ConnectionCatalogue } from '@/components/operational-projects/Connections';
 import { AgentConfiguration } from '@/components/operational-projects/Agents';
 import { BrowserConfigurations } from '@/components/operational-projects/BrowserConfigurations';
+import { BrowserAgents } from '@/components/operational-projects/BrowserAgents';
 import { AccessPolicy } from '@/components/operational-projects/AccessPolicy';
 import { AgentRunsPanel } from '@/components/operational-projects/AgentRuns';
 import { NewProjectButton, ProjectBrowser, ProjectPageHeader, ProjectStatus } from '@/components/operational-projects/ProjectSurface';
@@ -31,7 +32,7 @@ function Operation({id}) {
   const [transfer,setTransfer]=useState(''),[discard,setDiscard]=useState(false),[selectedVersion,setSelectedVersion]=useState(null);
   const [runForm,setRunForm]=useState(blankRun),[runVersion,setRunVersion]=useState(null),[correcting,setCorrecting]=useState(null),[relatedRun,setRelatedRun]=useState(null);
   const [capability,setCapability]=useState(false),[evidenceTick,setEvidenceTick]=useState(0),[selectionDirty,setSelectionDirty]=useState(false);
-  const [agentCapability,setAgentCapability]=useState(false),[runsCapability,setRunsCapability]=useState(false),[websiteCapability,setWebsiteCapability]=useState(false),[browserDraftCapability,setBrowserDraftCapability]=useState(false);
+  const [agentCapability,setAgentCapability]=useState(false),[runsCapability,setRunsCapability]=useState(false),[websiteCapability,setWebsiteCapability]=useState(false),[browserDraftCapability,setBrowserDraftCapability]=useState(false),[browserRuntimeCapability,setBrowserRuntimeCapability]=useState(false);
   const [execution,setExecution]=useState({available:false,message:''});
   const [params,setParams]=useSearchParams(),openRun=params.get('run');
   const sectionNav=useRef(null);
@@ -59,6 +60,7 @@ function Operation({id}) {
     setExecution({available:caps.agent_execution_available===true,message:caps.agent_execution_message||''});
     setWebsiteCapability(websiteReviewAvailable(caps));
     setBrowserDraftCapability(caps.enabled && caps.agents_metadata_enabled && caps.browser_draft_configuration_available === true && caps.browser_draft_contract === 'browser-agent-draft.v1');
+    setBrowserRuntimeCapability(caps.enabled && caps.agents_metadata_enabled && caps.agent_runs_enabled && caps.selected_browser_contract === 'selected-browser.v1');
     setData({p:project,d:d.draft,v,r,e,a});
     if(replace===true||replace==='draft')setDraft({title:d.draft.title,instructions:d.draft.instructions,revision:d.draft.revision});
     if(replace===true||replace==='meta')setMeta({name:project.name,description:project.description,revision:project.revision});
@@ -213,7 +215,7 @@ function Operation({id}) {
     </Panel>}
     {section==='Access'&&<Panel title="Access · Connections"><ConnectionCatalogue projectId={id}/></Panel>}
     {section==='Website reviews'&&(websiteCapability?<WebsiteReviews base={base} project={p} onChanged={()=>refresh(false)}/>:<Panel title="Website reviews"><p>Public website reviews are unavailable on this installation. This workflow requires the reviewed website review runtime.</p></Panel>)}
-    {section==='Agents'&&agentCapability&&<>{!brokerSetupActive&&<div className="rounded-md border bg-muted/20 p-4 space-y-2"><h3 className="font-semibold">Execution capability</h3><p className="text-sm text-muted-foreground">A configured task describes intended work. Running it requires a supported workflow and runtime, an approved guide, permitted connections and limits.</p><p className="text-sm text-muted-foreground">The synthetic sign-in pilot supports only demo.fractionate.ai. Check the agent readiness before starting work.</p></div>}{websiteCapability&&!brokerSetupActive&&<Panel title="Review a public website"><p className="text-sm">Use the separate public HTML/text workflow with your approved guide. It requires no website credential and does not use synthetic sign-in.</p><Action variant="outline" onClick={()=>{setSection('Website reviews');setParams({section:'Website reviews'},{replace:true});}}>Open website reviews</Action></Panel>}{browserDraftCapability&&<BrowserConfigurations key={base} base={base} project={p} onChanged={()=>refresh(false)}/>}<BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Demo sign-in profiles</summary><p className="text-sm text-muted-foreground mb-4">Demo sign-in at demo.fractionate.ai. Profiles and supervised runs remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} websiteAvailable={websiteCapability} onChanged={()=>refresh(false)}/></details></>}
+    {section==='Agents'&&agentCapability&&<>{!brokerSetupActive&&<div className="rounded-md border bg-muted/20 p-4 space-y-2"><h3 className="font-semibold">Execution capability</h3><p className="text-sm text-muted-foreground">A configured task describes intended work. Running it requires a supported workflow and runtime, an approved guide, permitted connections and limits.</p><p className="text-sm text-muted-foreground">The synthetic sign-in pilot supports only demo.fractionate.ai. Check the agent readiness before starting work.</p></div>}{websiteCapability&&!brokerSetupActive&&<Panel title="Review a public website"><p className="text-sm">Use the separate public HTML/text workflow with your approved guide. It requires no website credential and does not use synthetic sign-in.</p><Action variant="outline" onClick={()=>{setSection('Website reviews');setParams({section:'Website reviews'},{replace:true});}}>Open website reviews</Action></Panel>}{browserRuntimeCapability?<BrowserAgents key={base} base={base} project={p} onChanged={()=>refresh(false)}/>:browserDraftCapability&&<BrowserConfigurations key={base} base={base} project={p} onChanged={()=>refresh(false)}/>}<BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Demo sign-in profiles</summary><p className="text-sm text-muted-foreground mb-4">Demo sign-in at demo.fractionate.ai. Profiles and supervised runs remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} websiteAvailable={websiteCapability} onChanged={()=>refresh(false)}/></details></>}
     {section==='Agent runs'&&runsCapability&&runsPanel}
   </div></div></div>;
 }

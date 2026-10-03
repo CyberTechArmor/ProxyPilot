@@ -19,6 +19,8 @@ test('partially edited nested JSON remains available without mounting unsafe set
 });
 test('Start requires current server readiness, saved revision/hash, current guide and project authority',()=>{
   assert.equal(readyForStart(ready,saved,project),true);
+  assert.equal(readyForStart(ready,saved,project,{dirty:true}),false);
+  assert.equal(readyForStart(ready,saved,project,{conflict:true}),false);
   for(const r of [{...ready,can_start:false},{...ready,pins:{...ready.pins,project_revision:7}},{...ready,pins:{...ready.pins,configuration_revision:2}},{...ready,pins:{...ready.pins,configuration_sha256:'b'.repeat(64)}}])assert.equal(readyForStart(r,saved,project),false);
   for(const p of [{...project,own_role:'viewer'},{...project,archived_at:'now'},{...project,current_version:{...guide,content_hash:'b'.repeat(64)}}])assert.equal(readyForStart(ready,saved,p),false);
   assert.deepEqual(startPayload(saved,project,'one-key'),{project_revision:8,configuration_revision:3,configuration_sha256:sha,idempotency_key:'one-key'});

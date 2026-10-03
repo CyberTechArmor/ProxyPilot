@@ -115,6 +115,8 @@ jobs:
           node tests/agent-runs.browser.mjs
           node tests/agent-runs-a7.browser.mjs
           node tests/browser-configurations.browser.mjs
+          node --test tests/browser-agent-ui.test.mjs tests/browser-authentication-ui.test.mjs
+          node tests/browser-agent-integration.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

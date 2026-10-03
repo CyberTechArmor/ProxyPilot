@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Bot, FileText, Maximize2, Minimize2 } from 'lucide-react';
+import { FileText, Maximize2, Minimize2 } from 'lucide-react';
 import { browserAgentsApi as api } from '@/lib/api';
 import { requestAgentControl } from '@/lib/agent-control';
 import { requestSudo } from '@/lib/sudo';
@@ -7,9 +7,9 @@ import { Action, Choice, Field, Panel } from './shared';
 import { LiveBrowser } from './LiveBrowser';
 import { BrowserAuthenticationReadback } from './BrowserAuthenticationReadback';
 import { createBrowserFullscreen } from './browser-fullscreen';
-import example from './browser-agent-example.json';
-import { ACTIONS, ARTIFACT_REVIEW, ASSET_REVIEW, BROWSER_CONSENT, CONVERSION_DISCLOSURE, TERMINAL, approvalPayload, assetRef,
-  browserLiveEndpoint, browserPaths, budgetFields, filePayload, hasEditableDraftShape, parseDraft, readyForStart, safeBrowserCitation, startPayload, verifyPrivateBlob, wrappedSourceText } from './browser-agent-ui';
+import { BrowserConfigurations } from './BrowserConfigurations';
+import { ARTIFACT_REVIEW, ASSET_REVIEW, BROWSER_CONSENT, CONVERSION_DISCLOSURE, TERMINAL, approvalPayload, assetRef,
+  browserLiveEndpoint, browserPaths, filePayload, readyForStart, safeBrowserCitation, startPayload, verifyPrivateBlob } from './browser-agent-ui';
 
 const words=value=>String(value??'').replaceAll('_',' ');
 const pretty=value=>JSON.stringify(value,null,2);
@@ -28,35 +28,24 @@ function Hash({label,value}) {return <div><dt>{label}</dt><dd className="font-mo
 // Private source text stays in React memory and the versioned project record;
 // never in browser storage, a URL, a console, or a provisioning request.
 export function BrowserAgents({base,project,onChanged=async()=>{}}) {
-  const paths=browserPaths(base), [items,setItems]=useState([]),[next,setNext]=useState(null),[runs,setRuns]=useState([]);
-  const [saved,setSaved]=useState(null),[json,setJson]=useState(''),[source,setSource]=useState(''),[ready,setReady]=useState(null),[validated,setValidated]=useState('');
-  const [run,setRun]=useState(null),[assets,setAssets]=useState([]),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[lost,setLost]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
-  const [reviewed,setReviewed]=useState(false),[stale,setStale]=useState(false),[conversion,setConversion]=useState(null),[consent,setConsent]=useState(null);
-  const controller=useRef(null),epoch=useRef(0),lock=useRef(false),startKey=useRef(null),mounted=useRef(false),heading=useRef(null);
-  const editable=['owner','editor'].includes(project.own_role)&&!project.archived_at,owner=project.own_role==='owner'&&!project.archived_at;
+  const paths=browserPaths(base),[runs,setRuns]=useState([]),[run,setRun]=useState(null),[assets,setAssets]=useState([]);
+  const [busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[lost,setLost]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState(''),[conversion,setConversion]=useState(null);
+  const controller=useRef(null),epoch=useRef(0),lock=useRef(false),mounted=useRef(false);
+  const owner=project.own_role==='owner'&&!project.archived_at;
   const operator=['owner','editor','operator','reviewer'].includes(project.own_role)&&!project.archived_at;
-  let config=null;try{if(json)config=parseDraft(json);}catch{/* Server validation is an explicit gesture. */}
-  const dirty=!!saved&&(json!==pretty(saved.configuration)||source!==saved.source_text);
-  const validationKey=`${json}\u0000${source}`;
-  const settingsEditable=hasEditableDraftShape(config);
+  function clearPrivate() {setLost(true);setRun(null);setAssets([]);setRuns([]);setConversion(null);controller.current?.abort();}
   function fail(e) {
-    if([401,403,404].includes(e.status)&&!['ELEVATION_REQUIRED','AGENT_CONTROL_VERIFICATION_REQUIRED'].includes(e.code)){setLost(true);setSaved(null);setJson('');setSource('');setReady(null);setRun(null);setAssets([]);setItems([]);setRuns([]);setConversion(null);controller.current?.abort();}
-    if(e.status===412)setStale(true);
-    setError(`${e.message}${e.code?` (${e.code})`:''}${e.status===412?' Your entered settings are retained. Compare or reload the saved revision before retrying.':''}`);
+    if([401,403,404].includes(e.status)&&!['ELEVATION_REQUIRED','AGENT_CONTROL_VERIFICATION_REQUIRED'].includes(e.code))clearPrivate();
+    setError(`${e.message}${e.code?` (${e.code})`:''}${e.status===412?' Your entered settings are retained. Reload or reconcile the current revision before retrying.':''}`);
   }
-  async function load(signal,page=null) {
-    const listed=await api.get(`${paths.configurations}${page?`?after=${encodeURIComponent(page)}`:''}`,signal);
-    if(signal?.aborted)return;
-    setItems(old=>page?[...old,...listed.configurations]:listed.configurations);setNext(listed.next_cursor);
-    if(!page){const result=await api.get(paths.runs,signal);if(!signal?.aborted)setRuns(result.runs||[]);}
+  async function load(signal) {
+    const result=await api.get(paths.runs,signal);if(!signal?.aborted)setRuns(result.runs||[]);
   }
   useEffect(()=>{
-    mounted.current=true;const c=new AbortController(),gen=++epoch.current;controller.current=c;setLoading(true);setLost(false);setError('');setSaved(null);setJson('');setSource('');setReady(null);setRun(null);setAssets([]);setItems([]);setRuns([]);setConversion(null);
+    mounted.current=true;const c=new AbortController(),gen=++epoch.current;controller.current=c;setLoading(true);setLost(false);setError('');setRun(null);setAssets([]);setRuns([]);setConversion(null);
     load(c.signal).catch(e=>{if(!c.signal.aborted&&gen===epoch.current)fail(e);}).finally(()=>{if(!c.signal.aborted&&gen===epoch.current)setLoading(false);});
     return()=>{mounted.current=false;epoch.current++;c.abort();};
   },[base,project.own_role,project.archived_at]);
-  useEffect(()=>{setReviewed(false);setReady(null);setValidated('');setConsent(null);},[saved?.revision,project.current_version?.id,project.current_version?.content_hash]);
-  useEffect(()=>{if(saved||json)heading.current?.focus();},[saved?.id]);
   useEffect(()=>{
     if(!run?.run?.id||TERMINAL.includes(run.run.state)||lost)return;
     const c=new AbortController(),gen=epoch.current,timer=setInterval(()=>api.get(`${paths.runs}/${run.run.id}`,c.signal).then(value=>{if(!c.signal.aborted&&gen===epoch.current)setRun(value);}).catch(e=>{if(!c.signal.aborted&&gen===epoch.current)fail(e);}),2000);
@@ -68,72 +57,48 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     catch(e){if(mounted.current&&gen===epoch.current&&!signal?.aborted)fail(e);}
     finally{lock.current=false;if(mounted.current&&gen===epoch.current)setBusy(false);}
   }
-  function applyRecord(result){setSaved(result.configuration);setJson(pretty(result.configuration.configuration));setSource(result.configuration.source_text);setReady(result.readiness);setValidated('');setStale(false);setReviewed(false);startKey.current=null;}
-  const edit=id=>perform(async signal=>applyRecord(await api.get(`${paths.configurations}/${id}`,signal)),'Saved settings loaded.',{refresh:false});
-  const check=()=>perform(async signal=>{if(!saved)return;const result=await api.get(`${paths.configurations}/${saved.id}/readiness`,signal);setReady(result.readiness);},'Readiness refreshed.',{refresh:false});
-  function change(nextConfig){setJson(pretty(nextConfig));setValidated('');setReady(null);}
-  function changeAt(group,key,value){change({...config,[group]:{...config[group],[key]:value}});}
-  async function start(signal){
-    const current=(await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness;
-    setReady(current);if(!readyForStart(current,saved,project))throw new Error('The server cannot start this exact revision. Review readiness.');
-    startKey.current??=crypto.randomUUID();const result=await api.write(`${paths.configurations}/${saved.id}/start`,startPayload(saved,project,startKey.current),saved.revision,'POST',signal);setRun(result);
-  }
-  return <Panel title="Browser agents" icon={Bot} description="Work with explicitly selected websites in a supervised browser.">
-    <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-sm"><p>Define exact public, authenticated or internal destinations for this agent. Runner reachability and security policy are verified before a run.</p>
-      <p>Every consequential external change needs its own approval. An off-list redirect, login host or resource pauses before contact and asks for an exact destination and purpose.</p>
-      <p>Save and conversion store no website changes. Start is a separate action after guide, disclosure, limits and installed isolation checks pass.</p></div>
-    {error&&<p role="alert" className="text-destructive break-words">{error}</p>}<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':loading?'Loading browser agents…':message}</p>
-    {!lost&&<><div className="flex flex-wrap gap-2"><Action variant="outline" disabled={busy||loading} onClick={()=>perform(signal=>load(signal),'Browser agents refreshed.')}>Refresh browser agents</Action>
-      {operator&&<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Run authority verified. Submit the intended action explicitly.',{refresh:false})}>Verify run authority</Action>}
-      {editable&&<Action disabled={busy} onClick={()=>{setSaved(null);setJson('');setSource('');setReady(null);setValidated('');setStale(false);setConversion(null);setMessage('Paste structured settings or prepare a draft from your instructions.');}}>New browser agent</Action>}</div>
-      {!loading&&<ul className="space-y-2">{items.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><h3 className="font-medium break-words">{item.name}</h3><p className="text-xs text-muted-foreground">Revision {item.revision} · Saved settings</p></div><Action variant="outline" disabled={busy} onClick={()=>edit(item.id)}>Review settings<span className="sr-only"> for {item.name}</span></Action></li>)}</ul>}
-      {next&&<Action variant="outline" disabled={busy} onClick={()=>perform(signal=>load(signal,next),'More browser agents loaded.',{refresh:false})}>Load more browser agents</Action>}
-      {(editable||saved)&&<div className="rounded-md border p-3 sm:p-4 space-y-4 min-w-0"><h3 ref={heading} tabIndex={-1} className="font-semibold">{saved?'Review browser settings':'Prepare browser settings'}</h3>
-        {editable&&<><Field label="Original instructions" textarea rows={4} maxLength={100000} value={source} onChange={e=>setSource(e.target.value)}/><p className="text-xs text-muted-foreground">The original text is preserved with each saved revision. Editing structured settings does not overwrite it.</p>
-          <PrivateAssets paths={paths} assets={assets} setAssets={setAssets} busy={busy} owner={owner} perform={perform}/>
-          <Conversion paths={paths} project={project} source={source} assets={assets} busy={busy} owner={owner} value={conversion} setValue={setConversion} perform={perform} onDraft={(result,original)=>{setSaved(null);setJson(pretty(result.configuration));setSource(original);setValidated('');setReady(null);setStale(false);}}/>
-          {!saved&&<Action variant="outline" disabled={busy} onClick={()=>{setJson(pretty(example));setValidated('');setReady(null);}}>Use example settings for editing</Action>}
-        </>}
-        <Field label="Structured browser settings (JSON)" textarea rows={12} spellCheck={false} value={json} disabled={!editable||busy} onChange={e=>{setJson(e.target.value);try{const original=wrappedSourceText(e.target.value);if(original!==null)setSource(original);}catch{/* Keep partially edited JSON visible. */}setValidated('');setReady(null);}}/>
-        {editable&&settingsEditable&&<Settings config={config} change={change} changeAt={changeAt} guide={project.current_version} busy={busy} assets={assets}/>}
-        {saved&&<details><summary className="min-h-11 cursor-pointer py-3 font-medium">Saved source, identity and integrity hashes</summary><dl className="space-y-3 text-sm"><Hash label="Configuration ID" value={saved.id}/><Hash label="Configuration SHA-256" value={saved.configuration_sha256}/><Hash label="Original source SHA-256" value={saved.source_sha256}/><Hash label="Approved guide SHA-256" value={saved.configuration.work.guide_ref?.sha256}/><div><dt>Original source in saved revision {saved.revision}</dt><dd className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{saved.source_text}</dd></div></dl></details>}
-        {config&&<p className="text-sm break-words">{config.permissions?.external_change_approval==='per_action'?'Per-action external approval':'Review external approval policy'} · Off-list contact blocked until exact approval · Manual sign-in through takeover · Attempt-only session</p>}
-        {editable&&<div className="flex flex-wrap gap-2"><Action variant="outline" disabled={busy||!json} onClick={()=>perform(async signal=>{const input=parseDraft(json);const result=await api.write(`${paths.configurations}/validate`,{configuration:input,...(source.trim()?{source_text:source}:{})},null,'POST',signal);setReady(result.readiness);setValidated(validationKey);},'Settings validated. Nothing saved or started.',{refresh:false})}>Validate settings</Action>
-          <Action disabled={busy||!json||validated!==validationKey||stale} onClick={()=>perform(async signal=>{const result=await api.write(saved?`${paths.configurations}/${saved.id}`:paths.configurations,{configuration:parseDraft(json),...(source.trim()?{source_text:source}:{})},saved?.revision??project.revision,saved?'PATCH':'POST',signal);applyRecord(result);},'Settings saved. No run started; review readiness and owner consent.')}>Save browser settings</Action>
-          {saved&&<Action variant="outline" disabled={busy} onClick={()=>edit(saved.id)}>Reload saved settings</Action>}</div>}
-        {json&&editable&&validated!==validationKey&&<p className="text-sm text-muted-foreground">Validate the entered settings before saving.</p>}
-        {saved&&<><Readiness value={ready}/><div className="flex flex-wrap gap-2"><Action variant="outline" disabled={busy} onClick={check}>Check readiness</Action></div>
-          <div className="border-t pt-3 space-y-2"><p className="font-medium text-sm">Model disclosure consent: {ready?.checks?.find(c=>['model_consent','owner_consent'].includes(c.kind))?.state==='ready'||consent?.allowed===true?'given':consent?.allowed===false?'withdrawn':'check readiness'}</p><p className="text-sm text-muted-foreground">The model can receive the approved guide and bounded content from selected public or private pages. Only the owner can allow it for the saved revision; credentials stay in the controlled browser session.</p>
-            {owner&&<><label className="flex min-h-11 items-start gap-3 py-2 text-sm"><input className="mt-1 shrink-0" type="checkbox" checked={reviewed} disabled={busy||dirty} onChange={e=>setReviewed(e.target.checked)}/><span>I reviewed: {BROWSER_CONSENT}.</span></label>
-              <div className="flex flex-wrap gap-2"><Action disabled={busy||dirty||!reviewed} onClick={()=>perform(async signal=>{setConsent(await api.write(`${paths.configurations}/${saved.id}/model-consent`,{configuration_revision:saved.revision,configuration_sha256:saved.configuration_sha256,allow:true,reviewed_statement:BROWSER_CONSENT},saved.revision,'PUT',signal));setReady((await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness);},'Owner consent recorded for this revision. No run started.')}>Give model consent</Action>
-                <Action variant="outline" disabled={busy||dirty} onClick={()=>perform(async signal=>{setConsent(await api.write(`${paths.configurations}/${saved.id}/model-consent`,{configuration_revision:saved.revision,configuration_sha256:saved.configuration_sha256,allow:false,reviewed_statement:BROWSER_CONSENT},saved.revision,'PUT',signal));setReady((await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness);},'Model consent withdrawn.')}>Withdraw model consent</Action></div></>}
-          </div>{operator&&<Action disabled={busy||dirty||stale||!readyForStart(ready,saved,project)} onClick={()=>perform(start,'Run requested. Inspect the recorded state and receipts.')}>Start browser run</Action>}
-          {dirty&&<p className="text-sm">Save or reload local edits before consent or Start.</p>}</>}
-      </div>}
-      <div className="border-t pt-4 space-y-3"><h3 className="font-semibold">Browser run history</h3>{!runs.length?<p className="text-sm text-muted-foreground">No selected-browser runs yet.</p>:<ul className="space-y-2">{runs.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><p className="text-sm font-medium break-words">{items.find(c=>c.id===item.configuration_id)?.name||'Browser agent'} · {words(item.state)}</p><p className="text-xs text-muted-foreground break-all">{item.created_at||item.id}</p></div><Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setRun(await api.get(`${paths.runs}/${item.id}`,signal)),'Run record loaded.',{refresh:false})}>Inspect browser run</Action></li>)}</ul>}</div>
-      {run&&<BrowserRun base={base} paths={paths} data={run} project={project} busy={busy} setData={setRun} perform={perform}/>}</>}
-  </Panel>;
+  return <>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}<BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
+    privateUnavailable={lost} onPrivateClear={clearPrivate}
+    renderPreparation={draft=>draft.editable&&<div className="space-y-4">
+      <PrivateAssets paths={paths} assets={assets} setAssets={setAssets} busy={draft.busy} owner={owner} perform={perform}/>
+      {Array.isArray(draft.configuration?.artifacts?.upload_asset_refs)&&<fieldset className="min-w-0"><legend className="text-sm font-medium">Exact approved website upload inputs</legend>{assets.filter(a=>a.state==='approved'&&a.available).map(asset=><label key={asset.id} className="flex min-h-11 items-start gap-3 py-2 text-sm"><input type="checkbox" className="mt-1 shrink-0" disabled={draft.busy||draft.conflict} checked={draft.configuration.artifacts.upload_asset_refs.some(ref=>ref?.id===asset.id&&ref.sha256===asset.sha256)} onChange={e=>draft.updateConfiguration({...draft.configuration,artifacts:{...draft.configuration.artifacts,upload_asset_refs:e.target.checked?[...draft.configuration.artifacts.upload_asset_refs,assetRef(asset)]:draft.configuration.artifacts.upload_asset_refs.filter(ref=>ref?.id!==asset.id)}})}/><span className="break-all">Allow this reviewed {asset.mime_type} input {asset.id} as an upload candidate. Each external upload still needs its own action approval.</span></label>)}</fieldset>}
+      <Conversion paths={paths} project={project} source={draft.source} assets={assets} busy={draft.busy} owner={owner} value={conversion} setValue={setConversion} perform={perform} conflict={draft.conflict} generation={draft.generation} onDraft={draft.placeSuggestion} onAuthorizationFailure={fail}/>
+    </div>}
+    renderRuntime={draft=><section aria-label="Selected browser runtime" className="border-t pt-4 space-y-4 min-w-0">
+      <h3 className="font-semibold">Selected browser runtime</h3>
+      <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-sm"><p>Exact public, authenticated or internal destinations require verified runner reachability and security policy before a run.</p><p>Every consequential external change needs its own approval. Off-list contact pauses for an exact destination and purpose. Conversion, consent and Start are separate explicit actions.</p></div>
+      <p role="status" aria-live="polite" className="text-sm">{draft.busy?'Working…':loading?'Loading browser runs…':message}</p>
+      <div className="flex flex-wrap gap-2"><Action variant="outline" disabled={draft.busy||loading} onClick={()=>perform(signal=>load(signal),'Browser runs refreshed.',{refresh:false})}>Refresh browser runs</Action>
+        {operator&&<Action variant="outline" disabled={draft.busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Run authority verified. Submit the intended action explicitly.',{refresh:false})}>Verify run authority</Action>}</div>
+      {draft.saved&&<BrowserExecution key={draft.saved.id} paths={paths} project={project} draft={draft} owner={owner} operator={operator} perform={perform} setRun={setRun}/>}
+      <div className="space-y-3"><h3 className="font-semibold">Browser run history</h3>{!runs.length?<p className="text-sm text-muted-foreground">No selected-browser runs yet.</p>:<ul className="space-y-2">{runs.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><p className="text-sm font-medium break-words">{draft.saved?.id===item.configuration_id?draft.saved.configuration.name:'Browser agent'} · {words(item.state)}</p><p className="text-xs text-muted-foreground break-all">{item.created_at||item.id}</p></div><Action variant="outline" disabled={draft.busy} onClick={()=>perform(async signal=>setRun(await api.get(`${paths.runs}/${item.id}`,signal)),'Run record loaded.',{refresh:false})}>Inspect browser run</Action></li>)}</ul>}</div>
+      {run&&<BrowserRun base={base} paths={paths} data={run} project={project} busy={draft.busy} setData={setRun} perform={perform}/>}</section>}/></>;
 }
 
-function Settings({config,change,changeAt,guide,busy,assets=[]}) {
-  return <details className="rounded-md border p-3" open><summary className="min-h-11 cursor-pointer font-medium py-3">Editable settings</summary><div className="space-y-4">
-    <Field label="Browser agent name" value={config.name||''} maxLength={200} disabled={busy} onChange={e=>change({...config,name:e.target.value})}/>
-    <Field label="Task instructions" textarea rows={4} value={config.work?.instructions||''} disabled={busy} onChange={e=>changeAt('work','instructions',e.target.value)}/>
-    <Field label="Success criteria, one per line" textarea rows={3} value={config.work?.success_criteria?.join('\n')||''} disabled={busy} onChange={e=>changeAt('work','success_criteria',e.target.value.split(/\r?\n/))}/>
-    <Action type="button" variant="outline" disabled={busy||!guide} onClick={()=>changeAt('work','guide_ref',{id:guide.id,sha256:guide.content_hash})}>Assign current approved guide</Action>
-    <Field label="Entry URLs, one per line" textarea rows={3} value={config.destinations?.entry_urls?.join('\n')||''} disabled={busy} onChange={e=>changeAt('destinations','entry_urls',e.target.value.split(/\r?\n/))}/>
-    <fieldset className="space-y-3"><legend className="text-sm font-medium">Exact allowed destinations</legend><p className="text-sm text-muted-foreground">Include required login and resource origins explicitly. An internal origin still needs approved runner reachability. No wildcard, range or infrastructure access is granted here.</p>
-      {config.destinations?.allowed_origins?.map((dest,index)=><div key={index} className="rounded-md border p-3 space-y-3 min-w-0"><Field label={`Destination ${index+1} ID`} value={dest.id} disabled={busy} onChange={e=>changeAt('destinations','allowed_origins',config.destinations.allowed_origins.map((d,i)=>i===index?{...d,id:e.target.value}:d))}/>
-        <Field label={`Destination ${index+1} exact origin`} value={dest.origin} placeholder="https://site.example" disabled={busy} onChange={e=>changeAt('destinations','allowed_origins',config.destinations.allowed_origins.map((d,i)=>i===index?{...d,origin:e.target.value}:d))}/>
-        <div className="flex flex-wrap gap-3">{['navigation','resource','authentication'].map(role=><label key={role} className="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" disabled={busy} checked={dest.roles?.includes(role)||false} onChange={e=>changeAt('destinations','allowed_origins',config.destinations.allowed_origins.map((d,i)=>i===index?{...d,roles:e.target.checked?[...d.roles,role]:d.roles.filter(r=>r!==role)}:d))}/>{role}</label>)}</div>
-        <Choice label={`Destination ${index+1} session headers`} value={dest.session_headers} disabled={busy} onChange={e=>changeAt('destinations','allowed_origins',config.destinations.allowed_origins.map((d,i)=>i===index?{...d,session_headers:e.target.value}:d))}><option value="omit">Omit session headers</option><option value="this_origin_session">Only this origin's session</option></Choice>
-        <Action type="button" variant="outline" disabled={busy} onClick={()=>changeAt('destinations','allowed_origins',config.destinations.allowed_origins.filter((_,i)=>i!==index))}>Remove destination {index+1}</Action></div>)}
-      <Action type="button" variant="outline" disabled={busy} onClick={()=>changeAt('destinations','allowed_origins',[...config.destinations.allowed_origins,{id:`site-${config.destinations.allowed_origins.length+1}`,origin:'',roles:['navigation'],session_headers:'omit'}])}>Add exact destination</Action>
-    </fieldset>
-    <fieldset><legend className="text-sm font-medium">Permitted browser actions</legend><div className="grid grid-cols-1 sm:grid-cols-3 gap-2">{ACTIONS.map(action=><label key={action} className="flex min-h-11 items-center gap-3 text-sm"><input type="checkbox" disabled={busy} checked={config.permissions?.actions?.includes(action)||false} onChange={e=>changeAt('permissions','actions',e.target.checked?[...config.permissions.actions,action]:config.permissions.actions.filter(a=>a!==action))}/>{action}</label>)}</div></fieldset>
-    <fieldset className="space-y-2"><legend className="text-sm font-medium">Exact approved website upload inputs</legend>{assets.filter(a=>a.state==='approved'&&a.available).map(asset=><label key={asset.id} className="flex min-h-11 items-start gap-3 py-2 text-sm"><input type="checkbox" className="mt-1 shrink-0" disabled={busy} checked={config.artifacts.upload_asset_refs.some(ref=>ref.id===asset.id&&ref.sha256===asset.sha256)} onChange={e=>changeAt('artifacts','upload_asset_refs',e.target.checked?[...config.artifacts.upload_asset_refs,assetRef(asset)]:config.artifacts.upload_asset_refs.filter(ref=>ref.id!==asset.id))}/><span className="break-all">Allow this reviewed {asset.mime_type} input {asset.id} as an upload candidate. Each external upload still needs its own action approval.</span></label>)}</fieldset>
-    <fieldset className="space-y-3"><legend className="text-sm font-medium">Finite run ceilings</legend><div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{budgetFields.map(([key,label,min,max,step])=><Field key={key} label={label} type="number" min={min} max={max} step={step} required disabled={busy} value={config.budgets?.[key]??''} onChange={e=>changeAt('budgets',key,e.target.value===''?'':Number(e.target.value))}/>)}</div><p className="text-xs text-muted-foreground">These proposed ceilings remain subject to project limits and installed runner capacity. Saving does not reserve resources.</p></fieldset>
-  </div></details>;
+function BrowserExecution({paths,project,draft,owner,operator,perform,setRun}) {
+  const {saved,dirty,conflict,busy}=draft;
+  const [ready,setReady]=useState(null),[consent,setConsent]=useState(null),[reviewed,setReviewed]=useState(false),startKey=useRef(null);
+  useEffect(()=>{setReady(null);setConsent(null);setReviewed(false);startKey.current=null;},[saved.id,saved.revision,saved.configuration_sha256,project.revision,project.current_version?.id,project.current_version?.content_hash,dirty,conflict,owner]);
+  const blocked=busy||dirty||conflict;
+  const execute=(fn,success)=>perform(async signal=>{try{await fn(signal);}catch(e){if(e.status===412)draft.markConflict();throw e;}},success);
+  async function consentDecision(signal,allow) {
+    setConsent(await api.write(`${paths.configurations}/${saved.id}/model-consent`,{configuration_revision:saved.revision,configuration_sha256:saved.configuration_sha256,allow,reviewed_statement:BROWSER_CONSENT},saved.revision,'PUT',signal));
+    setReady((await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness);
+  }
+  async function start(signal) {
+    if(dirty||conflict)throw new Error('Save or reconcile the local draft before Start.');
+    const current=(await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness;
+    setReady(current);if(!readyForStart(current,saved,project,draft))throw new Error('The server cannot start this exact revision. Review readiness.');
+    startKey.current??=crypto.randomUUID();setRun(await api.write(`${paths.configurations}/${saved.id}/start`,startPayload(saved,project,startKey.current),saved.revision,'POST',signal));
+  }
+  return <section aria-label="Saved configuration execution" className="rounded-md border p-3 space-y-3 min-w-0">
+    <h4 className="font-semibold">Runtime readiness for saved revision {saved.revision}</h4><Readiness value={ready}/>
+    <Action variant="outline" disabled={blocked} onClick={()=>execute(async signal=>setReady((await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness),'Runtime readiness refreshed.')}>Check readiness</Action>
+    <div className="border-t pt-3 space-y-2"><p className="font-medium text-sm">Model disclosure consent: {ready?.model_consent?.allowed===true||ready?.checks?.find(c=>['model_consent','owner_consent'].includes(c.kind))?.state==='ready'||consent?.allowed===true?'given':consent?.allowed===false?'withdrawn':'check readiness'}</p><p className="text-sm text-muted-foreground">The model can receive the approved guide and bounded selected-page content. Only the owner can allow it for this saved revision; credentials stay in the controlled browser session.</p>
+      {owner&&<><label className="flex min-h-11 items-start gap-3 py-2 text-sm"><input className="mt-1 shrink-0" type="checkbox" checked={reviewed} disabled={blocked} onChange={e=>setReviewed(e.target.checked)}/><span>I reviewed: {BROWSER_CONSENT}.</span></label><div className="flex flex-wrap gap-2"><Action disabled={blocked||!reviewed} onClick={()=>execute(signal=>consentDecision(signal,true),'Owner consent recorded for this revision. No run started.')}>Give model consent</Action><Action variant="outline" disabled={blocked} onClick={()=>execute(signal=>consentDecision(signal,false),'Model consent withdrawn.')}>Withdraw model consent</Action></div></>}
+    </div>{operator&&<Action disabled={blocked||!readyForStart(ready,saved,project,draft)} onClick={()=>execute(start,'Run requested. Inspect the recorded state and receipts.')}>Start browser run</Action>}
+    {(dirty||conflict)&&<p className="text-sm">{conflict?'Reconcile the saved revision conflict before consent or Start. Refresh keeps this conflict.':'Save or reload local edits before consent or Start.'}</p>}
+  </section>;
 }
 
 function PrivateAssets({paths,assets,setAssets,busy,owner,perform}) {
@@ -165,10 +130,11 @@ function PrivateAsset({asset,paths,owner,busy,perform,refresh}) {
 }
 function saveBlob(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 
-function Conversion({paths,project,source,assets,busy,owner,value,setValue,perform,onDraft}) {
+function Conversion({paths,project,source,assets,busy,owner,value,setValue,perform,onDraft,conflict=false,generation,onAuthorizationFailure}) {
   const [reviewed,setReviewed]=useState(false),[selected,setSelected]=useState([]),[readiness,setReadiness]=useState(null),[limits,setLimits]=useState({max_seconds:120,max_tokens:30000,max_usd:0.1});
+  const requestedGeneration=useRef(null),current=value&&requestedGeneration.current===generation;
   useEffect(()=>{setReviewed(false);},[source,project.revision,project.current_version?.id,selected.join(','),JSON.stringify(limits)]);
-  useEffect(()=>{if(!value?.id||!['queued','converting','running'].includes(value.state))return;const c=new AbortController(),timer=setInterval(()=>api.get(`${paths.configurations}/conversions/${value.id}`,c.signal).then(r=>{if(!c.signal.aborted)setValue(r.conversion);}).catch(()=>{if(!c.signal.aborted)setValue({...value,state:'unavailable'});}),2000);return()=>{c.abort();clearInterval(timer);};},[paths.configurations,value?.id,value?.state]);
+  useEffect(()=>{if(!value?.id||!['queued','converting','running'].includes(value.state))return;const c=new AbortController(),timer=setInterval(()=>api.get(`${paths.configurations}/conversions/${value.id}`,c.signal).then(r=>{if(!c.signal.aborted)setValue(r.conversion);}).catch(e=>{if(c.signal.aborted)return;if([401,403,404].includes(e.status)&&!['ELEVATION_REQUIRED','AGENT_CONTROL_VERIFICATION_REQUIRED'].includes(e.code))onAuthorizationFailure(e);else setValue({...value,state:'unavailable'});}),2000);return()=>{c.abort();clearInterval(timer);};},[paths.configurations,value?.id,value?.state]);
   return <details className="rounded-md border p-3"><summary className="min-h-11 cursor-pointer py-3 font-medium">Prepare a draft from instructions, images or files</summary><div className="space-y-3 text-sm">
     <p>The model suggests editable settings with assumptions and source provenance. Review the returned settings before validating and saving. Conversion never starts a run.</p>
     <Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setReadiness(await api.get(`${paths.configurations}/convert/readiness`,signal)),'Conversion readiness checked.',{refresh:false})}>Check conversion readiness</Action>
@@ -177,9 +143,9 @@ function Conversion({paths,project,source,assets,busy,owner,value,setValue,perfo
     {owner?<><label className="flex min-h-11 items-start gap-3 py-2"><input type="checkbox" className="mt-1 shrink-0" checked={reviewed} disabled={busy} onChange={e=>setReviewed(e.target.checked)}/><span>I reviewed: {CONVERSION_DISCLOSURE}.</span></label>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{[['max_seconds','Conversion seconds',10,180,1],['max_tokens','Conversion token ceiling',1000,4000000,1],['max_usd','Conversion spend ceiling (USD)',0.001,20,0.001]].map(([key,label,min,max,step])=><Field key={key} label={label} type="number" min={min} max={max} step={step} required value={limits[key]} disabled={busy} onChange={e=>setLimits({...limits,[key]:e.target.value===''?'':Number(e.target.value)})}/>)}</div>
       <p className="text-xs text-muted-foreground">Conversion source ceiling: 6,000 UTF-8 bytes and 8 separately approved inputs. Image bytes can require a larger explicitly reviewed token ceiling. The server verifies effective ceilings and disclosure before calling the provider.</p>
-      <Action disabled={busy||!reviewed||!source.trim()||new TextEncoder().encode(source).length>6000||selected.length>8||!project.current_version||readiness?.available!==true} onClick={()=>perform(async signal=>{const r=await api.write(`${paths.configurations}/convert`,{source_text:source,source_asset_refs:assets.filter(a=>selected.includes(a.id)&&a.state==='approved').map(assetRef),project_revision:project.revision,guide_ref:{id:project.current_version.id,sha256:project.current_version.content_hash},disclosure:{enabled:true,reviewed_statement:CONVERSION_DISCLOSURE},limits},null,'POST',signal);setValue(r.conversion);},'Draft conversion requested. Inspect the result before applying.',{refresh:false})}>Suggest editable draft</Action></>:<p>Only the owner can approve disclosure and request conversion.</p>}
+      <Action disabled={busy||!reviewed||!source.trim()||new TextEncoder().encode(source).length>6000||selected.length>8||!project.current_version||readiness?.available!==true} onClick={()=>perform(async signal=>{requestedGeneration.current=generation;setValue(null);const r=await api.write(`${paths.configurations}/convert`,{source_text:source,source_asset_refs:assets.filter(a=>selected.includes(a.id)&&a.state==='approved').map(assetRef),project_revision:project.revision,guide_ref:{id:project.current_version.id,sha256:project.current_version.content_hash},disclosure:{enabled:true,reviewed_statement:CONVERSION_DISCLOSURE},limits},null,'POST',signal);setValue(r.conversion);},'Draft conversion requested. Inspect the result before applying.',{refresh:false})}>Suggest editable draft</Action></>:<p>Only the owner can approve disclosure and request conversion.</p>}
     {value&&<div className="rounded-md border p-3 space-y-3"><p role="status">Conversion: {words(value.state)}</p>{value.result?.code&&<p>{value.result.code}</p>}{['queued','converting'].includes(value.state)&&owner&&<Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setValue((await api.write(`${paths.configurations}/conversions/${value.id}/cancel`,{},null,'POST',signal)).conversion),'Conversion cancellation requested. Already reserved spend may remain.',{refresh:false})}>Cancel conversion</Action>}{value.result?.configuration&&<><ul className="space-y-2">{[...(value.result.assumptions||[]),...(value.result.warnings||[]),...(value.result.ambiguities||[]).map(a=>`${a.field}: ${a.question}`)].map((text,i)=><li key={i} className="break-words">{typeof text==='string'?text:pretty(text)}</li>)}</ul><details><summary className="min-h-11 cursor-pointer py-3">Original source provenance</summary><pre className="whitespace-pre-wrap break-words text-xs [overflow-wrap:anywhere]">{pretty(value.result.provenance)}</pre></details>
-      <Action variant="outline" disabled={busy||value.result.requires_review!==true||value.result.persisted!==false||value.result.execution_enabled!==false} onClick={()=>onDraft(value.result,value.source_text)}>Place suggestion in editor for review</Action><p>Applying the suggestion replaces the local settings editor and restores this conversion's preserved original instructions.</p></>}</div>}
+      <Action variant="outline" disabled={busy||conflict||!current||value.result.requires_review!==true||value.result.persisted!==false||value.result.execution_enabled!==false} onClick={()=>onDraft(value.result.configuration,value.source_text)}>Place suggestion in editor for review</Action><p>Applying edits the canonical local draft and preserves this conversion's original instructions. It retains the saved selection and requires validation, review and save. Reconcile an existing revision conflict first.</p>{!current&&<p role="status">This suggestion belongs to an earlier editor selection or draft. Review the current source and request a new suggestion before applying.</p>}</>}</div>}
   </div></details>;
 }
 

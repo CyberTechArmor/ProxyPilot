@@ -36,7 +36,7 @@ The exact draft contracts and fixtures are under `contracts/browser-agent/`.
 They accept all twelve browser primitives and finite budgets, exact per-agent
 origins with navigation/resource/auth roles, current scoped file references and
 explicit review/start. C0 now adds backend import validation and persistence locally;
-the shipped main/deployed UI do not yet accept the new format.
+main now accepts inert configuration drafts through merged PR727; the live PR725 deployment has not yet received that update.
 No pasted field can grant owner consent, approve an effect, activate execution,
 select credentials, change host policy or claim a verified environment.
 
@@ -187,15 +187,23 @@ it does not authorize Duo fallback, production SSH or MCP execution.
 
 The dependency streams now have additive implementations and local proof fixtures. The integrated root has completed local authority rechecks, metering, source-memory/report suppression, live viewer lifetime, timer-driven execution and packaging regressions. The broader implementation is published as draft PR726 and remains gated by its reviewed installed-package contract and acceptance. PR725 merged independently reviewed browser viewport/fullscreen presentation at main `863ed48caa2ec9fff212b9e9a76ea0fc8e04d7c7`; it does not unlock general websites. Incremental repository publication/merge is authorized; production deployment remains outside authorization.
 
-2026-10-03 release checkpoint: the isolated C0 editor is committed and pushed at
-`24032ed714e823559a85902a1c15461f68961a0a` on
-`browser/configuration-import-20261002`. Automatic approval review refused its
-draft PR creation against `main`, citing the original withheld publication
-authorization. The later release authorization is recorded above; a restatement
-request is pending. Further external repository mutations are paused. PR726's
-published head remains `dc8080c44dca6c2db81842709b7b48a6edc3e743`; fresh source
-and local proof are recorded in the implementation report, not claimed as green
-CI or installed capability.
+2026-10-03 release checkpoint: canonical C0 and its explicit refresh-conflict
+correction are merged through PR727/PR728 at main
+`c742d71ae3a319aa3b6f5817405cbea868c3fd1d`. PR728's frozen head
+`68b4aca96d42268205be4a2117c6dd2637129ac5` passed Security and
+credential-broker workflows and independent parent re-review. Automatic approval
+review rejected this worker's mark-ready request because forwarded authorization
+was classified as untrusted; this worker stopped external mutations. The parent
+completed ready/merge under the direct user authorization, and GitHub/main ref
+verification confirms the merge. Live
+PR725 remains `863ed48c`; no production update or host action occurred here.
+Preserved runtime checkpoint `1d284afa` is an ancestor of local canonical
+reconciliation `5b15de31` and latest-main ancestry `6ed11ca2`. Shared-editor
+integration now passes the six C0 journeys, seven editor checks, eight
+authentication scenarios and three actual Agents checks, with mobile Lighthouse
+96/100. Native backend461/461, frontend13/13, A6/A7 and the2004-module build
+pass. Exact candidate review/CI follow publication to the still-draft PR726;
+ordinary-update compatibility and installed acceptance remain unresolved.
 
 The scope estimates above are engineering estimates, not elapsed implementation promises. Local Chromium can prove selected primitives, held-request approval and no external replay. It cannot establish the absent Incus/nft installation, operator-owned acceptance marker, Neko privacy/controller media, actual provider/multimodal path or selected public/authenticated/internal target acceptance. Those proofs and reviewed private storage/decoder wrappers remain the release activation gate. No Duo fallback or broad credentials are included.
 

@@ -5,25 +5,34 @@ The legacy Guide `proxypilot-rules` parser remains synthetic-sign-in-only, and
 the existing bounded public Website-review path remains separate. Neither a
 draft import nor a rule edit unlocks non-demo browser execution.
 
-Current review checkpoint (2026-10-03): PR725 is merged. The isolated C0
-configuration editor is committed at `24032ed714e823559a85902a1c15461f68961a0a`;
-draft PR creation was blocked by automatic approval review citing the original
-withheld publication authorization, despite the later release authorization in
-this session. The broader PR726 remains draft. Its initial green local suites
-are historical checkpoints: actual-host composition exposed unticketed
-Chromium service startup traffic, which the gateway blocked before destination
-DNS/contact. Selected-only fixed non-network service suppression now passes
-actual local Chromium composition without a destination exception. Mandatory
-signed control metering, explicit human authentication readback, post-revocation
-network facts and the separate package contract have fresh local proof. The
-combined final check and immutable release candidate are being recorded below.
-These checks are not installed acceptance.
+Current release checkpoint (2026-10-03): canonical C0 and its explicit
+refresh-after412 reconciliation are merged through PR727/PR728 at main
+`c742d71ae3a319aa3b6f5817405cbea868c3fd1d`. PR728's frozen head
+`68b4aca96d42268205be4a2117c6dd2637129ac5` passed both exact-head workflows
+and independent parent re-review. Automatic approval review rejected this
+worker's mark-ready request because forwarded authorization was classified as
+untrusted; this worker stopped external mutations. The parent subsequently
+completed ready/merge under the direct user authorization, and merged state was
+verified through GitHub and the main ref. Live deployment remains PR725 at
+`863ed48caa2ec9fff212b9e9a76ea0fc8e04d7c7`; no deployment or host change is
+part of this work.
 
-C0 and the broader draft currently have separate configuration interfaces in
-their isolated branches. Before combining releases, retain the C0
-`BrowserConfigurations` editor/list and connect explicit selection, dirty-state,
-consent and Start callbacks into the runtime controls. This reuse is a remaining
-integration task; merging both interfaces unchanged would duplicate the editor.
+The broader source checkpoint `1d284afa54651ff5c9623416e352b5bdf2f0b068`
+is preserved as an ancestor of local canonical reconciliation
+`5b15de31e49a5fdd906c15e27bc112d05adad4d9`, then main ancestry reconciliation
+`6ed11ca2`. Migration1117 and its draft
+store/schema remain canonical; runtime migrations1118–1122 are additive.
+Reconciliation keeps bounded schema issue messages and removes duplicate imports.
+The combined native backend suite passes461/461. PR726's published head remains
+`dc8080c44dca6c2db81842709b7b48a6edc3e743` until the shared editor integration,
+independent review and new source proof are ready for publication.
+
+The frontend integration reuses canonical `BrowserConfigurations` as the
+sole list/editor under Agents, with explicit selected-record/dirty-state hooks
+into separate readiness, consent, Start and run controls. Local integration
+proof is complete; it does not silently save, start or authorize disclosure. Actual
+local Chromium/TLS proof and the package recovery contract remain source proof,
+not installed acceptance.
 
 ## Dependency order and resulting behavior
 
@@ -105,7 +114,7 @@ Counts are the retained integration checkpoint, not installed acceptance. Fixtur
 provider outputs and Neko transport stand-ins do not prove a real provider,
 external browser session or controller-only credential privacy.
 
-## Final source review checkpoint — 2026-10-03
+## Preserved source checkpoint 1d284afa — 2026-10-03
 
 Native locked dependencies passed 434 Operations/agent backend tests and 26
 broker backend tests, with no skips. Frontend units passed 13/13 and the
@@ -137,6 +146,47 @@ but broker CI failed on an unexplained first Chromium startup timeout. Bounded
 diagnostics were added without retries, skips or a timeout increase. Fresh
 candidate CI and independent exact-head review remain pending publication.
 
+## Canonical editor integration checkpoint — 2026-10-03
+
+The preserved runtime source and merged C0/PR728 now share one editor, list and
+Save path under Agents. An optional runtime composition consumes the selected
+saved record and draft dirty/conflict state. Capability metadata can reveal
+runtime controls; it cannot establish installed readiness or enable Start.
+Consent and Start bind the immutable saved revision, configuration/guide hashes
+and current project revision. A fresh server readiness check precedes Start.
+Draft changes and412 conflicts block consent, readiness and Start. Refresh keeps
+the conflict; explicit reconciliation remains the canonical C0 path.
+
+Provider/action waits lock the editor and selection controls. Conversion results
+bind the saved selection and monotonic draft generation, so a queued result
+cannot overwrite a newer draft or clear its conflict. Shared authority loss
+aborts and fences every canonical read/write, latches denial and clears private
+state immediately. Conversion-only polling uses that same denial path. Browser
+regressions reproduce a delayed list response after runtime403 and a conversion
+denial without a selected run. LEARNINGS258 records the failure and ratchets.
+
+The native combined backend suite passes461/461 with no skips; backend source
+is unchanged from reconciliation5b15de31. Final frontend proof passes13/13 units,
+six real HTTP/SQLite C0 journeys, seven shared-editor checks, eight retained
+authentication scenarios and three actual Agents-page checks. Existing A6
+passes20journeys/96layout checks and A7 passes6journeys/42layout checks. The new
+Agents test also passes in CI mode using locked backend axe-core, without
+temporary tools. C0 and the actual Agents page use internal scrolling at all
+five actual viewports, with zero document overflow and axe violations. The
+separate authentication fixture allows vertical scrolling and has zero
+horizontal overflow. Actual Agents mobile Lighthouse accessibility is96/100.
+The final production build passes with2004modules; existing bundle warnings
+remain. Security CI now includes the runtime units and actual Agents test.
+
+All25 retained script hashes are unchanged from checkpoint1d284afa, preserving
+its466-case Python and8/8 actual Chromium/host/TLS evidence. The earlier
+verification files remain historical checkpoints. Current source/artifact
+hashes, logs, responsive screenshots and the pre-fix denial reproduction are
+recorded in [canonical integration proof](evidence/selected-browser-20261002/canonical-integration/verification.json).
+No installed proof, new-candidate publication, CI, deployment or acceptance marker
+is implied by these local results. The separate package/ordinary-update gate
+below remains unresolved.
+
 ## Release and activation boundaries
 
 The [separate package contract](fractionate-selected-runtime-package-contract.md)
@@ -150,10 +200,11 @@ existing policies, and never creates or refreshes an acceptance marker. The
 ordinary updater remains unchanged.
 
 PR725 merged after independent review and both exact-head workflows passed.
-Remote main is `863ed48caa2ec9fff212b9e9a76ea0fc8e04d7c7`. Thomas can use
-the existing Settings → Update now flow and reload Operations. That update changes
-viewport/fullscreen behavior; it does not activate selected websites. The broader
-implementation is draft PR726, based on that main commit. Its first CI pass
+Main now includes PR727/PR728 at `c742d71ae3a319aa3b6f5817405cbea868c3fd1d`;
+live deployment is separately verified at PR725 `863ed48c`. The existing
+Settings → Update now flow can take reviewed main changes; no update was run here.
+C0 adds inert drafts and does not activate selected websites. The broader
+implementation remains draft PR726 and is being reconciled onto canonical C0. Its first CI pass
 exposed test portability assumptions: a hardcoded checkout path and undeclared
 PDF fixture utilities. The follow-up derives the path and installs/verifies the
 real bounded extraction tools on disposable CI; production source is unchanged.

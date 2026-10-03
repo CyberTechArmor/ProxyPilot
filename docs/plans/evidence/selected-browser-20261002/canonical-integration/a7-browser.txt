@@ -1,0 +1,7 @@
+ok - pending guide: authorized save approves the exact snapshot without starting execution
+ok - live view and takeover: confirm it is you once, control the browser, give it back, decide, resume
+ok - a timed-out sign-in blocks the profile until a person decides it (360 px)
+ok - practice run: choose the demo behaviour; the Review tab says it matched; the model summary is shown
+ok - no live install: a quiet note and still frames, no retry
+ok - layout: live pane, takeover bar, confirmation and the agent-control prompt at six widths
+6/6 journeys, 42 layout checks

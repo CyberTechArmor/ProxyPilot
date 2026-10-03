@@ -30,8 +30,8 @@ export function hasEditableDraftShape(config) {
     strings(config.destinations?.entry_urls)&&Array.isArray(config.destinations.allowed_origins)&&config.destinations.allowed_origins.every(d=>d&&typeof d.id==='string'&&typeof d.origin==='string'&&strings(d.roles)&&typeof d.session_headers==='string')&&
     strings(config.permissions?.actions)&&config.budgets&&typeof config.budgets==='object'&&!Array.isArray(config.budgets)&&Array.isArray(config.artifacts?.upload_asset_refs)&&config.artifacts.upload_asset_refs.every(ref=>ref&&typeof ref.id==='string'&&typeof ref.sha256==='string');
 }
-export function readyForStart(ready, saved, project) {
-  return !!saved && ready?.contract_version==='selected-browser.v1'&&ready.can_start===true && !project.archived_at && ['owner','operator','editor','reviewer'].includes(project.own_role) &&
+export function readyForStart(ready, saved, project, draft = {}) {
+  return !draft.dirty && !draft.conflict && !!saved && ready?.contract_version==='selected-browser.v1'&&ready.can_start===true && !project.archived_at && ['owner','operator','editor','reviewer'].includes(project.own_role) &&
     ready.pins?.project_revision===project.revision && ready.pins?.configuration_revision===saved.revision &&
     ready.pins?.configuration_sha256===saved.configuration_sha256 &&
     saved.configuration.work.guide_ref?.id===project.current_version?.id &&

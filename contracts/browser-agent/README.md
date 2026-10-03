@@ -7,7 +7,10 @@ snapshots. The cloud implementation now includes selected-browser lifecycle, wor
 destination gateway, private evidence, model/conversion bridge and review UI.
 Execution remains unavailable without genuine installed boundary acceptance;
 no credential intake, production deployment or changed legacy parser is included.
-Shipped main and the current deployed UI do not accept this new draft format.
+Canonical main now contains inert draft configuration import and explicit
+refresh-after412 reconciliation through PR727/PR728 at `c742d71a`; the live
+PR725 deployment at `863ed48c` has not received that update. Runtime is separately reviewed
+and default gated; this source reuses canonical migration1117 and adds1118–1122.
 The Guide Instructions `proxypilot-rules` parser remains synthetic-sign-in-only.
 
 Thomas authorized implementation of explicitly defined public, authenticated and internal browser

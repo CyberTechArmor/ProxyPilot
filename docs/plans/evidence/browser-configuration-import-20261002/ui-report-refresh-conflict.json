@@ -1,0 +1,98 @@
+{
+  "journeys": [
+    {
+      "name": "paste, typed errors, editable settings and explicit current-guide validation/save",
+      "passed": true
+    },
+    {
+      "name": "editing retains source, immutable history and stale-revision input",
+      "passed": true
+    },
+    {
+      "name": "new draft conflict requires explicit refreshed-project acceptance and retains edits",
+      "passed": true
+    },
+    {
+      "name": "exact paste provenance survives structured editing and example load never saves",
+      "passed": true
+    },
+    {
+      "name": "phone/tablet/desktop internal scrolling, accessible form and fixed viewport",
+      "passed": true
+    },
+    {
+      "name": "current guide changes block validation; readonly roles cannot edit; revocation clears private input",
+      "passed": true
+    }
+  ],
+  "layouts": [
+    {
+      "width": 360,
+      "height": 640,
+      "scrollWidth": 360,
+      "scrollHeight": 640,
+      "scrollTop": 0
+    },
+    {
+      "width": 375,
+      "height": 667,
+      "scrollWidth": 375,
+      "scrollHeight": 667,
+      "scrollTop": 0
+    },
+    {
+      "width": 768,
+      "height": 640,
+      "scrollWidth": 768,
+      "scrollHeight": 640,
+      "scrollTop": 0
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "scrollWidth": 1280,
+      "scrollHeight": 800,
+      "scrollTop": 0
+    },
+    {
+      "width": 1920,
+      "height": 900,
+      "scrollWidth": 1920,
+      "scrollHeight": 900,
+      "scrollTop": 0
+    }
+  ],
+  "a11y": [
+    {
+      "width": 360,
+      "height": 640,
+      "violations": 0
+    },
+    {
+      "width": 375,
+      "height": 667,
+      "violations": 0
+    },
+    {
+      "width": 768,
+      "height": 640,
+      "violations": 0
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "violations": 0
+    },
+    {
+      "width": 1920,
+      "height": 900,
+      "violations": 0
+    }
+  ],
+  "started_at": "2026-10-03T10:25:08.435Z",
+  "execution_requests": 0,
+  "model_calls": 0,
+  "external_contacts": 0,
+  "passed": true,
+  "finished_at": "2026-10-03T10:25:23.649Z"
+}

@@ -856,6 +856,13 @@ class Host:
         except Exception as error:
             raise Refused(getattr(error, 'code', 'NETWORK_ROUTE_UNVERIFIED')) from None
 
+    def selected_public_route_plan(self, addresses):
+        module = self._selected_gateway_helper()
+        try:
+            return module.public_route_plan(addresses)
+        except Exception as error:
+            raise Refused(getattr(error, 'code', 'NETWORK_ROUTE_UNVERIFIED')) from None
+
     def verify_install(self, own_files):
         """The daemon runs only from its reviewed, root-owned installed copies."""
         try:

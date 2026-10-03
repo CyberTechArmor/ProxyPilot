@@ -838,5 +838,104 @@ class SelectedSupervisorTests(unittest.TestCase):
         self.assertEqual(ledger['state'],'cancelled');self.assertEqual(ledger['reserved_tokens'],42)
 
 
+    def test_absent_attempt_cleanup_is_signed_and_permanent_across_restart(self):
+        receipt = self.runtime.stop(dict(self.ref, fence=2, reason='cancelled'))
+        proof = self.decode(receipt['attestation'])
+        self.assertTrue(proof['no_launch'])
+        self.assertTrue(proof['gateway_never_registered'])
+        self.assertFalse(proof['evidence']['launched'])
+        self.assertEqual(proof['original_fence'], 1)
+        self.assertEqual(proof['workspace_id'], helpers.ATTEMPT)
+        self.assertIsNone(proof['boot_id'])
+        self.assertIsNone(proof['network_plan_sha256'])
+        self.assertTrue(all(receipt['closed'].values()))
+        self.assertEqual(receipt['final_network']['ledger_sha256'], '0' * 64)
+        self.assertEqual(self.host.spawns, 0)
+        self.assertEqual(self.host.trace, ['gateway:never_registered', 'gateway:health'])
+        restored = s.Supervisor(host=self.host, journal=self.root / 'state.json', clock=self.clock)
+        runtime = restored._selected()
+        self.assertCode('ATTEMPT_EXISTS', runtime.launch, self.spec)
+        self.clock.value += 1
+        again = runtime.stop(dict(self.ref, fence=3, reason='cancelled'))
+        newer = self.decode(again['attestation'])
+        self.assertEqual(newer['fence'], 3)
+        self.assertEqual(newer['stopped_at'], proof['stopped_at'])
+        self.assertEqual(newer['evidence'], proof['evidence'])
+        self.assertEqual(again['final_network'], receipt['final_network'])
+        self.assertEqual(restored.state['runs'][helpers.RUN]['attempts'], [helpers.ATTEMPT])
+        self.assertCode('INVALID_REQUEST', runtime.stop, dict(self.ref, fence=3, reason='cancelled', policy_sha256='0' * 64))
+        self.assertCode('INVALID_REQUEST', runtime.stop, dict(self.ref, fence=3, reason='cancelled', attempt_id=PROJECT))
+
+    def test_absence_cleanup_serializes_with_a_delayed_launch(self):
+        entered, proceed = threading.Event(), threading.Event()
+        original = self.host.selected_gateway
+        def gateway(method, params):
+            if method == 'never_registered':
+                entered.set()
+                if not proceed.wait(3):
+                    raise AssertionError('Test did not release absence proof')
+            return original(method, params)
+        self.host.selected_gateway = gateway
+        result, failures = [], []
+        def stop():
+            try: result.append(self.runtime.stop(dict(self.ref, fence=2, reason='cancelled')))
+            except Exception as error: failures.append(error)
+        def launch():
+            try: self.runtime.launch(self.spec)
+            except s.Refused as error: failures.append(error)
+        stopper = threading.Thread(target=stop)
+        stopper.start()
+        self.assertTrue(entered.wait(3))
+        launcher = threading.Thread(target=launch)
+        launcher.start()
+        proceed.set()
+        stopper.join(4)
+        launcher.join(4)
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(launcher.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertEqual([e.code for e in failures], ['ATTEMPT_EXISTS'])
+        self.assertEqual(self.host.spawns, 0)
+        self.assertTrue(self.decode(result[0]['attestation'])['no_launch'])
+
+    def test_absence_receipt_refuses_retained_ledger_or_active_gateway(self):
+        ledger = self.host.registry.directory / ('selected-' + helpers.ATTEMPT + '.ledger')
+        ledger.write_text('')
+        ledger.chmod(0o600)
+        self.assertCode('GATEWAY_ADMISSION_ABSENCE_UNVERIFIED', self.runtime.stop, dict(self.ref, fence=2, reason='cancelled'))
+        self.assertNotIn('receipt', self.supervisor.state['attempts'][helpers.ATTEMPT])
+        self.assertEqual(self.host.spawns, 0)
+        self.assertTrue(ledger.exists())
+        ledger.unlink()  # Local fixture only: production never deletes admission history.
+        self.host.registry.latched_identity = dict(self.ref)
+        self.assertCode('GATEWAY_ADMISSION_ABSENCE_UNVERIFIED', self.runtime.stop, dict(self.ref, fence=2, reason='cancelled'))
+        self.host.registry.latched_identity = None
+
+    def test_terminal_launched_receipt_rebinds_fence_without_new_contact(self):
+        self.runtime.launch(self.spec)
+        receipt = self.runtime.stop(dict(self.ref, fence=2, reason='cancelled'))
+        proof = self.decode(receipt['attestation'])
+        before = list(self.host.trace)
+        newer = self.runtime.stop(dict(self.ref, fence=3, reason='cancelled'))
+        signed = self.decode(newer['attestation'])
+        self.assertEqual(signed['fence'], 3)
+        self.assertEqual(signed['original_fence'], 1)
+        self.assertEqual(signed['stopped_at'], proof['stopped_at'])
+        self.assertEqual(signed['evidence'], proof['evidence'])
+        self.assertEqual(newer['final_network'], receipt['final_network'])
+        self.assertEqual(self.host.trace, before)
+        self.assertNotIn('no_launch', signed)
+
+    def test_negative_readiness_retains_signed_identity_and_specific_reason(self):
+        self.c['destinations']['allowed_origins'][0]['origin'] = 'https://controller.example'
+        self.c['destinations']['entry_urls'] = ['https://controller.example/']
+        raw = self.runtime.contract.canonical_json(self.c)
+        out = self.runtime.status(dict(configuration_json=raw, configuration_sha256=hashlib.sha256(raw.encode()).hexdigest()))
+        self.assertEqual(out['code'], 'PROTECTED_DESTINATION')
+        self.assertFalse(out['available'])
+        proof = self.decode(out['attestation'])
+        self.assertEqual(proof['vm_uuid'], s.VM_UUID)
+        self.assertEqual(proof['valid_until'], s.stamp(self.clock() + 30))
+
 if __name__=='__main__':
     unittest.main()

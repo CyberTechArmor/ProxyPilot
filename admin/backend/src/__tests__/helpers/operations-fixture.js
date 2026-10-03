@@ -1,5 +1,5 @@
-import { operationalConfigurationsMigration1113 } from '../../lib/operational-configurations.js';
 import { operationalBrowserDraftMigration1117 } from '../../lib/operational-browser-agent-configurations.js';
+import { operationalConfigurationsMigration1113 } from '../../lib/operational-configurations.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { operationalProjectsMigration1100, operationalProjectsMigration1101, operationalProjectsMigration1102 } from '../../lib/operational-projects-schema.js';

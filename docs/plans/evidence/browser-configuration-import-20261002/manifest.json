@@ -1,0 +1,90 @@
+{
+  "base_commit": "863ed48caa2ec9fff212b9e9a76ea0fc8e04d7c7",
+  "source_state": "Corrected C0 review P2 source frozen before correction commit; later express authorization permits reviewed repository release.",
+  "branch": "browser/configuration-import-20261002",
+  "environment": "Saved ProxyPilot cloud only; localhost fixture HTTP; no laptop or production executor.",
+  "recorded_at": "2026-10-03T10:29:27.614761+00:00",
+  "source_sha256": {
+    ".github/workflows/security-regression.yml": "e90f8f64c295c6aa146a6df59314fe147f0885fb0de0ee4e1cb559a122064171",
+    "admin/backend/src/__tests__/helpers/operations-fixture.js": "19fe404bb60110693def404e6846272ef226a5171a7265fdc4ca3794ca36f525",
+    "admin/backend/src/__tests__/operational-browser-agent-configurations.test.js": "9004d1478ea2a5dc6db62c951bb00e2ed026da977fc1f5c704087487afe590b4",
+    "admin/backend/src/__tests__/operational-browser-configurations-http.test.js": "8e89fe5fbaf73b70b427195cf1f8b807a08c50a5dea9e815019a88cd7fe140c4",
+    "admin/backend/src/__tests__/operational-projects.test.js": "3b31ae8b440847e603c58bedeb64242fa2f1d5ea0c270b05d3c1e1e0d8acbf6f",
+    "admin/backend/src/__tests__/operations-toggles.test.js": "44060c88ea7760699841991a27c8fe621f08782c269b127b215410918a58578f",
+    "admin/backend/src/db.js": "5cd7963a30c5e05a90e04d484d589abd6291f5f7082865d0c2c6fbee0aa59807",
+    "admin/backend/src/lib/operational-browser-agent-configurations.js": "09b57ef38b17a8050f841836e08dd3443bb0fdbfa6dda957fd99320965beb1ac",
+    "admin/backend/src/lib/operational-browser-agent-proposal.js": "4ea0d6f8aac6fb705335af9053847670e6b702f2569118e8308f48e0280ad509",
+    "admin/backend/src/lib/operational-browser-agent-proposal.schema.json": "664c2d8d48ff7494d4aa7967d9b93cb7e15e1f0e4d21973df05c6e42faf6de36",
+    "admin/backend/src/lib/operational-projects-store.js": "ee76d7755340c10e3bb4782fffc29b48bf6628f3b6ee0a5cb8b4efd8b1ac2d42",
+    "admin/backend/src/routes/operational-projects.js": "7749c60f828153e1b0694f54032aa78b37f7777e823e3f60d12ee838e3c60ff8",
+    "admin/frontend/src/components/operational-projects/BrowserConfigurations.jsx": "c829feb9448f88db0bb457443904c51df6942d046d65f23bdc034e23ea896dca",
+    "admin/frontend/src/components/operational-projects/browser-configuration-example.json": "486b7c0e88a1aa3183c9bc35d073a9a542c6f8d5fd85934eb39b15bb63818688",
+    "admin/frontend/src/components/operational-projects/browser-configuration-ui.js": "fbe911d6036b3df2792b04b77c561f4e57c603b752989f4429800b3a46799faf",
+    "admin/frontend/src/pages/OperationalProjectDetail.jsx": "455b85a6d0872d4ac03e9edc6440e532d1201cd3e0d9ed5c3f1e6080d4f340e4",
+    "admin/frontend/tests/browser-configurations.browser.mjs": "a9173dfd1ed96101c122105a5f3566017fbd48eb720fe0b656e7b191d0633a35",
+    "contracts/browser-agent/fixtures/general-agent.draft.json": "37a3650350fcfb28bb9407886ace6554b7164ab7efbdce7c221321ffa37b8bde",
+    "contracts/browser-agent/proposal-v1.schema.json": "664c2d8d48ff7494d4aa7967d9b93cb7e15e1f0e4d21973df05c6e42faf6de36",
+    "docs/plans/browser-configuration-import-20261002.md": "34586225b74c0079b55a51b755b5426a685f6ef39fa6003117ba31e9455b5a46",
+    "contracts/browser-agent/README.md": "a79e21d0a3b79126e2d46084186898f3eb34dc2c6cf34e782660ddbf634b32bb",
+    "LEARNINGS.md": "28df515481d698dd53a0382c47741eae633b466524321a3bdd7956f057e4cd63",
+    ".github/scripts/frontend-audit-policy.mjs": "b88730939ce4ec7e25e5937b79bb949a3b4d63796d272e789c6bb2d69176849e"
+  },
+  "artifact_sha256": {
+    "ui-report.json": "7e8901b2524dc3ca53a562d533390c070c7fcb2a846a0c0c6a1939599e8f95ee",
+    "a6-report.json": "20e7f6a95b7e06b4ff0a5218b6d00fbce5f89fafbd956b8f5773fb0521d14e58",
+    "a7-report.json": "5b3c4c436b1fa73344a2f233864cb904d61ee1a141ef813c783b745592f4c8f2",
+    "configuration-375.png": "8f156bc55eaab8fc0737b4dda5aa07bdaabaa0e6920f61906bfd97f5f5b8a523",
+    "configuration-1280.png": "2f710c2b8e7f25ada0a38f8939e57ef73130d659f9b96eae547b685ab9521fef",
+    "budget-editor-375.png": "5feb14b0e1c693e24d3380ae555fc903c123c83db5998d053823b4ac052ce20b",
+    "budget-editor-1280.png": "fc475c0f28924a79da1cc47ba21957fb89deaae1c0e3732a779a5e8d1451cc5d",
+    "readiness-375.png": "d5b9a05d34cc0fa1f3186ad81a9a5e4138e71c0268672268aa419100d173d9a8",
+    "readiness-1280.png": "5299cbd9d825b10db56bbeda7550a9f0ff6a7da8ac9fc6afa65ababbcd8a643a",
+    "backend-focused.txt": "4a0b4f47549ff99878ab5744652004c52db5dfdc08b8405e9e17f56eba3296ad",
+    "backend-regression.txt": "5eb4ffab5b5080e94d71af83e84397d35b7eeadfd53140b1aa4d60511c082d23",
+    "frontend-build.txt": "8b920172db98c784dbca76da90865a268ae5c0c35dbd825c843f7527f28c5bc1",
+    "ui-report-refresh-conflict.json": "f72c5c5bbfa65f69c197ae921993c746ea5923e2d6f5421755a4e0799b25036b",
+    "refresh-conflict-browser.txt": "f87b2c6bdb272ba64d9d375bc501549177cb4d1e5bf1a6800411fa52583c3d87",
+    "frontend-build-refresh-conflict.txt": "d940fd6a7eb5b0d76070021be493a76724357e842db041cfb9de0eaba7edab00"
+  },
+  "dependency_note": "Existing same-cloud backend/frontend node_modules symlinks were used as dependency inputs only. No source or lock changes; do not stage symlinks.",
+  "verification": {
+    "backend": {
+      "tests": 210,
+      "passed": 210
+    },
+    "focused_backend_http": {
+      "tests": 12,
+      "passed": 12
+    },
+    "selected_configuration_ui": {
+      "journeys": 6,
+      "passed": 6,
+      "layouts": 5,
+      "axe_violations": 0,
+      "report": "ui-report-refresh-conflict.json",
+      "saved_conflict_refresh_blocks_save": true,
+      "new_draft_requires_explicit_project_revision_acceptance": true,
+      "reconciled_save_if_match": 3
+    },
+    "legacy_a6": {
+      "journeys": 20,
+      "passed": 20,
+      "layouts": 96
+    },
+    "legacy_a7_a8": {
+      "journeys": 6,
+      "passed": 6,
+      "layouts": 42
+    },
+    "production_build": {
+      "status": "passed",
+      "modules": 2000,
+      "log": "frontend-build-refresh-conflict.txt"
+    },
+    "selected_execution_requests": 0,
+    "model_calls": 0,
+    "external_contacts": 0
+  },
+  "prior_candidate_commit": "24032ed714e823559a85902a1c15461f68961a0a",
+  "integration_main_commit": "c774f57bdc6fa54b5ec5d50cdd7dcadd84d25618"
+}

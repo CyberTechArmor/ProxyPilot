@@ -1,0 +1,20 @@
+✔ generated runtime schema is byte-identical to the proposal and rejects raw authority fields (7.929052ms)
+✔ import cannot weaken the user-selected per-action and destination approval policy (6.620796ms)
+✔ exact internal names, addresses and ports are draft metadata with no reachability or execution grant (18.470223ms)
+✔ import validation checks destination roles, current asset pins, request classification and UTF-8 limits (3.812793ms)
+✔ preview has no writes; create preserves source and is unconditionally non-executable (13.977307ms)
+✔ update keeps original source by default and appends immutable version snapshots (11.036425ms)
+✔ stale revisions and failing snapshot insertion roll back draft updates and audit (13.523184ms)
+✔ current guide pin is validated and withdrawal/staleness is visible without execution (14.867776ms)
+✔ project isolation, role revocation, archive and administrator non-bypass apply to browser drafts (10.958057ms)
+✔ additive draft persistence does not alter legacy synthetic or typed API configurations (11.142354ms)
+✔ draft routes enforce metadata gate, revisions, CSRF and no execution endpoint (19.158017ms)
+✔ real HTTP browser drafts enforce current authority, CSRF, pins and inert endpoints (171.295718ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 323.007945

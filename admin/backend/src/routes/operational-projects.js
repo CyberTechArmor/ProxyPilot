@@ -101,7 +101,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
         try { store.auditDenied(req.operationsActor, req.params?.id, denialAction, err.status); } catch { /* preserve refusal */ }
       }
       return res.status(known ? err.status : 500).json({ error: known ? err.message : 'Unable to complete browser draft request',
-        ...(known && err.code ? { code: err.code } : {}) });
+        ...(known && err.code ? { code: err.code, ...(err.extra ?? {}) } : {}) });
     }
   };
   router.get('/:id/browser-agent-configurations', agentsOnly,

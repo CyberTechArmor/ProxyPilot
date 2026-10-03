@@ -5,7 +5,7 @@ import { OperationsError } from './operational-projects-logic.js';
 
 export const BROWSER_DRAFT_CONTRACT = 'browser-agent-draft.v1';
 export const BROWSER_DRAFT_MAX_BYTES = 200000;
-const refuse = (code) => { throw Object.assign(new OperationsError(400, 'Invalid browser draft configuration'), { code }); };
+const refuse = (code, extra = {}) => { throw Object.assign(new OperationsError(400, 'Invalid browser draft configuration'), { code, extra }); };
 
 // Compile only this trusted generated schema's small JSON Schema subset.
 // Callers cannot supply schemas or regexes. Unknown schema constructs fail closed.
@@ -58,7 +58,13 @@ export function validateBrowserDraftImport(input) {
   try { bytes = Buffer.byteLength(JSON.stringify(input), 'utf8'); } catch { refuse('BROWSER_DRAFT_INVALID'); }
   if (!Number.isFinite(bytes) || bytes > BROWSER_DRAFT_MAX_BYTES) refuse('BROWSER_DRAFT_TOO_LARGE');
   const parsed = inputSchema.safeParse(input);
-  if (!parsed.success) refuse('BROWSER_DRAFT_INVALID');
+  if (!parsed.success) refuse('BROWSER_DRAFT_INVALID', { issues: parsed.error.issues.slice(0, 16).map(issue => ({
+    path: issue.path,
+    message: issue.code === 'unrecognized_keys' ? 'Remove unsupported fields from this object.'
+      : issue.code === 'invalid_type' ? `Expected ${issue.expected}.`
+        : issue.code === 'too_small' ? 'Value is below the required minimum.'
+          : issue.code === 'too_big' ? 'Value exceeds the allowed maximum.' : 'Value does not match the configuration contract.',
+  })) });
   const { configuration: c } = parsed.data;
   if (!c.name.trim() || !c.work.instructions.trim() || c.work.success_criteria.some(v => !v.trim())) refuse('BROWSER_DRAFT_INVALID');
   if (Buffer.byteLength(c.work.instructions, 'utf8') > 100000) refuse('BROWSER_DRAFT_TOO_LARGE');

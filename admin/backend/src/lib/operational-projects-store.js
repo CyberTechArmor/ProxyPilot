@@ -1,5 +1,5 @@
-import { createConfigurationsStore } from './operational-configurations.js';
 import { createBrowserConfigurationsStore } from './operational-browser-agent-configurations.js';
+import { createConfigurationsStore } from './operational-configurations.js';
 import { randomUUID } from 'node:crypto';
 import { createOperationsWorkflow } from './operational-projects-workflow.js';
 import { createOperationalAgentsStore } from './operational-agents-store.js';

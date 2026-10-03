@@ -1,0 +1,58 @@
+{
+  "checks": [
+    "API contract presence mounts one canonical editor in Agents even when runtime configured=false; fresh runtime readiness still blocks Start",
+    "shared editor explicit validate/review/save reaches real C0 routes; source and revision retained; no consent or Start",
+    "all five actual viewports use internal scrolling with reachable runtime actions and zero document overflow or axe violations"
+  ],
+  "layouts": [
+    {
+      "width": 360,
+      "height": 640,
+      "scrollWidth": 360,
+      "scrollHeight": 640,
+      "scrollTop": 0,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 375,
+      "height": 667,
+      "scrollWidth": 375,
+      "scrollHeight": 667,
+      "scrollTop": 0,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 768,
+      "height": 640,
+      "scrollWidth": 768,
+      "scrollHeight": 640,
+      "scrollTop": 0,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "scrollWidth": 1280,
+      "scrollHeight": 800,
+      "scrollTop": 0,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 1920,
+      "height": 900,
+      "scrollWidth": 1920,
+      "scrollHeight": 900,
+      "scrollTop": 0,
+      "accessibility_violations": 0
+    }
+  ],
+  "page_errors": [],
+  "lighthouse_mobile": {
+    "score": 0.96,
+    "width": 375,
+    "height": 667,
+    "gather_mode": "snapshot",
+    "page": "Real Agents page, canonical selected editor and uninstalled runtime"
+  },
+  "passed": true
+}

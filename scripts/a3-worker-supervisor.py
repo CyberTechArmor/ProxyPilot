@@ -89,6 +89,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -155,6 +156,14 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 BACKEND_METHODS = frozenset(('status', 'launch', 'renew', 'action', 'step_record', 'model_step', 'view', 'stop',
                              'live', 'takeover', 'release', 'summarize',
                              'public_review_status', 'public_review_model', 'cancel_public_review'))
+SELECTED_METHODS = frozenset(('selected_browser_status', 'selected_browser_launch', 'selected_browser_observe',
+    'selected_browser_action', 'selected_browser_poll_action', 'selected_browser_pending', 'selected_browser_approve_request', 'selected_browser_deny_request',
+    'selected_browser_grant_destination', 'selected_browser_auth', 'selected_browser_pause', 'selected_browser_resume',
+    'selected_browser_auth_inventory', 'selected_browser_confirm_authentication',
+    'selected_browser_takeover', 'selected_browser_release', 'selected_browser_view', 'selected_browser_stage', 'selected_browser_offer_input',
+    'selected_browser_renew', 'selected_browser_stop', 'selected_browser_live', 'selected_browser_control',
+    'selected_browser_model_status', 'selected_browser_model', 'cancel_selected_browser_model'))
+BACKEND_METHODS |= SELECTED_METHODS
 OPERATOR_METHODS = BACKEND_METHODS | frozenset(('takeover', 'input', 'observe', 'locate',
                                                 'egress_probe', 'proof', 'unit_stats', 'journal',
                                                 'proof_crash_mid_action'))
@@ -806,7 +815,10 @@ class Host:
                 client.settimeout(timeout)
                 client.connect(str(BROKER_SOCKET))
                 client.sendall((json.dumps({'method': method, 'params': params}) + '\n').encode())
-                line = client.makefile().readline(65536)
+                limit = 1048576 if method in ('browser_model_call', 'selected_browser_model_call') else 65536
+                line = client.makefile().readline(limit + 1)
+                if len(line) > limit:
+                    raise ValueError('broker reply too large')
             reply = json.loads(line)
         except (OSError, ValueError) as error:
             raise Refused('CREDENTIAL_BROKER_UNAVAILABLE') from error
@@ -815,6 +827,34 @@ class Host:
             raise Refused(code if isinstance(code, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code)
                           else 'CREDENTIAL_BROKER_UNAVAILABLE')
         return reply.get('result')
+
+    def selected_gateway(self, method, params):
+        module = self._selected_gateway_helper()
+        try:
+            return module.control_call('/run/proxypilot-a3/selected-proxy.sock', method, params)
+        except Exception as error:
+            raise Refused(getattr(error, 'code', 'BROWSER_GATEWAY_UNAVAILABLE')) from None
+
+    def _selected_gateway_helper(self):
+        module = getattr(self, '_selected_gateway_module', None)
+        if module is None:
+            module = _module('pp_selected_gateway_client', 'selected_browser_gateway.py')
+            self._selected_gateway_module = module
+        return module
+
+    def selected_resolve(self, parts):
+        module = self._selected_gateway_helper()
+        try:
+            return module.resolve_host(parts)
+        except Exception as error:
+            raise Refused(getattr(error, 'code', 'DNS_LOOKUP_UNVERIFIED')) from None
+
+    def selected_route_hash(self, addresses):
+        module = self._selected_gateway_helper()
+        try:
+            return module.route_hash(addresses)
+        except Exception as error:
+            raise Refused(getattr(error, 'code', 'NETWORK_ROUTE_UNVERIFIED')) from None
 
     def verify_install(self, own_files):
         """The daemon runs only from its reviewed, root-owned installed copies."""
@@ -838,7 +878,7 @@ class Host:
 class Worker:
     """The host end of one attempt's line-delimited JSON channel."""
 
-    def __init__(self, process):
+    def __init__(self, process, event_sink=None):
         self.process = process
         self.write_lock = threading.Lock()
         self.state_lock = threading.Lock()
@@ -851,6 +891,7 @@ class Worker:
         self.credential_channel = threading.Event()
         self.live_sinks = {}
         self.stderr_tail = b''
+        self.event_sink = event_sink
         threading.Thread(target=self._stdout, daemon=True).start()
         threading.Thread(target=self._stderr, daemon=True).start()
 
@@ -863,6 +904,8 @@ class Worker:
                     continue
                 if not isinstance(message, dict):
                     continue
+                if self.event_sink is not None and message.get('event', '').startswith('selected_'):
+                    self.event_sink(message)
                 if 'id' in message:
                     with self.state_lock:
                         slot = self.pending.pop(message.get('id'), None)
@@ -1006,6 +1049,13 @@ class Supervisor:
         self.stopping = False
         self.state = self._load()
         self.key = None
+        self.selected_runtime = None
+
+    def _selected(self):
+        if self.selected_runtime is None:
+            module = _module('pp_selected_supervisor', 'selected_browser_supervisor.py')
+            self.selected_runtime = module.SelectedBrowserSupervisor(self, Refused, types.SimpleNamespace(**globals()))
+        return self.selected_runtime
 
     # ------------------------------------------------------------ journal
 
@@ -1047,6 +1097,8 @@ class Supervisor:
         return self.key
 
     def _receipt(self, attempt, reason, evidence, descendants_gone, workspace_removed):
+        if attempt.get('workload') == 'selected_browser_v1':
+            return self._selected().receipt(attempt, reason, evidence, descendants_gone, workspace_removed)
         payload = {
             'v': 1, 'kind': 'a3-teardown', 'run_id': attempt['run_id'], 'attempt_id': attempt['attempt_id'],
             'fence': attempt['fence'], 'workspace_id': attempt.get('workspace_id'), 'vm_uuid': VM_UUID,
@@ -1129,6 +1181,8 @@ class Supervisor:
                 self._save()
             reason = attempt['stop_reason']
             worker = self.workers.get(attempt_id)
+        if attempt.get('workload') == 'selected_browser_v1':
+            self._selected().before_teardown(attempt)
         if worker is not None:
             try:
                 # An attempt that submitted a credential signs out first (POST /api/logout).
@@ -1170,10 +1224,25 @@ class Supervisor:
                 self._note(attempt, 'teardown_unverified')
                 self._save()
             raise Refused('TEARDOWN_UNVERIFIED')
+        selected_network_closed = True
+        if attempt.get('workload') == 'selected_browser_v1':
+            selected_network_closed = self._selected().after_teardown(attempt, descendants, workspace)
         evidence['exit'] = attempt.get('exit')
         if attempt.get('credential_submitted'):
             evidence['logout'] = attempt.get('logout', 'not_run')
         receipt = self._receipt(attempt, reason, evidence, True, True)
+        if selected_network_closed is False:
+            with self.lock:
+                # A bounded gateway drain can finish after browser closure.
+                # Preserve signed known meters, keep admission/latch closed,
+                # and allow only a fresh verified cleanup retry. No partial
+                # receipt is treated as a terminal or cached full closure.
+                attempt['receipt'] = receipt
+                attempt['teardown_evidence'] = evidence
+                self.workers.pop(attempt_id,None)
+                self._note(attempt,'partial_receipt')
+                self._save()
+            return receipt
         with self.lock:
             attempt['receipt'] = receipt
             attempt['teardown_evidence'] = evidence
@@ -1825,7 +1894,7 @@ class Supervisor:
         ref = validate_ref(params)
         with self.lock:
             attempt = self._attempt(ref, ('running', 'human'))
-            if attempt.get('workload') != 'browser' or not attempt.get('live'):
+            if attempt.get('workload') not in ('browser', 'selected_browser_v1') or not attempt.get('live'):
                 raise Refused('LIVE_UNAVAILABLE')
             self._usable(attempt)
             worker = self.workers.get(ref['attempt_id'])
@@ -1857,7 +1926,7 @@ class Supervisor:
             raise Refused('INVALID_REQUEST', 'conn')
         with self.lock:
             attempt = self._attempt(ref, ('running',))
-            if attempt.get('workload') != 'browser' or not attempt.get('live'):
+            if attempt.get('workload') not in ('browser', 'selected_browser_v1') or not attempt.get('live'):
                 raise Refused('LIVE_UNAVAILABLE')
             run = self._usable(attempt)
             worker = self.workers.get(ref['attempt_id'])
@@ -2185,6 +2254,11 @@ class Supervisor:
             raise Refused('INVALID_REQUEST')
         if method not in (OPERATOR_METHODS if operator else BACKEND_METHODS):
             raise Refused('METHOD_NOT_ALLOWED')
+        if method in SELECTED_METHODS:
+            return self._selected().dispatch(method, params)
+        if params.get('attempt_id') in self.state['attempts'] and self.state['attempts'][params['attempt_id']].get('workload') == 'selected_browser_v1':
+            # Legacy routes carry no selected policy/controller/privacy pins.
+            raise Refused('METHOD_NOT_ALLOWED')
         if method == 'launch':
             if operator and 'workload' in params:
                 params = dict(params)
@@ -2323,16 +2397,18 @@ class Handler(socketserver.StreamRequestHandler):
         if uid != self.server.peer_uid:
             return
         self.request.settimeout(180)
-        line = self.rfile.readline(262145)
+        line = self.rfile.readline(24 * 1024 * 1024 + 1)
         try:
-            if len(line) > 262144:
-                raise Refused('INVALID_REQUEST', 'too large')
             try:
                 request = json.loads(line)
             except ValueError as error:
                 raise Refused('INVALID_REQUEST') from error
             if not isinstance(request, dict) or set(request) - {'method', 'params'} or 'method' not in request:
                 raise Refused('INVALID_REQUEST')
+            maximum = {'selected_browser_stage': 24 * 1024 * 1024, 'selected_browser_model': 3 * 1024 * 1024,
+                       'selected_browser_launch': 524288, 'selected_browser_status': 524288}.get(request['method'], 262144)
+            if len(line) > maximum or not line.endswith(b'\n'):
+                raise Refused('INVALID_REQUEST', 'too large')
             result = self.server.supervisor.dispatch(request['method'], request.get('params', {}),
                                                      operator=self.server.operator)
             if isinstance(result, LiveStream):
@@ -2365,7 +2441,10 @@ def listen(path, supervisor, operator):
 def installed_files():
     names = ('a3-worker-supervisor.py', 'a3-worker-guest.py', 'a3-install-proxy.py',
              'a3-install-fence.py', 'a3-network-fence.py', 'a3-origin-proxy.py')
-    return [HERE / name for name in names] + [UNIT]
+    selected = ('selected_browser_supervisor.py', 'selected_browser_policy.py', 'selected_browser_gateway.py',
+                'selected_browser_worker.py', 'selected_browser_contract.py', 'selected-browser-schemas.json',
+                'selected-browser-model.py')
+    return [HERE / name for name in names + selected] + [UNIT]
 
 
 def serve():

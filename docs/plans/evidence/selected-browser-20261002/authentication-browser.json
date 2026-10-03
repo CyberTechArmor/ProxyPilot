@@ -1,0 +1,94 @@
+{
+  "responsive": [
+    {
+      "width": 360,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 375,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 768,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 1280,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 1920,
+      "overflow": false,
+      "accessibility_violations": 0
+    }
+  ],
+  "source_preserved": true,
+  "approval_exact": true,
+  "conversion_requires_review": true,
+  "no_implicit_start": true,
+  "verification_no_replay": true,
+  "authorization_loss_clears_private_ui": true,
+  "private_release_separate": true,
+  "exact_form_text_review": true,
+  "selected_fullscreen_preserves_viewer": true,
+  "authentication": {
+    "checks": [
+      "another controller cannot load evidence",
+      "one exact request and full confirmation submitted without release/resume",
+      "revision change clears inventory and selection",
+      "revoked controller authority clears evidence",
+      "live viewer loss clears inventory",
+      "post-inventory current revision mismatch refuses stale evidence",
+      "late inventory response after viewer loss remains private and cleared",
+      "403 membership loss removes the entire private run editor"
+    ],
+    "layouts": [
+      {
+        "width": 360,
+        "height": 640,
+        "documentWidth": 360,
+        "horizontal_overflow": false,
+        "accessibility_violations": 0
+      },
+      {
+        "width": 375,
+        "height": 667,
+        "documentWidth": 375,
+        "horizontal_overflow": false,
+        "accessibility_violations": 0
+      },
+      {
+        "width": 768,
+        "height": 640,
+        "documentWidth": 768,
+        "horizontal_overflow": false,
+        "accessibility_violations": 0
+      },
+      {
+        "width": 1280,
+        "height": 800,
+        "documentWidth": 1280,
+        "horizontal_overflow": false,
+        "accessibility_violations": 0
+      },
+      {
+        "width": 1920,
+        "height": 900,
+        "documentWidth": 1920,
+        "horizontal_overflow": false,
+        "accessibility_violations": 0
+      }
+    ],
+    "exact_single_request": true,
+    "fixed_confirmation": true,
+    "revision_and_if_match": true,
+    "csrf_echo": true,
+    "no_automatic_release_resume": true,
+    "private_evidence_not_persisted": true
+  },
+  "page_errors": []
+}

@@ -1,0 +1,21 @@
+✔ paste accepts selected-browser JSON and refuses old demo or malformed/oversized text (3.986699ms)
+✔ partially edited nested JSON remains available without mounting unsafe setting controls (0.222635ms)
+✔ Start requires current server readiness, saved revision/hash, current guide and project authority (0.345268ms)
+✔ approvals carry the exact action pin and cannot implicitly enlarge policy (0.380632ms)
+✔ citation links cannot expose credentials or launch executable schemes (0.18018ms)
+✔ selected browser live URL cannot use another workflow or arbitrary path (0.3593ms)
+✔ all proposed numeric ceilings match the authoritative schema bounds (0.489986ms)
+✔ file staging validates bounds and hashes bytes without trusting the file name (8.839571ms)
+✔ private preview refuses bytes or hashes that do not match the exact artifact pin (1.949419ms)
+✔ effect mutations use noReplay and private UI does not persist content in browser storage (1.632443ms)
+✔ authentication selection preserves exact inventory and selected bindings without bulk acknowledgement (1.623028ms)
+✔ authentication evidence rejects another fence, missing proof and duplicate request references (0.220041ms)
+✔ frontend authentication statement matches the authoritative server contract and private review is ephemeral (1.620064ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 117.976799

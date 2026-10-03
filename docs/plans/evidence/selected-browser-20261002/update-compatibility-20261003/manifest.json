@@ -1,0 +1,126 @@
+{
+  "candidate_sha": "bae85ff7409823bf242b8108157fdbd781be61ad",
+  "base_main_sha": "c742d71ae3a319aa3b6f5817405cbea868c3fd1d",
+  "compatibility_sha": "62c4b1b0bca1218b2b43ac7206815aaab735b6f9",
+  "review": "independent exact-head clear; all ten compatibility files identical to reviewed source",
+  "source_sha256": {
+    "update.sh": "abb8f25547a8d6f95c590b313ef486e9564758fce781a7e964fcb794b305ce1e",
+    "scripts/review-runtime-refresh.py": "1120f2944856a6740a9c122734f0e6331adaa0fa57026ed553886643ae8232ef",
+    "scripts/selected-runtime-package.py": "1cc82d14281699266434b0545c743db99041dd08cc2ff66605c672530b2e69a4"
+  },
+  "proofs": [
+    {
+      "file": "pp-update-compat-refresh-final.log",
+      "bytes": 121,
+      "sha256": "e61e1ee58580551afb3faef2c398503fa05eb80d65d5dd8697bfe482eea36353"
+    },
+    {
+      "file": "pp-update-compat-preservation-final.log",
+      "bytes": 105,
+      "sha256": "60727e36075d646d1285aee80e93756346f06c0fee27c2430dfd562fdbb09dea"
+    },
+    {
+      "file": "pp-update-compat-package.log",
+      "bytes": 604,
+      "sha256": "b2b4138297ba70c6b61662250b59f26e97634e415156d1c02e8850874cb1ca93"
+    },
+    {
+      "file": "pp-update-compat-git.log",
+      "bytes": 110,
+      "sha256": "24afd002b289acfcaf29439c76bb37a618e8cb4910dc7ee40ac89940885832ef"
+    },
+    {
+      "file": "pp-update-compat-readiness.log",
+      "bytes": 10962,
+      "sha256": "1cf379e378da4f02a19361d893581ce8f39d5833832d17526962b7e9425249a1"
+    },
+    {
+      "file": "pp-update-compat-updater-node.log",
+      "bytes": 7259,
+      "sha256": "58ef39d742a4931d50aa245dc089e731f005470e7190bfd52dba3f8e745647e8"
+    },
+    {
+      "file": "pp-update-compat-terminal.log",
+      "bytes": 123,
+      "sha256": "91e271e995119bce1c5a7153f521bb98735735faab25737efaace9fdb05dbe95"
+    },
+    {
+      "file": "proxypilot-d4b6-isolated-ci-final.json",
+      "bytes": 7340,
+      "sha256": "88e779c4d584519d44ba0f4602a067b35249042cb567d699d7c8e38afeb42727"
+    },
+    {
+      "file": "proxypilot-bae-dashboard-start-failure.json",
+      "bytes": 7278,
+      "sha256": "47a5cbebd0ba6a6d59f3217937bc52c0d8f3bac266dd4ee5712c794babc1bfa8"
+    },
+    {
+      "file": "proxypilot-bae-security-start-failure.json",
+      "bytes": 6105,
+      "sha256": "2a6efd05fdd9365cd0986720a14d7858d01e4ca88c645284d54a4b769749e5e3"
+    },
+    {
+      "file": "proxypilot-bae-start-failure-provenance.json",
+      "bytes": 2529,
+      "sha256": "6f1a991277b3c032801e67eadfa7ca72ee16a30478f18e2233b67d95a90352bf"
+    },
+    {
+      "file": "proxypilot-bae-ci-final.json",
+      "bytes": 51381,
+      "sha256": "906733e003315232ba3273059b28b3d8bf6cb2a2af67a7581e5597f8172d5ed5"
+    }
+  ],
+  "fresh_ci": {
+    "security": 37126162901,
+    "broker": 37126162943,
+    "status": "both workflows completed failure solely at actual native launch",
+    "broker_python": {
+      "tests": 484,
+      "passed": 451,
+      "skipped": 33,
+      "seconds": 229.004,
+      "browser": "Chromium154.0.8037.0"
+    },
+    "root_updater": {
+      "passed": 83,
+      "skipped": 0
+    },
+    "root_authentication_security": {
+      "passed": 313,
+      "skipped": 0
+    },
+    "security_later_steps": "skipped after native failure",
+    "unit_selections": [
+      {
+        "tests": 462,
+        "passed": 462,
+        "skipped": 0
+      },
+      {
+        "tests": 436,
+        "passed": 436,
+        "skipped": 0
+      }
+    ]
+  },
+  "scope": "legacy pre-activation source/app release only",
+  "remaining_activation_gates": [
+    "ordinary app Update compatibility after selected package attempt/activation",
+    "actual host-bound reviewed plan",
+    "installed Incus/nft/Neko/privacy/storage/decoder/provider/selected-site acceptance"
+  ],
+  "production_operations_performed": false,
+  "native_failure": {
+    "rpc_ms": [
+      20002,
+      20003
+    ],
+    "code": "FIXTURE_RPC_DEADLINE",
+    "worker_ready": false,
+    "gateway_requests": 0,
+    "gateway_effects": 0,
+    "waiting_startup_phase": "unproved",
+    "browser_bridge_guest_supervisor_workflows_identical_to_d4b6": true
+  },
+  "retained_evidence_scope": "Local compatibility proofs plus exact bae CI outcomes; no installed/production acceptance. A later diagnostic candidate must earn fresh exact-head CI."
+}

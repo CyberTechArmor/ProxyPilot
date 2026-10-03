@@ -1,0 +1,8 @@
+test_fixed_marker_refuses_special_file_and_unapproved_content (test_selected_browser_composition.StartupMarkerTests.test_fixed_marker_refuses_special_file_and_unapproved_content) ... ok
+Selected composition browser: Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)
+test_real_discovery_reply_hold_reports_phase_at_transport_deadline_and_cleans_owned_browser (test_selected_browser_composition.BrowserCompositionTests.test_real_discovery_reply_hold_reports_phase_at_transport_deadline_and_cleans_owned_browser) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 24.696s
+
+OK

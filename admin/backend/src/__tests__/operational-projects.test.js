@@ -252,11 +252,17 @@ test('composition preserves authoritative auth/CSRF and new modules have no runt
   for(const name of ['operational-projects-store.js','operational-projects-logic.js','operational-projects-schema.js','operational-projects-workflow.js',
     'operational-evidence-guide.js','operational-evidence-guide-schema.js','operational-evidence-logic.js',
     'operational-configurations.js','operational-agents-store.js','operational-agents-schema.js','operational-pilot-review.js',
-    'operational-browser-agent-configurations.js','operational-browser-agent-proposal.js']) {
+    'operational-browser-agent-configurations.js','operational-browser-agent-proposal.js',
+    'operational-selected-browser-schema.js','operational-selected-browser-contract.js','operational-selected-browser-service.js',
+    'operational-selected-browser-auth-contract.js','operational-selected-browser-auth-schema.js',
+    'operational-browser-model.js']) {
     const content=readFileSync(new URL('../lib/'+name,import.meta.url),'utf8');
     const imports=[...content.matchAll(/(?:from\s+|import\s*\()(['"])([^'"]+)\1/g)].map(m=>m[2]);
     assert.ok(imports.every(i=>['node:crypto','zod','./operational-configurations.js','./operational-projects-logic.js','./operational-projects-workflow.js',
       './operational-evidence-guide.js','./operational-evidence-logic.js','./operational-agents-store.js','./operational-pilot-review.js',
-      './operational-browser-agent-configurations.js','./operational-browser-agent-proposal.js','./operational-browser-agent-proposal.schema.json'].includes(i)),imports.join(','));
+      './operational-browser-agent-configurations.js','./operational-browser-agent-proposal.js',
+      './operational-browser-agent-proposal.schema.json','./operational-selected-browser-contract.js','./operational-browser-model.js',
+      './operational-selected-browser-auth-contract.js',
+      './operational-selected-browser-action.schema.json'].includes(i)),imports.join(','));
   }
 });

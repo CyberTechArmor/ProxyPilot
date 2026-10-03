@@ -1,0 +1,13 @@
+test_agent_wire_denial_is_signed_and_does_not_send_or_replay_submission (test_selected_browser_composition.BrowserCompositionTests.test_agent_wire_denial_is_signed_and_does_not_send_or_replay_submission) ... ok
+test_explicit_account_website_and_attempt_session_headers_remain_ticketed (test_selected_browser_composition.BrowserCompositionTests.test_explicit_account_website_and_attempt_session_headers_remain_ticketed) ... ok
+test_forced_guest_death_cleans_recorded_browser_group_without_other_processes (test_selected_browser_composition.BrowserCompositionTests.test_forced_guest_death_cleans_recorded_browser_group_without_other_processes) ... ok
+test_local_form_preparation_then_unobserved_submit_blocks_continuation (test_selected_browser_composition.BrowserCompositionTests.test_local_form_preparation_then_unobserved_submit_blocks_continuation) ... ok
+test_manual_wire_denial_keeps_capture_paused_and_disposes_actual_held_request (test_selected_browser_composition.BrowserCompositionTests.test_manual_wire_denial_keeps_capture_paused_and_disposes_actual_held_request) ... ok
+test_navigation_escalation_grant_settles_unsent_action_and_offers_new_exact_path (test_selected_browser_composition.BrowserCompositionTests.test_navigation_escalation_grant_settles_unsent_action_and_offers_new_exact_path) ... ok
+test_resource_escalation_grant_allows_fresh_read_without_replaying_page_load (test_selected_browser_composition.BrowserCompositionTests.test_resource_escalation_grant_allows_fresh_read_without_replaying_page_load) ... ok
+test_sent_write_then_off_list_resource_cannot_be_settled_or_replayed (test_selected_browser_composition.BrowserCompositionTests.test_sent_write_then_off_list_resource_cannot_be_settled_or_replayed) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 29.366s
+
+OK

@@ -1,0 +1,19 @@
+{"error":"Late canonical list response cannot restore private editors after runtime authorization denial\n\n1 !== 0\n","page_errors":[]}
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Late canonical list response cannot restore private editors after runtime authorization denial
+
+1 !== 0
+
+    at file:///workspace/ProxyPilot/admin/frontend/tests/browser-agent-browser-check.mjs:134:10 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 1,
+  expected: 0,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.19.0

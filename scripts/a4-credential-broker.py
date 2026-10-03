@@ -857,7 +857,84 @@ class Broker:
                     self.model_lock.release()
                 return
 
-    def _model_call(self, params, proof, max_output, excerpt, review_control=None):
+    def browser_model_call(self, params):
+        """Versioned selected-browser inference, using existing host key custody.
+
+        No website credential can be attached. Images are pinned private data,
+        not URLs to fetch. Every encoded image byte is reserved as a token;
+        absent budgets/prices never become an assumed free multimodal call.
+        """
+        fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens',
+                  'prompt', 'image_inputs', 'deadline_at', 'price_table_revision', 'reservation')
+        if (not exact(params, fields) or not uuid_ok(params['run_id']) or not uuid_ok(params['call_id']) or
+                not isinstance(params['image_inputs'], list) or len(params['image_inputs']) > 8 or not safe_int(params['price_table_revision'],1) or
+                not exact(params['reservation'],('tokens','usd')) or not safe_int(params['reservation']['tokens'],1) or
+                type(params['reservation']['usd']) not in (int,float) or not 0<=params['reservation']['usd']<=20):
+            raise Refused('INVALID_REQUEST')
+        try:
+            parsed = datetime.datetime.fromisoformat(params['deadline_at'].replace('Z', '+00:00'))
+            if parsed.utcoffset() is None:
+                raise ValueError('timezone required')
+            remaining = parsed.timestamp() - self.clock()
+            if not 0 < remaining <= 180:
+                raise Refused('DEADLINE')
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            raise Refused('INVALID_REQUEST')
+        pins, images, encoded_bytes, decoded_bytes = [], [], 0, 0
+        for image in params['image_inputs']:
+            if (not exact(image, ('mime_type', 'sha256', 'base64')) or
+                    image['mime_type'] not in ('image/png', 'image/jpeg') or
+                    not isinstance(image['sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', image['sha256']) or
+                    not isinstance(image['base64'], str) or len(image['base64']) > 2796204):
+                raise Refused('INVALID_REQUEST')
+            try:
+                raw = base64.b64decode(image['base64'], validate=True)
+            except (ValueError, TypeError):
+                raise Refused('INVALID_REQUEST')
+            decoded_bytes += len(raw)
+            if (not raw or base64.b64encode(raw).decode() != image['base64'] or
+                    hashlib.sha256(raw).hexdigest() != image['sha256']):
+                raise Refused('INVALID_REQUEST')
+            encoded_bytes += len(image['base64']) + 256
+            pins.append({'mime_type': image['mime_type'], 'sha256': image['sha256'], 'byte_count': len(raw)})
+            images.append({'type': 'image_url', 'image_url': {'url': 'data:%s;base64,%s' %
+                           (image['mime_type'], image['base64']), 'detail': 'low'}})
+        if decoded_bytes > 2 * 1024 * 1024:
+            raise Refused('INVALID_REQUEST')
+        control = {'run_id': params['run_id'], 'deadline': parsed.timestamp(), 'deadline_at': params['deadline_at'],
+                   'monotonic_deadline': time.monotonic() + remaining}
+        pin_hash = hashlib.sha256(json.dumps(pins, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        with self.lock:
+            self._review_allowed(control)
+            run = self.state['runs'].get(params['run_id'])
+            if run is None or run.get('credential') is not None or not all(k in run['limits'] for k in ('max_tokens', 'max_usd')):
+                raise Refused('RUN_NOT_PINNED')
+            if params['reservation']['tokens']>run['limits']['max_tokens'] or params['reservation']['usd']>run['limits']['max_usd']:
+                raise Refused('BUDGET_EXHAUSTED')
+            previous = self.state['calls'].get(params['call_id'])
+            if previous is not None and (previous.get('kind') != 'selected_browser_model' or
+                    previous.get('run_id') != params['run_id'] or previous.get('image_inputs_sha256') != pin_hash or
+                    previous.get('price_table_revision') != params['price_table_revision'] or
+                    previous.get('prompt_sha256') != hashlib.sha256(str(params['prompt']).encode('utf-8')).hexdigest() or
+                    previous.get('max_output_tokens') != params['max_output_tokens'] or previous.get('deadline_at') != params['deadline_at']):
+                raise Refused('RUN_POLICY_MISMATCH')
+        request = {k: v for k, v in params.items() if k not in ('image_inputs', 'deadline_at', 'price_table_revision', 'reservation')}
+        return dict(self._model_call(request, None, 6000, 60000, control,
+                    browser_input={'pins_sha256': pin_hash, 'encoded_bytes': encoded_bytes, 'images': images,
+                                   'price_table_revision':params['price_table_revision'],'reservation':params['reservation']}),
+                    kind='selected_browser_model')
+
+    def cancel_browser_model(self, params):
+        if not exact(params, ('run_id',)) or not uuid_ok(params['run_id']):
+            raise Refused('INVALID_REQUEST')
+        with self.lock:
+            self.state.setdefault('review_cancellations', {})[params['run_id']] = stamp(self.clock())
+            accepted = any(c.get('kind') == 'selected_browser_model' and c.get('run_id') == params['run_id'] and
+                           c.get('state') not in ('reserved', 'refused') for c in self.state['calls'].values())
+            self._save()
+        return {'cancelled': True, 'provider_already_accepted': accepted}
+
+    def _model_call(self, params, proof, max_output, excerpt, review_control=None, browser_input=None):
         fields = ('run_id', 'call_id', 'project_limits_revision', 'model', 'max_output_tokens', 'prompt')
         if (not exact(params, fields) or not uuid_ok(params['run_id']) or not uuid_ok(params['call_id'])
                 or not safe_int(params['project_limits_revision']) or not isinstance(params['model'], str)
@@ -867,6 +944,8 @@ class Broker:
         prompt_bytes = len(params['prompt'].encode('utf-8'))
         if not 0 < prompt_bytes <= MAX_PROMPT_BYTES:
             raise Refused('INVALID_REQUEST', 'prompt size')
+        if browser_input is not None:
+            prompt_bytes += browser_input['encoded_bytes']
         with self._model_admission(review_control):
             with self.lock:
                 self._review_allowed(review_control)
@@ -879,12 +958,14 @@ class Broker:
                         raise Refused(existing.get('refusal') or 'CALL_REFUSED')
                     return dict(self._call_result(existing), replayed=True)
                 call = {'call_id': params['call_id'], 'run_id': params['run_id'], 'model_requested': params['model'],
-                        'kind': 'public_review' if excerpt == 10000 else 'summary' if max_output == SUMMARY_MAX_OUTPUT_TOKENS else 'step',
+                        'kind': 'selected_browser_model' if browser_input is not None else 'public_review' if excerpt == 10000 else 'summary' if max_output == SUMMARY_MAX_OUTPUT_TOKENS else 'step',
                         'max_output_tokens': params['max_output_tokens'], 'prompt_bytes': prompt_bytes,
                         'prompt_sha256': hashlib.sha256(params['prompt'].encode('utf-8')).hexdigest(),
                         'started_at': stamp(self.clock()), 'price_table_revision': self.state['prices']['revision']}
                 if review_control is not None:
                     call['deadline_at'] = review_control['deadline_at']
+                if browser_input is not None:
+                    call['image_inputs_sha256'] = browser_input['pins_sha256']
                 run = self.state['runs'].get(params['run_id'])
                 if run is None:
                     self._refuse_call(call, 'RUN_NOT_PINNED')
@@ -896,11 +977,15 @@ class Broker:
                 price = self.state['prices']['models'].get(params['model'])
                 if price is None:
                     self._refuse_call(call, 'PRICE_UNKNOWN')
+                if browser_input is not None and self.state['prices']['revision']!=browser_input['price_table_revision']:
+                    self._refuse_call(call, 'PRICE_CHANGED')
                 provider = self.state['provider']
                 if provider is None:
                     self._refuse_call(call, 'PROVIDER_KEY_UNBOUND')
                 output_tokens = 0 if proof == 'provider_error' else params['max_output_tokens']
                 tokens, nano = worst_case(prompt_bytes, output_tokens, price)
+                if browser_input is not None and (tokens>browser_input['reservation']['tokens'] or nano>budget_nano(browser_input['reservation']['usd'])):
+                    self._refuse_call(call, 'RESERVATION_TOO_SMALL')
                 limits = run['limits']
                 if 'max_tokens' in limits and (run['tokens']['settled'] + run['tokens']['reserved'] + tokens
                                                > limits['max_tokens']):
@@ -933,7 +1018,9 @@ class Broker:
                         self._release(call, 'refused', error.code)
                         self._save()
                     raise
-                body = {'model': params['model'], 'messages': [{'role': 'user', 'content': params['prompt']}],
+                content = params['prompt'] if browser_input is None or not browser_input['images'] else [
+                    {'type': 'text', 'text': params['prompt']}, *browser_input['images']]
+                body = {'model': params['model'], 'messages': [{'role': 'user', 'content': content}],
                         'max_completion_tokens': output_tokens, 'reasoning_effort': 'none',
                         'service_tier': route['service_tier'], 'store': False, 'n': 1}
                 try:
@@ -1014,6 +1101,7 @@ class Broker:
                 'vm_uuid': VM_UUID, 'origin': ORIGIN, 'routes': sorted(MODEL_ROUTES), 'vault_healthy': vault,
                 'bindings': bindings, 'prices': prices, 'public_review': True,
                 'public_review_control_version': 'website-review-control.v1',
+                'selected_browser_model_control_version': 'selected-browser-model-control.v1',
                 'provider': None if provider is None else {k: provider[k] for k in ('vault_key', 'vault_version',
                                                                                      'revision')}}
 
@@ -1024,6 +1112,7 @@ class Broker:
                    'bindings': self.bindings, 'pin_run': self.pin_run, 'check': self.check, 'deliver': self.deliver,
                    'provider_bind': self.provider_bind, 'price_set': self.price_set, 'price_clear': self.price_clear,
                    'model_call': self.model_call, 'summary_call': self.summary_call, 'review_call': self.review_call,
+                   'browser_model_call': self.browser_model_call, 'cancel_browser_model': self.cancel_browser_model,
                    'cancel_review': self.cancel_review, 'ledger': self.ledger}.get(method)
         if handler is None:
             raise Refused('METHOD_NOT_ALLOWED')
@@ -1048,9 +1137,11 @@ class Handler(socketserver.StreamRequestHandler):
         if uid != self.server.peer_uid:
             return
         self.request.settimeout(180)
-        line = self.rfile.readline(65537)
+        # Only the versioned selected-browser method admits bounded inline
+        # images. Legacy credential/model methods keep their exact 64 KiB cap.
+        line = self.rfile.readline(3 * 1024 * 1024 + 1)
         try:
-            if len(line) > 65536:
+            if len(line) > 3 * 1024 * 1024:
                 raise Refused('INVALID_REQUEST', 'too large')
             try:
                 request = json.loads(line)
@@ -1058,6 +1149,8 @@ class Handler(socketserver.StreamRequestHandler):
                 raise Refused('INVALID_REQUEST') from error
             if not isinstance(request, dict) or set(request) - {'method', 'params'} or 'method' not in request:
                 raise Refused('INVALID_REQUEST')
+            if len(line) > 65536 and request['method'] != 'browser_model_call':
+                raise Refused('INVALID_REQUEST', 'too large')
             reply = {'ok': True, 'result': self.server.broker.dispatch(request['method'], request.get('params', {}))}
         except Refused as error:
             reply = {'ok': False, 'error': error.code}

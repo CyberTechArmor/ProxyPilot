@@ -1,5 +1,6 @@
 """Real fixed-file transactions with simulated service/VM/socket operations."""
 import importlib.util
+import base64
 import io
 import json
 import os
@@ -10,14 +11,48 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+import zlib
 from unittest.mock import patch
 from contextlib import redirect_stdout
-from guest_compatibility_fixture import legacy_guest_source, LEGACY_GUEST_SHA, CURRENT_GUEST_SHA
+from guest_compatibility_fixture import legacy_guest_source, LEGACY_GUEST_SHA, BASELINE_GUEST_SHA
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('refresh_test', ROOT / 'review-runtime-refresh.py')
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+
+PR724 = '9b88f8f03925ee4c4cf097e40429897be9195e2f'
+PR724_BUNDLE_SHA = 'e64b0397323eac04037945e32982ca5d8b0a46a1b64c4e03e19e24d0da467586'
+PR724_NAMES = ('a3-install-supervisor.py','a3-install-proxy.py','a3-install-fence.py','a3-network-fence.py',
+               'a3-origin-proxy.py','a3-worker-supervisor.py','a4-install-broker.py','a4-credential-broker.py','a8-wire-dashboard.py')
+
+
+def reviewed_legacy_package(directory):
+    """Authentic PR724 package, independent of current code and Git history.
+
+    The test-only bundle was extracted with git show at PR724. Its whole-file
+    hash and each source hash are checked before any historical helper loads.
+    Production updater allowlists/guest compatibility pins are never patched.
+    """
+    bundle = ROOT / 'tests/fixtures/review-runtime-pr724-sources.json'
+    raw = bundle.read_bytes()
+    if r.sha(raw) != PR724_BUNDLE_SHA:
+        raise AssertionError('Frozen PR724 runtime bundle must keep its reviewed hash')
+    data = json.loads(raw)
+    if data['source_commit'] != PR724 or set(data['files']) != set(PR724_NAMES):
+        raise AssertionError('Unknown historical runtime package')
+    directory.mkdir(parents=True)
+    for name in PR724_NAMES:
+        value = data['files'][name]
+        source = zlib.decompress(base64.b64decode(value['zlib_base64'],validate=True))
+        if r.sha(source) != value['sha256']:
+            raise AssertionError('Historical source digest mismatch: ' + name)
+        (directory/name).write_bytes(source)
+    guest = (ROOT/'tests/fixtures/a3-worker-guest-pr724.py.txt').read_bytes()
+    if r.sha(guest) != BASELINE_GUEST_SHA:
+        raise AssertionError('Frozen PR724 guest source changed')
+    (directory/'a3-worker-guest.py').write_bytes(guest)
+    return directory
 
 
 def grown_supervisor_ledger(vm):
@@ -86,6 +121,9 @@ class FixtureHost:
 
     def opted_in(self):
         return self.enabled
+
+    def selected_absent(self):
+        pass  # This fixture has no selected-runtime filesystem.
 
     def candidates(self):
         return {p: f'#!/usr/bin/env python3\nnew_{n} = True\n'.encode() for n, p in enumerate(self.targets[:2])}
@@ -442,9 +480,10 @@ class HostContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             host = r.Host.__new__(r.Host)
-            host.a3 = r.load('a3-install-supervisor', ROOT)
-            host.a4 = r.load('a4-install-broker', ROOT)
-            host.a8 = r.load('a8-wire-dashboard', ROOT)
+            baseline = reviewed_legacy_package(root/'reviewed-pr724')
+            host.a3 = r.load('a3-install-supervisor', baseline)
+            host.a4 = r.load('a4-install-broker', baseline)
+            host.a8 = r.load('a8-wire-dashboard', baseline)
             host.vm, host.install, host.source = host.a8.VM, root, root
             for directory in ('etc/supervisor', 'state/supervisor', 'etc/broker', 'state/broker', 'etc/a8', 'run/backend', 'scripts', 'systemd'):
                 (root / directory).mkdir(parents=True, exist_ok=True)
@@ -463,8 +502,8 @@ class HostContractTests(unittest.TestCase):
             host.secure = lambda _: None
             a.i.secure = b.broker.secure = w.secure = lambda _: None
             for name in a.SOURCES:
-                shutil.copyfile(ROOT / name, root / 'scripts' / name)
-            shutil.copyfile(ROOT / 'a4-credential-broker.py', root / 'scripts/a4-credential-broker.py')
+                shutil.copyfile(baseline / name, root / 'scripts' / name)
+            shutil.copyfile(baseline / 'a4-credential-broker.py', root / 'scripts/a4-credential-broker.py')
             subprocess.run(['git', 'init', '-q', str(root)], check=True, capture_output=True)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts'], check=True, capture_output=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
@@ -503,10 +542,13 @@ class HostContractTests(unittest.TestCase):
                 large_history = grown_supervisor_ledger(host.vm)
                 self.assertGreater(len(large_history), 2998598)
                 host.write(host.ledgers[0], large_history, 0o600)
-                supervisor = r.load('a3-worker-supervisor', ROOT)
+                supervisor = r.load('a3-worker-supervisor', baseline)
                 supervisor.installer.secure = lambda _: None
                 loaded = supervisor.Supervisor(host=object(), journal=host.ledgers[0], runner_source='# fixture')
                 self.assertEqual(loaded.state, json.loads(large_history))
+                for method in ('selected_browser_status','selected_browser_launch'):
+                    with self.assertRaises(supervisor.Refused) as unavailable:loaded.dispatch(method,{})
+                    self.assertEqual(unavailable.exception.code,'METHOD_NOT_ALLOWED')
                 host.write(b.broker.CONFIG, b'{"role_id":"existing-role","secret_id":"existing-secret"}\n', 0o600)
                 host.write(root / '.env', ''.join(f'{k}={v}\n' for k, v in w.SETTINGS.items()).encode(), 0o600)
                 compose = 'services:\n  proxypilot:\n    privileged: true\n    pid: host\n    env_file:\n      - .env\n    volumes:\n      - /data:/data\n'
@@ -528,7 +570,7 @@ class HostContractTests(unittest.TestCase):
                 before = {p: (p.read_bytes(), p.stat().st_mode & 0o777) for p in host.targets + preserved}
                 self.assertEqual(host.identity(), key)
                 self.assertEqual(r.sha(guest.read_bytes()), LEGACY_GUEST_SHA)
-                self.assertEqual(r.sha((root / 'scripts/a3-worker-guest.py').read_bytes()), CURRENT_GUEST_SHA)
+                self.assertEqual(r.sha((root / 'scripts/a3-worker-guest.py').read_bytes()), BASELINE_GUEST_SHA)
                 refresh.apply()
                 self.assertEqual(host.identity(), key)
                 self.assertEqual(a.read_journal()['files'][str(guest)], LEGACY_GUEST_SHA)
@@ -540,6 +582,96 @@ class HostContractTests(unittest.TestCase):
                 self.assertEqual(a.read_journal()['files'][str(guest)], LEGACY_GUEST_SHA)
                 for p in host.targets + preserved:
                     self.assertEqual((p.read_bytes(), p.stat().st_mode & 0o777), before[p])
+                # Expanded source delivery preserves a positively recognized
+                # PR724 runtime; it never installs that expanded package.
+                current = r.load('a3-install-supervisor', ROOT)
+                for name in current.SOURCES + current.SELECTED_SOURCES + ('a4-credential-broker.py',
+                        'a3-install-supervisor.py','a4-install-broker.py','selected-runtime-package.py','review-runtime-refresh.py'):
+                    shutil.copyfile(ROOT/name,root/'scripts'/name)
+                subprocess.run(['git','-C',str(root),'add','scripts'],check=True,capture_output=True)
+                subprocess.run(['git','-C',str(root),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid',
+                                'commit','-qm','Separately reviewed selected package fixture'],check=True,capture_output=True)
+                host.source_sha=subprocess.run(['git','-C',str(root),'rev-parse','HEAD'],check=True,capture_output=True,text=True).stdout.strip()
+                for field in ('TARGET','UNIT','KEY','PUBLIC_KEY','JOURNAL','STATE_DIR','RENEW_SERVICE','RENEW_TIMER'):
+                    setattr(current,field,getattr(a,field))
+                current.proxy=a.proxy;current.i=a.i
+                current.unit_checks=a.unit_checks;current.renew_timer_checks=a.renew_timer_checks
+                current.wait_status=a.wait_status
+                host.a3=current
+                host.source_record=root/'source-dir'
+                host.write(host.source_record,(str(root)+'\n').encode(),0o644)
+                # Previous-source comments were used solely to prove the old
+                # refresh. Preservation requires authentic historical bytes.
+                for target,name,journal in ((host.targets[0],'a3-worker-supervisor.py',a.JOURNAL),
+                                             (b.TARGET,'a4-credential-broker.py',b.JOURNAL)):
+                    value=(baseline/name).read_bytes();host.write(target,value,0o644)
+                    data=json.loads(journal.read_bytes());data['files'][str(target)]=r.sha(value)
+                    host.write(journal,r.encoded(data),0o600)
+                proxy=a.proxy
+                proxy.INSTALLED=root/'etc/origin-proxy.py';proxy.CERT=root/'etc/proxy-cert.pem'
+                proxy.KEY=root/'etc/proxy-key.pem';proxy.UNIT=root/'systemd/proxy.service'
+                proxy.JOURNAL=root/'state/proxy-install.json'
+                subprocess.run(['openssl','req','-x509','-newkey','ed25519','-nodes','-days','7',
+                    '-subj','/CN=demo.fractionate.ai','-keyout',str(proxy.KEY),'-out',str(proxy.CERT)],check=True,capture_output=True)
+                proxy.KEY.chmod(0o600);proxy.CERT.chmod(0o644)
+                host.write(proxy.INSTALLED,(baseline/'a3-origin-proxy.py').read_bytes(),0o644)
+                host.write(proxy.UNIT,proxy.UNIT_TEXT.encode(),0o644)
+                host.write(proxy.JOURNAL,r.encoded(dict(version=1,phase='installed',vm_uuid=host.vm,
+                    files={str(p):r.sha(p.read_bytes()) for p in (proxy.INSTALLED,proxy.KEY,proxy.CERT,proxy.UNIT)})),0o600)
+                proxy.status=lambda:dict(vm_uuid=host.vm,installed=True)
+                refresh=r.Refresh(host,root/'preserved-transaction')
+                paths=host.preservation_paths()+host.protected+host.ledgers
+                fixed={p:(p.read_bytes(),p.stat().st_mode&0o777) for p in paths}
+                with patch.object(host,'stop',side_effect=AssertionError('No daemon stop on preservation')), \
+                        patch.object(host,'start',side_effect=AssertionError('No daemon restart on preservation')):
+                    result=refresh.apply()
+                    self.assertTrue(result['preserved']);self.assertFalse(result['runtime_changed'])
+                    self.assertFalse(result['selected_browser_available'])
+                    self.assertEqual(refresh.read()['version'],2)
+                    for p in paths:self.assertEqual((p.read_bytes(),p.stat().st_mode&0o777),fixed[p])
+                    refresh.rollback()
+                    for p in paths:self.assertEqual((p.read_bytes(),p.stat().st_mode&0o777),fixed[p])
+                    refresh.apply()
+                    state=json.loads(host.ledgers[1].read_bytes());state['calls']['legitimate']={'state':'sent'}
+                    host.write(host.ledgers[1],r.encoded(state),0o600)
+                    # Real status refuses another launch while an already
+                    # admitted Demo runs; completion is a serving identity check.
+                    idle_status=current.wait_status
+                    current.wait_status=lambda _:dict(idle_status(_),active={'state':'running'},accepting_launch=False,blockers=[])
+                    refresh.commit()
+                    current.wait_status=idle_status
+                    self.assertEqual(json.loads(host.ledgers[1].read_bytes()),state)
+                    state['calls'].clear();host.write(host.ledgers[1],r.encoded(state),0o600)
+                    refresh.apply();refresh.commit()  # A subsequent ordinary Update works.
+                    for p in paths[:-2]:self.assertEqual((p.read_bytes(),p.stat().st_mode&0o777),fixed[p])
+                    # Even a self-consistent changed legacy code/journal is unknown.
+                    value=host.targets[0].read_bytes();journal=a.JOURNAL.read_bytes()
+                    host.targets[0].write_bytes(value+b'\n# unreviewed drift\n')
+                    data=json.loads(journal);data['files'][str(host.targets[0])]=r.sha(host.targets[0].read_bytes())
+                    a.JOURNAL.write_bytes(r.encoded(data))
+                    with self.assertRaisesRegex(ValueError,'Legacy runtime source is unrecognized'):refresh.preflight()
+                    host.targets[0].write_bytes(value);a.JOURNAL.write_bytes(journal)
+                    for path in (a.TARGET/r.SELECTED[0],a.TARGET.parent/'selected-browser-acceptance.json',
+                                 a.STATE_DIR.parent/'selected-gateway'):
+                        path.write_bytes(b'partial selected install')
+                        with self.assertRaisesRegex(ValueError,'separate package review'):refresh.preflight()
+                        path.unlink()
+                    # A positively recognized pre-renewal layout preserves
+                    # absence of both units; ordinary Update cannot enroll it.
+                    timers={p:p.read_bytes() for p in (a.RENEW_SERVICE,a.RENEW_TIMER)}
+                    journal=a.JOURNAL.read_bytes();data=json.loads(journal)
+                    for path in timers:del data['files'][str(path)];path.unlink()
+                    a.JOURNAL.write_bytes(r.encoded(data))
+                    without_timer=r.Refresh(host,root/'preserved-before-renewal')
+                    without_timer.apply();without_timer.commit()
+                    for path in timers:self.assertFalse(path.exists())
+                    for path,content in timers.items():host.write(path,content,0o644)
+                    a.JOURNAL.write_bytes(journal)
+                    refresh.apply()
+                    host.targets[0].write_bytes(value+b'\n# post-apply drift\n')
+                    with self.assertRaises(ValueError):refresh.commit()
+                    with self.assertRaises(ValueError):refresh.rollback()
+                    host.targets[0].write_bytes(value);refresh.rollback()
             finally:
                 listener.close()
 
@@ -547,8 +679,9 @@ class HostContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             host = r.Host.__new__(r.Host)
-            host.a3 = r.load('a3-install-supervisor', ROOT)
-            host.a4 = r.load('a4-install-broker', ROOT)
+            baseline = reviewed_legacy_package(root/'reviewed-pr724')
+            host.a3 = r.load('a3-install-supervisor', baseline)
+            host.a4 = r.load('a4-install-broker', baseline)
             host.install, host.source, host.source_sha = root, root, 'a' * 40
             host.targets = (root / 'supervisor/a3-worker-supervisor.py', root / 'broker/a4-credential-broker.py')
             host.a3.TARGET, host.a3.UNIT = root / 'supervisor', root / 'systemd/a3.service'
@@ -558,7 +691,7 @@ class HostContractTests(unittest.TestCase):
             host.execute = lambda *_: host.source_sha
             (root / 'scripts').mkdir()
             for name in host.a3.SOURCES + ('a4-credential-broker.py',):
-                shutil.copyfile(ROOT / name, root / 'scripts' / name)
+                shutil.copyfile(baseline / name, root / 'scripts' / name)
             files = host.a3.plan_files(root / 'scripts')
             guest = host.a3.TARGET / 'a3-worker-guest.py'
             files[guest] = legacy_guest_source()
@@ -570,17 +703,17 @@ class HostContractTests(unittest.TestCase):
             broker_unit = {str(host.a4.UNIT): r.sha(host.a4.UNIT_TEXT.encode())}
             host.a4.read_journal = lambda: {'files': broker_unit}
             def committed(argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, (ROOT / argv[-1].split(':scripts/')[1]).read_bytes())
+                return subprocess.CompletedProcess(argv, 0, (baseline / argv[-1].split(':scripts/')[1]).read_bytes())
             with patch.object(r.subprocess, 'run', committed):
                 self.assertEqual(set(host.candidates()), set(host.targets))
                 candidate = root / 'scripts/a3-worker-guest.py'
                 guest.write_bytes(candidate.read_bytes())
-                recorded[str(guest)] = CURRENT_GUEST_SHA
+                recorded[str(guest)] = BASELINE_GUEST_SHA
                 self.assertEqual(set(host.candidates()), set(host.targets))
                 candidate.write_bytes(legacy_guest_source())
                 with self.assertRaisesRegex(ValueError, str(guest)):
                     host.candidates()
-                candidate.write_bytes((ROOT / candidate.name).read_bytes())
+                candidate.write_bytes((baseline / candidate.name).read_bytes())
                 guest.write_bytes(legacy_guest_source())
                 recorded[str(guest)] = LEGACY_GUEST_SHA
                 for victim in files.keys() - {host.targets[0]}:
@@ -599,10 +732,37 @@ class HostContractTests(unittest.TestCase):
                 candidate.write_bytes(candidate.read_bytes() + b'\n# unknown candidate\n')
                 with self.assertRaisesRegex(ValueError, str(guest)):
                     host.candidates()
-                candidate.write_bytes((ROOT / candidate.name).read_bytes())
+                candidate.write_bytes((baseline / candidate.name).read_bytes())
                 broker_unit[str(host.a4.UNIT)] = 'b' * 64
                 with self.assertRaisesRegex(ValueError, str(host.a4.UNIT)):
                     host.candidates()
+
+    def test_new_selected_owned_file_set_is_not_legacy_refresh_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);baseline=reviewed_legacy_package(root/'reviewed-pr724')
+            host=r.Host.__new__(r.Host)
+            host.a3=r.load('a3-install-supervisor',baseline);host.a4=r.load('a4-install-broker',baseline)
+            host.vm='49592202-a8b0-45af-9ac6-5439761d73e4';host.protected=()
+            a,b=host.a3,host.a4
+            a.TARGET=root/'installed-supervisor';a.PUBLIC_KEY=root/'public.pem';a.UNIT=root/'a3.service'
+            a.RENEW_SERVICE=root/'renew.service';a.RENEW_TIMER=root/'renew.timer'
+            b.TARGET=root/'broker.py';b.UNIT=root/'a4.service'
+            current=r.load('a3-install-supervisor',ROOT)
+            self.assertFalse(hasattr(a,'SELECTED_SOURCES'))
+            files={str(a.TARGET/name):'a'*64 for name in a.SOURCES}
+            files.update({str(path):'a'*64 for path in (a.PUBLIC_KEY,a.UNIT,a.RENEW_SERVICE,a.RENEW_TIMER)})
+            files.update({str(a.TARGET/name):'b'*64 for name in current.SELECTED_SOURCES})
+            a.read_journal=lambda:dict(files=files,phase='installed',vm_uuid=host.vm)
+            b.read_journal=lambda:dict(files={str(b.TARGET):'a'*64,str(b.UNIT):'a'*64},phase='installed',vm_uuid=host.vm)
+            host.opted_in=lambda:True
+            with patch.object(a,'verify_files',side_effect=AssertionError('Unknown identity must fail first')) as verified, \
+                    patch.object(host,'stop',side_effect=AssertionError('No target service operation')) as stopped, \
+                    patch.object(host,'write',side_effect=AssertionError('No target file operation')) as written:
+                with self.assertRaisesRegex(ValueError,'Installation identity or owned file set is unknown'):
+                    r.Refresh(host,root/'transaction').apply()
+                verified.assert_not_called();stopped.assert_not_called();written.assert_not_called()
+            self.assertFalse((root/'transaction').exists())
+            self.assertEqual(r.GUEST_REVIEW_COMPATIBILITY,(LEGACY_GUEST_SHA,BASELINE_GUEST_SHA))
 
     def test_real_candidate_commit_pin_and_compile_not_just_shebang(self):
         with tempfile.TemporaryDirectory() as temp:

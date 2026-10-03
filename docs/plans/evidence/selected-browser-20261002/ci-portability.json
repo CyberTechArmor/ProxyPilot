@@ -1,0 +1,41 @@
+{
+  "first_head": "ea40495e540c0e4643506ad89b8e508370903973",
+  "failed_ci_run": 37075705925,
+  "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37075705925",
+  "failed_cases": [
+    "PDF decoder real bounded fixed-command extraction: runner tool prerequisite was undeclared; child failure maps to415",
+    "artifact configuration path fixture: hardcoded /workspace/ProxyPilot was outside actual GitHub checkout"
+  ],
+  "corrected_checks": [
+    "checkout/descendant/parent rejection uses module-derived repository location",
+    "disposable backend/dashboard runners explicitly install/check fixed pdftotext/prlimit paths and report versions"
+  ],
+  "production_source_changed": false,
+  "local_runtime_tests": {
+    "passed": 28,
+    "tests": 28
+  },
+  "local_pdf_fixture": "real extraction passed; no skip or parser-limit relaxation",
+  "ci_after_fix": {
+    "head": "dc8080c44dca6c2db81842709b7b48a6edc3e743",
+    "security": {
+      "run": 37076010120,
+      "conclusion": "success"
+    },
+    "credential_broker": {
+      "run": 37076010012,
+      "conclusion": "failure",
+      "passing_jobs": [
+        "dashboard",
+        "security-filesystem"
+      ],
+      "failure": "Paired Python suite412: first real Chromium fixture Target.setDiscoverTargets timed out during startup;1error,33skips. Cause remains unproven. No blind rerun, skip or timeout increase."
+    }
+  },
+  "scope": "Historical portability fix at dc8080c; current candidate source and local proof are recorded separately in verification-final.json.",
+  "current_candidate": {
+    "published": false,
+    "ci": "not_run",
+    "startup_diagnostics": "Bounded test-only Chromium/process/CDP/stderr evidence added; no matching local startup failure reproduced."
+  }
+}

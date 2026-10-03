@@ -1,0 +1,18 @@
+{
+  "broker.txt": {
+    "sha256": "ad87233d7093eb63e8d2292b366e43015d9eade5a4516c363c50c42c3b1f4c51",
+    "bytes": 441
+  },
+  "failure.txt": {
+    "sha256": "c947526fbcd29e8cab92ac50251a586dbee2995d2323698a81b5746c0f968c02",
+    "bytes": 1966
+  },
+  "security.txt": {
+    "sha256": "d95d21bc0f1c811832fb711b5536788a5273b9dfbf1e18af07b0214de35abb8f",
+    "bytes": 926
+  },
+  "verification.json": {
+    "sha256": "e7306d4470580824eaacd3e7b9043a17f58bd1a5282740abfdaf6dcc31c42ebc",
+    "bytes": 959
+  }
+}

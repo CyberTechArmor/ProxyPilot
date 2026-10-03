@@ -1,0 +1,54 @@
+{
+  "scope": "Synthetic frontend-only authentication fixture; local mocked WebSocket/WebRTC viewer. No external website, browser-agent execution, credential, provider, publish or deploy calls.",
+  "source_status": "Uncommitted primary worktree source hashes at verification; parent owns final integrated manifest.",
+  "source_sha256": {
+    "admin/frontend/tests/fixtures/browser-agents.jsx": "2d6da0d7d4d2ab407f87d9f7ba935520a1c9692509ff962610371702d8bb4e33",
+    "admin/frontend/tests/browser-agent-browser-check.mjs": "365c9e3ff7d48ac3eebae69d275368da101143989da9a27c8bc7cda9881bea84"
+  },
+  "commands": [
+    "BROWSER_FIXTURE_ORIGIN=http://127.0.0.1:5189 BROWSER_AUTH_ARTIFACTS=/tmp/browser-authentication-ui-proof node tests/browser-agent-browser-check.mjs",
+    "node --test tests/browser-agent-ui.test.mjs tests/browser-authentication-ui.test.mjs",
+    "npm run build"
+  ],
+  "results": {
+    "authentication_scenarios": 8,
+    "ui_units_passed": 13,
+    "production_build": "passed",
+    "page_errors": 0,
+    "axe_violations": 0,
+    "horizontal_overflow": false
+  },
+  "viewports": [
+    [
+      360,
+      640
+    ],
+    [
+      375,
+      667
+    ],
+    [
+      768,
+      640
+    ],
+    [
+      1280,
+      800
+    ],
+    [
+      1920,
+      900
+    ]
+  ],
+  "layout_limit": "Standalone fixture is a vertically scrolling page, not the production fixed-height shell. Assertions prove zero horizontal overflow and reachable controls at the actual viewport heights.",
+  "evidence_sha256": {
+    "authentication-browser.json": "302ec8476b016ea186246dae792c3106af0c113d982c50f7912a7459bc46b862",
+    "authentication-ui-units.txt": "a07899eb99f78a04d98f99292dc409af77aec45ef1deaebf5539be288bb574b2",
+    "authentication-frontend-build.txt": "9eb2a6bda4b6806a967032187443b21140efd2b6d0775136ecb74e4cb785478c",
+    "authentication-1920x900.png": "965883cd90027e54a605446803be7bd3489927509b08526ff2d5cd6655a72f4a",
+    "authentication-1280x800.png": "6489f8accbec10adeb628b27b45a3217e1eea3bdee443bb64986774ee38bf545",
+    "authentication-768x640.png": "e2f7b1edd8291bb2bb5870b11591a7b193b0d575b7e0690110a2287e72b4ebfc",
+    "authentication-375x667.png": "3163f82dcdf356f15e1113d2c4fe13ca7cd10296f9286071c15032766c7815c1",
+    "authentication-360x640.png": "df240b861f7a4350527affb65a838268aa316c3f0ba960ca1e8037395e3386d0"
+  }
+}

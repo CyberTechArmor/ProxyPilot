@@ -1,0 +1,113 @@
+{
+  "base_revision": "2ed34018f8a69e847ff880e01ba61968c67e7762",
+  "kind": "local source checkpoint; no installed acceptance or production change",
+  "source_sha256": {
+    "scripts/a3-worker-guest.py": {
+      "sha256": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f",
+      "bytes": 89071
+    },
+    "scripts/selected_browser_supervisor.py": {
+      "sha256": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab",
+      "bytes": 78880
+    },
+    "scripts/tests/guest_compatibility_fixture.py": {
+      "sha256": "98230499d6d9731d7f7964cfd2609b570b77062558aa499c37cc971f7d497b59",
+      "bytes": 2645
+    },
+    "scripts/tests/test_selected_browser_composition.py": {
+      "sha256": "c0b9b7fb0f85625c1fa99c32275ded3370b494ea1522de2796ac7530ca1756a4",
+      "bytes": 45996
+    },
+    "scripts/tests/test_selected_browser_supervisor.py": {
+      "sha256": "2ffa8527ea806c91c8cc823c7446419d61f6c2e8209b2910ef2016905831c974",
+      "bytes": 59269
+    },
+    "scripts/tests/selected_browser_backend_bridge.py": {
+      "sha256": "c5812fbf426aaa7de8fa6bab37f453eb16d4d3d9004ca4eb574e49528fa5bb50",
+      "bytes": 7503
+    },
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": {
+      "sha256": "d02699912976d9f4f11b9c0c91b6429d91a78bf7ed2e5fb4515af6902c6fcaae",
+      "bytes": 13669
+    },
+    "admin/backend/src/lib/operational-selected-browser-service.js": {
+      "sha256": "c8048bcf7b5e644358a1bb3fde26a1ccc58212f31fc16ac77d42cc9cc6611540",
+      "bytes": 99759
+    },
+    "admin/backend/src/lib/operational-selected-browser-runtime.js": {
+      "sha256": "09408498af4e1919f864e8791c7d9ec186f3d19bcc77c4fa68f42d09faaa575b",
+      "bytes": 39693
+    }
+  },
+  "historical_ci": {
+    "broker": {
+      "run_id": 37119080600,
+      "source_revision": "2ed34018f8a69e847ff880e01ba61968c67e7762",
+      "conclusion": "failure",
+      "python_tests": 466,
+      "failures": 6,
+      "errors": 1,
+      "preexisting_skips": 33
+    },
+    "security": {
+      "run_id": 37119080634,
+      "source_revision": "2ed34018f8a69e847ff880e01ba61968c67e7762",
+      "conclusion": "failure",
+      "python_tests": 466,
+      "failures": 6,
+      "errors": 1,
+      "preexisting_skips": 33
+    }
+  },
+  "local_browser": "Chromium151.0.7922.173 Debian13",
+  "fresh_candidate_ci_record": "must verify exact published follow-up commit; not established by this local checkpoint",
+  "boundaries": [
+    "browser argv additions apply to selected workflow only",
+    "backend service/runtime and its admission guards unchanged",
+    "no destination/request/DNS/proxy/SPKI exception",
+    "provider and installed Incus/nft/Neko boundaries remain fixtures",
+    "no real credentials or external site/provider contacted",
+    "no host installation or acceptance marker written"
+  ],
+  "tests": {
+    "actual_chromium_composition": {
+      "tests": 10,
+      "failures": 0,
+      "skipped": 0,
+      "seconds": 33.516
+    },
+    "host": {
+      "tests": 36,
+      "failures": 0,
+      "skipped": 0
+    },
+    "backend_selected": {
+      "tests": 171,
+      "failures": 0,
+      "skipped": 0
+    },
+    "startup_native_controls": {
+      "tests": 2,
+      "failures": 0,
+      "skipped": 0
+    },
+    "python_aggregate": {
+      "tests": 474,
+      "passed": 441,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 33,
+      "skip_scope": "unchanged pre-existing unavailable installed/live dependencies",
+      "seconds": 173.846,
+      "exit_code": 0
+    },
+    "backend_aggregate": {
+      "tests": 462,
+      "passed": 462,
+      "failures": 0,
+      "skipped": 0,
+      "seconds": 12.060224543,
+      "exit_code": 0
+    }
+  }
+}

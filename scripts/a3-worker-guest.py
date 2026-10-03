@@ -187,7 +187,7 @@ def receive_credential(path, seconds=None, on_open=None):
 
 def validate_config(value):
     # A7: `live` (true) asks for the real-time view (Neko); a browser workload only.
-    if not isinstance(value, dict) or set(value) - {'live'} != {'attempt_id', 'workload', 'spki'}:
+    if not isinstance(value, dict) or set(value) - {'live', 'selected_browser'} != {'attempt_id', 'workload', 'spki'}:
         raise Refused('INVALID_CONFIG')
     if 'live' in value and (value['live'] is not True or value['workload'] != 'browser'):
         raise Refused('INVALID_CONFIG')
@@ -197,6 +197,13 @@ def validate_config(value):
         raise Refused('INVALID_CONFIG')
     if not isinstance(value['spki'], str) or not SPKI.fullmatch(value['spki']):
         raise Refused('INVALID_CONFIG')
+    if 'selected_browser' in value:
+        from selected_browser_worker import validate_selected_config
+        if value['workload'] != 'browser':
+            raise Refused('INVALID_CONFIG')
+        validate_selected_config(value['selected_browser'], Refused)
+        if value['selected_browser']['attempt_id'] != value['attempt_id']:
+            raise Refused('INVALID_CONFIG')
     return value
 
 
@@ -1004,6 +1011,22 @@ class Browser:
         # A7 live: the same browser, drawn on the unit's private display in kiosk
         # mode (no address bar or tabs) under the managed policy; still the pipe.
         mode = ['--kiosk', '--ozone-platform=x11', '--window-position=0,0'] if live else ['--headless=new']
+        disabled_features = 'Translate,MediaRouter,OptimizationHints,AutofillServerCommunication'
+        selected_args = []
+        if hasattr(self, 'selected'):
+            # These browser-owned services can run outside page CDP Fetch.
+            # Fixed non-network service endpoints and the attempt-private profile
+            # suppress their traffic; the independent gateway remains strict.
+            # Chromium 151/154 GaiaConfig accepts this per-service valid GURL.
+            # Native search preconnect runs outside Fetch; PreconnectToSearch
+            # gates it before a socket. Component updater's exact URL override
+            # also covers on-demand registration beyond disable-component-update.
+            # Both use fixed code settings, never caller URLs or extra grants.
+            disabled_features += ',NetworkTimeServiceQuerying,AimEnabled,PreconnectToSearch'
+            selected_args = ['--allow-browser-signin=false',
+                             '--gcm-checkin-url=about:blank',
+                             '--component-updater=url-source=about:blank',
+                             '--gaia-config-contents={"urls":{"list_accounts_url":{"url":"about:blank"}}}']
         argv = [CHROMIUM, *mode, '--remote-debugging-pipe',
                 '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check',
                 '--disable-background-networking', '--disable-component-update',
@@ -1011,11 +1034,11 @@ class Browser:
                 '--disable-domain-reliability', '--disable-client-side-phishing-detection',
                 '--disable-breakpad', '--no-pings', '--disable-quic', '--disable-gpu',
                 '--password-store=basic', '--use-mock-keychain',
-                '--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication',
+                '--disable-features=' + disabled_features,
                 '--proxy-server=http://' + PROXY, '--proxy-bypass-list=<-loopback>',
                 '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE ' + proxy_host,
                 '--ignore-certificate-errors-spki-list=' + spki,
-                '--window-size=%d,%d' % VIEWPORT, 'about:blank']
+                '--window-size=%d,%d' % VIEWPORT, *selected_args, 'about:blank']
         env = {'HOME': home, 'XDG_CONFIG_HOME': os.path.join(home, '.config'),
                'XDG_CACHE_HOME': os.path.join(home, '.cache'), 'TMPDIR': WORKSPACE,
                'LANG': 'C.UTF-8', 'PATH': '/usr/bin:/bin'}
@@ -1651,7 +1674,7 @@ def relay(command, live, channel):
             channel.emit({'id': ident, 'ok': False, 'error': error.code})
 
 
-def commands(stream, sink, live=None, channel=None):
+def commands(stream, sink, live=None, channel=None, browser=None):
     for line in stream:
         try:
             value = json.loads(line)
@@ -1659,6 +1682,22 @@ def commands(stream, sink, live=None, channel=None):
             value = {'malformed': True}
         if isinstance(value, dict) and value.get('op') in RELAY_OPS:
             relay(value, live[0] if live else None, channel)
+            continue
+        # A selected request remains paused while an action is in flight. Its
+        # host ticket must bypass that action queue, like A7 signalling. This
+        # relay accepts only the supervisor's narrow decision DTO, never code.
+        if isinstance(value, dict) and value.get('op') == 'selected_request_decision':
+            ident = value.get('id')
+            try:
+                current = browser[0] if browser else None
+                allowed = ({'id', 'op', 'request_ref', 'decision', 'ticket'} if value.get('decision') == 'allow'
+                           else {'id', 'op', 'request_ref', 'decision', 'code'})
+                if type(ident) is not int or set(value) != allowed or current is None or not hasattr(current, 'request_decision'):
+                    raise Refused('INVALID_REQUEST_DECISION')
+                result = current.request_decision({k: v for k, v in value.items() if k not in ('id', 'op')})
+                channel.emit({'id': ident, 'ok': True, 'result': result})
+            except Refused as error:
+                channel.emit({'id': ident, 'ok': False, 'error': error.code})
             continue
         sink.put(value)
     sink.put(None)
@@ -1672,7 +1711,8 @@ def serve(config, channel, stream=None):
         return 3
     inbox = queue.Queue()
     live_box = [None]
-    threading.Thread(target=commands, args=(stream or sys.stdin, inbox, live_box, channel), daemon=True).start()
+    browser_box = [None]
+    threading.Thread(target=commands, args=(stream or sys.stdin, inbox, live_box, channel, browser_box), daemon=True).start()
     browser = None
     ready = {'event': 'ready', 'workload': workload, 'workspace': workspace_identity(),
              'cgroup': own_cgroup(), 'uid': os.getuid()}
@@ -1680,7 +1720,15 @@ def serve(config, channel, stream=None):
         try:
             if config.get('live'):
                 live_box[0] = LiveDesktop(channel).start()
-            browser = Browser(config['spki'], channel, live_box[0])
+            if config.get('selected_browser'):
+                from selected_browser_worker import selected_browser_class
+                from selected_browser_contract import validate_configuration, validate_action
+                selected_class = selected_browser_class(Browser, Refused,
+                    validate_configuration=validate_configuration, validate_action=validate_action)
+                browser = selected_class(config['selected_browser'], config['spki'], channel, live_box[0])
+            else:
+                browser = Browser(config['spki'], channel, live_box[0])
+            browser_box[0] = browser
         except Refused as error:
             if live_box[0] is not None:
                 live_box[0].close()
@@ -1710,7 +1758,15 @@ def serve(config, channel, stream=None):
                          'observe': {'id', 'op'}, 'egress_probe': {'id', 'op'}, 'proof': {'id', 'op'},
                          'action': {'id', 'op', 'action'}, 'input': {'id', 'op', 'input'},
                          'locate': {'id', 'op', 'target'}, 'live_give': {'id', 'op', 'conn'},
-                         'live_release': {'id', 'op'}}.get(op)
+                         'live_release': {'id', 'op'},
+                         'selected_observe': {'id', 'op'}, 'selected_action': {'id', 'op', 'envelope'},
+                         'selected_auth': {'id', 'op', 'active'}, 'selected_pause': {'id', 'op'},
+                         'selected_resume': {'id', 'op'}, 'selected_control': {'id', 'op', 'input'},
+                         'selected_offer_input': {'id', 'op', 'snapshot_ref', 'target_ref', 'input_ref'},
+                         'selected_discard_stage': {'id', 'op', 'ref'},
+                         'selected_grant_destination': {'id', 'op', 'destination', 'expires_at'},
+                         'selected_rebind': {'id', 'op', 'run_id', 'attempt_id', 'old_fence', 'new_fence', 'policy_sha256'},
+                         'selected_stage': {'id', 'op', 'kind', 'ref', 'mime_type', 'bytes_base64'}}.get(op)
                 if op == 'action' and command.get('action') == 'submit_bound_fixture':
                     shape = {'id', 'op', 'action', 'binding_id'}
                 if shape is None or set(command) != shape:
@@ -1732,13 +1788,42 @@ def serve(config, channel, stream=None):
                     raise Refused('INVALID_COMMAND')
                 elif browser.exited.is_set():
                     raise Refused('BROWSER_CLOSED')
+                elif op.startswith('selected_'):
+                    if not config.get('selected_browser'):
+                        raise Refused('INVALID_COMMAND')
+                    if op == 'selected_observe':
+                        result = browser.observe_selected()
+                    elif op == 'selected_action':
+                        result = browser.execute_selected(command['envelope'])
+                    elif op == 'selected_auth':
+                        result = browser.auth(command['active'])
+                    elif op == 'selected_pause':
+                        result = browser.pause_selected()
+                    elif op == 'selected_resume':
+                        result = browser.resume_selected()
+                    elif op == 'selected_control':
+                        result = browser.human_input(command['input'])
+                    elif op == 'selected_offer_input':
+                        result = browser.offer_input({k: v for k, v in command.items() if k not in ('id', 'op')})
+                    elif op == 'selected_discard_stage':
+                        result = browser.discard_stage(command['ref'])
+                    elif op == 'selected_grant_destination':
+                        result = browser.grant_destination(command['destination'], command['expires_at'])
+                    elif op == 'selected_rebind':
+                        result = browser.rebind({k: v for k, v in command.items() if k not in ('id', 'op')})
+                    else:
+                        result = browser.stage({k: v for k, v in command.items() if k not in ('id', 'op')})
                 elif op == 'action':
+                    if config.get('selected_browser'):
+                        raise Refused('INVALID_COMMAND')
                     if command['action'] not in ACTIONS:
                         raise Refused('INVALID_BROWSER_ACTION')
                     result = browser.action(command['action'], command.get('binding_id'))
                 elif op == 'view':
                     result = browser.view()
                 elif op == 'input':
+                    if config.get('selected_browser'):
+                        raise Refused('INVALID_COMMAND')
                     result = browser.human_input(command['input'])
                 elif op in ('live_give', 'live_release'):
                     # Queued: an in-flight submit has finished and cleared both
@@ -1754,10 +1839,16 @@ def serve(config, channel, stream=None):
                     else:
                         result = live_box[0].release()
                 elif op == 'observe':
+                    if config.get('selected_browser'):
+                        raise Refused('INVALID_COMMAND')
                     result = browser.observe()
                 elif op == 'locate':
+                    if config.get('selected_browser'):
+                        raise Refused('INVALID_COMMAND')
                     result = browser.locate(command['target'])
                 else:
+                    if config.get('selected_browser'):
+                        raise Refused('INVALID_COMMAND')
                     result = browser.egress_probe()
                 channel.emit({'id': ident, 'ok': True, 'result': result})
             except Refused as error:

@@ -1,0 +1,8 @@
+Selected composition browser: Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)
+test_native_component_update_is_denied_before_any_upstream_contact (test_selected_browser_composition.BrowserCompositionTests.test_native_component_update_is_denied_before_any_upstream_contact) ... ok
+test_fixed_component_endpoint_suppresses_service_without_page_url_exemption (test_selected_browser_composition.BrowserCompositionTests.test_fixed_component_endpoint_suppresses_service_without_page_url_exemption) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 5.456s
+
+OK

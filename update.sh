@@ -882,6 +882,14 @@ on_error() {
 }
 
 review_runtime_refresh() {
+    # scripts/ is delivered separately from the recorded Git checkout. Never
+    # run a stale/different copied refresh helper. Its capability-aware check
+    # either applies the historical two-file refresh or preserves a positively
+    # recognized legacy runtime for a separately reviewed selected package.
+    if ! cmp -s "${SCRIPT_DIR}/scripts/review-runtime-refresh.py" "${INSTALL_DIR}/scripts/review-runtime-refresh.py"; then
+        log "${RED}Runtime refresh helper differs from the delivered source; refusing Update.${NC}"
+        return 1
+    fi
     python3 "${INSTALL_DIR}/scripts/review-runtime-refresh.py" "$1" \
         --install-dir "$INSTALL_DIR" --source-dir "$SCRIPT_DIR" \
         --source-sha "$EXPECTED_UPDATE_SHA" --database "${DB_BACKUP_SOURCE:-${INSTALL_DIR}/data/db/proxypilot.db}"
@@ -1973,8 +1981,9 @@ PYEOF
             log "${RED}A8 supervisor wiring refused; the running dashboard has not been stopped.${NC}"
             exit 1
         }
-        # Metadata/code validation only. Never install or opt in an ordinary
-        # dashboard, rotate a key, bind a credential or start a run.
+        # Metadata/code validation only. Expanded selected-browser source
+        # preserves recognized legacy runtime bytes; unknown or partial
+        # installations refuse. No opt-in, key rotation, credential or run.
         review_runtime_refresh preflight
 
         # Rebuild frontend at the install location

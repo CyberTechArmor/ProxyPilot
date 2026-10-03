@@ -1,17 +1,21 @@
 """Reconstruct the exact PR #710 worker without depending on Git history.
 
-Only the four changes in 39ada2b are reversed. The resulting full-source hash
+Only the four changes in 39ada2b are reversed from the frozen PR #724 fixture,
+independently of current worker development. The resulting full-source hash
 must match the historical blob; no production worker source is changed.
 """
 import hashlib
 from pathlib import Path
 
 LEGACY_GUEST_SHA = 'd0724e5fb5573a18095a8e906cd9bb9c2542c17c494184ca15cbc65d345331f9'
-CURRENT_GUEST_SHA = '54302e5ee880470480d9b4de3d30616b263c7213d9eb08712b1ef3f50c5c0d21'
+CURRENT_GUEST_SHA = '21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f'
+BASELINE_GUEST_SHA = '54302e5ee880470480d9b4de3d30616b263c7213d9eb08712b1ef3f50c5c0d21'
 
 
 def legacy_guest_source():
-    source = Path(__file__).resolve().parents[1].joinpath('a3-worker-guest.py').read_text()
+    source = Path(__file__).resolve().parent.joinpath('fixtures/a3-worker-guest-pr724.py.txt').read_text()
+    if hashlib.sha256(source.encode()).hexdigest() != BASELINE_GUEST_SHA:
+        raise AssertionError('Frozen PR #724 baseline must keep its exact reviewed hash')
     replacements = (
         ("        self.sign_out_attempted = False\n        self.sign_out_confirmed = False\n", ''),
         ("        # A prior UI sign-out already sent (or may have sent) this write.\n"

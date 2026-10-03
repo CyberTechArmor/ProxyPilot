@@ -1,0 +1,799 @@
+{
+  "base_candidate": "bae85ff7409823bf242b8108157fdbd781be61ad",
+  "prior_diagnostics_commit": "7bead9db5069a3d6411dce9a9b31c92cafe0afa1",
+  "final_fixture_sha256": {
+    "scripts/tests/test_selected_browser_composition.py": "be1bc94f892a53d7103653c2d3adda65d7cb0afff9456a91eddf98a09cf26f2e",
+    "scripts/tests/selected_browser_backend_bridge.py": "b988197fa3c62b8db585da9b35209c75985d7959154260689282d5d62357f9fe",
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": "8d89094b8586ca45c2a57738fc14103473ba19a6b9da59a27f4f58d7e3535b9f"
+  },
+  "unchanged_production_sha256": {
+    "scripts/a3-worker-supervisor.py": "a74c497081e59e1b19d11e0bb94ebfc0e2543b17399349e12407bbe6300673bb",
+    "scripts/a3-worker-guest.py": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f",
+    "scripts/selected_browser_supervisor.py": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab",
+    "admin/backend/src/lib/operational-worker-supervisor.js": "52b39abba4be3bcde56e336ae6de5b4b0090031acc08e45a34b86d40f4f13128"
+  },
+  "bounds_ms": {
+    "old_fixture_launch": 20000,
+    "new_fixture_launch": 65000,
+    "other_fixture_rpc": 20000,
+    "fixture_close": 5000,
+    "whole_fixture_test": 120000,
+    "production_client": 120000,
+    "host_readiness": 60000,
+    "initial_cdp_call": 30000
+  },
+  "proofs": [
+    {
+      "file": "pp-startup-phase-composition.log",
+      "bytes": 2785,
+      "sha256": "1f8546ed61297698ba68a35fd5a2e5a7b05a123194851658f5fd11c68505b00c"
+    },
+    {
+      "file": "pp-startup-phase-node.log",
+      "bytes": 4548,
+      "sha256": "92654198053943927ba1ad74ef1e0ee8f44d8332f821eeb8425cedca5b0f2520"
+    },
+    {
+      "file": "pp-startup-phase-old20-slow-setup.log",
+      "bytes": 5744,
+      "sha256": "b9b324d60fa210bd0790a8f389e83ad342d6d6f338d62a0b6d57a0650bb8edc4"
+    },
+    {
+      "file": "pp-startup-phase-corrected-node.log",
+      "bytes": 9306,
+      "sha256": "5f73d37a4aceb2ecd504e5cee073eea72d4708de2b51489b53f2b3af528789c5"
+    },
+    {
+      "file": "pp-startup-phase-final-controls.log",
+      "bytes": 628,
+      "sha256": "48c1bc0cf736a82ea53e4ce275fcf8de08a39a6881190035e660bb8fcb658afd"
+    },
+    {
+      "file": "pp-startup-phase-new65-stall.log",
+      "bytes": 16414,
+      "sha256": "28f4d636d7d741177533e1b4af5fba0743ccfadfa7899945f99dc73b4754b721"
+    },
+    {
+      "file": "pp-startup-phase-new65-stall-proof.json",
+      "bytes": 523,
+      "sha256": "e9abc2e53ef69bcaca208031d4c8c522a24216483d2a66fcdac6b810ca9bd75f"
+    },
+    {
+      "file": "pp-startup-phase-new65-wedged-stall.log",
+      "bytes": 18626,
+      "sha256": "a7a4863648ae837a13ebfa9fac401a0bf05001ecbe8ac9b44dd9d6c4e307e148"
+    },
+    {
+      "file": "pp-startup-phase-final65-wedged-stall.log",
+      "bytes": 18626,
+      "sha256": "db772370cf660cd3eda522c03d92135e1522af15d8097eea381840084c7c18d2"
+    },
+    {
+      "file": "pp-startup-phase-final65-wedged-stall-proof.json",
+      "bytes": 1198,
+      "sha256": "baf77338f130645a6ae06b4ef4fc5a23e885c86d8ea7414a000f723c558ecec2"
+    },
+    {
+      "file": "pp-startup-phase-new65-wedged-stall-proof.json",
+      "bytes": 866,
+      "sha256": "6c4994c7bd60ea9edc3ef49c3d30b09a0591022a19a3f43bdbaf5b9bc76fc784"
+    }
+  ],
+  "normal_and_delayed_success": [
+    {
+      "browser_version": "Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)",
+      "startup_phases": {
+        "records": [
+          {
+            "phase": "guest_loading",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 0
+          },
+          {
+            "phase": "guest_loaded",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 35
+          },
+          {
+            "phase": "serve",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 35
+          },
+          {
+            "phase": "spawn",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 36
+          },
+          {
+            "phase": "spawn",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 37
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setDiscoverTargets",
+            "status": "start",
+            "elapsed_ms": 37
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setDiscoverTargets",
+            "status": "end",
+            "elapsed_ms": 584
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.getTargets",
+            "status": "start",
+            "elapsed_ms": 584
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.getTargets",
+            "status": "end",
+            "elapsed_ms": 595
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.attachToTarget",
+            "status": "start",
+            "elapsed_ms": 595
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.attachToTarget",
+            "status": "end",
+            "elapsed_ms": 607
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Browser.setDownloadBehavior",
+            "status": "start",
+            "elapsed_ms": 607
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Browser.setDownloadBehavior",
+            "status": "end",
+            "elapsed_ms": 613
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Fetch.enable",
+            "status": "start",
+            "elapsed_ms": 613
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Fetch.enable",
+            "status": "end",
+            "elapsed_ms": 627
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Page.enable",
+            "status": "start",
+            "elapsed_ms": 628
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Page.enable",
+            "status": "end",
+            "elapsed_ms": 641
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.enable",
+            "status": "start",
+            "elapsed_ms": 641
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.enable",
+            "status": "end",
+            "elapsed_ms": 646
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setBypassServiceWorker",
+            "status": "start",
+            "elapsed_ms": 646
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setBypassServiceWorker",
+            "status": "end",
+            "elapsed_ms": 648
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setCacheDisabled",
+            "status": "start",
+            "elapsed_ms": 648
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setCacheDisabled",
+            "status": "end",
+            "elapsed_ms": 649
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Emulation.setDeviceMetricsOverride",
+            "status": "start",
+            "elapsed_ms": 649
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Emulation.setDeviceMetricsOverride",
+            "status": "end",
+            "elapsed_ms": 651
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "start",
+            "elapsed_ms": 651
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "end",
+            "elapsed_ms": 652
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "start",
+            "elapsed_ms": 652
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "end",
+            "elapsed_ms": 652
+          },
+          {
+            "phase": "guest_ready",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 653
+          }
+        ],
+        "invalid": false,
+        "incomplete": false
+      },
+      "browser_processes": [
+        {
+          "pid": 216693,
+          "state": "R",
+          "parent": 216688,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335117,
+          "cpu_ticks": 66,
+          "rss_pages": 31694
+        },
+        {
+          "pid": 216713,
+          "state": "S",
+          "parent": 216693,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335123,
+          "cpu_ticks": 3,
+          "rss_pages": 12352
+        },
+        {
+          "pid": 216715,
+          "state": "S",
+          "parent": 216693,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335123,
+          "cpu_ticks": 3,
+          "rss_pages": 12352
+        },
+        {
+          "pid": 216736,
+          "state": "S",
+          "parent": 216713,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335127,
+          "cpu_ticks": 2,
+          "rss_pages": 9872
+        },
+        {
+          "pid": 216751,
+          "state": "S",
+          "parent": 216693,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335158,
+          "cpu_ticks": 4,
+          "rss_pages": 14560
+        },
+        {
+          "pid": 216752,
+          "state": "S",
+          "parent": 216715,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335161,
+          "cpu_ticks": 0,
+          "rss_pages": 5557
+        },
+        {
+          "pid": 216784,
+          "state": "R",
+          "parent": 216715,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335166,
+          "cpu_ticks": 33,
+          "rss_pages": 18097
+        },
+        {
+          "pid": 216793,
+          "state": "S",
+          "parent": 216715,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335170,
+          "cpu_ticks": 1,
+          "rss_pages": 8411
+        },
+        {
+          "pid": 216794,
+          "state": "S",
+          "parent": 216715,
+          "group": 216693,
+          "session": 216693,
+          "start": 6335170,
+          "cpu_ticks": 2,
+          "rss_pages": 12385
+        }
+      ],
+      "launch_rpc_deadline_ms": 65000,
+      "rpc_deadline_ms": 20000,
+      "setup_delay_ms": 0,
+      "stages": [
+        {
+          "method": "fixture_bootstrap",
+          "elapsed_ms": 260,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_status",
+          "elapsed_ms": 8,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_model_status",
+          "elapsed_ms": 5,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_launch",
+          "elapsed_ms": 804,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_stop",
+          "elapsed_ms": 345,
+          "status": "returned",
+          "code": null
+        }
+      ],
+      "final_state": "uncertain",
+      "actions": 4
+    },
+    {
+      "browser_version": "Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)",
+      "startup_phases": {
+        "records": [
+          {
+            "phase": "guest_loading",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 0
+          },
+          {
+            "phase": "guest_loaded",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 47
+          },
+          {
+            "phase": "controlled_setup_delay",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 47
+          },
+          {
+            "phase": "controlled_setup_delay",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 22047
+          },
+          {
+            "phase": "serve",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 22047
+          },
+          {
+            "phase": "spawn",
+            "method": null,
+            "status": "start",
+            "elapsed_ms": 22049
+          },
+          {
+            "phase": "spawn",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 22050
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setDiscoverTargets",
+            "status": "start",
+            "elapsed_ms": 22050
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setDiscoverTargets",
+            "status": "end",
+            "elapsed_ms": 22525
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.getTargets",
+            "status": "start",
+            "elapsed_ms": 22525
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.getTargets",
+            "status": "end",
+            "elapsed_ms": 22600
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.attachToTarget",
+            "status": "start",
+            "elapsed_ms": 22600
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.attachToTarget",
+            "status": "end",
+            "elapsed_ms": 22613
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Browser.setDownloadBehavior",
+            "status": "start",
+            "elapsed_ms": 22613
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Browser.setDownloadBehavior",
+            "status": "end",
+            "elapsed_ms": 22621
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Fetch.enable",
+            "status": "start",
+            "elapsed_ms": 22621
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Fetch.enable",
+            "status": "end",
+            "elapsed_ms": 22628
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Page.enable",
+            "status": "start",
+            "elapsed_ms": 22628
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Page.enable",
+            "status": "end",
+            "elapsed_ms": 22646
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.enable",
+            "status": "start",
+            "elapsed_ms": 22646
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.enable",
+            "status": "end",
+            "elapsed_ms": 22653
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setBypassServiceWorker",
+            "status": "start",
+            "elapsed_ms": 22653
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setBypassServiceWorker",
+            "status": "end",
+            "elapsed_ms": 22655
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setCacheDisabled",
+            "status": "start",
+            "elapsed_ms": 22655
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Network.setCacheDisabled",
+            "status": "end",
+            "elapsed_ms": 22656
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Emulation.setDeviceMetricsOverride",
+            "status": "start",
+            "elapsed_ms": 22656
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Emulation.setDeviceMetricsOverride",
+            "status": "end",
+            "elapsed_ms": 22660
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "start",
+            "elapsed_ms": 22660
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "end",
+            "elapsed_ms": 22661
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "start",
+            "elapsed_ms": 22661
+          },
+          {
+            "phase": "cdp_call",
+            "method": "Target.setAutoAttach",
+            "status": "end",
+            "elapsed_ms": 22662
+          },
+          {
+            "phase": "guest_ready",
+            "method": null,
+            "status": "end",
+            "elapsed_ms": 22662
+          }
+        ],
+        "invalid": false,
+        "incomplete": false
+      },
+      "browser_processes": [
+        {
+          "pid": 216918,
+          "state": "S",
+          "parent": 216913,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337621,
+          "cpu_ticks": 68,
+          "rss_pages": 31860
+        },
+        {
+          "pid": 216940,
+          "state": "S",
+          "parent": 216918,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337627,
+          "cpu_ticks": 3,
+          "rss_pages": 12352
+        },
+        {
+          "pid": 216941,
+          "state": "S",
+          "parent": 216918,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337627,
+          "cpu_ticks": 4,
+          "rss_pages": 12352
+        },
+        {
+          "pid": 216961,
+          "state": "S",
+          "parent": 216940,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337633,
+          "cpu_ticks": 3,
+          "rss_pages": 9899
+        },
+        {
+          "pid": 216976,
+          "state": "S",
+          "parent": 216918,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337663,
+          "cpu_ticks": 5,
+          "rss_pages": 14561
+        },
+        {
+          "pid": 216977,
+          "state": "S",
+          "parent": 216941,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337666,
+          "cpu_ticks": 0,
+          "rss_pages": 5626
+        },
+        {
+          "pid": 217010,
+          "state": "R",
+          "parent": 216941,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337671,
+          "cpu_ticks": 36,
+          "rss_pages": 18079
+        },
+        {
+          "pid": 217019,
+          "state": "S",
+          "parent": 216941,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337674,
+          "cpu_ticks": 1,
+          "rss_pages": 8434
+        },
+        {
+          "pid": 217020,
+          "state": "S",
+          "parent": 216941,
+          "group": 216918,
+          "session": 216918,
+          "start": 6337674,
+          "cpu_ticks": 4,
+          "rss_pages": 12339
+        }
+      ],
+      "launch_rpc_deadline_ms": 65000,
+      "rpc_deadline_ms": 20000,
+      "setup_delay_ms": 22000,
+      "stages": [
+        {
+          "method": "fixture_bootstrap",
+          "elapsed_ms": 251,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_status",
+          "elapsed_ms": 9,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_model_status",
+          "elapsed_ms": 7,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_launch",
+          "elapsed_ms": 22837,
+          "status": "returned",
+          "code": null
+        },
+        {
+          "method": "selected_browser_stop",
+          "elapsed_ms": 371,
+          "status": "returned",
+          "code": null
+        }
+      ],
+      "final_state": "uncertain",
+      "actions": 4
+    }
+  ],
+  "beyond_new_bound_control": {
+    "expected_failure": "FIXTURE_RPC_DEADLINE",
+    "launch_elapsed_ms": 65001,
+    "whole_case_elapsed_ms": 66908.054793,
+    "rpc_history": [
+      {
+        "method": "fixture_bootstrap",
+        "elapsed_ms": 295,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_status",
+        "elapsed_ms": 9,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_model_status",
+        "elapsed_ms": 6,
+        "status": "returned",
+        "code": null
+      },
+      {
+        "method": "selected_browser_launch",
+        "elapsed_ms": 65001,
+        "status": "deadline",
+        "code": "FIXTURE_RPC_DEADLINE"
+      }
+    ],
+    "ready_before_deadline": true,
+    "guest_ended_before_deadline": false,
+    "owned_browser_identity": {
+      "pid": 218281,
+      "start": 6420627
+    },
+    "owned_guest_pids": [
+      218276
+    ],
+    "live_owned_browser_members_before_deadline": 9,
+    "live_owned_browser_and_guest_survivors_after_cleanup": [],
+    "usage": {
+      "actions": 0,
+      "model_calls": 0,
+      "tokens": 0,
+      "usd": 0,
+      "requests": 0,
+      "response_bytes": 0,
+      "artifact_bytes": 0
+    },
+    "rpc_after_deadline": 0,
+    "production_deadlines_unchanged": true
+  },
+  "ci": "fresh exact candidate pending",
+  "scope": "test-only transport correction and bounded fixture evidence; no runtime flags/budgets/destination/production limit changes or installed acceptance",
+  "reviewed_fixture_commit": "6a77c9f40dc8416ff8b297d60e919e95b1f65518",
+  "negative_history": [
+    {
+      "proof": "pp-startup-phase-new65-stall-proof.json",
+      "limit": "Watchdog had already closed the browser before65; not active-cleanup proof."
+    },
+    {
+      "proof": "pp-startup-phase-new65-wedged-stall.log",
+      "result": "Artificially paused guest exposed queued teardown before physical closure; nine owned Chromium processes survived. They were subsequently cleaned by verified PID/start/group/session. The final control fixes fault-specific physical cleanup order."
+    }
+  ],
+  "review": "Independent source and final kernel proof review CLEAR for publication; both verified browser and guest groups empty. Fresh exact-head CI remains required."
+}

@@ -13,6 +13,7 @@ import { effectiveToggles } from './lib/operations-toggles.js';
 import { createOperationsSettingsRouter } from './routes/operations-settings.js';
 import { evidenceConfiguration, createEvidenceRuntime } from './lib/operational-evidence-runtime.js';
 import { agentRunsConfiguration, createAgentRunRuntime } from './lib/operational-agent-runtime.js';
+import { createSelectedBrowserRuntime } from './lib/operational-selected-browser-runtime.js';
 import { createEvidenceRouter, evidenceHeaders } from './routes/operational-evidence.js';
 import http from 'http';
 import cors from 'cors';
@@ -282,7 +283,11 @@ for (const p of ['/api/mcp', '/api/mcp/t/:token',
   '/api/mcp-editor', '/api/mcp-editor/t/:token']) {
   app.use(p, mcpJson);
 }
-app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+const defaultJson=express.json({ limit: DEFAULT_BODY_LIMIT });
+// This one private file intake is parsed after authenticated Operations gates,
+// at its finite 16 MiB decoded bound. All other routes keep the 1 MiB default.
+const browserAssetIntake=/^\/api\/operational-projects\/[0-9a-f-]{36}\/browser-assets\/?$/;
+app.use((req,res,next)=>req.method==='POST'&&browserAssetIntake.test(req.path)?next():defaultJson(req,res,next));
 app.use(express.urlencoded({ extended: true, limit: DEFAULT_BODY_LIMIT }));
 
 // Cookie parsing — needed for the httpOnly JWT cookie + the CSRF
@@ -629,6 +634,10 @@ const agentRuns = createAgentRunRuntime(agentRunsConfig, { db: getDb(),
   log: entry => console.log('[agent-runs]', JSON.stringify(entry)),
   audit: (actor, action, details) => logAudit(actor?.id ?? null, action, 'operational_agent_run', details?.run_id ?? null, details, null) });
 const operationsToggle = name => () => effectiveToggles(getDb())[name];
+const selectedBrowserEnabled=()=>{const t=effectiveToggles(getDb());return t.operations&&t.agents_metadata&&t.agent_runs;};
+const browserRuntime=createSelectedBrowserRuntime(agentRunsConfig,{db:getDb(),store:operationsStore,isEnabled:selectedBrowserEnabled,
+  isMetadataEnabled:()=>{const t=effectiveToggles(getDb());return t.operations&&t.agents_metadata;},
+  log:entry=>console.log('[selected-browser]',JSON.stringify(entry))});
 const websiteReviews = createWebsiteReviewRuntime({db:getDb(),store:operationsStore});
 const connectionBridge = configuredBrokerBridge();
 const brokerTaskWorker = await configuredBrokerWorker();
@@ -647,6 +656,8 @@ app.use('/api/operational-projects', authenticateToken, blockPendingRole, create
   configurationConnections: configurationConnectionReader(connectionBridge),
   agentRuns,
   websiteReviews,
+  browserRuntime,
+  browserAssetBodyParser:express.json({limit:'24mb',inflate:false}),
   requireSudo,
   controlVerified: req => hasControlGrant(getDb(), { sessionId: req.user?.jti, userId: req.user?.id }),
   evidenceEnabled: evidenceConfig.enabled,
@@ -975,6 +986,8 @@ attachTerminalServer(server);
 attachAgentLiveServer(server, { agentRuns,
   enabled: () => { const t = effectiveToggles(getDb()); return t.operations && t.agents_metadata && t.agent_runs; },
   actorOf: user => { const actor = { ...user, requestId: randomUUID() }; operationsStore.assertActor(actor); return actor; } });
+attachAgentLiveServer(server,{agentRuns:browserRuntime.live,pathKind:'browser-agent-runs',enabled:selectedBrowserEnabled,
+  actorOf:user=>{const actor={...user,requestId:randomUUID()};operationsStore.assertActor(actor);return actor;}});
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
@@ -986,6 +999,7 @@ server.listen(PORT, '0.0.0.0', () => {
   if (agentRuns?.execution.available) {
     agentRuns.recover().catch((err) => console.error('[agent-runs] recovery failed:', err?.code || err?.message || err));
   }
+  browserRuntime.startMaintenance().catch(err=>console.error('[selected-browser] recovery refused:',err?.code||'BROWSER_RECOVERY_REFUSED'));
 
   // Self-update bookkeeping (docs/features/self-update.md): the backend that
   // asked for an update died in the container rebuild, so the NEW one records

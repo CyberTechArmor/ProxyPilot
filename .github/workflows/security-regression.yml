@@ -24,6 +24,14 @@ jobs:
         working-directory: admin/backend
       - run: npm ci --no-audit --no-fund
         working-directory: cli
+      - name: Install bounded PDF fixture tools on disposable runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y poppler-utils util-linux
+          test -x /usr/bin/pdftotext
+          test -x /usr/bin/prlimit
+          /usr/bin/pdftotext -v
+          /usr/bin/prlimit --version
       - name: Authentication, authorization, upgrade and dependency regressions
         working-directory: admin/backend
         run: |
@@ -37,7 +45,18 @@ jobs:
         run: node --test src/__tests__/pomerium-setup.test.js src/__tests__/full-platform-mcp.test.js
       - name: Operations and supervised agent authorization, fencing and recovery
         working-directory: admin/backend
-        run: node --test src/__tests__/operational-*.test.js src/__tests__/agent-run*.test.js src/__tests__/operations-toggles.test.js
+        run: |
+          tests=()
+          for test_file in src/__tests__/operational-*.test.js src/__tests__/agent-run*.test.js src/__tests__/operations-toggles.test.js; do
+            case "$test_file" in
+              src/__tests__/operational-selected-browser-chromium.test.js) ;;
+              *) tests+=("$test_file") ;;
+            esac
+          done
+          node --test "${tests[@]}"
+      - name: Actual Chromium lifecycle and signed host continuation
+        working-directory: admin/backend
+        run: node --test src/__tests__/operational-selected-browser-chromium.test.js
       - name: Root-only bootstrap integration (disposable runner and temporary databases)
         working-directory: admin/backend
         run: sudo "$(command -v node)" --test src/__tests__/security-bootstrap*.test.js
@@ -107,6 +126,8 @@ jobs:
           node tests/agent-runs.browser.mjs
           node tests/agent-runs-a7.browser.mjs
           node tests/browser-configurations.browser.mjs
+          node --test tests/browser-agent-ui.test.mjs tests/browser-authentication-ui.test.mjs
+          node tests/browser-agent-integration.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

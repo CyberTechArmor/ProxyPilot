@@ -1,0 +1,39 @@
+{
+  "responsive": [
+    {
+      "width": 360,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 375,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 768,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 1280,
+      "overflow": false,
+      "accessibility_violations": 0
+    },
+    {
+      "width": 1920,
+      "overflow": false,
+      "accessibility_violations": 0
+    }
+  ],
+  "source_preserved": true,
+  "approval_exact": true,
+  "conversion_requires_review": true,
+  "no_implicit_start": true,
+  "verification_no_replay": true,
+  "authorization_loss_clears_private_ui": true,
+  "private_release_separate": true,
+  "exact_form_text_review": true,
+  "selected_fullscreen_preserves_viewer": true,
+  "page_errors": []
+}

@@ -1,0 +1,192 @@
+{
+  "commit": "d4b6f616a8b08a56f8875c191e9ab5b03754f0c9",
+  "workflows": [
+    {
+      "id": 37124341014,
+      "name": "Credential broker configured boundary",
+      "status": "completed",
+      "conclusion": "success",
+      "all_jobs_success": 3
+    },
+    {
+      "id": 37124341023,
+      "name": "Security regression",
+      "status": "completed",
+      "conclusion": "success",
+      "all_jobs_success": 7
+    }
+  ],
+  "jobs": [
+    {
+      "name": "dashboard",
+      "workflow_run_id": 37124341014,
+      "job_id": 111206512040,
+      "target_step": 8,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37124341014/job/111206512040",
+      "status": "completed",
+      "conclusion": "success",
+      "native_stages": [
+        {
+          "browser_version": "Chromium 154.0.8037.0",
+          "rpc_deadline_ms": 20000,
+          "stages": [
+            {
+              "method": "fixture_bootstrap",
+              "elapsed_ms": 490,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_status",
+              "elapsed_ms": 5,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_model_status",
+              "elapsed_ms": 3,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_launch",
+              "elapsed_ms": 7807,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_stop",
+              "elapsed_ms": 50,
+              "status": "returned",
+              "code": null
+            }
+          ],
+          "final_state": "uncertain",
+          "actions": 4
+        }
+      ],
+      "bounded_log_lines": [
+        "2026-10-03T12:54:15.8514954Z ✔ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (9761.252302ms)",
+        "2026-10-03T12:54:15.8520000Z ℹ Cross-language browser stages: {\"browser_version\":\"Chromium 154.0.8037.0\",\"rpc_deadline_ms\":20000,\"stages\":[{\"method\":\"fixture_bootstrap\",\"elapsed_ms\":490,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_status\",\"elapsed_ms\":5,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_model_status\",\"elapsed_ms\":3,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_launch\",\"elapsed_ms\":7807,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_stop\",\"elapsed_ms\":50,\"status\":\"returned\",\"code\":null}],\"final_state\":\"uncertain\",\"actions\":4}"
+      ],
+      "decoded_utf8_job_log": {
+        "sha256": "e7df28cb0b0319b791bf20af11ced6e3dfde1a162d83b98b84d683f6d8ef14be",
+        "bytes": 143593
+      }
+    },
+    {
+      "name": "security-backend",
+      "workflow_run_id": 37124341023,
+      "job_id": 111206512230,
+      "target_step": 10,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37124341023/job/111206512230",
+      "status": "completed",
+      "conclusion": "success",
+      "native_stages": [
+        {
+          "browser_version": "Chromium 154.0.8037.0",
+          "rpc_deadline_ms": 20000,
+          "stages": [
+            {
+              "method": "fixture_bootstrap",
+              "elapsed_ms": 2218,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_status",
+              "elapsed_ms": 7,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_model_status",
+              "elapsed_ms": 4,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_launch",
+              "elapsed_ms": 16048,
+              "status": "returned",
+              "code": null
+            },
+            {
+              "method": "selected_browser_stop",
+              "elapsed_ms": 70,
+              "status": "returned",
+              "code": null
+            }
+          ],
+          "final_state": "uncertain",
+          "actions": 4
+        }
+      ],
+      "bounded_log_lines": [
+        "2026-10-03T12:54:47.7161119Z ✔ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (20095.727265ms)",
+        "2026-10-03T12:54:47.7168109Z ℹ Cross-language browser stages: {\"browser_version\":\"Chromium 154.0.8037.0\",\"rpc_deadline_ms\":20000,\"stages\":[{\"method\":\"fixture_bootstrap\",\"elapsed_ms\":2218,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_status\",\"elapsed_ms\":7,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_model_status\",\"elapsed_ms\":4,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_launch\",\"elapsed_ms\":16048,\"status\":\"returned\",\"code\":null},{\"method\":\"selected_browser_stop\",\"elapsed_ms\":70,\"status\":\"returned\",\"code\":null}],\"final_state\":\"uncertain\",\"actions\":4}",
+        "2026-10-03T12:55:40.8527691Z ................Selected composition browser: Chromium 154.0.8037.0",
+        "2026-10-03T12:58:08.8133404Z Ran 474 tests in 198.580s",
+        "2026-10-03T12:58:08.8134132Z OK (skipped=33)"
+      ],
+      "decoded_utf8_job_log": {
+        "sha256": "d1e16d64fb3a4fea65e9fd2c451c0c68ef6b3c15307873a44a77fb2cf99144ea",
+        "bytes": 243594
+      }
+    },
+    {
+      "name": "broker",
+      "workflow_run_id": 37124341014,
+      "job_id": 111206512182,
+      "target_step": 8,
+      "url": "https://github.com/CyberTechArmor/ProxyPilot/actions/runs/37124341014/job/111206512182",
+      "status": "completed",
+      "conclusion": "success",
+      "native_stages": [],
+      "bounded_log_lines": [
+        "2026-10-03T12:55:04.8213544Z ................Selected composition browser: Chromium 154.0.8037.0",
+        "2026-10-03T12:57:51.6995783Z Ran 474 tests in 219.998s",
+        "2026-10-03T12:57:51.6996069Z OK (skipped=33)"
+      ],
+      "decoded_utf8_job_log": {
+        "sha256": "b2d132a3b63c4e76bddc13faa097cefd385dd1b8e2c178db79ad36b5ac67b7ca",
+        "bytes": 64266
+      }
+    }
+  ],
+  "native_results": {
+    "broker": {
+      "pass": 1,
+      "fail": 0,
+      "skipped": 0,
+      "unit_pass": 461
+    },
+    "security": {
+      "pass": 1,
+      "fail": 0,
+      "skipped": 0,
+      "unit_pass": 435
+    }
+  },
+  "python_results": {
+    "broker": {
+      "tests": 474,
+      "existing_skips": 33,
+      "failures": 0,
+      "duration_seconds": 219.998
+    },
+    "security": {
+      "tests": 474,
+      "existing_skips": 33,
+      "failures": 0,
+      "duration_seconds": 198.58
+    }
+  },
+  "limitations": [
+    "Launch latency varied from7807ms to16048ms; measured resource contention is not established.",
+    "The original307a85 Start failure cause remains directly unproven.",
+    "These exact-head runs pass; this does not guarantee all future runner startup latencies.",
+    "No installed host/provider acceptance or production activation occurred."
+  ],
+  "raw_log_hash_semantics": "Complete authorized decoded job-log content encoded as UTF-8, including supplied BOM/newlines; not archive bytes."
+}

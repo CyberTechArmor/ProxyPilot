@@ -1,0 +1,10 @@
+✔ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (3259.03093ms)
+ℹ Cross-language browser stages: {"browser_version":"Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)","rpc_deadline_ms":20000,"stages":[{"method":"fixture_bootstrap","elapsed_ms":302,"status":"returned","code":null},{"method":"selected_browser_status","elapsed_ms":8,"status":"returned","code":null},{"method":"selected_browser_model_status","elapsed_ms":5,"status":"returned","code":null},{"method":"selected_browser_launch","elapsed_ms":743,"status":"returned","code":null},{"method":"selected_browser_stop","elapsed_ms":334,"status":"returned","code":null}],"final_state":"uncertain","actions":4}
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3368.16986

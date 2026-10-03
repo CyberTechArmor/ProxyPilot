@@ -1,0 +1,34 @@
+✔ authority facts project current eligibility and withdrawn guide without reading secret or narrative columns (26.010096ms)
+✔ authority Unix client requires a private socket, fixed paths and bounded metadata response (23.500255ms)
+✔ HTTP bridge enforces real broker private ownership, assign ceilings and revocation (230.599452ms)
+✔ dashboard bridge consumes actual configured capabilities and delegated RPC while worker remains unavailable (452.170109ms)
+✔ draft configuration persistence, revision, permissions and no execution (46.661111ms)
+✔ initial people grant is atomic and never implies private connection rights (11.857243ms)
+✔ connection boundary denies secret intake, requires freshness/revision and fails closed (17.767462ms)
+✔ configuration routes use existing access and expose ETag (16.957065ms)
+✔ existing approved guide reused and withdrawal immediately invalidates readiness (30.687733ms)
+✔ hostile bridge fields never cross public response projection (14.788558ms)
+✔ real HTTP routes enforce authentication/CSRF and persist configurations (201.860732ms)
+✔ delegation is transient scoped to broker endpoints, exact user and never retried for task mutation (3.020598ms)
+✔ current Controls bound assignment/session scope and config edits permanently stale issued sessions (124.985019ms)
+✔ configured worker client loads in Docker backend-only layout without standalone services (170.139647ms)
+✔ operation activity retains bounded receipt metadata and strips every content/capability field (17.117506ms)
+✔ policy quarantine is faithfully displayed without credential data (0.49949ms)
+✔ readiness HTTP observes assignment, rotation and revocation while execution remains unavailable (240.726451ms)
+✔ malformed or unavailable metadata fails closed with no error content (1.108986ms)
+✔ shared permission ceiling absent from public projection cannot claim an effective scope (1.542618ms)
+✔ configured bridge validates mutual TLS, independent delegation, exact version and response bounds (146.740843ms)
+✔ configuration readiness requests only selected Operations project with unchanged human delegation (2.314928ms)
+✔ explicit task dispatch is durable scoped revision-bound and never retries uncertain start (26.926352ms)
+✔ a missing configured worker cannot start or manufacture a persisted task (25.768092ms)
+✔ configured dispatcher reaches real worker over mTLS without persisting its bearer (158.731237ms)
+✔ saved configuration proposals derive epochs and require current source at explicit single-use start (58.694309ms)
+✔ saved-task HTTP routes keep fresh proof and Operations feature gates before authorization (18.259441ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 26
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1323.876326

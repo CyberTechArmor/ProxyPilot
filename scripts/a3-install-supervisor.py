@@ -27,6 +27,9 @@ spec.loader.exec_module(proxy)
 i = proxy.i
 SOURCES = ('a3-worker-supervisor.py', 'a3-worker-guest.py', 'a3-install-proxy.py',
            'a3-install-fence.py', 'a3-network-fence.py', 'a3-origin-proxy.py')
+SELECTED_SOURCES = ('selected_browser_supervisor.py', 'selected_browser_policy.py', 'selected_browser_gateway.py',
+                    'selected_browser_worker.py', 'selected_browser_contract.py', 'selected-browser-schemas.json',
+                    'selected-browser-model.py')
 TARGET = i.CONFIG / 'supervisor'
 UNIT = Path('/etc/systemd/system/proxypilot-a3-supervisor.service')
 KEY = i.CONFIG / 'supervisor-key.pem'
@@ -126,9 +129,14 @@ def save_bytes(path, data, mode):
 
 def plan_files(source_dir=Path(__file__).resolve().parent):
     files = {}
-    for name in SOURCES:
+    for name in SOURCES + SELECTED_SOURCES:
         data = (source_dir / name).read_bytes()
-        if not data.startswith(b'#!/usr/bin/env python3\n'):
+        if name.endswith('.json'):
+            schemas = json.loads(data)
+            if not isinstance(schemas, dict) or set(schemas) != {'configuration', 'action'}:
+                raise ValueError(f'Unreviewed schema bundle: {name}')
+        elif not (data.startswith(b'#!/usr/bin/env python3\n') or
+                  name in SELECTED_SOURCES and data.startswith(b'"""')):
             raise ValueError(f'Unreviewed source: {name}')
         files[TARGET / name] = data
     files[UNIT] = UNIT_TEXT.encode()
@@ -253,7 +261,7 @@ def install():
         for path, text in ((UNIT, UNIT_TEXT), (RENEW_SERVICE, RENEW_SERVICE_TEXT), (RENEW_TIMER, RENEW_TIMER_TEXT)):
             (Path(temp) / path.name).write_text(text)
         i.execute(['systemd-analyze', 'verify', *(str(Path(temp) / p.name) for p in (UNIT, RENEW_SERVICE, RENEW_TIMER))])
-        for name in SOURCES:
+        for name in SOURCES + tuple(n for n in SELECTED_SOURCES if n.endswith('.py')):
             compile(files[TARGET / name].decode('utf-8'), name, 'exec')  # Syntax only; nothing is written.
         if JOURNAL.exists():
             data = read_journal()

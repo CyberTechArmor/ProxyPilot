@@ -1,0 +1,27 @@
+✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (768.268266ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 898.195835
+
+✖ failing tests:
+
+test at admin/backend/src/__tests__/operational-selected-browser-chromium.test.js:25:1
+✖ service approval settles actual Chromium off-list action before a temporary grant and fresh next action (768.268266ms)
+  AssertionError [ERR_ASSERTION]: Actual browser launch failed before step: {"run":{"state":"uncertain","result_code":"LAUNCH_UNCERTAIN","revision":3,"fence":2,"usage":{"actions":0,"model_calls":0,"tokens":0,"usd":0,"requests":0,"response_bytes":0,"artifact_bytes":0}},"uncertainties":[{"id":"4bd50790-78a0-4067-8b42-826156504cb9","kind":"CLEANUP_UNVERIFIED","state":"unresolved","decision":null,"created_at":"2026-10-03T12:23:21.638Z"}],"receipts":[],"rpc_history":[{"method":"fixture_bootstrap","elapsed_ms":251,"status":"returned","code":null},{"method":"selected_browser_status","elapsed_ms":9,"status":"returned","code":null},{"method":"selected_browser_model_status","elapsed_ms":5,"status":"returned","code":null},{"method":"selected_browser_launch","elapsed_ms":1,"status":"refused","code":"BROWSER_START_FAILED"},{"method":"selected_browser_stop","elapsed_ms":2,"status":"refused","code":"INVALID_REQUEST"},{"method":"fixture_diagnostics","elapsed_ms":1,"status":"returned","code":null}],"transport_failure":null,"launch_evidence":{"phase":"launch_finished","evidence":{"browser_version":"Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)","gateway":null,"attempts":[],"workers":[],"browser_process":null,"service_requests":[],"chromium_log":"","fetch_log":"","received":[],"upstream":[],"contacts":[],"trace":["gateway:health"]}},"bridge_evidence":{"phase":"request_failed","evidence":{"browser_version":"Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)","gateway":null,"attempts":[],"workers":[],"browser_process":null,"service_requests":[],"chromium_log":"","fetch_log":"","received":[],"upstream":[],"contacts":[],"trace":["gateway:health"]}},"inspection":{"evidence":{"browser_version":"Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)","gateway":null,"attempts":[],"workers":[],"browser_process":null,"service_requests":[],"chromium_log":"","fetch_log":"","received":[],"upstream":[],"contacts":[],"trace":["gateway:health"]},"failures":[{"method":"selected_browser_launch","code":"BROWSER_START_FAILED","detail":"BROWSER_START_FAILED"},{"method":"selected_browser_stop","code":"INVALID_REQUEST","detail":"INVALID_REQUEST"}]},"inspection_error":null,"stderr":"Selected composition browser: Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)\n"}
+      at assertRunning (file:///workspace/ProxyPilot/admin/backend/src/__tests__/operational-selected-browser-chromium.test.js:94:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async TestContext.<anonymous> (file:///workspace/ProxyPilot/admin/backend/src/__tests__/operational-selected-browser-chromium.test.js:100:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: undefined,
+    operator: 'fail',
+    diff: 'simple'
+  }

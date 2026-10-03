@@ -1,0 +1,69 @@
+{
+  "diagnostic_commit": "cbd0c9e141a2ccf7ff5f7ce913f08f83c2490161",
+  "ci_scheduling_commit": "21e2d51be879441fd84e7323ca728e6b36233b14",
+  "source_pins": {
+    ".github/workflows/credential-broker.yml": {
+      "sha256": "5e9cfb7832be1027d05ab0ed7ef8f3e8783394a3dedf424466b2116559375603",
+      "bytes": 4906
+    },
+    ".github/workflows/security-regression.yml": {
+      "sha256": "10881a1f30dc47f0cb8ac1aaf3bbff67e7c7d94594e609d5ea004fcf12dfc6e2",
+      "bytes": 6449
+    },
+    "LEARNINGS.md": {
+      "sha256": "82f7a5aa971f0fe9efb0952f5c382056408f63adc63c0a7b9d4f8504193a7746",
+      "bytes": 286871
+    },
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": {
+      "sha256": "6c1df0932655ab77284eb56b1dcf86cfa7e9cced8ca9610747b75713fe734a85",
+      "bytes": 16643
+    },
+    "scripts/tests/selected_browser_backend_bridge.py": {
+      "sha256": "448f8d0326a8ba4b651bbe2258b2292c3544c4d90889ca9e6051a54dc603e80b",
+      "bytes": 12576
+    },
+    "scripts/selected_browser_supervisor.py": {
+      "sha256": "68aecd57bb1d6e8dead69ec957919d6cdb8de7f9b3b3111d7158fdb203cf44ab",
+      "bytes": 78880
+    },
+    "scripts/a3-worker-guest.py": {
+      "sha256": "21a56eeb7624d1740cbbb087d90002d55bf1f2fabc70025f33bfea51c9d95f3f",
+      "bytes": 89071
+    }
+  },
+  "frozen_test_and_product_files_unchanged_since_diagnostic_commit": {
+    "admin/backend/src/__tests__/operational-selected-browser-chromium.test.js": true,
+    "scripts/tests/selected_browser_backend_bridge.py": true,
+    "scripts/selected_browser_supervisor.py": true,
+    "scripts/a3-worker-guest.py": true
+  },
+  "validation": {
+    "workflow_yaml_parse": true,
+    "changed_run_blocks_bash_syntax": true,
+    "all_original_selected_files_exactly_once": true,
+    "all_other_workflow_structure_unchanged": true,
+    "git_diff_check": true,
+    "isolated_actual_browser": {
+      "pass": 1,
+      "fail": 0,
+      "skipped": 0,
+      "duration_ms": 3047.627257,
+      "launch_ms": 750,
+      "browser_version": "Chromium 151.0.7922.173 built on Debian GNU/Linux 13 (trixie)",
+      "result_state": "uncertain",
+      "actions": 4,
+      "result_state_meaning": "Intended honest website-effect uncertainty after the approved final request; the continuation assertions passed."
+    }
+  },
+  "unchanged_deadlines_ms": {
+    "rpc": 20000,
+    "test": 60000,
+    "close": 5000
+  },
+  "limits": {
+    "contention": "Inference only; this CI evidence contains no CPU-pressure measurements.",
+    "original_307_failure_cause": "Unproven directly; the older log masked Start failure.",
+    "new_scheduling_ci": "Not yet published/run. Fresh exact-head CI must be inspected before claiming the startup failure resolved.",
+    "installed_acceptance": "Local real Chromium/host composition uses fixture installed OS/provider boundaries. It does not establish installed Incus/nft/Neko/provider acceptance."
+  }
+}

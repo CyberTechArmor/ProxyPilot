@@ -14,8 +14,13 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const METHODS = new Set(['status', 'launch', 'renew', 'action', 'step_record', 'model_step', 'view', 'stop',
-  'takeover', 'release', 'summarize', 'public_review_status', 'public_review_model', 'cancel_public_review']);
-const STREAM_METHODS = new Set(['live']);
+  'takeover', 'release', 'summarize', 'public_review_status', 'public_review_model', 'cancel_public_review',
+  'selected_browser_status','selected_browser_launch','selected_browser_observe','selected_browser_action','selected_browser_poll_action',
+  'selected_browser_pending','selected_browser_approve_request','selected_browser_deny_request','selected_browser_grant_destination',
+  'selected_browser_auth','selected_browser_pause','selected_browser_resume','selected_browser_takeover','selected_browser_release',
+  'selected_browser_view','selected_browser_stage','selected_browser_offer_input','selected_browser_control','selected_browser_renew','selected_browser_stop',
+  'selected_browser_model_status','selected_browser_model','cancel_selected_browser_model']);
+const STREAM_METHODS = new Set(['live','selected_browser_live']);
 const MAX_REPLY = 4 * 1024 * 1024;
 // One relayed signalling line (an SDP offer is the largest, a few kB).
 const MAX_STREAM_LINE = 256 * 1024;
@@ -55,7 +60,8 @@ export function createSupervisorClient(socketPath, { timeoutMs = 120_000 } = {})
         socket.on('end', () => done(coded('SUPERVISOR_PROTOCOL')));
         socket.on('data', (chunk) => {
           buffer += chunk;
-          if (Buffer.byteLength(buffer) > (method === 'step_record' ? 2048 : MAX_REPLY)) return done(coded('SUPERVISOR_PROTOCOL'));
+          const replyLimit=method==='selected_browser_poll_action'?24*1024*1024:method==='step_record'?2048:MAX_REPLY;
+          if (Buffer.byteLength(buffer) > replyLimit) return done(coded('SUPERVISOR_PROTOCOL'));
           const end = buffer.indexOf('\n');
           if (end < 0) return undefined;
           let reply;

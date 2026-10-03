@@ -33,7 +33,7 @@ function cookies(req) {
 
 // `toggles: true` serves the administrators' toggles (all off at start) exactly as
 // index.js does; otherwise Operations, agent metadata and agent runs are on.
-export async function startHarness({ execution = true, delayMs = 350, toggles = false, world: worldOptions = {} } = {}) {
+export async function startHarness({ execution = true, delayMs = 350, toggles = false, world: worldOptions = {}, selectedBrowserFixture = null } = {}) {
   const world = agentRunsWorld({ execution, ...worldOptions });
   world.supervisor.scenario.delayMs = delayMs;
   world.f.db.exec(`CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL,
@@ -94,6 +94,7 @@ export async function startHarness({ execution = true, delayMs = 350, toggles = 
     requireAdmin, requireSudo }));
   app.use('/api/operational-projects', authed,
     createOperationsRouter({ Router: express.Router, store: world.f.store, lookupLimiter: (_req, _res, next) => next(),
+      browserRuntime: selectedBrowserFixture ? selectedBrowserFixture(world) : null,
       agentRuns: world.service, requireSudo, controlVerified: req => controlGrants.has(req.user?.jti), ...(toggles
         ? { enabled: toggle('operations'), agentsEnabled: toggle('agents_metadata'), agentRunsEnabled: toggle('agent_runs') }
         : { enabled: true, agentsEnabled: true }) }));

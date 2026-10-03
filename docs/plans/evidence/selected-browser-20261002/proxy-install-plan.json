@@ -1,0 +1,37 @@
+{
+  "contract_version": "selected-browser-install-plan.v1",
+  "installed": false,
+  "acceptance_created": false,
+  "fixed_guest": "49592202-a8b0-45af-9ac6-5439761d73e4",
+  "proxy_listen": [
+    "10.185.17.1",
+    18083
+  ],
+  "directories": [
+    {
+      "path": "/var/lib/proxypilot-a3-proof/selected-gateway",
+      "mode": "0700",
+      "owner": "root"
+    }
+  ],
+  "files": {
+    "/etc/proxypilot-a3-proof/origin-proxy.py": {
+      "sha256": "12e754034d466d86f61e53360d84a8df360c03cbe8417b16821d79b5f6fcbc99",
+      "bytes": 14032
+    },
+    "/etc/proxypilot-a3-proof/selected_browser_gateway.py": {
+      "sha256": "5765748c7446be9df8b5a3e47f2621019789ce1a5d4e5c9505ad554fb86fcfbe",
+      "bytes": 47413
+    },
+    "/etc/proxypilot-a3-proof/selected_browser_policy.py": {
+      "sha256": "f56d6567a7e531725796272bd05cbd0942602e322c2f92f47ee97066e0eb2079",
+      "bytes": 18655
+    },
+    "/etc/systemd/system/proxypilot-a3-origin-proxy.service": {
+      "sha256": "29cc6549e6f8ecad175ede6bfb4d667c54a5d90bd8cb9ec8d281ac163d1c6356",
+      "bytes": 697
+    }
+  },
+  "unit": "[Unit]\nDescription=A3 fixed-origin proxy for the proof VM\nRequires=proxypilot-a3-fence.service\nAfter=proxypilot-a3-fence.service network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /etc/proxypilot-a3-proof/origin-proxy.py --serve --selected-control\nRestart=on-failure\nRestartSec=1\nNoNewPrivileges=yes\nCapabilityBoundingSet=\nProtectSystem=strict\nRuntimeDirectory=proxypilot-a3\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\nReadWritePaths=/run/proxypilot-a3 /var/lib/proxypilot-a3-proof/selected-gateway\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nRestrictNamespaces=yes\nMemoryMax=256M\nTasksMax=32\n\n[Install]\nWantedBy=multi-user.target\n",
+  "notice": "Apply only on an authorized proof host; verify acceptance separately"
+}

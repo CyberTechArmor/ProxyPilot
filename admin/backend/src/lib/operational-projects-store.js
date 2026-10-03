@@ -1,3 +1,4 @@
+import { createBrowserConfigurationsStore } from './operational-browser-agent-configurations.js';
 import { createConfigurationsStore } from './operational-configurations.js';
 import { randomUUID } from 'node:crypto';
 import { createOperationsWorkflow } from './operational-projects-workflow.js';
@@ -68,6 +69,7 @@ export function createOperationsStore(db, { now = () => new Date().toISOString()
     ...workflow.methods,
     ...agents,
     ...createConfigurationsStore({one,all,run,tx,access,event,now,uuid,workflow}),
+    ...createBrowserConfigurationsStore({one,all,run,tx,access,event,now,uuid,workflow}),
     assertActor: eligible,
     create(actor, input) {
       const v = parse(schemas.create, input);

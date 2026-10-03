@@ -92,6 +92,7 @@ jobs:
           node --test tests/agent-runs-cleanup.test.mjs
           node tests/agent-runs.browser.mjs
           node tests/agent-runs-a7.browser.mjs
+          node tests/browser-configurations.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,0 +1,120 @@
+{
+  "schema": "proxypilot.browser-agent.proposal.v1",
+  "workflow": "selected_browser_v1",
+  "name": "Selected-site browser configuration",
+  "work": {
+    "instructions": "Read the selected website and summarize the requested information. Do not include credentials in these instructions.",
+    "success_criteria": [
+      "A summary of the requested information with its source."
+    ],
+    "guide_ref": null,
+    "source_inputs": []
+  },
+  "destinations": {
+    "network_scope": "explicit_destinations",
+    "network_policy_ref": null,
+    "allowed_origins": [
+      {
+        "id": "site-1",
+        "origin": "https://example.com",
+        "roles": [
+          "navigation",
+          "resource"
+        ],
+        "session_headers": "this_origin_session"
+      },
+      {
+        "id": "assets-1",
+        "origin": "https://assets.example.com",
+        "roles": [
+          "resource"
+        ],
+        "session_headers": "omit"
+      }
+    ],
+    "entry_urls": [
+      "https://example.com/"
+    ],
+    "off_list": "pause_and_escalate_before_send",
+    "off_list_approval": {
+      "scope": "exact_destination_and_purpose",
+      "lifetime": "attempt",
+      "persist_to_allowlist": false,
+      "wildcards": false
+    },
+    "subresources": "explicit_origins_only",
+    "redirects": "same_policy",
+    "popups": "same_policy",
+    "request_rules": [],
+    "unclassified_requests": "pause_and_escalate_before_send",
+    "websockets": "blocked_pending_selected_site_transport_review"
+  },
+  "permissions": {
+    "actions": [
+      "navigate",
+      "read",
+      "click",
+      "scroll",
+      "wait"
+    ],
+    "external_change_approval": "per_action",
+    "preauthorization_refs": [],
+    "start": "explicit_current_revision"
+  },
+  "authentication": {
+    "mode": "manual_takeover",
+    "session_lifetime": "attempt",
+    "persist_session": false
+  },
+  "model": {
+    "provider_route": "existing_a4",
+    "name": "gpt-6-luna",
+    "decisions": "bounded_candidate_selection",
+    "disclosure": "approved_guide_and_bounded_page_content",
+    "max_prompt_bytes": 16000,
+    "max_decision_output_tokens": 128,
+    "max_report_output_tokens": 1500
+  },
+  "budgets": {
+    "max_seconds": 900,
+    "max_actions": 60,
+    "max_model_calls": 20,
+    "max_tokens": 50000,
+    "max_usd": 1,
+    "max_requests": 500,
+    "max_response_bytes": 52428800,
+    "max_artifact_bytes": 33554432,
+    "cpu": 1,
+    "memory_mib": 1024,
+    "temporary_disk_mib": 512
+  },
+  "artifacts": {
+    "visibility": "run_authorized_users",
+    "record_video": false,
+    "retention_days": 14,
+    "capture_during_manual_auth": false,
+    "download_max_bytes": 16777216,
+    "upload_max_bytes": 16777216,
+    "download_mime_types": [
+      "application/pdf",
+      "text/plain",
+      "text/csv",
+      "image/png",
+      "image/jpeg"
+    ],
+    "upload_asset_refs": [],
+    "clipboard": {
+      "scope": "attempt_private",
+      "human_exchange": "explicit_import_export",
+      "max_bytes": 65536
+    }
+  },
+  "supervision": {
+    "live_view": true,
+    "pause": true,
+    "stop": true,
+    "takeover": true,
+    "escalation": "project_inbox",
+    "report": "project_activity"
+  }
+}

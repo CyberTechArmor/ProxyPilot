@@ -1,3 +1,4 @@
+import { operationalBrowserDraftMigration1117 } from './lib/operational-browser-agent-configurations.js';
 import { websiteReviewMigration1116 } from './lib/operational-website-review.js';
 import { brokerTaskProposalsMigration1115 } from './lib/broker-task-proposals.js';
 import { brokerTaskMigration1114 } from './lib/broker-task-dispatch.js';
@@ -166,6 +167,7 @@ export function getDb() {
 //   1110 Operations — A4 credential binding metadata (vault path/version, never a value) and run pins.
 //   1111 Operations — A5 run policy pins, typed steps, model calls, approvals and results.
 //   1112 Operations — A7 practice/resume origins, reconciliations, control grants, takeovers, fixture state, summaries.
+//   1117 Operations — non-executable selected-browser drafts and immutable configuration/source revisions.
 //   800 Manual (pasted) TLS certificates — tls_certificates (admin-supplied
 //               PEM cert + encrypted key for ACME-blocked networks; the private
 //               key is encrypted at rest, covered names/fingerprint/validity are
@@ -2056,6 +2058,7 @@ export function initDatabase() {
   runMigration(db, 1114, 'broker_task_dispatch', brokerTaskMigration1114);
   runMigration(db, 1115, 'broker_task_proposals', brokerTaskProposalsMigration1115);
   runMigration(db, 1116, 'public_website_reviews', websiteReviewMigration1116);
+  runMigration(db, 1117, 'browser_agent_draft_configurations', operationalBrowserDraftMigration1117);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

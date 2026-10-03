@@ -29,6 +29,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
         agent_execution_message: agentRuns.execution.message } : {}),
       ...(websiteReviews ? { website_review_enabled: agentsOn() && on(agentRunsEnabled),
         website_review_contract: 'website-review.v1', website_review_strategy: 'http_extract_v1' } : {}),
+      browser_draft_configuration_available: agentsOn(), browser_draft_contract: 'browser-agent-draft.v1',
       // Only a hint for the sidebar; the settings routes check the role themselves.
       can_manage_settings: req.user?.role === 'admin' });
   });
@@ -78,6 +79,33 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   if (evidenceRouter) router.use('/:id/demonstrations', evidenceRouter);
   const empty = req => parse(schemas.empty, req.body ?? {});
   const agentsOnly = (_req,res,next) => agentsOn() ? next() : res.status(404).json({error:'Not found'});
+  // Draft-only import/review surface. No start/action/credential route exists.
+  const browserDraftHandle = (fn, status = 200, denialAction = 'browser_draft_read') => (req, res) => {
+    try {
+      const data = fn(req, req.operationsActor);
+      if (data.configuration?.revision) res.set('ETag', `"${data.configuration.revision}"`);
+      return res.status(status).json(data);
+    } catch (err) {
+      const known = err instanceof OperationsError;
+      if (known && [401, 403, 404].includes(err.status)) {
+        try { store.auditDenied(req.operationsActor, req.params?.id, denialAction, err.status); } catch { /* preserve refusal */ }
+      }
+      return res.status(known ? err.status : 500).json({ error: known ? err.message : 'Unable to complete browser draft request',
+        ...(known && err.code ? { code: err.code, ...(err.extra ?? {}) } : {}) });
+    }
+  };
+  router.get('/:id/browser-agent-configurations', agentsOnly,
+    browserDraftHandle((r,a)=>store.browserConfigurations(a,r.params.id,r.query)));
+  router.post('/:id/browser-agent-configurations/validate', agentsOnly,
+    browserDraftHandle((r,a)=>store.validateBrowserConfiguration(a,r.params.id,r.body),200,'browser_draft_validate'));
+  router.post('/:id/browser-agent-configurations', agentsOnly,
+    browserDraftHandle((r,a)=>store.createBrowserConfiguration(a,r.params.id,expected(r),r.body),201,'browser_draft_save'));
+  router.get('/:id/browser-agent-configurations/:configurationId', agentsOnly,
+    browserDraftHandle((r,a)=>store.browserConfiguration(a,r.params.id,r.params.configurationId)));
+  router.patch('/:id/browser-agent-configurations/:configurationId', agentsOnly,
+    browserDraftHandle((r,a)=>store.updateBrowserConfiguration(a,r.params.id,r.params.configurationId,expected(r),r.body),200,'browser_draft_save'));
+  router.get('/:id/browser-agent-configurations/:configurationId/readiness', agentsOnly,
+    browserDraftHandle((r,a)=>({readiness:store.browserConfiguration(a,r.params.id,r.params.configurationId).readiness})));
   const reviewOnly=(_req,res,next)=>agentsOn()&&on(agentRunsEnabled)&&websiteReviews?next():res.status(404).json({error:'Not found'});
   router.get('/:id/website-review-agents',reviewOnly,agentHandle((r,a)=>websiteReviews.listAgents(a,r.params.id),200,'website_review_agents_read'));
   router.post('/:id/website-review-agents',reviewOnly,agentHandle((r,a)=>websiteReviews.createAgent(a,r.params.id,r.body),201,'website_review_agent_save'));

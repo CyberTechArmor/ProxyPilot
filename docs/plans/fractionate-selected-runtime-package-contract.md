@@ -107,13 +107,44 @@ Drift refuses recovery with the dashboard stopped for inspection. Older
 version1 refresh transactions keep their exact four-target rollback behavior;
 unknown or incomplete transactions cannot be superseded by preservation.
 
-This compatibility profile covers the recognized legacy host before separate
-selected installation. An expanded installed package, acceptance/gateway state,
-or any retained selected-package transaction directory (including a completed
-or rolled-back attempt) refuses ordinary Update. A future preservation profile
-for that expanded installation and its backend protocol compatibility is
-pre-activation work requiring separate review. This release does not claim the
-future expanded-runtime ordinary-update lifecycle is accepted.
+The expanded preservation profile in `review-runtime-refresh.py` recognizes a
+separately committed selected package. It attests current delivered source to
+the updater's exact Git revision, checks the complete installed journals and
+25-file set, and requires every installed code/unit byte to match both the
+committed package and the current source-generated contract. A runtime code or
+unit change still requires the separately reviewed package workflow. Normal
+application-only updates preserve the runtime without restarting its daemons.
+The existing versioned browser/gateway/schema contracts remain unchanged.
+
+A version3 `preserve_selected` transaction records current source, complete
+protected inventories, machine/VM/network/Chromium/receipt identity, current
+units, installed pins and idle ledgers. It writes only private updater metadata.
+Apply requires a stopped dashboard and rechecks admission. Commit verifies
+current code and identity after dashboard health, allowing newly admitted work
+without comparing, restoring, settling or replaying business history. The
+readiness API remains authoritative; preservation never claims browser
+availability or writes acceptance. Absent, expired or otherwise unaccepted
+proof cannot be converted into acceptance by an ordinary update.
+
+A certificate renewal between completed updates is recognized only when the
+proxy journal's certificate/key pair changes: other journal metadata must match
+the retained committed generation. Current certificate/key equality, lifetime,
+root custody, serving bytes and policy are still verified. Changes during an
+in-flight preservation transaction refuse completion for inspection.
+
+Interrupted preservation requires a stopped-dashboard metadata-only rollback;
+unknown state or changed pins refuse without runtime restoration. A completed
+initial-install rollback may retain its transaction directory: its exact restored old
+files and journal metadata must verify before the existing positive legacy
+profile admits an ordinary update. No history directory is deleted to achieve
+admission. A fully rolled-back later package upgrade retains the prior expanded
+generation; that generation must match its saved old pins and current delivered
+source before selected preservation is admitted. Partial package installation/
+recovery is never admitted.
+
+Local tests cover these source/filesystem contracts with simulated host effects.
+Actual expanded-host update/recovery acceptance is still pending installation;
+this source change does not claim that target proof has happened.
 
 Before a future installation approval, obtain the current complete read-only
 package plan on the actual host. Record its exact `plan_sha256`, source revision,

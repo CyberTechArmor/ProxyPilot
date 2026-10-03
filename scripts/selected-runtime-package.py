@@ -495,7 +495,7 @@ class Host:
             refuse('Recorded source/delivery changed during attestation')
         return revision, files, dict(path=checkout, record_sha256=sha(record), delivered_modes=modes)
 
-    def identity(self):
+    def identity(self, allow_work=False):
         self.wiring()
         query = lambda p: strict(self.execute(['incus', 'query', p]))
         vm = query('/1.0/instances/' + VM)
@@ -503,7 +503,7 @@ class Host:
         if vm.get('type') != 'virtual-machine' or vm.get('config', {}).get('volatile.uuid') != VM_UUID or running.get('status') != 'Running':
             refuse('Current proof VM identity is unverified')
         groups=self.execute(['incus','exec',VM,'--','/usr/bin/ls','-1','/sys/fs/cgroup/system.slice']).decode('utf-8').splitlines()
-        if any(name.startswith('pp-a3-worker-') and name.endswith('.service') for name in groups):
+        if not allow_work and any(name.startswith('pp-a3-worker-') and name.endswith('.service') for name in groups):
             refuse('Guest worker cgroup remains; package must not trigger runtime cleanup')
         policy = self.execute(['incus', 'exec', VM, '--', 'sha256sum', '/etc/chromium/policies/managed/proxypilot-live.json']).decode().split()[0]
         der=self.execute(['openssl','pkey','-pubin','-in',PUBLIC_KEY,'-outform','DER'])
@@ -586,7 +586,7 @@ class Host:
             refuse('Runtime health refused')
         return reply['result']
 
-    def health(self, pins, key_id, selected):
+    def health(self, pins, key_id, selected, allow_work=False):
         self.wiring(require_socket=True)
         self.unit_check()
         def wait(path,method,gateway=False):
@@ -600,7 +600,9 @@ class Host:
                     time.sleep(.25)
         a = wait('/run/proxypilot-a3/operator.sock', 'status')
         b = wait('/run/proxypilot-a4/broker.sock', 'status')
-        if (a.get('active') is not None or a.get('accepting_launch') is not True or a.get('vm_uuid') != VM_UUID or
+        active_work = (allow_work and isinstance(a.get('active'), dict) and a.get('blockers') == [])
+        if ((not allow_work and a.get('active') is not None) or
+                (a.get('accepting_launch') is not True and not active_work) or a.get('vm_uuid') != VM_UUID or
                 a['supervisor'].get('key_id') != key_id or a['supervisor'].get('supervisor_sha256') != pins[SUPERVISOR + '/a3-worker-supervisor.py']['sha256'] or
                 a['supervisor'].get('runner_sha256') != pins[SUPERVISOR + '/a3-worker-guest.py']['sha256'] or
                 b.get('vm_uuid') != VM_UUID or b['broker'].get('broker_sha256') != pins[BROKER]['sha256']):
@@ -609,7 +611,8 @@ class Host:
             g = wait('/run/proxypilot-a3/selected-proxy.sock', 'health', True)
             expected = {n:pins[ROOT + '/' + n]['sha256'] for n in ('selected_browser_gateway.py','selected_browser_policy.py')}
             expected['a3-origin-proxy.py'] = pins[ROOT + '/origin-proxy.py']['sha256']
-            if g.get('active') is not False or g.get('files') != expected or g.get('protocol') != 'selected-gateway.v1':
+            if (type(g.get('active')) is not bool or (g['active'] and not allow_work) or
+                    g.get('files') != expected or g.get('protocol') != 'selected-gateway.v1'):
                 refuse('Serving gateway identity changed or latched')
 
     def stop(self):

@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-from test_selected_browser_composition import BrowserCompositionTests, Origin, s
+from test_selected_browser_composition import BrowserCompositionTests, Origin, s, startup_phases
 
 
 def tail(path,limit):
@@ -38,6 +38,7 @@ def diagnostics(fixture):
             workers=[dict(attempt_id=aid,ready=w.ready.is_set(),ended=w.ended.is_set(),
                 stderr=w.stderr_tail.decode('utf-8','replace')[-3000:]) for aid,w in workers[:4]],
             browser_process=fixture.host.browser_identity(),service_requests=fixture.browser_service_requests(),
+            startup_phases=startup_phases(fixture.root),browser_processes=fixture.host.live_browser_members()[:16],
             chromium_log=tail(fixture.root/'guest/chromium.log',3000),
             fetch_log=tail(fixture.root/'guest/fetch-fixture.log',1500),
             received=[dict(method=m[:16],host=h[:128],path=p[:160],body_bytes=len(b)) for m,h,p,b in Origin.received[-10:]],
@@ -52,6 +53,7 @@ def diagnostics(fixture):
                 attempts=[dict(attempt_id=a['attempt_id'],state=a['state']) for a in attempts[:4]],
                 workers=[dict(attempt_id=aid,ready=w.ready.is_set(),ended=w.ended.is_set(),
                     stderr=w.stderr_tail.decode('utf-8','replace')[-256:]) for aid,w in workers[:4]],
+                startup_phases=value['startup_phases'],browser_processes=value['browser_processes'],
                 chromium_log=value['chromium_log'][-512:],fetch_log=value['fetch_log'][-256:])
         return value
     except Exception as error:
@@ -75,11 +77,13 @@ def main():
     # Local diagnostic controls, absent in normal/CI runs. They cannot relax
     # policy or request limits, and never enter the supervisor protocol.
     launch_fault=os.environ.get('PROXYPILOT_TEST_BROWSER_LAUNCH_FAULT')
-    if launch_fault not in (None,'refuse','stall'):
+    if launch_fault not in (None,'refuse','stall','stall_discovery','slow_setup'):
         raise AssertionError('Unknown local browser diagnostic control')
     BrowserCompositionTests.setUpClass()
     fixture = BrowserCompositionTests('test_navigation_escalation_grant_settles_unsent_action_and_offers_new_exact_path')
     fixture.setUp()
+    fixture.host.hold_startup_discovery=launch_fault=='stall_discovery'
+    fixture.host.delay_startup_setup=launch_fault=='slow_setup'
     decision_count = 0
     calls = []
     held = []
@@ -179,11 +183,18 @@ def main():
                                 if launch_fault=='refuse':raise s.Refused('BROWSER_START_FAILED')
                                 out=fixture.runtime.dispatch(method,params)
                                 if launch_fault=='stall':
-                                    # The real guest/browser is running. Hold its
-                                    # response past the unchanged Node deadline;
-                                    # SIGTERM must clean that exact owned browser.
+                                    # Wedge only this Popen-owned guest after genuine
+                                    # readiness. Its unchanged watchdog cannot close
+                                    # Chromium before the transport deadline, so TERM
+                                    # must exercise forced owned-group cleanup.
+                                    attempt=fixture.supervisor.state['attempts'][params['attempt_id']]
+                                    guest=fixture.host.units[attempt['unit']]
+                                    if (guest.poll() is not None or os.getpgid(guest.pid)!=guest.pid or
+                                            os.getsid(guest.pid)!=guest.pid):
+                                        raise AssertionError('Held-launch fixture guest ownership changed')
+                                    os.killpg(guest.pid,signal.SIGSTOP)
                                     evidence('launch_response_held')
-                                    threading.Event().wait(60)
+                                    threading.Event().wait(80)
                             finally:
                                 done.set()
                                 evidence('launch_finished')
@@ -202,6 +213,12 @@ def main():
                 emit(dict(id=message['id'],error=dict(code=failure['code'],detail=failure['detail'],
                     diagnostics=json.dumps(snapshot)[:12000])))
     finally:
+        if launch_fault=='stall':
+            # The controlled stopped guest cannot answer queued stop requests.
+            # Dispose its exact fixture-owned groups before orderly supervisor
+            # teardown so the parent's unchanged 5s close bound is sufficient.
+            for unit in tuple(fixture.host.units):
+                fixture.host.stop_unit(unit)
         fixture.tearDown()
 
 

@@ -11,10 +11,12 @@ import http.client
 import json
 import os
 from pathlib import Path
+import queue
 import shutil
 import signal
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,54 @@ s = fixture.s
 ROOT = Path(__file__).resolve().parents[1]
 SITE = 'https://selected.example'
 OTHER = 'https://frame.example'
+STARTUP_PHASE_LIMIT = 32
+STARTUP_METHODS = ('Target.setDiscoverTargets', 'Target.getTargets', 'Target.createTarget',
+    'Target.attachToTarget', 'Browser.setDownloadBehavior', 'Fetch.enable', 'Page.enable',
+    'Network.enable', 'Network.setBypassServiceWorker', 'Network.setCacheDisabled',
+    'Emulation.setDeviceMetricsOverride', 'Target.setAutoAttach')
+STARTUP_PHASES = ('guest_loading', 'guest_loaded', 'serve', 'spawn', 'cdp_call',
+    'guest_ready', 'controlled_reply_hold', 'controlled_setup_delay')
+
+
+def startup_phases(root):
+    """Read only the fixture's fixed, bounded, content-free startup marker."""
+    result = dict(records=[], invalid=False, incomplete=False)
+    try:
+        fd = os.open(root / 'guest/startup-phases-fixture.jsonl', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                result['invalid'] = True
+                return result
+            data = stream.read(16385)
+    except FileNotFoundError:
+        return result
+    except OSError:
+        result['invalid'] = True
+        return result
+    if len(data) > 16384:
+        result['invalid'] = True
+        return result
+    lines = data.splitlines(keepends=True)
+    if len(lines) > STARTUP_PHASE_LIMIT:
+        result['invalid'] = True
+        return result
+    for line in lines:
+        if not line.endswith(b'\n'):
+            result['incomplete'] = True
+            break  # A concurrent append may have one incomplete final row.
+        try:
+            row = json.loads(line)
+            if (type(row) is not dict or set(row) != {'phase', 'method', 'status', 'elapsed_ms'} or
+                    row['phase'] not in STARTUP_PHASES or row['status'] not in ('start', 'end', 'error') or
+                    type(row['elapsed_ms']) is not int or not 0 <= row['elapsed_ms'] <= 86400000 or
+                    (row['method'] not in STARTUP_METHODS if row['phase'] in ('cdp_call', 'controlled_reply_hold')
+                     else row['method'] is not None)):
+                raise ValueError('Invalid fixed startup row')
+        except (ValueError, TypeError):
+            result['invalid'] = True
+            break
+        result['records'].append(row)
+    return result
 
 
 def fixture_process(pid):
@@ -42,7 +92,8 @@ def fixture_process(pid):
         return None
     fields = text[text.rfind(')') + 2:].split()
     return dict(pid=pid, state=fields[0], parent=int(fields[1]), group=int(fields[2]),
-                session=int(fields[3]), start=int(fields[19]))
+                session=int(fields[3]), start=int(fields[19]),
+                cpu_ticks=int(fields[11])+int(fields[12]), rss_pages=int(fields[21]))
 
 
 class Origin(BaseHTTPRequestHandler):
@@ -193,33 +244,126 @@ class RealGuestHost(fixture.SelectedHost):
         # Execute the reviewed compressed bundle with a non-main namespace so
         # only test boundary hooks can be set before its real serve() entrypoint.
         # No fake actions, request decisions, observations or grant results.
-        code = """import os,sys,json
+        code = """import os,sys,json,time,threading,stat
+phase_started=time.monotonic()
+phase_lock=threading.Lock()
+phase_count=0
+phase_closed=False
+def phase(name,status,method=None):
+ global phase_count
+ with phase_lock:
+  if phase_count>=PHASE_LIMIT or phase_closed:return
+  row={'phase':name,'method':method,'status':status,'elapsed_ms':int((time.monotonic()-phase_started)*1000)}
+  try:
+   fd=os.open(WORKSPACE+'/startup-phases-fixture.jsonl',os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
+   with os.fdopen(fd,'w') as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):return
+    stream.write(json.dumps(row,separators=(',',':'))+'\\n')
+  except OSError:return
+  phase_count+=1
+phase('guest_loading','start')
 namespace={'__name__':'selected_fixture_guest'}
 exec(compile(SOURCE,'<reviewed-fixture-bundle>','exec'),namespace)
+phase('guest_loaded','end')
 namespace['PROXY']=PROXY
 namespace['CHROMIUM']=CHROMIUM
 namespace['WORKSPACE']=WORKSPACE
+call=namespace['Cdp'].call
+def diagnostic_call(self,method,*args,**kwargs):
+ if method not in STARTUP_METHODS:return call(self,method,*args,**kwargs)
+ phase('cdp_call','start',method)
+ try:result=call(self,method,*args,**kwargs)
+ except BaseException:
+  phase('cdp_call','error',method)
+  raise
+ phase('cdp_call','end',method)
+ return result
+namespace['Cdp'].call=diagnostic_call
+write=namespace['Cdp']._write
+held_discovery_id=None
+def diagnostic_write(self,message):
+ global held_discovery_id
+ if HOLD_DISCOVERY and message.get('method')=='Target.setDiscoverTargets' and held_discovery_id is None:
+  held_discovery_id=message['id']
+ return write(self,message)
+namespace['Cdp']._write=diagnostic_write
 dispatch=namespace['Cdp']._dispatch
 def diagnostic_dispatch(self,message):
+ if HOLD_DISCOVERY and held_discovery_id is not None and message.get('id')==held_discovery_id:
+  # A controlled fixture holds this genuine reply, leaving the original call
+  # pending under its unchanged 30s bound until owned transport teardown.
+  phase('controlled_reply_hold','start','Target.setDiscoverTargets')
+  threading.Event().wait(60)
+  return
  if message.get('method')=='Fetch.requestPaused':
   p=message['params'];open(WORKSPACE+'/fetch-fixture.log','a').write(json.dumps({'session':message.get('sessionId'),'id':p.get('requestId'),'network':p.get('networkId'),'url':p.get('request',{}).get('url')})+'\\n')
  return dispatch(self,message)
 namespace['Cdp']._dispatch=diagnostic_dispatch
 spawn=os.posix_spawn
 def fixture_spawn(path,argv,env,**kwargs):
+ phase('spawn','start')
  kwargs.pop('setsid',None)
- return spawn(path,argv,env,**kwargs)
+ try:pid=spawn(path,argv,env,**kwargs)
+ except BaseException:
+  phase('spawn','error')
+  raise
+ phase('spawn','end')
+ return pid
 os.posix_spawn=fixture_spawn
+emit=namespace['Channel'].emit
+def diagnostic_emit(self,value):
+ global phase_closed
+ if value.get('event')=='ready':
+  phase('guest_ready','end')
+  with phase_lock:phase_closed=True
+ return emit(self,value)
+namespace['Channel'].emit=diagnostic_emit
 config=json.loads(sys.argv[1]);config.pop('live',None)
+if DELAY_SETUP:
+ phase('controlled_setup_delay','start')
+ threading.Event().wait(22)
+ phase('controlled_setup_delay','end')
+phase('serve','start')
 sys.exit(namespace['serve'](config,namespace['Channel']()))
 """
         values = dict(SOURCE=source, PROXY='127.0.0.1:%d' % self.proxy_port,
-                      CHROMIUM=str(self.chromium), WORKSPACE=str(workspace))
+                      CHROMIUM=str(self.chromium), WORKSPACE=str(workspace),
+                      PHASE_LIMIT=STARTUP_PHASE_LIMIT, STARTUP_METHODS=STARTUP_METHODS,
+                      HOLD_DISCOVERY=getattr(self, 'hold_startup_discovery', False),
+                      DELAY_SETUP=getattr(self, 'delay_startup_setup', False))
         program = '\n'.join(name + '=' + repr(value) for name, value in values.items()) + '\n' + code
         process = subprocess.Popen([sys.executable, '-c', program, json.dumps(config)], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
         self.units[unit] = process
         return process
+
+
+class StartupMarkerTests(unittest.TestCase):
+    def test_fixed_marker_refuses_special_file_and_unapproved_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'guest').mkdir()
+            path = root / 'guest/startup-phases-fixture.jsonl'
+            os.mkfifo(path)
+            started = time.monotonic()
+            self.assertEqual(startup_phases(root), dict(records=[], invalid=True, incomplete=False))
+            self.assertLess(time.monotonic()-started, 1)
+            path.unlink()
+            valid = dict(phase='cdp_call', method='Target.getTargets', status='start', elapsed_ms=7)
+            for row in (dict(valid, params={'password':'private-marker-control'}),
+                        dict(valid, method='Runtime.evaluate'), dict(valid, elapsed_ms=True)):
+                path.write_text(json.dumps(row)+'\n')
+                result = startup_phases(root)
+                self.assertEqual(result, dict(records=[], invalid=True, incomplete=False))
+                self.assertNotIn('private-marker-control', json.dumps(result))
+            path.write_text((json.dumps(valid)+'\n')*(STARTUP_PHASE_LIMIT+1))
+            self.assertTrue(startup_phases(root)['invalid'])
+            self.assertEqual(startup_phases(root)['records'], [])
+            path.write_bytes(b'x'*16385)
+            self.assertTrue(startup_phases(root)['invalid'])
+            path.unlink()
+            path.symlink_to(root / 'not-a-marker')
+            self.assertTrue(startup_phases(root)['invalid'])
 
 
 @unittest.skipUnless(Path('/usr/bin/chromium').exists() and shutil.which('openssl'), 'local Chromium + openssl required')
@@ -342,17 +486,9 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.ownership.stop()
 
     def launch(self, path='/navigation'):
-        self.c['destinations']['entry_urls'] = [path if path.startswith('https://') else SITE + path]
-        text = self.runtime.contract.canonical_json(self.c)
-        policy = hashlib.sha256(text.encode()).hexdigest()
-        spec = dict(contract_version='selected-browser.v1', project_id=fixture.PROJECT,
-            run_id=fixture.helpers.RUN, attempt_id=fixture.helpers.ATTEMPT, workspace_id=fixture.helpers.WORKSPACE,
-            fence=1, project_limits_revision=1,
-            project_limits=dict(cpu=1, memory_mib=1024, temporary_disk_mib=256,
-                max_actions=10, max_seconds=600, max_tokens=10000, max_usd=.25),
-            configuration_json=text, configuration_sha256=policy, guide_version_id=fixture.GUIDE,
-            guide_hash='c' * 64, consent_hash='d' * 64, deadline_at=s.stamp(time.time() + 600))
-        self.ref = dict(run_id=spec['run_id'], attempt_id=spec['attempt_id'], fence=1, policy_sha256=policy)
+        spec = self.launch_parameters(path)
+        self.ref = dict(run_id=spec['run_id'], attempt_id=spec['attempt_id'], fence=1,
+                        policy_sha256=spec['configuration_sha256'])
         try:
             self.runtime.launch(spec)
         except s.Refused as error:
@@ -363,7 +499,125 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
             log = self.root / 'guest/chromium.log'
             if log.exists():
                 detail += '\n' + log.read_bytes()[-6000:].decode('utf-8', 'replace')
+            detail += '\n' + json.dumps(startup_phases(self.root))
             raise AssertionError('Local composition launch failed: ' + error.code + '\n' + detail) from error
+
+    def launch_parameters(self, path='/navigation'):
+        self.c['destinations']['entry_urls'] = [path if path.startswith('https://') else SITE + path]
+        text = self.runtime.contract.canonical_json(self.c)
+        policy = hashlib.sha256(text.encode()).hexdigest()
+        spec = dict(contract_version='selected-browser.v1', project_id=fixture.PROJECT,
+            run_id=fixture.helpers.RUN, attempt_id=fixture.helpers.ATTEMPT, workspace_id=fixture.helpers.WORKSPACE,
+            fence=1, project_limits_revision=1,
+            project_limits=dict(cpu=1, memory_mib=1024, temporary_disk_mib=256,
+                max_actions=10, max_seconds=600, max_tokens=10000, max_usd=.25),
+            configuration_json=text, configuration_sha256=policy, guide_version_id=fixture.GUIDE,
+            guide_hash='c' * 64, consent_hash='d' * 64, deadline_at=s.stamp(time.time() + 600))
+        return spec
+
+    def test_real_discovery_reply_hold_reports_phase_at_transport_deadline_and_cleans_owned_browser(self):
+        # Exercise an explicit short 20s diagnostic transport deadline (the
+        # prior Node launch bound), without changing the CDP or host bounds.
+        env = dict(os.environ, PROXYPILOT_TEST_BROWSER_LAUNCH_FAULT='stall_discovery')
+        messages, events, sent = queue.Queue(), [], []
+        fenced = False
+        with tempfile.TemporaryFile() as stderr:
+            process = subprocess.Popen([sys.executable, '-u', str(ROOT / 'tests/selected_browser_backend_bridge.py')],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, text=True, env=env)
+            def read_replies():
+                try:
+                    for line in process.stdout:
+                        messages.put(json.loads(line))
+                finally:
+                    messages.put(None)
+            reader = threading.Thread(target=read_replies, daemon=True)
+            reader.start()
+            def request(method, params=None):
+                nonlocal fenced
+                if fenced:
+                    raise RuntimeError('Fixture transport is fenced')
+                sent.append(method)
+                ident = len(sent)
+                process.stdin.write(json.dumps(dict(id=ident, method=method, params=params or {}))+'\n')
+                process.stdin.flush()
+                deadline = time.monotonic()+20
+                while True:
+                    try:
+                        value = messages.get(timeout=max(0, deadline-time.monotonic()))
+                    except queue.Empty:
+                        fenced = True
+                        process.terminate()  # No command can be queued behind the held launch.
+                        raise TimeoutError('FIXTURE_RPC_DEADLINE')
+                    self.assertIsNotNone(value, 'Bridge exited before the controlled transport deadline')
+                    if value.get('event') == 'fixture_diagnostics':
+                        events.append(value)
+                        self.assertLessEqual(len(events), 40)
+                    elif value.get('id') == ident:
+                        self.assertNotIn('error', value, repr(value))
+                        return value['result']
+            try:
+                request('fixture_bootstrap')
+                started = time.monotonic()
+                with self.assertRaisesRegex(TimeoutError, 'FIXTURE_RPC_DEADLINE'):
+                    request('selected_browser_launch', self.launch_parameters())
+                self.assertGreaterEqual(time.monotonic()-started, 20)
+                with self.assertRaisesRegex(RuntimeError, 'transport is fenced'):
+                    request('fixture_inspect')
+                process.wait(8)
+                reader.join(3)
+                while not messages.empty():
+                    value = messages.get_nowait()
+                    if value is not None and value.get('event') == 'fixture_diagnostics':
+                        events.append(value)
+                evidence = next(value['evidence'] for value in reversed(events)
+                    if any(row['phase'] == 'controlled_reply_hold'
+                           for row in value['evidence']['startup_phases']['records']))
+                phases = evidence['startup_phases']
+                self.assertFalse(phases['invalid'])
+                self.assertFalse(phases['incomplete'])
+                rows = phases['records']
+                self.assertLessEqual(len(rows), STARTUP_PHASE_LIMIT)
+                self.assertEqual([(r['phase'], r['status']) for r in rows[:5]],
+                    [('guest_loading','start'), ('guest_loaded','end'), ('serve','start'),
+                     ('spawn','start'), ('spawn','end')])
+                self.assertTrue(any(r['phase']=='cdp_call' and r['method']=='Target.setDiscoverTargets' and
+                    r['status']=='start' for r in rows))
+                self.assertFalse(any(r['phase']=='cdp_call' and r['status'] in ('end','error') for r in rows))
+                self.assertFalse(any(r['phase']=='guest_ready' for r in rows))
+                self.assertEqual(sent, ['fixture_bootstrap', 'selected_browser_launch'])
+                self.assertTrue(evidence['workers'])
+                self.assertFalse(evidence['workers'][0]['ready'])
+                self.assertEqual(evidence['gateway']['requests'], 0)
+                self.assertEqual(evidence['gateway']['effects_sent'], 0)
+                self.assertEqual(evidence['received'], [])
+                self.assertEqual(evidence['upstream'], [])
+                identity = evidence['browser_process']
+                self.assertIsNotNone(identity)
+                members = evidence['browser_processes']
+                self.assertTrue(members)
+                self.assertLessEqual(len(members), 16)
+                for member in members:
+                    self.assertEqual(member['group'], identity['pid'])
+                    self.assertEqual(member['session'], identity['pid'])
+                    self.assertGreaterEqual(member['start'], identity['start'])
+                    self.assertGreaterEqual(member['cpu_ticks'], 0)
+                    self.assertGreaterEqual(member['rss_pages'], 0)
+                survivors = []
+                for path in Path('/proc').iterdir():
+                    if path.name.isdigit():
+                        member = fixture_process(int(path.name))
+                        if (member and member['group']==identity['pid'] and member['session']==identity['pid'] and
+                                member['start']>=identity['start'] and member['state'] not in ('Z','X')):
+                            survivors.append(member)
+                self.assertEqual(survivors, [], 'Controlled startup left a live owned browser')
+                self.assertEqual(process.returncode, 1)  # SIGTERM ran the bridge's verified finally cleanup.
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(8)
+                process.stdin.close()
+                process.stdout.close()
+                reader.join(3)
 
     def action(self, kind, predicate=lambda _: True):
         try:
@@ -384,6 +638,7 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         gate = self.host.registry.gateway
         cdp = self.root / 'guest/fetch-fixture.log'
         return repr({'browser_version':self.chromium_version, 'browser_process':self.host.browser_identity(),
+            'startup_phases':startup_phases(self.root), 'browser_processes':self.host.live_browser_members()[:16],
             'browser_service_requests':self.browser_service_requests(), 'status': gate.status(),
             'cdp':cdp.read_text()[-3000:] if cdp.exists() else '', 'received': Origin.received, 'upstream': self.upstream,
             'pending': gate.pending, 'tickets': list(gate.tickets.values()),

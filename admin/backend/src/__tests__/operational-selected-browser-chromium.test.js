@@ -119,7 +119,7 @@ async function actualBrowserContinuation(t, slowSetup = false) {
     const settle=async predicate=>{
       const until=Date.now()+5000;
       while(Date.now()<until) { await runtime.runs.refresh(owner,p.id,runId); if(predicate(get())) return get(); await delay(25); }
-      assert.fail('Actual host continuation did not settle: '+JSON.stringify({dto:get(),host:await client.request('fixture_inspect')}));
+      assert.fail('Actual host continuation did not settle: '+JSON.stringify({dto:get(),host:await client.request('fixture_inspect'),diagnostics:await client.request('fixture_diagnostics')}));
     };
     await step(); await settle(()=>f.db.prepare("SELECT state FROM ops_selected_browser_steps WHERE run_id=? AND ordinal=1").get(runId)?.state==='done');
     // Delay only delivery of the next real guest result. Poll/grant responses

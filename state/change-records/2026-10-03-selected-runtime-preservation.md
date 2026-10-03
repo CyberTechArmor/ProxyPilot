@@ -105,3 +105,34 @@ post-start failure; no production test is weakened to certify activation.
 
 These corrections require renewed independent review and current-head CI.
 Actual general-browser installation/provider/acceptance remain incomplete.
+
+A subsequent independent reproduction found A7's separate daily TURN certificate
+sync could also strand preservation. The narrow correction validates only the
+existing0640 TURN pair against system certificate trust, retained hostname,
+expiry, matching private key, stable fixed service units and a final file-pin
+readback. Every other A7 file stays exact. Tests use a real temporary CA, issued
+certificate and private key with wrong-hostname/untrusted-chain/key-mismatch
+and active-renewal refusals; service state is still simulated. There is no host
+acceptance claim. Re-review and final published-head CI apply to this correction.
+
+## Final candidate review
+
+The independent reviewer rechecked all corrections and reported no remaining
+substantive code findings. Nine focused recovery/refusal scenarios and the real
+SQLite maintenance harness were independently checked; the final TURN pair
+correction received a further two-test independent check using real OpenSSL.
+Local final validation: 20 preservation/serving/TURN tests and 35 updater
+maintenance/policy tests pass with no skips. Earlier unchanged package/legacy
+checks remain valid. Final published-head CI is required before merge.
+
+Reviewed production file SHA256 pins:
+- `scripts/review-runtime-refresh.py`: `2a34d29fd0697c833d023b49e9c089e38c6bf194bb224a266d34ae3c77e3f69b`
+- `scripts/selected-runtime-package.py`: `64d5908d144fea51bbe795ee1b5ee64e6d7da93fbdbfdf7e14087c9378096e53`
+- `update.sh`: `42e36e9912c482502d44a8abc750118bcce354dec986cf0c0af3bf8e575697bd`
+
+An actively running certificate sync can still cause an explicit safe refusal;
+current service/data are retained and metadata recovery can revalidate after
+the renewal settles. This is not installed acceptance. The user authorized the
+independent reviewer and instructed continuation without another operator
+terminal; the available connector still lacks the fixed host-root package
+review/install operation, and no interactive-review bypass is introduced.

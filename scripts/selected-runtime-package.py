@@ -615,6 +615,33 @@ class Host:
                     g.get('files') != expected or g.get('protocol') != 'selected-gateway.v1'):
                 refuse('Serving gateway identity changed or latched')
 
+    def verified_turn_pair(self):
+        # Read-only validation of the separately owned A7 Caddy/coturn renewal.
+        # Never relax the rest of /etc/proxypilot-a7 or write enrollment evidence.
+        certificate = '/etc/proxypilot-a7/turn-cert.pem'
+        key = '/etc/proxypilot-a7/turn-key.pem'
+        pins = {path:self.tree.pin(path) for path in (certificate, key)}
+        if any(pin['mode'] != 0o640 for pin in pins.values()):
+            refuse('TURN certificate custody changed')
+        journal = strict(self.tree.read('/var/lib/proxypilot-a7/live-install.json'))
+        hostname = journal.get('turn', {}).get('hostname', '')
+        if not isinstance(hostname, str) or not re.fullmatch(r'(?=.{4,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}', hostname):
+            refuse('TURN certificate hostname is unverified')
+        for unit, active in (('proxypilot-a7-turn-cert.service', 'inactive'), ('proxypilot-a7-turn.service', 'active')):
+            for field, expected in (('FragmentPath', '/etc/systemd/system/' + unit),
+                                    ('DropInPaths', ''), ('NeedDaemonReload', 'no'), ('ActiveState', active)):
+                if self.execute(['systemctl', 'show', unit, '--property=' + field, '--value']).decode().strip() != expected:
+                    refuse('TURN renewal/service state is not stable')
+        self.execute(['openssl', 'x509', '-in', certificate, '-checkend', '86400', '-noout'])
+        self.execute(['openssl', 'verify', '-purpose', 'sslserver', '-verify_hostname', hostname,
+                      '-CApath', '/etc/ssl/certs', '-untrusted', certificate, certificate])
+        public = self.execute(['openssl', 'x509', '-in', certificate, '-pubkey', '-noout'])
+        certificate_der = self.execute(['openssl', 'pkey', '-pubin', '-outform', 'DER'], input=public)
+        key_der = self.execute(['openssl', 'pkey', '-in', key, '-pubout', '-outform', 'DER'])
+        if certificate_der != key_der or any(self.tree.pin(path) != pin for path, pin in pins.items()):
+            refuse('TURN certificate/key pair changed during verification')
+        return pins
+
     def stop(self):
         for path in (RENEW_TIMER, RENEW_SERVICE, SUP_UNIT, PROXY_UNIT, BROKER_UNIT):
             self.execute(['systemctl', 'stop', Path(path).name], timeout=90)

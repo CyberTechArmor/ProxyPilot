@@ -874,6 +874,19 @@ class SelectedRefresh:
         journal = self.module.JOURNALS[1]
         value['files'][journal] = {'mode': value['files'][journal]['mode']}
         value['ledgers'] = None  # Never rewind even completed post-start history.
+        turn_root = '/etc/proxypilot-a7'
+        entries = value['protected'][turn_root]['entries']
+        previous = expected['protected'][turn_root]['entries']
+        turn_paths = (turn_root + '/turn-cert.pem', turn_root + '/turn-key.pem')
+        if any(entries.get(path) != previous.get(path) for path in turn_paths):
+            # A7 renews independently of the A3 lock. Require a trusted chain for
+            # the retained hostname, matching private key, fixed loaded services,
+            # and unchanged root custody; only this measured pair is normalized.
+            pair = self.h.verified_turn_pair()
+            if any(path not in previous or previous[path]['mode'] != 0o640 or entries.get(path) != pair[path] for path in turn_paths):
+                raise ValueError('TURN renewal changed during preservation')
+            for path in turn_paths:
+                entries[path] = previous[path]
         env_path = self.module.SOURCE + '/.env'
         original = expected['protected'][env_path]
         if value['protected'][env_path] != original:

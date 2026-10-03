@@ -131,7 +131,11 @@ proxy journal's certificate/key pair changes: other journal metadata must match
 the retained committed generation. Current certificate/key equality, lifetime,
 root custody, serving bytes and policy are still verified. A completed renewal during an
 in-flight preservation transaction is accepted after those same checks; no
-certificate, key or journal is restored. Other drift still refuses.
+certificate, key or journal is restored. A7 TURN's separate certificate timer
+is recognized only for its existing mode0640 certificate/key pair: the current
+chain must validate against system trust for the retained installation hostname,
+remain valid for a day, match its private key, and have stable loaded TURN and
+renewal services. Every other A7 tree entry remains exact. Other drift refuses.
 
 Interrupted preservation requires a stopped-dashboard metadata-only rollback.
 A reboot may change only the host boot ID; current idle admission and every

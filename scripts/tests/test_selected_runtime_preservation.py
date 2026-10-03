@@ -1,6 +1,8 @@
 """Real committed package bytes and metadata; host effects are simulated."""
 import copy
 import importlib.util
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -174,6 +176,26 @@ class SelectedPreservationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'drift'):
             self.refresh.rollback()
 
+    def test_verified_turn_renewal_during_update_is_narrowly_preserved(self):
+        paths = ('/etc/proxypilot-a7/turn-cert.pem', '/etc/proxypilot-a7/turn-key.pem')
+        for path in paths:
+            self.host.put(path, b'fixture original TURN pair\n', 0o640)
+        for operation in ('commit', 'rollback'):
+            self.refresh.apply()
+            for path in paths:
+                self.host.put(path, b'fixture changed TURN pair ' + operation.encode(), 0o640)
+            pair = {path:self.host.tree.pin(path) for path in paths}
+            # Production cryptographic/service validation is tested separately.
+            with patch.object(self.host, 'verified_turn_pair', create=True, return_value=pair) as verify:
+                before = self.runtime_bytes()
+                getattr(self.refresh, operation)()
+                verify.assert_called_once()
+                self.assertEqual(before, self.runtime_bytes())
+        self.refresh.apply()
+        self.host.put('/etc/proxypilot-a7/turnserver.conf', b'foreign config\n', 0o640)
+        with self.assertRaisesRegex(ValueError, 'drift'):
+            self.refresh.rollback()
+
     def test_no_package_enrollment_or_acceptance_created(self):
         self.assertIsNone(self.host.tree.pin(p.ROOT + '/selected-browser-acceptance.json', missing=True))
         self.refresh.apply()
@@ -240,6 +262,54 @@ class SelectedPreservationTests(unittest.TestCase):
         self.host.put(path, self.host.tree.read(path)+b'\n# drift\n', 0o644)
         with self.assertRaises(ValueError):
             r.verify_rolled_back_package(self.package, p)
+
+
+class TurnCertificateTests(unittest.TestCase):
+    def test_real_turn_chain_hostname_key_and_service_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trust = root / 'trust'; trust.mkdir()
+            run = lambda args: subprocess.run(['openssl', *args], check=True, capture_output=True)
+            ca_key, ca_cert, key, csr, leaf = [root / n for n in ('ca.key', 'trust/ca.pem', 'leaf.key', 'leaf.csr', 'leaf.pem')]
+            run(['req', '-x509', '-newkey', 'ed25519', '-nodes', '-days', '3', '-subj', '/CN=Fixture CA',
+                 '-keyout', str(ca_key), '-out', str(ca_cert)])
+            run(['req', '-newkey', 'ed25519', '-nodes', '-subj', '/CN=streamview.example.test',
+                 '-addext', 'subjectAltName=DNS:streamview.example.test', '-keyout', str(key), '-out', str(csr)])
+            run(['x509', '-req', '-in', str(csr), '-CA', str(ca_cert), '-CAkey', str(ca_key), '-CAcreateserial',
+                 '-days', '2', '-copy_extensions', 'copy', '-out', str(leaf)])
+            run(['rehash', str(trust)])
+            (root / 'host/etc').mkdir(parents=True)
+            (root / 'host/var/lib').mkdir(parents=True)
+            host = p.Host(); host.tree = p.Tree(root / 'host', os.geteuid())
+            cert_path, key_path = '/etc/proxypilot-a7/turn-cert.pem', '/etc/proxypilot-a7/turn-key.pem'
+            host.tree.mkdir('/etc/proxypilot-a7', 0o750)
+            host.tree.mkdir('/var/lib/proxypilot-a7', 0o700)
+            host.tree.write(cert_path, leaf.read_bytes() + ca_cert.read_bytes(), 0o640)
+            host.tree.write(key_path, key.read_bytes(), 0o640)
+            journal = '/var/lib/proxypilot-a7/live-install.json'
+            host.tree.write(journal, p.encoded({'turn':{'hostname':'streamview.example.test'}}), 0o600)
+            renewal_active = False
+            def execute(args, timeout=30, input=None):
+                if args[0] == 'systemctl':
+                    unit, field = args[2], args[3].split('=', 1)[1]
+                    state = 'inactive' if 'cert.service' in unit and not renewal_active else 'active'
+                    return {'FragmentPath':'/etc/systemd/system/' + unit, 'DropInPaths':'',
+                            'NeedDaemonReload':'no', 'ActiveState':state}[field].encode()
+                fixed = [str(trust) if a == '/etc/ssl/certs' else str(host.tree.path(a)) if a in (cert_path, key_path) else a for a in args]
+                return subprocess.run(fixed, input=input, check=True, capture_output=True, timeout=timeout).stdout
+            host.execute = execute
+            self.assertEqual(host.verified_turn_pair()[cert_path], host.tree.pin(cert_path))
+            renewal_active = True
+            with self.assertRaises(ValueError): host.verified_turn_pair()
+            renewal_active = False
+            host.tree.write(journal, p.encoded({'turn':{'hostname':'wrong.example.test'}}), 0o600)
+            with self.assertRaises(subprocess.CalledProcessError): host.verified_turn_pair()
+            host.tree.write(journal, p.encoded({'turn':{'hostname':'streamview.example.test'}}), 0o600)
+            host.tree.write(key_path, ca_key.read_bytes(), 0o640)
+            with self.assertRaises(ValueError): host.verified_turn_pair()
+            host.tree.write(key_path, key.read_bytes(), 0o640)
+            ca_cert.unlink(); run(['rehash', str(trust)])
+            with self.assertRaises(subprocess.CalledProcessError): host.verified_turn_pair()
 
 
 class ServingHealthTests(unittest.TestCase):

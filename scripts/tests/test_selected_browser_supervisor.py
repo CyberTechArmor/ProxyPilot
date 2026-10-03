@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock
@@ -492,25 +493,103 @@ class SelectedSupervisorTests(unittest.TestCase):
         self.assertEqual(self.begin_fixture_action()['current_action']['ordinal'],2)
         self.assertEqual(self.host.registry.gateway.status()['effects_sent'],0)
 
-    def test_offlist_grant_settles_started_slot_before_resolution_without_replay(self):
+    def test_offlist_poll_settles_before_grant_and_retains_exact_escalation_without_replay(self):
         self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
         self.runtime.launch(self.spec)
         pending=self.begin_fixture_action()
         self.assertEqual(pending['kind'],'off_list_destination')
-        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1))['kind'],'off_list')
         a=self.supervisor.state['attempts'][helpers.ATTEMPT]
-        destination=dict(id='temporary',origin=pending['origin'],roles=[pending['role']],session_headers='omit')
-        grant=dict(schema='proxypilot.selected-browser.destination-grant.v1',id=APPROVAL,identity=a['selected_identity'],
-            origin=destination['origin'],roles=destination['roles'],purpose_sha256=self.runtime.policy.digest(pending['purpose']),
-            expires_at=int(self.clock()+60),persist_to_allowlist=False,wildcards=False)
-        self.runtime.grant_destination(dict(self.ref,grant=grant,destination=destination))
+        sent=self.runtime.actions[(helpers.ATTEMPT,1)]
+        self.assertTrue(sent[1].wait(3),'Real fixture guest never finished the blocked action')
         old=self.runtime.poll_action(dict(self.ref,ordinal=1))
         self.assertEqual(old['state'],'blocked')
         proof=self.decode(old['attestation'])
         self.assertEqual(proof['ordinal'],1);self.assertEqual(proof['request_refs'],[pending['request_ref']])
-        self.assertFalse(proof['replay_allowed'])
+        self.assertFalse(proof['replay_allowed']);self.assertTrue(proof['no_effect_sent'])
+        self.assertEqual(self.runtime.pending(self.ref)['pending'],[pending])
+        self.assertEqual(self.supervisor.state['runs'][helpers.RUN]['action_count'],1)
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1)),old)
+        self.assertNotIn('resolve:other.example',self.host.trace)
+        destination=dict(id='temporary',origin=pending['origin'],roles=[pending['role']],
+                         session_headers='this_origin_session' if pending['role']=='authentication' else 'omit')
+        grant=dict(schema='proxypilot.selected-browser.destination-grant.v1',id=APPROVAL,identity=a['selected_identity'],
+            origin=destination['origin'],roles=destination['roles'],purpose_sha256=self.runtime.policy.digest(pending['purpose']),
+            expires_at=int(self.clock()+60),persist_to_allowlist=False,wildcards=False)
+        self.runtime.grant_destination(dict(self.ref,grant=grant,destination=destination))
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1)),old)
         self.assertEqual(self.host.registry.gateway.status()['requests'],0)
         self.assertEqual(self.begin_fixture_action()['current_action']['ordinal'],2)
+
+    def test_offlist_poll_keeps_unfinished_action_and_escalation_pending(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action()
+        key=(helpers.ATTEMPT,1);sent=self.runtime.actions[key]
+        self.assertTrue(sent[1].wait(3))
+        # Delay real completion delivery, not browser execution or wire facts.
+        with patch.dict(self.runtime.actions,{key:(sent[0],threading.Event(),sent[2])}):
+            out=self.runtime.poll_action(dict(self.ref,ordinal=1))
+            self.assertEqual(out['kind'],'off_list')
+            self.assertEqual(out['escalation']['request_ref'],pending['request_ref'])
+            self.assertEqual(self.supervisor.state['attempts'][helpers.ATTEMPT]['actions'][0]['state'],'started')
+            self.assertEqual(self.runtime.pending(self.ref)['pending'],[pending])
+            self.assertNotIn('resolve:other.example',self.host.trace)
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1))['state'],'blocked')
+
+    def test_offlist_poll_with_changed_effects_is_uncertain_and_never_proves_no_effect(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action()
+        self.assertTrue(self.runtime.actions[(helpers.ATTEMPT,1)][1].wait(3))
+        self.host.registry.gateway.effects_sent=1
+        out=self.runtime.poll_action(dict(self.ref,ordinal=1))
+        self.assertEqual(out['kind'],'uncertain')
+        self.assertEqual(out['code'],'SITE_EFFECT_READBACK_REQUIRED')
+        self.assertNotIn('attestation',out)
+        self.assertEqual(self.supervisor.state['attempts'][helpers.ATTEMPT]['actions'][0]['state'],'uncertain')
+        self.assertEqual(self.runtime.pending(self.ref)['pending'],[pending])
+        self.assertNotIn('resolve:other.example',self.host.trace)
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1)),out)
+        self.assertCode('BROWSER_ACTION_UNCERTAIN',self.runtime.grant_destination,self.destination_grant(pending))
+        self.assertNotIn('resolve:other.example',self.host.trace)
+
+    def destination_grant(self,pending):
+        a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        destination=dict(id='temporary',origin=pending['origin'],roles=[pending['role']],
+                         session_headers='this_origin_session' if pending['role']=='authentication' else 'omit')
+        grant=dict(schema='proxypilot.selected-browser.destination-grant.v1',id=APPROVAL,identity=a['selected_identity'],
+            origin=destination['origin'],roles=destination['roles'],purpose_sha256=self.runtime.policy.digest(pending['purpose']),
+            expires_at=int(self.clock()+60),persist_to_allowlist=False,wildcards=False)
+        return dict(self.ref,grant=grant,destination=destination)
+
+    def test_offlist_poll_transport_uncertainty_is_durable_and_refuses_grant_before_resolution(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action()
+        self.assertTrue(self.runtime.actions[(helpers.ATTEMPT,1)][1].wait(3))
+        self.host.registry.gateway.effects_uncertain=1
+        out=self.runtime.poll_action(dict(self.ref,ordinal=1))
+        self.assertEqual(out['kind'],'uncertain')
+        self.assertEqual(out['code'],'SITE_EFFECT_READBACK_REQUIRED')
+        self.assertNotIn('attestation',out)
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1)),out)
+        self.assertEqual(self.runtime.pending(self.ref)['pending'],[pending])
+        self.assertCode('BROWSER_ACTION_UNCERTAIN',self.runtime.grant_destination,self.destination_grant(pending))
+        self.assertNotIn('resolve:other.example',self.host.trace)
+
+    def test_offlist_poll_cannot_sign_no_effect_while_network_is_inflight(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec)
+        pending=self.begin_fixture_action()
+        self.assertTrue(self.runtime.actions[(helpers.ATTEMPT,1)][1].wait(3))
+        self.host.registry.gateway.inflight=1
+        out=self.runtime.poll_action(dict(self.ref,ordinal=1))
+        self.assertEqual(out['kind'],'off_list')
+        self.assertEqual(out['escalation']['request_ref'],pending['request_ref'])
+        self.assertNotIn('attestation',out)
+        self.assertEqual(self.supervisor.state['attempts'][helpers.ATTEMPT]['actions'][0]['state'],'started')
+        self.host.registry.gateway.inflight=0
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1))['state'],'blocked')
 
     def test_offlist_after_sent_effect_refuses_grant_before_destination_resolution(self):
         self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
@@ -613,6 +692,45 @@ class SelectedSupervisorTests(unittest.TestCase):
             reviewed_statement=self.host.gateway_module.AUTH_STATEMENT,expires_at=s.stamp(self.clock()+30))
         packet['confirmation_ref']=dict(id=str(__import__('uuid').uuid4()),sha256=self.runtime.policy.digest(self.runtime.policy.canonical(packet)))
         return packet
+
+    def test_manual_next_auth_origin_requires_current_live_controller_and_keeps_readback_pending(self):
+        self.runtime.launch(self.spec);conn=self.live_controller();self.send_auth_wire_fixture()
+        meta=dict(url='https://other.example/mfa',method='GET',body_sha256=hashlib.sha256(b'').hexdigest(),
+            body_bytes=0,resource_type='document',role='authentication',current_action=None,**self.ref)
+        self.runtime.event_queues[helpers.ATTEMPT].put(dict(event='selected_request',request_ref='manual-next-auth',metadata=meta))
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline and not self.runtime.pending(self.ref)['pending']:time.sleep(.01)
+        pending=self.runtime.pending(self.ref)['pending'][0]
+        self.assertEqual(pending['role'],'authentication');self.assertTrue(pending['no_contact'])
+        worker=self.supervisor.workers[helpers.ATTEMPT];sink=worker.live_sinks.pop(conn)
+        self.assertCode('AUTH_READBACK_CONTROLLER_MISMATCH',self.runtime.grant_destination,self.destination_grant(pending))
+        self.assertNotIn('resolve:other.example',self.host.trace)
+        worker.live_sinks[conn]=sink
+        self.host.registry.gateway.effects_uncertain=1
+        self.assertCode('BROWSER_ACTION_UNCERTAIN',self.runtime.grant_destination,self.destination_grant(pending))
+        self.assertNotIn('resolve:other.example',self.host.trace)
+        self.host.registry.gateway.effects_uncertain=0
+        self.runtime.grant_destination(self.destination_grant(pending))
+        a=self.supervisor.state['attempts'][helpers.ATTEMPT]
+        self.assertEqual(a['selected_mode'],'human');self.assertTrue(a['manual_auth'])
+        status=self.runtime.pending(self.ref)
+        self.assertEqual(status['effects_sent'],1);self.assertEqual(status['auth_effects_acknowledged'],0)
+        self.assertCode('AUTH_READBACK_REQUIRED',self.runtime.release,dict(self.ref,controller_id=PROJECT))
+        self.assertCode('MANUAL_AUTH_CAPTURE_DISABLED',self.runtime.view,self.ref)
+
+    def test_confirmed_auth_baseline_does_not_block_a_fresh_automated_destination_grant(self):
+        self.host.guest_program=FAKE_SELECTED.replace('https://selected.example/save','https://other.example/new')
+        self.runtime.launch(self.spec);conn=self.live_controller();self.send_auth_wire_fixture()
+        inventory=self.runtime.auth_inventory(dict(self.ref,controller_id=PROJECT,session_id=SESSION,conn=conn))
+        self.runtime.confirm_authentication(dict(self.ref,packet=self.confirmation(inventory),conn=conn))
+        self.runtime.release(dict(self.ref,controller_id=PROJECT));self.runtime.resume(self.ref)
+        pending=self.begin_fixture_action()
+        self.assertTrue(self.runtime.actions[(helpers.ATTEMPT,1)][1].wait(3))
+        self.assertEqual(self.runtime.poll_action(dict(self.ref,ordinal=1))['state'],'blocked')
+        self.runtime.grant_destination(self.destination_grant(pending))
+        status=self.runtime.pending(self.ref)
+        self.assertEqual(status['effects_sent'],1);self.assertEqual(status['auth_effects_acknowledged'],1)
+        self.assertEqual(status['pending'],[]);self.assertEqual(status['mode'],'agent')
 
     def test_authentication_independent_confirm_then_giveback_pause_resume_read(self):
         self.runtime.launch(self.spec);conn=self.live_controller();self.send_auth_wire_fixture()

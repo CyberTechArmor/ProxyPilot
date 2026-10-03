@@ -1,0 +1,16 @@
+{
+  "runner_image": "ubuntu24/20260927.320.1",
+  "runner_documentation": "https://github.com/actions/runner-images/blob/ubuntu24/20260927.320/images/ubuntu/Ubuntu2404-Readme.md",
+  "documented_runner_chromium": "154.0.8037.0",
+  "local_chromium": "151.0.7922.173 (Debian13)",
+  "search_source": "https://github.com/chromium/chromium/blob/154.0.8037.0/chrome/browser/navigation_predictor/search_engine_preconnector.cc",
+  "search_gate": "SearchEnginePreconnector::PreconnectDSE checks PreconnectToSearch and SearchSuggestEnabled before native preconnect",
+  "updater_source": "https://github.com/chromium/chromium/blob/154.0.8037.0/components/component_updater/configurator_impl.cc",
+  "updater_gate": "ConfiguratorImpl::UpdateUrl returns valid exact url_source_override instead of default updater URLs",
+  "updater_flag_source": "https://github.com/chromium/chromium/blob/154.0.8037.0/components/component_updater/component_updater_command_line_config_policy.cc",
+  "updater_stability_limit": "Source explicitly calls these debug values and says not to use them in production code. This fixed private-browser suppression is tested for current versions and remains availability-sensitive to future browser changes; strict gateway denies before contact if ignored.",
+  "local_search_positive_control": false,
+  "local_search_limit": "Mandatory cloud SearchSuggestEnabled:false masks native search preconnect; no managed-policy change was made.",
+  "primary_code_independently_read": true,
+  "fresh_corrected_candidate_ci_status": "not yet run"
+}

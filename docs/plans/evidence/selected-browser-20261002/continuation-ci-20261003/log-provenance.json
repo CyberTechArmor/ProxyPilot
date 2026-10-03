@@ -1,0 +1,92 @@
+{
+  "ci-broker-errors-2ed34018.txt": {
+    "original_local_path": "/tmp/proxypilot-ci-python-broker-2ed34018.txt",
+    "original_sha256": "6a7e302240a9c3fd05b86f63bba8f43f967689e8e8c579e883d1fa7d610cfe7b",
+    "original_bytes": 32452,
+    "trailing_whitespace_normalized": true
+  },
+  "ci-security-errors-2ed34018.txt": {
+    "original_local_path": "/tmp/proxypilot-ci-python-security-2ed34018.txt",
+    "original_sha256": "d46193c942c9673900bb6fba4566ac2354675608d05757830fd9e647e825d72a",
+    "original_bytes": 32433,
+    "trailing_whitespace_normalized": true
+  },
+  "startup-controls.txt": {
+    "original_local_path": "/tmp/pp-ci-startup-controls.log",
+    "original_sha256": "cc7aedbbedce2ad45645359f006aa57ba2e7fdaf4aed8ed0806bbc950d371cad",
+    "original_bytes": 610,
+    "trailing_whitespace_normalized": false
+  },
+  "native-updater-positive.txt": {
+    "original_local_path": "/tmp/pp-ci-updater-control.log",
+    "original_sha256": "d8fedac94af1317f63d81e4a0cb720f52c1d7ad512edfd739d767af2e01c6f4b",
+    "original_bytes": 3517,
+    "trailing_whitespace_normalized": false
+  },
+  "native-updater-suppressed.txt": {
+    "original_local_path": "/tmp/pp-ci-updater-suppressed.log",
+    "original_sha256": "89d105f5422953d4d7d4a10950a486e42d1a3d98a38aea47a5093fcac57a4f50",
+    "original_bytes": 1008,
+    "trailing_whitespace_normalized": false
+  },
+  "composition-startup-checkpoint.txt": {
+    "original_local_path": "/tmp/pp-ci-startup-composition-final.log",
+    "original_sha256": "fbdfa00a1120f74188d7591f70ea78e5632c33e7e55ac83aa06e4e6d027a0b2e",
+    "original_bytes": 2348,
+    "trailing_whitespace_normalized": false
+  },
+  "worker-guest-regressions.txt": {
+    "original_local_path": "/tmp/pp-ci-startup-worker-guest-final.log",
+    "original_sha256": "f6714f0b630e554534c501d75298e9c1409f9398cff0327a100f82d82e44dd0f",
+    "original_bytes": 5580,
+    "trailing_whitespace_normalized": false
+  },
+  "continuation-before.txt": {
+    "original_local_path": "/tmp/selected-browser-chromium-before.log",
+    "original_sha256": "91a59a1d2772757a1d33d5bb1a985709f36e9147a6f7d67d4f26e427214b612a",
+    "original_bytes": 69637,
+    "trailing_whitespace_normalized": false
+  },
+  "composition-handshake-before-host-guard.txt": {
+    "original_local_path": "/tmp/pp-ci-startup-handshake-composition-final.log",
+    "original_sha256": "a6007fe86c150bf502cdc2d68704229598c84f0175a8449618f0d92f2d342970",
+    "original_bytes": 3036,
+    "trailing_whitespace_normalized": false
+  },
+  "composition-corrected.txt": {
+    "original_local_path": "/tmp/pp-ci-startup-handshake-corrected-final.log",
+    "original_sha256": "3dcad04525528357431fd76537785542faa16ad1acb5089b7cc8755f8a27944c",
+    "original_bytes": 2348,
+    "trailing_whitespace_normalized": false
+  },
+  "continuation-corrected-backend.txt": {
+    "original_local_path": "/tmp/selected-browser-backend-final.log",
+    "original_sha256": "19a6157dc0ccf4439247b005a70b925854eab3600a0758f82a11300a90ce63c5",
+    "original_bytes": 18717,
+    "trailing_whitespace_normalized": false
+  },
+  "continuation-corrected-host.txt": {
+    "original_local_path": "/tmp/selected-browser-host-final.log",
+    "original_sha256": "43f1609ae2730d6d40a1ff9091ca59ec27e169f3388bd48f1dd5510a0a2f8749",
+    "original_bytes": 135,
+    "trailing_whitespace_normalized": false
+  },
+  "continuation-corrected-chromium.txt": {
+    "original_local_path": "/tmp/selected-browser-chromium-final.log",
+    "original_sha256": "5a22177b05643efaf188c25c06b06f3c6afc61f428f5572ad385cbe10c0e3de1",
+    "original_bytes": 240,
+    "trailing_whitespace_normalized": false
+  },
+  "python-aggregate.txt": {
+    "original_local_path": "/tmp/proxypilot-selected-followup-python-final.log",
+    "original_sha256": "57b489e717eae3bc10cfdc35fab0c0a3e59dbabfce03d8c0ef71fdcd44644145",
+    "original_bytes": 30771,
+    "trailing_whitespace_normalized": false
+  },
+  "backend-aggregate.txt": {
+    "original_local_path": "/tmp/proxypilot-selected-followup-backend-final.log",
+    "original_sha256": "92ca8a4b77c73770641d2df874870e3f69bd026e851be92e8c03790bd50b9870",
+    "original_bytes": 49973,
+    "trailing_whitespace_normalized": false
+  }
+}

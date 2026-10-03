@@ -24,6 +24,7 @@ import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import test_selected_browser_supervisor as fixture
 
@@ -223,6 +224,12 @@ sys.exit(namespace['serve'](config,namespace['Channel']()))
 
 @unittest.skipUnless(Path('/usr/bin/chromium').exists() and shutil.which('openssl'), 'local Chromium + openssl required')
 class BrowserCompositionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.chromium_version = subprocess.run(['/usr/bin/chromium', '--version'], check=True,
+            capture_output=True, text=True, timeout=10).stdout.strip()[:256]
+        print('Selected composition browser: ' + cls.chromium_version, file=sys.stderr, flush=True)
+
     def setUp(self):
         self.ownership = patch.object(s.installer, 'secure', lambda _: None)
         self.ownership.start()
@@ -270,7 +277,8 @@ marker=Path(__file__).parent/'browser-ownership-fixture.json'
 temporary=marker.with_suffix('.tmp')
 temporary.write_text(json.dumps({'pid':os.getpid(),'start':int(fields[19])}))
 os.replace(temporary,marker)
-os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
+netlog=Path(__file__).parent/'browser-netlog-fixture.json'
+os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log='+str(netlog),*sys.argv[1:]])
 ''')
         wrapper.chmod(0o755)
         self.host = RealGuestHost(self.root, spki, self.listener.getsockname()[1], wrapper, LocalPinned)
@@ -375,9 +383,63 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
     def diagnostics(self):
         gate = self.host.registry.gateway
         cdp = self.root / 'guest/fetch-fixture.log'
-        return repr({'status': gate.status(), 'cdp':cdp.read_text()[-3000:] if cdp.exists() else '', 'received': Origin.received, 'upstream': self.upstream,
+        return repr({'browser_version':self.chromium_version, 'browser_process':self.host.browser_identity(),
+            'browser_service_requests':self.browser_service_requests(), 'status': gate.status(),
+            'cdp':cdp.read_text()[-3000:] if cdp.exists() else '', 'received': Origin.received, 'upstream': self.upstream,
             'pending': gate.pending, 'tickets': list(gate.tickets.values()),
             'trace': self.host.trace[-20:], 'wire': self.browser_wire, 'ledger': gate.ledger.rows[:5] + gate.ledger.rows[-3:]})[:6000]
+
+    def browser_service_requests(self):
+        # Synthetic-fixture-only netlog. Disclose bounded service paths and
+        # annotation hashes, never cookies, headers, bodies, URL queries or keys.
+        path = self.root / 'browser-netlog-fixture.json'
+        if not path.exists():
+            return []
+        with path.open('rb') as stream:
+            data = stream.read(1024 * 1024).decode('utf-8', 'replace')
+        rows = []
+        for line in data.splitlines()[2:]:
+            try:
+                event = json.loads(line.rstrip(','))
+                params = event.get('params', {})
+                url = urlsplit(params.get('url', ''))
+                if (url.scheme not in ('http', 'https') or url.hostname in ('selected.example', 'frame.example') or
+                        (url.hostname == 'accounts.google.com' and url.path in ('/cookie-login', '/cookie-read'))):
+                    continue
+                if not url.hostname:
+                    continue
+                rows.append(dict(origin=url.scheme+'://'+url.hostname, path=url.path[:128],
+                    event=event.get('type'), method=params.get('method'),
+                    traffic_annotation=params.get('traffic_annotation'), source=event.get('source')))
+            except (ValueError, TypeError, AttributeError):
+                continue  # An active browser may have one incomplete final row.
+            if len(rows) >= 10:
+                break
+        return rows
+
+    def force_fixture_component_update(self, *, remove_fixed_endpoint):
+        # Positive/negative native-service controls only. Registration and the
+        # accelerated scheduler cannot create a gateway exemption or page ticket.
+        # Primary Chromium154 contracts:
+        # chrome/browser/navigation_predictor/search_engine_preconnector.cc
+        # components/component_updater/{configurator_impl,
+        # component_updater_command_line_config_policy}.cc
+        wrapper = self.root / 'chromium'
+        source = wrapper.read_text()
+        if remove_fixed_endpoint:
+            source = source.replace('*sys.argv[1:]',
+                "*[a for a in sys.argv[1:] if a!='--disable-component-update' and not a.startswith('--component-updater=')]")
+            source = source.replace("'--no-sandbox',", "'--no-sandbox','--component-updater=initial-delay=0.1',")
+        else:
+            # Retain the product's actual endpoint; add only a test scheduler
+            # delay. Inventing a duplicate about:blank flag would hide a missing
+            # or broken product override.
+            source = source.replace('*sys.argv[1:]',
+                "*[a+',initial-delay=0.1' if a.startswith('--component-updater=') else a for a in sys.argv[1:] if a!='--disable-component-update']")
+            source = source.replace("os.execv('/usr/bin/chromium'", "assert '--component-updater=url-source=about:blank' in sys.argv[1:]\n"+
+                "assert any(a.startswith('--disable-features=') and 'PreconnectToSearch' in a.split('=',1)[1].split(',') for a in sys.argv[1:])\n"+
+                "os.execv('/usr/bin/chromium'")
+        wrapper.write_text(source)
 
     def poll(self, ordinal, kinds=('done', 'uncertain', 'off_list', 'request_approval')):
         deadline = time.monotonic() + 8
@@ -398,6 +460,35 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
             expires_at=int(time.time() + 30), persist_to_allowlist=False, wildcards=False)
         destination = dict(id='temporary', origin=origin, roles=[role], session_headers='omit')
         return self.runtime.grant_destination(dict(self.ref, grant=grant, destination=destination))
+
+    def retained_off_list_request(self, ordinal, origin):
+        result = self.poll(ordinal)
+        # A finished/idle before-contact block may settle before the retained
+        # destination review. Discover that review through the real host state;
+        # it must survive action settlement and still identify the exact target.
+        pending = self.runtime.pending(self.ref)['pending']
+        requests = [p for p in pending if p['kind'] == 'off_list_destination' and p['origin'] == origin]
+        self.assertEqual(len(requests), 1, self.diagnostics())
+        request = requests[0]
+        self.assertTrue(request['no_contact'])
+        if result['kind'] == 'off_list':
+            self.assertEqual(result['escalation'], {k:v for k,v in request.items() if k != 'kind'})
+        else:
+            self.assertEqual(result['kind'], 'done')
+            self.assertEqual(result['state'], 'blocked')
+            self.assertEqual(result['code'], 'BROWSER_OPERATION_BLOCKED_BEFORE_EFFECT')
+            version, payload, signature = result['attestation'].split('.')
+            self.assertEqual(version, 'sbr1')
+            body = base64.urlsafe_b64decode(payload+'==')
+            self.assertEqual(base64.urlsafe_b64decode(signature+'=='), self.host.sign(body))
+            proof = json.loads(body)
+            for key, value in self.ref.items():
+                self.assertEqual(proof[key], value)
+            self.assertEqual(proof['ordinal'], ordinal)
+            self.assertIn(request['request_ref'], proof['request_refs'])
+            self.assertTrue(proof['no_effect_sent'])
+            self.assertFalse(proof['replay_allowed'])
+        return request
 
     def approve_wire_request(self, pending):
         grant = dict(schema='proxypilot.selected-browser.effect-grant.v1', id=str(uuid.uuid4()),
@@ -421,14 +512,13 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
         first_result = self.poll(first)
         self.assertEqual(first_result['kind'], 'done', repr(first_result) + '\n' + self.diagnostics())
         old, old_envelope = self.action('navigate', lambda c: c['operation']['url'] == OTHER + '/visit')
-        escalation = self.poll(old)
-        self.assertEqual(escalation['kind'], 'off_list')
-        self.assertTrue(escalation['escalation']['no_contact'])
+        escalation = self.retained_off_list_request(old, OTHER)
+        self.assertTrue(escalation['no_contact'])
         self.assertFalse(any(host == 'frame.example' for host, _ in self.upstream))
         self.assertFalse(any(host == 'frame.example' for _, host in self.host.contacts))
         base = copy.deepcopy(self.c['destinations'])
-        # No old-action completion poll before grant: this caught the stale
-        # started-slot bug while the paused guest navigation had already failed.
+        # No additional completion poll before grant: the first poll may already
+        # have signed the blocked result while retaining its destination review.
         self.grant(OTHER, 'navigation')
         state = json.loads(self.supervisor.journal_path.read_text())
         old_record = next(r for r in state['attempts'][self.ref['attempt_id']]['actions'] if r['ordinal'] == old)
@@ -461,12 +551,53 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
         self.assertEqual([r[2] for r in Origin.received if r[1]=='frame.example'], ['/visit'])
         self.assertEqual(self.host.registry.gateway.status()['outstanding_requests'], 0)
 
+    def test_native_component_update_is_denied_before_any_upstream_contact(self):
+        self.force_fixture_component_update(remove_fixed_endpoint=True)
+        self.launch()
+        deadline = time.monotonic() + 8
+        while self.host.registry.gateway.status()['state'] != 'paused' and time.monotonic() < deadline:
+            time.sleep(.02)
+        status = self.host.registry.gateway.status()
+        self.assertEqual(status['state'], 'paused', self.diagnostics())
+        self.assertIn(('CONNECT', 'update.googleapis.com:443', False), self.browser_wire)
+        self.assertEqual(self.upstream, [])
+        self.assertEqual(Origin.received, [])
+        self.assertEqual(status['requests'], 0)
+        self.assertEqual(status['effects_sent'], 0)
+        self.assertEqual(status['effects_uncertain'], 0)
+        self.assertEqual(status['outstanding_requests'], 0)
+        self.assertTrue(any(r['origin'] == 'https://update.googleapis.com' and r['path'] == '/service/update2/json'
+            for r in self.browser_service_requests()), self.diagnostics())
+
+    def test_fixed_component_endpoint_suppresses_service_without_page_url_exemption(self):
+        self.force_fixture_component_update(remove_fixed_endpoint=False)
+        self.launch()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            self.assertEqual(self.host.registry.gateway.status()['state'], 'running', self.diagnostics())
+            time.sleep(.05)
+        self.assertEqual(self.browser_wire, [])
+        self.assertEqual(self.browser_service_requests(), [])
+        status = self.host.registry.gateway.status()
+        self.assertEqual(status['requests'], 0)
+        self.assertEqual(status['effects_sent'], 0)
+        self.assertEqual(status['effects_uncertain'], 0)
+        self.assertEqual(status['outstanding_requests'], 0)
+        self.assertEqual(self.upstream, [])
+        ordinal, _ = self.action('navigate')
+        self.assertEqual(self.poll(ordinal)['kind'], 'done')
+        self.assertEqual([(r[1], r[2]) for r in Origin.received], [('selected.example', '/navigation')])
+        self.assertTrue(all(ticket for method, _, ticket in self.browser_wire if method != 'CONNECT'))
+        ordinal, _ = self.action('navigate', lambda c: c['operation']['url'] == OTHER + '/visit')
+        offlist = self.retained_off_list_request(ordinal, OTHER)
+        self.assertTrue(offlist['no_contact'])
+        self.assertFalse(any(host == 'frame.example' for host, _ in self.upstream))
+
     def test_resource_escalation_grant_allows_fresh_read_without_replaying_page_load(self):
         self.launch('/resource')
         old, _ = self.action('navigate')
-        result = self.poll(old)
-        self.assertEqual(result['kind'], 'off_list', self.diagnostics())
-        self.assertEqual(result['escalation']['origin'], OTHER)
+        result = self.retained_off_list_request(old, OTHER)
+        self.assertEqual(result['origin'], OTHER)
         self.assertFalse(any(host == 'frame.example' for host, _ in self.upstream))
         before = list(Origin.received)
         self.grant(OTHER, 'resource')
@@ -489,8 +620,17 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
         self.assertEqual(review['kind'],'request_approval')
         self.assertFalse(any(r[0]=='POST' for r in Origin.received))
         self.approve_wire_request(review['request'])
-        escalation = self.poll(ordinal,kinds=('off_list',))
-        self.assertEqual(escalation['escalation']['origin'],OTHER)
+        result = self.poll(ordinal,kinds=('off_list','uncertain'))
+        if result['kind'] == 'uncertain':
+            self.assertEqual(result['code'], 'SITE_EFFECT_READBACK_REQUIRED')
+            self.assertEqual(result['state'], 'uncertain')
+            self.assertNotIn('attestation', result)  # Never a signed no-effect block.
+        else:
+            self.assertEqual(result['kind'], 'off_list')
+            self.assertEqual(result['escalation']['origin'], OTHER)
+        pending = self.runtime.pending(self.ref)['pending']
+        escalation = next(p for p in pending if p['kind'] == 'off_list_destination' and p['origin'] == OTHER)
+        self.assertTrue(escalation['no_contact'])
         self.assertEqual(self.host.registry.gateway.status()['effects_sent'],1)
         self.assertEqual(len([r for r in Origin.received if r[0]=='POST']),1)
         self.assertFalse(any(host=='frame.example' for host,_ in self.upstream))
@@ -499,6 +639,8 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
         self.assertEqual(caught.exception.code,'BROWSER_ACTION_UNCERTAIN')
         self.assertEqual(len([r for r in Origin.received if r[0]=='POST']),1)
         self.assertEqual(self.host.registry.gateway.status()['temporary_destinations'],0)
+        self.assertFalse(any(host == 'frame.example' for _, host in self.host.contacts))
+        self.assertFalse(any(host == 'frame.example' for host, _ in self.upstream))
 
     def test_local_form_preparation_then_unobserved_submit_blocks_continuation(self):
         self.launch('/local-form-preparation')
@@ -646,6 +788,7 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox',*sys.argv[1:]])
         self.launch(account+'/cookie-login')
         first,_=self.action('navigate')
         self.assertEqual(self.poll(first)['kind'],'done')
+        self.assertTrue(Origin.received, self.diagnostics())
         self.assertEqual(Origin.received[0][1:3],('accounts.google.com','/cookie-login'))
         controller=str(uuid.uuid4())
         self.runtime.takeover(dict(self.ref,controller_id=controller,session_id=str(uuid.uuid4()),

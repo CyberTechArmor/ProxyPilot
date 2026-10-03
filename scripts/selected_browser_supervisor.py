@@ -547,9 +547,24 @@ class SelectedBrowserSupervisor:
             self.fail('UNKNOWN_ACTION')
         if record.get('blocked_proof'):
             return record['blocked_proof']
+        if record['state'] in ('completed','uncertain'):
+            # A retained destination review is independent of action outcome.
+            # Never hide a durable uncertainty behind that review on later polls.
+            return self.results.get((a['attempt_id'],params['ordinal']),
+                dict(kind='uncertain',state=record['state'],ordinal=params['ordinal']))
         sent = self.actions.get((a['attempt_id'], params['ordinal']))
         pending = self.pending({k:params[k] for k in ('run_id','attempt_id','fence','policy_sha256')})['pending']
-        if pending:
+        current_usage = None
+        # A before-contact destination block finishes the original guest action,
+        # but deliberately retains its escalation for human review. Return the
+        # measured action settlement before that retained escalation: the backend
+        # cannot authorize a grant while the original action is still reserved.
+        # Completion alone is insufficient; fresh wire counters must also be idle.
+        blocked_finished_idle = False
+        if record.get('blocked_request_refs') and sent is not None and sent[1].is_set():
+            current_usage = self.s.host.selected_gateway('status', dict(identity=a['selected_identity']))
+            blocked_finished_idle = not current_usage['inflight'] and not current_usage['outstanding_requests']
+        if pending and not blocked_finished_idle:
             request = pending[0]
             if request['kind'] == 'network_effect':
                 return dict(kind='request_approval', request=request)
@@ -560,7 +575,8 @@ class SelectedBrowserSupervisor:
         if not sent[1].is_set():
             return dict(kind='pending', state='started', ordinal=params['ordinal'])
         reply = sent[2].get('reply', {})
-        current_usage = self.s.host.selected_gateway('status', dict(identity=a['selected_identity']))
+        if current_usage is None:
+            current_usage = self.s.host.selected_gateway('status', dict(identity=a['selected_identity']))
         if current_usage['inflight'] or current_usage['outstanding_requests']:
             return dict(kind='pending', state='started', ordinal=params['ordinal'])
         usage = {k: current_usage[k] for k in ('requests', 'response_bytes')}
@@ -569,17 +585,18 @@ class SelectedBrowserSupervisor:
         with self.s.lock:
             # HTTP success and DOM click completion do not prove a site saved a
             # write. No generic readback can claim a business effect succeeded.
-            sent_effect = current_usage['effects_sent'] > record['usage_start']['effects_sent']
+            effect_counters_changed = any(current_usage[k] != record['usage_start'][k]
+                                          for k in ('effects_sent','effects_uncertain'))
             local_dom_only = (isinstance(reply.get('result'),dict) and
                 reply['result'].get('effect') == 'unverified_until_gateway_and_site_readback')
             # Local field/click completion is useful for preparing a form. It
             # confirms no business effect. Explicit submit intent remains
             # uncertain even if Chromium has emitted no attributable Fetch yet.
             declared_unverified = record['action'] == 'submit'
-            if (record.get('blocked_request_refs') and not sent_effect and
+            if (record.get('blocked_request_refs') and current_usage['effects_sent'] == record['usage_start']['effects_sent'] and
                     current_usage['effects_uncertain'] == record['usage_start']['effects_uncertain']):
                 return self._blocked_result(a, record, current_usage)
-            unverified_effect = sent_effect or declared_unverified
+            unverified_effect = effect_counters_changed or declared_unverified
             uncertain = not reply.get('ok') or unverified_effect or current_usage['state'] != 'running'
             record['state'] = 'uncertain' if uncertain else 'completed'
             record['result_sha256'] = self.policy.digest(self.policy.canonical(reply.get('result')))
@@ -768,8 +785,22 @@ class SelectedBrowserSupervisor:
         if ((destination['roles'] == ['resource'] and destination['session_headers'] != 'omit') or
                 (parts['scheme'] == 'http' and ('authentication' in destination['roles'] or destination['session_headers'] != 'omit'))):
             self.fail('DESTINATION_GRANT_INVALID')
+        if any(r['state'] == 'uncertain' for r in a['actions']):
+            self.fail('BROWSER_ACTION_UNCERTAIN')
         self._settle_blocked_actions(a, [p['request_ref'] for p in matching])
         if any(r['state'] == 'started' for r in a['actions']):
+            self.fail('BROWSER_BLOCKED_ACTION_UNSETTLED')
+        status = self.s.host.selected_gateway('status',dict(identity=a['selected_identity']))
+        # Grant planning may resolve the new destination. Refuse known unsafe
+        # effects before that contact, even after an uncertain action settled.
+        # The current manual controller may continue an explicitly reviewed
+        # sign-in sequence; model work still awaits separate auth readback.
+        manual = bool(a.get('manual_auth'))
+        if manual:
+            self._auth_controller(a,a.get('selected_controller'),a.get('selected_controller_session'),a.get('selected_live_conn'))
+        if status['effects_uncertain'] or (not manual and status['effects_sent'] != status['auth_effects_acknowledged']):
+            self.fail('BROWSER_ACTION_UNCERTAIN')
+        if status['inflight'] or status['outstanding_requests']:
             self.fail('BROWSER_BLOCKED_ACTION_UNSETTLED')
         if grant['expires_at'] <= self.s.clock():
             self.fail('DESTINATION_GRANT_INVALID')

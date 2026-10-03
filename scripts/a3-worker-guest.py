@@ -1017,11 +1017,15 @@ class Browser:
             # These browser-owned services can run outside page CDP Fetch.
             # Fixed non-network service endpoints and the attempt-private profile
             # suppress their traffic; the independent gateway remains strict.
-            # Chromium 151 GaiaConfig accepts this exact per-service valid GURL
-            # override (gaia-url itself accepts HTTP origins only).
-            disabled_features += ',NetworkTimeServiceQuerying,AimEnabled'
+            # Chromium 151/154 GaiaConfig accepts this per-service valid GURL.
+            # Native search preconnect runs outside Fetch; PreconnectToSearch
+            # gates it before a socket. Component updater's exact URL override
+            # also covers on-demand registration beyond disable-component-update.
+            # Both use fixed code settings, never caller URLs or extra grants.
+            disabled_features += ',NetworkTimeServiceQuerying,AimEnabled,PreconnectToSearch'
             selected_args = ['--allow-browser-signin=false',
                              '--gcm-checkin-url=about:blank',
+                             '--component-updater=url-source=about:blank',
                              '--gaia-config-contents={"urls":{"list_accounts_url":{"url":"about:blank"}}}']
         argv = [CHROMIUM, *mode, '--remote-debugging-pipe',
                 '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check',

@@ -4520,7 +4520,7 @@ async function toolRunProxypilotUpdate(args, auth) {
     flags: started.flags,
     from_sha: installed.sha,
     branch: installed.branch,
-    next: `poll get_proxypilot_update_status({ id: "${started.id}" }); the full update may take longer while Incus is backed up and upgraded; the API will be unreachable during the dashboard restart — keep polling until status is success, failed or refused`,
+    next: `poll get_proxypilot_update_status({ id: "${started.id}" }); the full update may take several minutes while ProxyPilot is rebuilt; Incus package and image settings remain unchanged; the API will be unreachable during the dashboard restart — keep polling until status is success, failed or refused`,
   });
 }
 

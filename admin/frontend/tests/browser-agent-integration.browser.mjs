@@ -27,7 +27,7 @@ try{
   await page.goto(`${h.origin}/operational-projects/${project.id}?section=Agents`);
   const panel=page.locator('.browser-configurations'),runtime=page.getByRole('region',{name:'Selected browser runtime',exact:true});
   await runtime.waitFor();await panel.getByRole('button',{name:'Review configuration Canonical selected configuration',exact:true}).click();
-  assert.equal(await panel.count(),1);assert.equal(await panel.getByRole('textbox',{name:'Browser configuration JSON',exact:true}).count(),1);assert.equal(await panel.getByRole('textbox',{name:'Original source',exact:true}).count(),1);
+  assert.equal(await panel.count(),1);assert.equal(await panel.getByLabel('Browser configuration JSON',{exact:true}).count(),1);assert.equal(await panel.getByRole('textbox',{name:'Original source',exact:true}).count(),1);
   assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Browser agents',exact:true}).count(),0);
   assert.equal(await panel.getByText('Execution unavailable. Selected-site browser execution is not included in this release.',{exact:false}).count(),0);
   await runtime.getByRole('button',{name:'Check readiness',exact:true}).click();await runtime.getByText('Runtime readiness refreshed.',{exact:true}).waitFor();
@@ -41,6 +41,40 @@ try{
   const current=h.world.f.store.browserConfiguration(h.world.users.owner,project.id,saved.configuration.id).configuration;
   assert.equal(current.revision,2);assert.equal(current.source_text,'Synthetic immutable source for the shared editor.');assert.equal(current.configuration.name,'Reviewed shared editor revision');
   assert.equal(await runtime.getByRole('button',{name:'Start browser run',exact:true}).isDisabled(),true);report.checks.push('shared editor explicit validate/review/save reaches real C0 routes; source and revision retained; no consent or Start');
+  // Only the conversion provider response is scripted; persistence uses real routes.
+  let conversionSource = null;
+  await page.route('**/browser-agent-configurations/convert/readiness', r => r.fulfill({json:{available:true}}));
+  await page.route('**/browser-agent-configurations/convert', async r => {
+    conversionSource=r.request().postDataJSON().source_text;
+    await r.fulfill({json:{conversion:{id:'ui-conversion',state:'completed',source_text:conversionSource,result:{configuration:{...configuration,work:{...configuration.work,instructions:conversionSource}},requires_review:true,persisted:false,execution_enabled:false}}}});
+  });
+  await panel.getByRole('button',{name:'New browser configuration',exact:true}).click();
+  assert.equal(await panel.getByLabel('Browser configuration JSON',{exact:true}).isVisible(),false);
+  await panel.getByLabel('Website URL (optional if included in your request)',{exact:true}).fill('https://selected.example/reports');
+  await panel.getByLabel('Original source',{exact:true}).fill('Summarize reports.');
+  await panel.getByLabel('Additional task rules',{exact:true}).selectOption('custom');
+  await panel.getByLabel('Task rules in plain language',{exact:true}).fill('Exclude archived reports.');
+  await panel.getByLabel('Additional task rules',{exact:true}).selectOption('skip');
+  await panel.getByText('Prepare a draft from instructions, images or files',{exact:true}).click();
+  await panel.getByRole('button',{name:'Check conversion readiness',exact:true}).click();
+  await panel.getByRole('checkbox',{name:/I reviewed: Send the original instructions/}).check();
+  await panel.getByRole('button',{name:'Suggest editable draft',exact:true}).click();
+  await panel.getByRole('button',{name:'Place suggestion in editor for review',exact:true}).waitFor();
+  assert.equal(conversionSource,'Website: https://selected.example/reports\n\nSummarize reports.');
+  await panel.getByLabel('Additional task rules',{exact:true}).selectOption('custom');
+  assert.equal(await panel.getByRole('button',{name:'Place suggestion in editor for review',exact:true}).isDisabled(),true);
+  await panel.getByRole('checkbox',{name:/I reviewed: Send the original instructions/}).check();
+  await panel.getByRole('button',{name:'Suggest editable draft',exact:true}).click();
+  await panel.getByRole('button',{name:'Place suggestion in editor for review',exact:true}).click();
+  assert.match(conversionSource,/Additional task rules:\nExclude archived reports\.$/);
+  assert.equal(await panel.getByLabel('Browser task instructions',{exact:true}).inputValue(),conversionSource);
+  assert.equal(await panel.getByRole('button',{name:'Save browser configuration',exact:true}).isDisabled(),true);
+  await panel.getByRole('button',{name:'Validate configuration',exact:true}).click();
+  await panel.getByRole('checkbox',{name:/I reviewed this configuration/}).check();
+  await panel.getByRole('button',{name:'Save browser configuration',exact:true}).click();
+  await panel.getByText('Configuration revision 1',{exact:true}).waitFor();
+  assert.equal(await panel.getByLabel('Original source',{exact:true}).inputValue(),conversionSource);
+  report.checks.push('request converts without JSON; skipped rules excluded, selected rules included, stale suggestion blocked, explicit save preserves source');
   for(const [width,height]of[[360,640],[375,667],[768,640],[1280,800],[1920,900]]){
     await page.setViewportSize({width,height});await page.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
     const dimensions=await page.evaluate(()=>({width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,scrollTop:document.scrollingElement.scrollTop}));

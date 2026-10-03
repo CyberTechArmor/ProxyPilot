@@ -3,9 +3,9 @@
   "source_state": "Corrected C0 review P2 source frozen before correction commit; later express authorization permits reviewed repository release.",
   "branch": "browser/configuration-import-20261002",
   "environment": "Saved ProxyPilot cloud only; localhost fixture HTTP; no laptop or production executor.",
-  "recorded_at": "2026-10-03T10:27:32.268367+00:00",
+  "recorded_at": "2026-10-03T10:29:27.614761+00:00",
   "source_sha256": {
-    ".github/workflows/security-regression.yml": "756e328715d34ccfbc0918080c32261f43e9797a706588ae12682acfdcb8d326",
+    ".github/workflows/security-regression.yml": "e90f8f64c295c6aa146a6df59314fe147f0885fb0de0ee4e1cb559a122064171",
     "admin/backend/src/__tests__/helpers/operations-fixture.js": "19fe404bb60110693def404e6846272ef226a5171a7265fdc4ca3794ca36f525",
     "admin/backend/src/__tests__/operational-browser-agent-configurations.test.js": "9004d1478ea2a5dc6db62c951bb00e2ed026da977fc1f5c704087487afe590b4",
     "admin/backend/src/__tests__/operational-browser-configurations-http.test.js": "8e89fe5fbaf73b70b427195cf1f8b807a08c50a5dea9e815019a88cd7fe140c4",
@@ -24,9 +24,10 @@
     "admin/frontend/tests/browser-configurations.browser.mjs": "a9173dfd1ed96101c122105a5f3566017fbd48eb720fe0b656e7b191d0633a35",
     "contracts/browser-agent/fixtures/general-agent.draft.json": "37a3650350fcfb28bb9407886ace6554b7164ab7efbdce7c221321ffa37b8bde",
     "contracts/browser-agent/proposal-v1.schema.json": "664c2d8d48ff7494d4aa7967d9b93cb7e15e1f0e4d21973df05c6e42faf6de36",
-    "docs/plans/browser-configuration-import-20261002.md": "4400d48837f9ec00d29f868d9db8e5383429e283477955b290812479a32b3eac",
+    "docs/plans/browser-configuration-import-20261002.md": "34586225b74c0079b55a51b755b5426a685f6ef39fa6003117ba31e9455b5a46",
     "contracts/browser-agent/README.md": "a79e21d0a3b79126e2d46084186898f3eb34dc2c6cf34e782660ddbf634b32bb",
-    "LEARNINGS.md": "28df515481d698dd53a0382c47741eae633b466524321a3bdd7956f057e4cd63"
+    "LEARNINGS.md": "28df515481d698dd53a0382c47741eae633b466524321a3bdd7956f057e4cd63",
+    ".github/scripts/frontend-audit-policy.mjs": "b88730939ce4ec7e25e5937b79bb949a3b4d63796d272e789c6bb2d69176849e"
   },
   "artifact_sha256": {
     "ui-report.json": "7e8901b2524dc3ca53a562d533390c070c7fcb2a846a0c0c6a1939599e8f95ee",
@@ -84,5 +85,6 @@
     "model_calls": 0,
     "external_contacts": 0
   },
-  "prior_candidate_commit": "24032ed714e823559a85902a1c15461f68961a0a"
+  "prior_candidate_commit": "24032ed714e823559a85902a1c15461f68961a0a",
+  "integration_main_commit": "c774f57bdc6fa54b5ec5d50cdd7dcadd84d25618"
 }

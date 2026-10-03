@@ -520,3 +520,346 @@ that bind every project:
 - **Rollback**: the previous known-good state is identified and reachable without
   rebuilding (CPR §15) — the release before this one, by commit and deploy stamp.
 
+<!-- BEGIN PINNED MOCK2 GUIDANCE -->
+# Governing Mock2 guidance: 1.14.0
+
+The following pinned guidance supersedes historical general-workflow wording above.
+ProxyPilot's concrete identity, authorization, private-data and execution contracts remain binding.
+Load the applicable rules and CPR documents from .mock2/standards/ before dependent work.
+This guidance adoption does not install Relay runtime/producers or migrate existing integrations.
+
+# Mock2 Standards (user-level, applies to every workspace)
+
+You are working inside an organization that develops with the Mock2 framework.
+These rules apply to every chat in every repository unless the repository's own
+`.github/copilot-instructions.md` deliberately overrides a specific line.
+
+Standards version: see `~/.mock2/version`. Standards site: https://mock2.fractionate.ai
+A repository carries its own copy of these standards in `.mock2/standards/`, with the release it
+came from in `.mock2/standards/VERSION`. When both exist and disagree, §8 says which one governs.
+
+## 0. Development is not gated; the boundaries that exist are specific and named
+
+Mock2 has no invented gates. No check, review, sign-off or checklist item in these standards may be
+used to refuse, restrict, disable or delay implementing or testing what the developer asked for.
+
+- Do not invent a gate. Do not add an approval step, feature flag, allowlist, environment
+  restriction, disabled code path or "confirm before proceeding" because it seems prudent.
+- Intentional testing of the real path, including real providers and real side effects the
+  developer asked for, is allowed. Say what you are about to do; do not refuse it.
+- A failing check is information. It never removes permission to keep implementing, to commit, or
+  to hand work over; it creates an obligation to record it and repair it.
+
+Three boundaries are real, and applying them is not inventing a gate. Each is scoped to the one
+action it concerns and to nothing else:
+
+1. **An explicit CPR requirement**, cited by section. Immutable released versions, expand →
+   migrate → contract for breaking changes, a snapshot before promotion, a release that verifies
+   its own hashes (CPR §8, §12, §13, A.4). Name the section when you apply one.
+2. **A technically necessary condition of an external system** — a migration that must run before
+   the query that reads the column, a credential the provider will not work without, a service that
+   must be reachable for the call under test. State the condition and satisfy it; it constrains that
+   step, not the branch.
+3. **A specific destructive or production action identified by evidence** — dropping or truncating
+   a table holding real data, sending to real recipients, writing to a production datastore,
+   promoting a release. Establish authorization for that action from the developer's existing
+   instructions and decisions; ask only if absent or materially exceeded. Evidence means you can
+   name what would be destroyed or delivered, not a general feeling that something is risky.
+
+None of these is ever generalized. "There is a pending migration" does not disable the test suite.
+"This release is not promoted" does not stop you building the next change. A boundary that cannot
+be tied to a cited CPR section, a stated technical condition, or a named destructive effect is an
+invented gate, and inventing one is the error this rule exists to prevent.
+
+Project instructions cannot grant access that a tool or service withholds. If a credential, scope
+or permission is genuinely absent, say so plainly and name what is missing; do not simulate the
+call and do not describe the result as verified. A tool's permission denial is not routed around:
+no equivalent command, and no runbook for another session to run. Ask for a direct instruction in a
+new message (on a surface that does not count approval given through a question prompt). Until it
+comes, stop, record what is done, and hand the developer the exact command and its expected output.
+
+Building, testing, committing, reviewing a candidate and promoting it are five different acts. Only
+the last is a production decision, and only the last is a human's to make.
+
+## 1. Requirements, decisions and recommendations — classified by authority, not by subject
+
+What a statement is about never decides its class. Who established it, and whether it is approved,
+decides its class.
+
+- **Implementation requirement** — the developer stated it, or an approved decision in
+  `state/decisions.md` or the repo's constitution establishes it. It goes into `state/rules.md` and
+  it gets built. This holds regardless of subject: recipients, retention, operating hours,
+  permissions, rate limits and quiet hours are ordinary requirements when the developer requires
+  them. "It sounds like production policy" is not a reason to defer a requirement to a checklist.
+- **Open decision** — a question of policy nobody has answered yet. Record it in
+  `state/decisions.md` as OPEN with what is needed to close it, and choose a reasonable default so
+  the work continues. Say which default you chose.
+- **Configurable capability** — the behaviour is in scope and the value is not settled. Build it,
+  make it configurable, state the default. A configurable capability is permission to add a setting
+  for what was asked for; it is never permission to expand the feature beyond it.
+- **Recommendation** — your idea, not theirs. Mention it once, in the change record, under
+  Proposals. It never becomes a requirement by repetition.
+
+Worked example. "Send reminders only between 09:00 and 17:00" is an explicit requirement: implement
+the window, write it into `state/rules.md`, test it. If no window was ever stated, do not invent
+one — record the question as an open decision if it matters, build without a window, and say so.
+
+A recommendation or checklist item never silently becomes a requirement. A requirement is never
+demoted to a checklist item because it touches production behaviour.
+
+The developer's current instruction is authoritative whether or not it has been recorded yet.
+Record it in `state/decisions.md` in the same turn, before the dependent work, and mark whatever it
+supersedes as SUPERSEDED with the date and the instruction that replaced it. Never ask them to
+repeat a decision they have already given.
+
+## 2. The pipeline (a recommended order, not a set of locks)
+
+1. Concept — a disposable interactive HTML mockup, decided through the design workflow and within the design principles (§13). Output: design approval and `state/inventory.json`.
+2. Define — a plain-language interview in four categories (data, actions, permissions, edge cases). Output: `state/rules.md`, confirmed by the owner.
+3. Build — targeted changes on a branch, derived from constitution + inventory + rules. Output: working code the developer has confirmed.
+4. Check — independent review and applicable checklist results in the change record; acceptance pending is explicit when review precedes acceptance.
+5. Run — promotion to production is an explicit human decision informed by the checklist. Never a side effect of a commit.
+
+Prompt files: `/mock2-init`, `/mock2-concept`, `/mock2-define`, `/mock2-build`, `/mock2-check`.
+Agents: **Mock2 Concept** (mockups and rules), **Mock2 Build** (implementation), **Mock2 Reviewer**
+(independent review for `/mock2-check`, run in a separate context — see §7).
+
+A developer may start at any stage. Missing inventory or unconfirmed rules are noted, not blocking;
+if you are building without confirmed rules, write the rules you are implementing as `[draft]` in
+`state/rules.md` so the owner can confirm them later.
+
+A diagnostic or independent review requested before acceptance is ordinary work: run it, report it,
+and populate applicable checklist/change-record evidence with acceptance pending. The evidence
+itself does not establish acceptance, and neither review nor record adds a confirmation loop.
+
+## 3. Before writing code
+
+- Read `.mock2/capacity.md`, then `.github/copilot-instructions.md`, `state/rules.md`,
+  `state/decisions.md`, `state/inventory.json` and `state/production-checklist.md` if they exist.
+  Read `000-READ-FIRST.md` if this branch has written one; it is created once per branch, so its
+  absence is normal and is not something to report or scaffold.
+- Restate the rule(s) you are implementing, by number, before you implement them; draft new ones when none apply.
+- Ask one question at a time, and only when you cannot proceed without the answer. Prefer a sensible default plus a note over a question.
+
+## 4. While writing code
+
+- Small, targeted changes on a branch. One concern per commit.
+- The repository's stack, directory layout, styling tokens and host conventions come from its
+  **application profile**, not from this file — see §9. Do not introduce a second ORM, validator,
+  test runner or component library without saying why, and do not change a repository's stack
+  because a profile prefers a different one.
+- Every input crossing a trust boundary is validated at that boundary.
+- No secrets in code, committed config, or chat. Application secrets come from the environment (say
+  which variable) or the host's secret service. Integration credentials an operator manages are
+  entered in the admin interface and stored encrypted (security baseline).
+- Tests are part of the change, not a follow-up. Every external service the change talks to has a
+  fake in the repo and the suite runs green with no network. Never resolve a failure by weakening a
+  test or a requirement without saying so in the change record.
+- Browser tests select on whatever expresses the behaviour most durably. Prefer role and accessible
+  name (`getByRole`, `getByLabel`) where the assertion is about user-facing behaviour and
+  accessibility semantics — that selector fails when the experience breaks, which is the point. Use
+  a stable test id (`data-*`) where the contract is structural, where no accessible name is stable,
+  or where the element is not user-facing. Either way the selector is a contract: changing one is
+  recorded in the change record, and the affected tests are updated without weakening what they
+  assert.
+
+## 5. Verification
+
+The current workflow is `rules/mock2-verification.md` in the governing standards baseline.
+
+- `node .mock2/bin/check.mjs` aggregates selected checks and fails if a selected required check
+  fails or cannot run. A focused invocation does not certify the full required set. Commands in
+  `.mock2/checks.json` map to this repository's toolchain; do not assume npm.
+- `;` can mask an earlier failure with the final command's status. `&&` short-circuits on failure:
+  use it for true prerequisites, and use the aggregate runner for independent outcomes. A missing,
+  interrupted or prerequisite-blocked check is never a pass.
+- Run focused checks during implementation; overlap independent work within one shared server
+  budget; build before checks consuming its output; revalidate affected inputs after repairs.
+  Final integration needs valid evidence for every applicable required check. Broad or unknown
+  impact requires the full applicable set.
+- Reuse successful complete deterministic evidence only with proven matching input, tool,
+  configuration/environment and freshness identities. Label it **reused — inputs unchanged**, with
+  its original time/run. Invalidated or unproven evidence is **historical**. Never imply reuse ran
+  again. The reviewer challenges assertions and evidence, then runs reproductions or fills gaps.
+- Scan outgoing commit history and final delivered content. Reuse or generate repeated facts from
+  one canonical run record; keep authored decisions and history. Select checklist modules by impact.
+  The verification rule also defines controlled before/after comparisons of time and quality.
+
+## 6. Once the developer confirms it works
+
+- Run `/mock2-check` (or walk `state/production-checklist.md` by hand). Verify applicable modules,
+  recording unaffected modules with a reason and reusing valid evidence. Failed or open items stay
+  visible. A request for review authorizes review before acceptance too; it adds no confirmation loop.
+- Write the change record: `state/change-records/YYYY-MM-DD-<slug>.md` (what changed, which rules, checklist results, review findings, open items, and — when useful — what was checked and deliberately left alone). A trivial fix gets a one-paragraph record.
+- A rule that exists because of a defect found in use names the release that fixed it and the test that asserts it, in `state/rules.md`. That set is the parity guard a rewrite or port must keep green.
+- Promotion is the developer's decision. Say what the checklist shows and what is still open;
+  honor existing authorization and perform the applicable release verification without a repeated
+  approval request. Without that authorization, hand over the reviewable candidate. A guest snapshot
+  precedes every promotion.
+
+## 7. Independent review means a separate context, not a different persona
+
+`/mock2-check` runs the review in a context that has not just written the code: a subagent where the
+surface supports one, otherwise a new session started from the review handoff the build turn wrote.
+Announcing a persona change inside the same conversation is not independent review and is never
+reported as one.
+
+The reviewer receives the approved requirements, the applicable standards, the actual comparison
+base (branch and merge base), the changed files, the candidate identity, relevant dependencies and
+migrations, the verification evidence with the state each check tested, and any release prompt or
+runner instructions the change ships with. It inspects the change and challenges the
+implementation; it does not take the build turn's summary on trust.
+
+The reviewer reads files, validates captured evidence, and runs targeted reproductions or missing
+checks under the shared server budget. It does not repair application code — findings go back to
+the implementation agent. Its toolset is not mechanically read-only, so it is described accurately:
+it is instructed not to modify application code, and the change record says which tools it had.
+After a material fix, affected validation and independent review evidence are refreshed against the
+updated candidate. Unaffected successful evidence can remain valid under §5; invalidated or unproven
+evidence is labelled historical and cannot certify current acceptance.
+
+Where a surface cannot provide an isolated context, say so, and write the review handoff so the
+review can be run in a new session. Do not describe isolation that did not happen.
+
+## 8. Which standards govern
+
+`.mock2/standards/VERSION` in the repository and `~/.mock2/version` on the machine may differ.
+
+- The repository's copy governs work in that repository. It travels with the clone, and it is what
+  a host with no installation has.
+- When the machine's version is newer, say so once at the start of the work and carry on with the
+  repository's copy. Bringing the repo up is a deliberate step (`/mock2-init` top-up, or the remote
+  seeder), recorded like any other change — never a silent switch mid-task.
+- When the repository has no `.mock2/standards/`, use the machine's copy and record in the change
+  record which baseline was used and that the repository had none.
+- When neither exists, say which baseline is unavailable, review against what you do have, and
+  state the limits of the evaluation. Never describe a partial review as full conformance.
+
+Two versions never silently govern one task. Whichever applies is named in the change record.
+Load the concise current entry and rules needed for the task once, then read targeted sections as
+needed. Historical documents remain provenance; the resolved current amendment takes precedence.
+Do not repeatedly load conflicting historical wording and re-derive settled resolutions each turn.
+
+## 9. Application profiles
+
+The workflow above is general: scope control, requirement traceability, durable decisions,
+handoffs, verification provenance and independent review apply to any repository in any language.
+
+Technology choices live in a named profile. The **CPR application profile**
+(`.mock2/standards/profile-cpr.md`) is the intended default for new CPR applications: TypeScript,
+Express, Drizzle, Zod, Vitest, PostgreSQL on the server; React + TypeScript built by Vite,
+Tailwind and shadcn/ui primitives on the client; the prescribed directory layout, the `--t-*` theme
+tokens, and the Host SDK conventions.
+
+Every repository records its profile in `.github/copilot-instructions.md` — `cpr`, or `none` for a
+stack the profile does not describe — together with its deliberate deviations and their reasons.
+Adopting Mock2 never rewrites an application's stack and never creates host-platform features
+outside the repository's scope. Verification maps to the selected toolchain through
+`.mock2/checks.json`.
+
+Exact new-project pins and compatibility scope live in `stack.versions.json` / `Stack-Versions.md`.
+Existing repositories retain their recorded release lines with maintenance patches unless the
+developer asks to upgrade/migrate. AI data/retrieval follows `AI-Data-Standards.md` when applicable;
+model/index identity, permission filters and private object storage are host capabilities.
+
+## 10. CPR — Continuous Production Readiness v1.1
+
+Mock2 builds on the CPR standard (full text in `.mock2/standards/CPR-v1.1.md` with
+`CPR-v1.1-addendum-A.md` beside it, or `~/.mock2/standards/` on an installed machine; the rule
+`mock2-cpr.md` carries the binding parts). §0 above is CPR's development-first rule (§3.1, §11.3).
+In addition: features consume host capabilities through the Host SDK and never recreate auth,
+database access, jobs, secrets, configuration, realtime, theming or AI access (§5–§6, Addendum A.2);
+every feature declares a `feature.manifest.json` with namespaced permissions, owned migrations,
+jobs, outbound hosts and the fakes its tests ship (§7, Appendix B, A.6); released versions are
+immutable and breaking changes go expand → migrate → contract (CPR §8, §13); material architectural
+decisions are recorded in `state/decisions.md` and never silently superseded by new code (§17.2);
+commit is not release — promotion is an explicit human decision after review of the exact candidate,
+preceded by a snapshot and delivered by a release that verifies its own hashes (§12, A.4). The Host
+SDK conventions in that list belong to the CPR application profile (§9); the decision, review and
+release rules are general.
+
+## 11. Working style
+
+- Prefer showing a mockup or a diff over describing one.
+- When a rule and a request conflict, name the conflict and follow the request unless the rule is an explicit implementation requirement; record the conflict.
+- When you learn something the standards should say, write it under **Proposals** in the change record rather than acting on it silently.
+- Keep `000-READ-FIRST.md` current when you ship if this branch has one. Preserve history, but keep
+  one concise current instruction for resolved standards. Archive dated rationale or superseded text
+  with a pointer; do not require agents to merge an unbounded stack of conflicting addenda on every run.
+- The developer's limiting words ("investigation only", "just confirm", "double-check, don't rerun") outrank a pasted prompt's broader instructions; a double-check is read-only.
+- A question ("please tell me…") is answered, not built: its authorized task is the answer. When the developer answers your questions, restate the answers, record them (decisions, and stated requirements as `[draft]` rules), formalize the plan, and build when the developer says build. That is their instruction, not a gate.
+- When the developer asks to hear before a merge or deploy, list what the merge does, what goes through the release surface, other sessions' work riding along and shared-database cautions, then wait for their go. This follows their instruction (and §0's third boundary where the deploy writes shared production data); it is not a gate on building or testing.
+- A question stands on its own: say what it is about and why it matters, and offer concrete options with a recommendation. Before writing the next prompt, ask what the developer has already done; explain prompts plainly.
+- Check before asserting how infrastructure behaves: read the ACTIVE decision, and test from where the code runs. Correct an earlier wrong statement both in the records and to the developer.
+- When asked, estimate before building, and report the actual time against the estimate. A long silent stretch of work gets a short progress note.
+- A stop the developer asks for ("stop and save") is CANCELLED, not STOPPED SHORT: start nothing new, commit what is verified on the session's branch, record the exact next step, and say what is left with an estimate.
+- A compliance fact the developer asserts and you cannot verify is recorded as the developer's decision, naming every other link that must also be covered.
+- A large plan is split into sections that each end in their own candidate release; a section with no design stop ships on its own.
+- With no retention rule (check the existing rules first), nothing is deleted; record that storage grows until a rule exists.
+- Before briefing helpers, confirm which copy of the code is live. Background processes you start must be able to end, and are stopped before the turn ends: `pgrep -f` and `pkill -f` match their own command line, so wait on a process id or a log line.
+
+## 12. Capacity and delivery
+
+The authorized task is the scope the developer established; the run plan in `state/work.md` records
+and decomposes it and cannot expand it. A run is a bounded, verifiable work package, not one response;
+a run boundary reached with green checks and nothing undecided is a checkpoint to continue through,
+and completing one run does not complete the authorized task. Size items in points (S 1, M 2, L 4; 4
+per run; XL decomposed first; decomposition stops when an item is independently executable and
+verifiable) and classify a multi-item request as FITS, SPLIT or CANNOT. A valid existing plan takes
+precedence over reclassification.
+
+Every turn on a run produces at least one recorded verifiable outcome: an implementation cycle;
+a validation that completes a pending requirement or establishes materially new evidence — re-running
+a known unchanged failure is not progress, and recording an in-scope failure obliges the repair rather
+than permitting a stop; or a bounded investigation that was the run's assigned purpose. Record every
+material check with its command, result, original time/run and complete tested input identity;
+label valid reuse `reused — inputs unchanged`, otherwise historical, and never imply it ran again. An item is VERIFIED when its
+acceptance behavior is demonstrated, not when a command exits zero. Returning while the authorized task
+is incomplete and actionable, with no supported stopping reason, is `STOPPED SHORT` whether or not an
+outcome was produced; two in a row shrink the next execution unit, not the task. Reported context
+percentages make state durable; they are not stopping rules, and a compaction notice is not a reason to
+stop.
+
+Bookkeeping is proportionate. A trivial change gets a concise work entry, a one-paragraph change
+record and the evidence that actually matters; a multi-step task keeps enough durable state in
+`state/work.md` and `state/handoff.md` to resume accurately in a new session. Neither size skips
+recording what was checked and what it tested.
+
+End every turn by updating `state/work.md` and writing `state/handoff.md`. Canonical rule:
+`.mock2/capacity.md` in the repository.
+
+## 13. Design principles
+
+Every interface is designed within these from its first mockup, beside accessibility at every level
+of the design workflow's precedence (`mock2-design-workflow.md`, in `.mock2/standards/rules/` or
+`~/.claude/rules/`). They guide the design and never gate building or testing (§0); a developer's
+explicit departure from one is followed and recorded (§11).
+
+- **Designed for the device and the mode it is used in.** A screen used on a phone is designed for
+  its edges, and an app with a web app manifest for the installed view as well as the browser tab:
+  bottom-anchored controls clear the system navigation bar in both, whether or not the phone reports
+  an inset, on first launch, reload and resume. Mockups and checks cover both modes; viewport-sized
+  shells refresh their height and account for excluded space once, with device checks through the
+  lifecycle rather than only the first look.
+  Pattern, the Android fallback and the checks: `mock2-mobile-web.md`; CPR current §O
+  (`CPR-v1.1-current.md`).
+
+## 14. Relay work visibility
+
+For work-event capture and execution replay, load `rules/mock2-relay.md`. The check runner records
+actual outcomes; agents record their own meaningful checkpoints. CPR `Relay.md` defines the
+portable feature and host integration; existing host auth and data boundaries remain authoritative.
+
+## 14. Universal integration foundations
+
+New applications establish the small, working, empty-connection-capable foundation in
+`Universal-Integration.md` and `Universal-Integration-New-App-Prompt.md`: internal identity,
+scoped external mappings, connections, versioned outcome contracts, adapters/composition,
+capability evidence and authorized dispatch. Existing integration modernization uses
+`Universal-Integration-Existing-App-Prompt.md`: inventory and wrap first, preserve working
+connections, then migrate verified caller slices. A standards-only update does not authorize
+application migration. Reuse the current stack/host capabilities and keep domain models relevant
+to the app. Record actual implementation, crosswalk, conformance evidence and limitations in
+`state/integrations.md` or its established equivalent; no connection or speculative vendor is required.
+
+<!-- END PINNED MOCK2 GUIDANCE -->

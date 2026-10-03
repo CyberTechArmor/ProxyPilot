@@ -1,3 +1,11 @@
+> Current adoption (2026-10-03): the framework seed now includes hash-verified
+> Mock2 **1.14.0** guidance. See `framework-seed/README.md` and
+> `scripts/sync-mock2-guidance.mjs`. Framework integer, scaffold, CPR 1.1 and Relay
+> 1.2.1 are independent identities. Historical instructions below describe the
+> earlier 0.3.0 rendering. An available site release requires reviewed adoption;
+> updating unchanged ProxyPilot code cannot install it. Guidance adoption alone
+> does not install Relay runtime/producers or migrate existing integrations.
+
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 
 *2026-09-05.* This note records where the Mock2 standards live, how ProxyPilot's

@@ -217,7 +217,7 @@ test('checkForUpdates: composes, caches network results for 10 min, force bypass
     ['raw.githubusercontent.com/o/r/main/admin/backend/package.json', { body: { version: '1.5.0' } }],
     ['/commits/main', { body: { sha: 'newsha', commit: { committer: { date: '2026-09-04T00:00:00Z' } } } }],
     ['/compare/', { body: { ahead_by: 2 } }],
-    ['manifest.json', { body: { version: '0.4.0' } }],
+    ['manifest.json', { body: { version: `${Number(readStandardsSeedVersion().version.split('.')[0]) + 1}.0.0` } }],
   ]);
   let t = 1_000_000;
   const now = () => t;

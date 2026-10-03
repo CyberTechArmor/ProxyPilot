@@ -165,3 +165,8 @@ download did not:
   exports dataset fills.
 - **Retention (3 per container / 14 days)** because a prepared download is a
   convenience; the backup of record is sanoid + replication.
+
+
+## Cloud continuation — 2026-10-03
+
+Active isolated implementation: `standards/cloud-continuation-20261003`. Scope and evidence: [work-cloud-continuation-20261003.md](work-cloud-continuation-20261003.md), [change record](change-records/2026-10-03-build-identity-guidance.md). Existing historical work above is preserved.

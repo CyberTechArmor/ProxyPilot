@@ -23,6 +23,7 @@ import { readFileSync } from 'node:fs';
 import { readFile, stat, open as fsOpen } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentCall, AgentError } from './agent.js';
+import { RUNNING_BUILD } from './build-identity.js';
 import {
   CHECK_CACHE_MS,
   STANDARDS_MANIFEST_URL,
@@ -58,6 +59,9 @@ export function readStandardsSeedVersion() {
     const j = JSON.parse(raw);
     seedVersionCache = {
       version: normalizeVersion(j.version) || null,
+      family: j.family || 'mock2-core',
+      source_version: normalizeVersion(j.source_version || j.version) || null,
+      adoption_scope: j.adoption_scope || 'legacy_rendering',
       source: typeof j.source === 'string' ? j.source : null,
       manifest: typeof j.manifest === 'string' ? j.manifest : STANDARDS_MANIFEST_URL,
       synced: typeof j.synced === 'string' ? j.synced : null,
@@ -331,6 +335,7 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
   }
   return buildVersionCheck({
     currentVersion,
+    runningBuild: RUNNING_BUILD,
     repo,
     release: net.github.release,
     branchVersion: net.github.branchVersion,
@@ -339,6 +344,9 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
     installed,
     standards: {
       seed_version: net.seed.version,
+      version_family: net.seed.family,
+      source_version: net.seed.source_version,
+      adoption_scope: net.seed.adoption_scope,
       site_version: net.manifest.site_version,
       changelog: net.manifest.changelog,
       site: STANDARDS_SITE_URL,

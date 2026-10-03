@@ -96,6 +96,13 @@ COPY --from=backend-builder /app/backend/node_modules ./backend/node_modules
 COPY admin/backend/src ./backend/src
 COPY admin/backend/package.json ./backend/
 
+# These describe the source actually packaged, independently of the host checkout.
+# Direct builds without the supported installer report unknown provenance.
+ARG PROXYPILOT_BUILD_SHA
+ARG PROXYPILOT_BUILD_TIME
+ARG PROXYPILOT_BUILD_DIRTY
+RUN node -e 'require("fs").writeFileSync("/app/backend/build-info.json", JSON.stringify({sha:process.env.PROXYPILOT_BUILD_SHA || null,built_at:process.env.PROXYPILOT_BUILD_TIME || null,dirty:process.env.PROXYPILOT_BUILD_DIRTY === "true" ? true : process.env.PROXYPILOT_BUILD_DIRTY === "false" ? false : null}))'
+
 # Copy the CVE engine Python package. Lives at /app/proxypilot so
 # `python3 -m proxypilot.engine ...` resolves with PYTHONPATH=/app.
 # Tests live alongside; they're harmless at runtime.

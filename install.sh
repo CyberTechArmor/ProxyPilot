@@ -1729,7 +1729,15 @@ EOF
     run_docker_compose down --remove-orphans 2>/dev/null || true
 
     # Build with --no-cache to ensure frontend dist is included fresh
-    run_docker_compose build --no-cache
+    local pp_build_sha pp_build_time pp_build_dirty
+    pp_build_sha=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
+    pp_build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    pp_build_dirty=unknown
+    if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        pp_build_dirty=false
+        if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]; then pp_build_dirty=true; fi
+    fi
+    run_docker_compose build --no-cache --build-arg "PROXYPILOT_BUILD_SHA=$pp_build_sha" --build-arg "PROXYPILOT_BUILD_TIME=$pp_build_time" --build-arg "PROXYPILOT_BUILD_DIRTY=$pp_build_dirty"
     run_docker_compose up -d
 
     # Wait for container to be healthy

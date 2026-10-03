@@ -18,6 +18,13 @@ mutable journal, and preservation after rolling back a package upgrade while
 newer source remains delivered. Baseline: repository-pinned Mock2 1.14.0; no
 dependency, Incus, other application or database-schema changes.
 
-All 21 local preservation tests pass. Independent review, exact-head CI and
-deployed verification are pending. Local tests do not establish actual host
-installation or normal-update proof.
+All 21 local preservation tests passed locally and independently. Review found no
+blocking issues. Exact-head CI for 50941135bd2c662c06af5e8aa1ea1d7cd9c7a321
+passed all three workflows. Initial backend job 111262200848 timed out in unchanged
+Chromium startup before navigation; single rerun 111263090088 passed unchanged.
+Failure evidence remains in GitHub; cause is unproven and timeouts were not widened.
+
+Merged as cad71e96f61b9640ba3c69fc4754ec1c1f2fffec. Deployment
+233d0b85-916b-442c-9881-d951a879044d succeeded at 18:26:22Z with empty flags;
+running build and host agent identify cad71e96f6. The runtime is not installed,
+so this is deployment/health proof, not expanded-runtime update acceptance.

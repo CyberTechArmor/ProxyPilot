@@ -1,3 +1,44 @@
+# Current browser delivery authorization and checkpoint
+
+The owner's updated 2026-10-03 instruction supersedes the historical terminal-only
+and all-capability gates below. Implementation, review, CI, merge, deployment and
+necessary fixed runtime installation are authorized for ProxyPilot/browser only.
+No Incus upgrade, other hosted application update, local/Duo work or temporary
+SSH key. Use the existing new selected runner; do not generalize the legacy demo.
+
+Deliver public navigation and live view first; then actual model-driven tasks;
+then private sign-in, action authorization, files and explicit internal access.
+Optional features must remain honestly unavailable without disabling working
+public navigation. Retain process isolation, host/credential protection, stop,
+cleanup and recovery. Acceptance comes from actual checks, never a toggled flag.
+
+Current deployment: PR732 merged as `829944a8ec4bdaa9e6bdd4663f276cae77a6e439`.
+The first update `116d5a68-4e5d-4225-8bae-0cd4e7ac9e93` exited 75 at the
+existing service-lifetime transition check. Rebuild
+`62fbe678-8f9a-4c8b-87f3-70cda056492d` succeeded at 18:16:36Z. Dashboard and
+host agent both identify `829944a8ec`; recovery unit is loaded; existing A3/A4/A7
+services remain active. These facts do not prove package installation.
+
+The fixed install/recover/rollback operation is exposed in Profile → Application
+settings → Browser runtime, POST `/api/user/version/browser-runtime`, and MCP
+`manage_browser_runtime`. It uses the root host runner and private operation
+journal without depending on a terminal connection. The current conversation's
+MCP catalog lacks that newly deployed tool and its cloud browser remains signed
+out. Actual installation has not been invoked. Last measured selected runtime:
+`selected_browser_available=false`, `separate_runtime_package_required`.
+
+PR733 then merged as `cad71e96f61b9640ba3c69fc4754ec1c1f2fffec` and deployed
+successfully through `233d0b85-916b-442c-9881-d951a879044d` at 18:26:22Z.
+It allows ordinary application delivery to preserve a committed runtime generation
+while newer package source awaits the explicit installer. No package is installed
+by that update. The running build and agent identify `cad71e96f6`.
+
+The continuation tracker is `state/browser-delivery-20261003.md`.
+
+---
+
+## Historical checkpoint (superseded where inconsistent above)
+
 # ProxyPilot agent request continuation — 2026-10-03
 
 Scope: ProxyPilot and its browser agent only. All consumer-app standards upgrades are deferred by the owner. No Incus upgrade requested.

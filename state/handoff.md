@@ -279,3 +279,42 @@ those; worth checking why it did not.
 ## Cloud continuation — 2026-10-03
 
 PR 726 and deployment confirmed at 91472e9e34. First tranche implements image build identity and 30 hash-verified Mock2 1.14.0 guidance files. See `state/work-cloud-continuation-20261003.md` and the matching change record. Not yet a claim of Relay runtime/producer integration, consumer rollout, activation or live acceptance. Earlier paused worktrees are not available in this cloud workspace.
+
+
+## Browser runtime takeover — 2026-10-03
+
+This continuation is authorized by the owner's updated incremental-delivery
+request. It supersedes historic all-feature acceptance and independent-terminal
+requirements. See `state/browser-delivery-20261003.md` for current evidence.
+
+Code is developed in `/workspace/scratch/66cd7b6659dd/ProxyPilot`. The older dirty
+checkout under `/workspace/scratch/3abe9742da67/ProxyPilot` was left untouched.
+GitHub API publication preserves exact reviewed Git trees; do not reset that
+historical checkout. No temporary SSH key was created or reused.
+
+The next real-host action is the dedicated `manage_browser_runtime` operation
+(`operation: install`, `confirm: true`) or the equivalent authenticated Profile
+control. Poll its returned ID through `get_proxypilot_update_status`, including
+across the dashboard's temporary shutdown. This session could deploy but did not
+have the new tool in its catalog; its cloud browser was signed out. No installed
+runtime acceptance is claimed. Do not substitute an unrelated shell-capable tool.
+
+After package installation, public navigation needs an explicit mode within the
+selected runner. Add real nullable mode-specific guide/consent persistence rather
+than fake IDs. Branch readiness, start/live pins and the pump by capability; public
+navigation performs a real reserved navigation and stays viewable without model
+calls or private-artifact dependencies. Preserve historical agent configurations.
+
+Replace the monolithic marker gate with measured installed/loaded hashes, VM,
+fence, managed Chromium policy, gateway, live-view and root-owned protected-host
+inventory. The inventory currently comes from the marker and must not disappear.
+Dynamic public egress must screen all DNS answers, protected host/address aliases,
+actual socket targets and routes; unknown CONNECT permits only local interception
+until a screened request receives a ticket. Retain credentials omission and
+unavailable writes/auth/files until separately delivered. Do not call guest-exec
+`full_boundary()` during active work: use initial measurement plus `light_boundary()`.
+
+Use actual non-demo navigation, redirected resources, live frames, cancellation,
+cleanup, restart and subsequent normal-update evidence. Follow with real model
+execution, manual authentication/action approval, files and internal destinations.
+Only then reconcile approved mockups and deploy visible UI/UX batches separately.

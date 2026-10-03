@@ -170,3 +170,13 @@ download did not:
 ## Cloud continuation — 2026-10-03
 
 Active isolated implementation: `standards/cloud-continuation-20261003`. Scope and evidence: [work-cloud-continuation-20261003.md](work-cloud-continuation-20261003.md), [change record](change-records/2026-10-03-build-identity-guidance.md). Existing historical work above is preserved.
+
+
+## Browser runtime takeover — 2026-10-03
+
+PR732 and PR733 are reviewed, CI-passed, merged and deployed. Current running
+checkpoint: cad71e96f6. See `state/browser-delivery-20261003.md` for capability
+status and `state/handoff.md` for the exact continuation. Actual installation
+is blocked by the missing callable new MCP tool / signed-out cloud browser,
+not by a request for renewed authorization. Public/browser-model/auth/files/internal
+and subsequent visual batches remain unfinished.

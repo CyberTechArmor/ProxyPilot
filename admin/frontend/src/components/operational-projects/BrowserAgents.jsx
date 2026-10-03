@@ -14,7 +14,7 @@ import { ARTIFACT_REVIEW, ASSET_REVIEW, BROWSER_CONSENT, CONVERSION_DISCLOSURE, 
 const words=value=>String(value??'').replaceAll('_',' ');
 const pretty=value=>JSON.stringify(value,null,2);
 const readinessText={GUIDE_REQUIRED:'Assign the current approved guide and save these settings.',GUIDE_STALE:'Assign the new approved guide and save a new settings revision.',
-  INSTALLED_SELECTED_BROWSER_PROOF_REQUIRED:'An installed, isolated browser runner with verified destination policy is required. This installation cannot start the run yet.',CURRENT_APPROVED_GUIDE_REQUIRED:'Assign the current approved guide and save the settings.',PROJECT_LIMITS_REQUIRED:'The owner must set finite project limits that admit this configuration.',PRIVATE_INPUT_PINS_UNRESOLVED:'Review the private inputs and verify their exact hashes.',ATTEMPT_ALREADY_ACTIVE:'A browser attempt is already active for this configuration.',UNRESOLVED_EFFECT:'Reconcile the recorded uncertain effect before starting another attempt.',MODEL_ROUTE_UNAVAILABLE:'The reviewed model provider bridge is unavailable.',
+  INSTALLED_SELECTED_BROWSER_PROOF_REQUIRED:'An installed, isolated browser runner with verified destination policy is required. This installation cannot start the run yet.',CURRENT_APPROVED_GUIDE_REQUIRED:'Assign the current approved guide and save the settings.',PROJECT_LIMITS_REQUIRED:'The owner must set finite project limits that admit this configuration.',PRIVATE_INPUT_PINS_UNRESOLVED:'Review the private inputs and verify their exact hashes.',ATTEMPT_ALREADY_ACTIVE:'A browser attempt is already active on the shared runner.',CLEANUP_UNVERIFIED:'A previous browser launch has unverified cleanup. Inspect Browser run history and retry verified cleanup before opening another website.',UNRESOLVED_EFFECT:'Reconcile the recorded uncertain effect before starting another attempt.',MODEL_ROUTE_UNAVAILABLE:'The reviewed model provider bridge is unavailable.',
   OWNER_MODEL_CONSENT_REQUIRED:'The owner must review and approve model disclosure for this exact revision.',SELECTED_BROWSER_RUNTIME_NOT_IMPLEMENTED:'The selected-browser runtime is unavailable.',
   RUNNER_REACHABILITY_UNVERIFIED:'Runner reachability to these exact destinations is unverified.',EXACT_TARGET_NETWORK_POLICY_UNVERIFIED:'The installed runner must verify the exact target network policy.',
   SELECTED_SITE_POLICY_UNVERIFIED:'Request and destination policies need verification.',ASSET_RESOLUTION_UNAVAILABLE:'The private input references need verification.',PROJECT_ARCHIVED:'Restore this project before starting.'};
@@ -54,7 +54,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
   },[base,run?.run?.id,run?.run?.state,lost]);
   async function perform(fn,success,{refresh=true}={}) {
     if(lock.current||lost)return;lock.current=true;setBusy(true);setError('');setMessage('');const gen=epoch.current,signal=controller.current?.signal;
-    try{await fn(signal);if(!mounted.current||gen!==epoch.current||signal?.aborted)return;if(refresh)await load(signal);setMessage(success);if(refresh)await onChanged();}
+    try{await fn(signal);if(!mounted.current||gen!==epoch.current||signal?.aborted)return;if(refresh){await load(signal);setPublicReady(null);}setMessage(success);if(refresh)await onChanged();}
     catch(e){if(mounted.current&&gen===epoch.current&&!signal?.aborted)fail(e);}
     finally{lock.current=false;if(mounted.current&&gen===epoch.current)setBusy(false);}
   }
@@ -68,7 +68,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     {publicReady&&<><Readiness value={publicReady}/><details><summary className="cursor-pointer min-h-11 py-3 text-sm">Measured browser capabilities</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(publicReady)}</pre></details></>}
     <p className="text-sm text-muted-foreground">Model tasks, private sign-in, files and internal websites are unavailable in this mode.</p>
     <p role="status" className="text-sm">{busy?'Working…':message}</p>
-    {run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun base={base} paths={paths} data={run} busy={busy} setData={setRun} perform={perform}/>}
+    {run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform}/>}
   </Panel><BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
     privateUnavailable={lost} onPrivateClear={clearPrivate}
     renderPreparation={draft=>draft.editable&&<div className="space-y-4">
@@ -87,8 +87,9 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
       {run&&run.run.execution_mode!=='public_navigation'&&<BrowserRun base={base} paths={paths} data={run} project={project} busy={draft.busy} setData={setRun} perform={perform}/>}</section>}/></>;
 }
 
-function PublicBrowserRun({base,paths,data,busy,setData,perform}) {
+function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
   const run=data.run,active=!TERMINAL.includes(run.state),[liveState,setLiveState]=useState('connecting');
+  const cleanupBlocked=data.uncertainties?.some(item=>item.kind==='CLEANUP_UNVERIFIED'&&item.state==='unresolved');
   const root=`${paths.runs}/${run.id}`;
   return <section aria-label="Public browser activity" className="space-y-3 min-w-0">
     <p role="status" className="text-sm">{words(run.state)} · {active?words(liveState):'Browser closed'} · {run.usage.requests} requests · {run.usage.response_bytes.toLocaleString()} response bytes</p>
@@ -99,6 +100,10 @@ function PublicBrowserRun({base,paths,data,busy,setData,perform}) {
     {active&&data.controls.can_live&&<LiveBrowser base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>}
     {data.receipts?.map((receipt,i)=><p key={i} className="text-sm">Cleanup: {Object.entries(receipt.closed||{}).map(([part,closed])=>`${words(part)} ${closed?'closed':'unverified'}`).join(' · ')}</p>)}
     {run.uncertain&&<p role="alert" className="text-sm text-destructive">Cleanup or an effect remains unverified. Inspect the run record before another launch.</p>}
+    {operator&&!active&&cleanupBlocked&&<div className="space-y-2 text-sm"><p>Verify your session, then retry cleanup explicitly. The installed supervisor must prove closure; this never restarts the browser or deletes the run record.</p><div className="flex flex-wrap gap-2">
+      <Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Session verified. Select Retry verified cleanup.',{refresh:false})}>Verify session for cleanup</Action>
+      <Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setData(await api.write(`${root}/retry-cleanup`,{},run.revision,'POST',signal)),'Cleanup checked. Inspect the receipt and check browser readiness again.')}>Retry verified cleanup</Action>
+    </div></div>}
     <details><summary className="cursor-pointer min-h-11 py-3 text-sm">Browser run record</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(data)}</pre></details>
   </section>;
 }

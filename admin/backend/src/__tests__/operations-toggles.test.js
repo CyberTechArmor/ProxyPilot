@@ -70,7 +70,8 @@ test('the Operations router reads the toggles on every request', async () => {
   const call = (who, method, path, body = {}) => router.dispatch({ method, path, body, user: who });
   const caps = async who => (await call(who, 'GET', '/capabilities')).body;
   assert.deepEqual(await caps(user), { enabled: false, stage: 'human-workflow', ui_available: false, evidence_enabled: false,
-    agents_metadata_enabled: false, agent_runs_enabled: false, can_manage_settings: false });
+    agents_metadata_enabled: false, agent_runs_enabled: false, browser_draft_configuration_available: false,
+    browser_draft_contract: 'browser-agent-draft.v1', can_manage_settings: false });
   assert.equal((await caps(admin)).can_manage_settings, true);
   assert.equal((await call(user, 'GET', '/')).statusCode, 404);
   setOperationsToggle(f.db, 'operations', true, admin);
@@ -78,6 +79,7 @@ test('the Operations router reads the toggles on every request', async () => {
   assert.equal((await call(user, 'GET', '/')).statusCode, 200);
   assert.equal((await call(user, 'GET', '/directory')).statusCode, 404);
   setOperationsToggle(f.db, 'agents_metadata', true, admin);
+  assert.equal((await caps(user)).browser_draft_configuration_available, true);
   assert.equal((await call(user, 'GET', '/directory')).statusCode, 200);
   setOperationsToggle(f.db, 'operations', false, admin);
   assert.equal((await call(user, 'GET', '/')).statusCode, 404);

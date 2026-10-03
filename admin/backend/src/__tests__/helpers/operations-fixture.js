@@ -1,3 +1,4 @@
+import { operationalBrowserDraftMigration1117 } from '../../lib/operational-browser-agent-configurations.js';
 import { operationalConfigurationsMigration1113 } from '../../lib/operational-configurations.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -50,6 +51,7 @@ export function operationsFixture({path=':memory:'}={}) {
   operationalRunMigration1111(adapter);
   operationalRecoveryMigration1112(adapter);
   operationalConfigurationsMigration1113(adapter);
+  operationalBrowserDraftMigration1117(adapter);
   let time = Date.now();
   const store = createOperationsStore(adapter, { now: () => new Date(time).toISOString() });
   const addUser = (role = 'user') => {

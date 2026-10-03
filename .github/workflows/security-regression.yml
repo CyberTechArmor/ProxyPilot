@@ -68,8 +68,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm audit --audit-level=low
+      - name: Dependency audit
         working-directory: ${{ matrix.directory }}
+        shell: bash
+        run: |
+          if [ "${{ matrix.directory }}" != "admin/frontend" ]; then
+            npm audit --audit-level=low
+            exit
+          fi
+          set +e
+          npm audit --audit-level=low --json > audit.json
+          audit_status=$?
+          set -e
+          if [ "$audit_status" -eq 0 ]; then
+            exit
+          fi
+          node ../../.github/scripts/frontend-audit-policy.mjs audit.json
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -92,6 +106,7 @@ jobs:
           node --test tests/agent-runs-cleanup.test.mjs
           node tests/agent-runs.browser.mjs
           node tests/agent-runs-a7.browser.mjs
+          node tests/browser-configurations.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

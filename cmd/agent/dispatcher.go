@@ -60,7 +60,7 @@ func (s *server) methodSlot(method string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// These methods share a root-runner request file; serialize across aliases.
-	if method == "update.request" || method == "update.check" || method == "storage.install_request" {
+	if method == "update.request" || method == "update.check" || method == "storage.install_request" || method == "browser.runtime_request" {
 		method = "update-writer"
 	}
 	slot := s.methods[method]

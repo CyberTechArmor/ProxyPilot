@@ -9,6 +9,7 @@ import { mcpKeyRefusal } from '../../lib/mcp-key-authority.js';
 // same guards the UI has (last-admin, superadmin protection, sudo-class
 // actions behind a confirmation token).
 
+import { requestBrowserRuntime } from '../../lib/browser-runtime-install.js';
 import bcrypt from 'bcryptjs';
 import { randomBytes, createHmac } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -36,6 +37,19 @@ export function createAdminHandlers(kit) {
     getDb, getSetting, setSetting, runHostCapture, uuidv4, mintMcpToken, hashMcpToken, MCP_TOOL_NAMES, dbPath,
     selfUpdateStatus, mock2Modules, mock2Enabled, listBackupsRunning,
   } = ctx;
+
+  const manage_browser_runtime = mutation('manage_browser_runtime', { subjectType: 'host', flag: 'mcp.host_control' }, async (args, auth, req, note) => {
+    const operation = args.operation;
+    if (!['install', 'recover', 'rollback'].includes(operation)) return err('operation must be install, recover or rollback');
+    const preview = { operation, action: `browser-runtime-${operation}`, dashboard_restart: true, incus_upgrade: false, acceptance_created: false };
+    const d = dry(args, preview); if (d) return d;
+    const gate = confirmFlag(args, note, `Run fixed browser runtime ${operation} and restart the dashboard.`); if (gate) return gate;
+    const result = await requestBrowserRuntime({ operation, requestedBy: `mcp:${auth.created_by}` });
+    note.subject_id = result.id;
+    note.summary = `browser runtime ${operation} requested`;
+    note.detail = preview;
+    return ok({ ...result, ...preview, next: 'Poll get_proxypilot_update_status with this id. Package installation does not certify browser functionality.' });
+  });
 
   /* -------------------------------- users -------------------------------- */
 
@@ -722,6 +736,7 @@ export function createAdminHandlers(kit) {
   });
 
   return {
+    manage_browser_runtime,
     list_users, create_user, set_role, disable_user, reset_passkey,
     list_mcp_keys, create_scoped_key, revoke_mcp_key,
     get_settings, set_setting, list_feature_flags, set_feature_flag,

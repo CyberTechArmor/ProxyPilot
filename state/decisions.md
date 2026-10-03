@@ -1,0 +1,4 @@
+
+## 2026-10-03 — Incremental browser delivery (approved)
+
+The owner authorizes implementation, independent review, CI, merge, deployment and runtime installation for ProxyPilot/browser only. Use the new selected runner. Deliver public navigation/live view first, then real language/model tasks, then manual sign-in, actions, files and supported internal destinations. Optional capabilities must not block public browsing. Earlier full-feature acceptance prerequisites and interactive terminal ceremonies are SUPERSEDED. Fixed authenticated host operations retain isolation, credential protection, cleanup, bounded execution, durable recovery and real capability evidence. No Incus upgrade, other app update, local/Duo use or temporary SSH key. Visual work follows browser delivery in individually deployed batches using actual approved mockups.

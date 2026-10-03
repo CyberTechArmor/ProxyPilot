@@ -413,3 +413,35 @@ func TestDefaultRegistryHasUpdateMethods(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserRuntimeRequest(t *testing.T) {
+	for _, operation := range []string{"install", "recover", "rollback"} {
+		t.Run(operation, func(t *testing.T) {
+			runDir, _ := withUpdateDirs(t)
+			_, err := BrowserRuntimeRequest(json.RawMessage(`{"requested_by":"admin","operation":"` + operation + `"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := readRequest(t, runDir)
+			if req.Action != "browser-runtime-"+operation || req.Flags != "" {
+				t.Fatalf("unexpected request: %+v", req)
+			}
+			if _, err := BrowserRuntimeRequest(json.RawMessage(`{"requested_by":"admin","operation":"install"}`)); err == nil {
+				t.Fatal("concurrent request accepted")
+			}
+		})
+	}
+	for _, params := range []string{
+		`{"requested_by":"admin","operation":"shell"}`,
+		`{"requested_by":"admin","operation":"install","command":"id"}`,
+		`{"requested_by":"admin","operation":"install","flags":["--upgrade-incus"]}`,
+		`{"requested_by":"admin;id","operation":"install"}`,
+	} {
+		t.Run(params, func(t *testing.T) {
+			withUpdateDirs(t)
+			if _, err := BrowserRuntimeRequest(json.RawMessage(params)); err == nil {
+				t.Fatal("invalid request accepted")
+			}
+		})
+	}
+}

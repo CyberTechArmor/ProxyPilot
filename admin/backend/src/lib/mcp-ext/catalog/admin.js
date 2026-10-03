@@ -1,6 +1,7 @@
 import { P, tool, mutating, destructive } from './shared.js';
 
 export const ADMIN_TOOLS = [
+  mutating('manage_browser_runtime', 'Install, recover or roll back the selected browser runtime using the fixed authenticated host runner. Restarts only the ProxyPilot dashboard. No Incus upgrade, arbitrary command, caller path or acceptance fabrication. Poll get_proxypilot_update_status.', { operation: { type: 'string', enum: ['install', 'recover', 'rollback'] } }, ['operation', 'confirm']),
   tool('list_users', 'Dashboard users with role, auth source, TOTP/passkey state.', { role: { type: 'string', enum: ['admin', 'user', 'pending'] } }),
   mutating('create_user', 'Create a dashboard user with a generated one-time password (must be changed at first sign-in).', { username: { type: 'string' }, display_name: { type: 'string' }, role: { type: 'string', enum: ['admin', 'user'] } }, ['username', 'confirm']),
   mutating('set_role', 'Change a user\'s role (admin / user / pending). Last-admin and superadmin protections apply.', { user_id: { type: 'string', description: 'User id or username.' }, role: { type: 'string', enum: ['admin', 'user', 'pending'] } }, ['user_id', 'role', 'confirm']),

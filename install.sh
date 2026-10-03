@@ -709,7 +709,7 @@ install_update_runner() {
     if ! cmp -s "$runner_src" "$runner_dst" 2>/dev/null; then
         install -m 0755 "$runner_src" "${runner_dst}.tmp" && mv -f "${runner_dst}.tmp" "$runner_dst"
     fi
-    for unit in proxypilot-update.service proxypilot-update.path; do
+    for unit in proxypilot-update.service proxypilot-update.path proxypilot-browser-recovery.service; do
         if [[ ! -f "${script_dir}/deploy/${unit}" ]]; then
             log_error "Missing systemd unit at ${script_dir}/deploy/${unit}"
             exit 1
@@ -732,6 +732,7 @@ install_update_runner() {
     if ! systemctl is-enabled --quiet proxypilot-update.path 2>/dev/null; then
         systemctl enable proxypilot-update.path
     fi
+    systemctl enable proxypilot-browser-recovery.service
     systemctl reset-failed proxypilot-update.path 2>/dev/null || true
     systemctl restart proxypilot-update.path
     log_success "Self-update runner installed (proxypilot-update.path enabled)"

@@ -387,6 +387,50 @@ func StorageInstallRequest(params json.RawMessage) (any, *Error) {
 	}, nil
 }
 
+// BrowserRuntimeRequest queues only a fixed package lifecycle operation.
+func BrowserRuntimeRequest(params json.RawMessage) (any, *Error) {
+	var p struct {
+		RequestedBy string `json:"requested_by"`
+		Operation   string `json:"operation"`
+	}
+	if len(params) > 0 {
+		if err := decodeParams(params, &p); err != nil {
+			return nil, &Error{Code: "invalid_params", Message: "browser.runtime_request params must be {requested_by:string, operation:install|recover|rollback}: " + err.Error()}
+		}
+	}
+	if p.Operation != "install" && p.Operation != "recover" && p.Operation != "rollback" {
+		return nil, &Error{Code: "invalid_params", Message: "unknown browser runtime operation"}
+	}
+	if !updateRequestedByRe.MatchString(p.RequestedBy) {
+		return nil, &Error{Code: "invalid_params", Message: "requested_by is required and must match ^[A-Za-z0-9._@:+-]{1,80}$"}
+	}
+	st, err := readJSONObject(filepath.Join(updateStateDir, "state.json"))
+	if err != nil {
+		return nil, &Error{Code: "state_unreadable", Message: err.Error()}
+	}
+	if updateRunLive(st, updateNow()) {
+		return nil, &Error{
+			Code:    "update_in_progress",
+			Message: fmt.Sprintf("%s %s is %s (%s); wait for it to finish", stringField(st, "action"), stringField(st, "id"), stringField(st, "status"), stringField(st, "phase")),
+		}
+	}
+	if updateRequestPending() {
+		return nil, &Error{Code: "update_pending", Message: "a request is already waiting for the update runner"}
+	}
+	id, at, werr := writeUpdateRequest("browser-runtime-"+p.Operation, p.RequestedBy, "")
+	if werr != nil {
+		return nil, &Error{Code: "request_write_failed", Message: werr.Error()}
+	}
+	return updateRequestResult{
+		ID:          id,
+		RequestedAt: at.Format(time.RFC3339),
+		Flags:       "",
+		RequestPath: updateRequestPath(),
+		StatePath:   filepath.Join(updateStateDir, "state."+id+".json"),
+		LogPath:     filepath.Join(updateStateDir, id+".log"),
+	}, nil
+}
+
 // UpdateRequest is the update.request RPC handler. It validates the caller's
 // input against the allowlist, refuses while a run is live or a request is
 // already waiting, and drops the request file. Everything after that is the

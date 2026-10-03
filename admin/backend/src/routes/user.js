@@ -25,6 +25,7 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { requestBrowserRuntime } from '../lib/browser-runtime-install.js';
 import { checkForUpdates, installedState, startUpdate, updateStatus } from '../lib/self-update.js';
 import { flagsFromOptions, isUpdateId, mapAgentErrorToHttp, sanitizeRequestedBy, updateStartRefusal } from '../lib/self-update-logic.js';
 
@@ -1337,6 +1338,19 @@ userRouter.post('/version/reset-dismiss', (req, res) => {
 // Request an update (Admin + sudo). 202 with the run id; 409 when it cannot
 // run right now (agent unreachable, uncommitted changes on the host, a run
 // already live) with the reason the UI shows verbatim.
+// Fixed runtime operation, under the same admin/sudo/CSRF boundary as Update.
+userRouter.post('/version/browser-runtime', requireAdmin, requireSudo, async (req, res) => {
+  try {
+    const { operation } = z.object({ operation: z.enum(['install', 'recover', 'rollback']) }).strict().parse(req.body);
+    const started = await requestBrowserRuntime({ operation, requestedBy: req.user.id });
+    logAudit(req.user.id, 'BROWSER_RUNTIME_REQUESTED', 'system', started.id, { operation, via: 'dashboard' }, req.ip);
+    res.status(202).json(started);
+  } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors[0].message });
+    res.status(mapAgentErrorToHttp(error.code)).json({ error: error.message, code: error.code });
+  }
+});
+
 userRouter.post('/version/update', requireAdmin, requireSudo, async (req, res) => {
   try {
     const { rebuild } = z.object({ rebuild: z.boolean().optional() }).parse(req.body || {});

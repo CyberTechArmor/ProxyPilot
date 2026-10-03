@@ -422,12 +422,12 @@ handle_request() {
     fi
     case "$action" in
         update|check) ;;
-        storage-install)
+        storage-install|browser-runtime-install|browser-runtime-recover|browser-runtime-rollback)
             # No caller-supplied arguments reach the installer. The script name
             # is fixed here, inside the checkout the runner already trusts.
             if [ -n "$flags" ]; then
                 rm -f "$nonce_file"
-                refuse invalid_flags "storage-install takes no flags"
+                refuse invalid_flags "$action takes no flags"
                 return 1
             fi
             ;;
@@ -494,6 +494,9 @@ handle_request() {
         storage-install)
             run_storage_install
             ;;
+        browser-runtime-install|browser-runtime-recover|browser-runtime-rollback)
+            run_browser_runtime "${action#browser-runtime-}"
+            ;;
     esac
 }
 
@@ -550,6 +553,34 @@ run_storage_install() {
     fi
     write_state
     log "storage-install $S_ID finished with exit $rc"
+    return "$rc"
+}
+
+# Dedicated operation; neither script path nor flags come from the request.
+run_browser_runtime() {
+    local operation="$1" rc
+    S_STATUS=running
+    S_PHASE="Browser runtime $operation"
+    S_STARTED_AT=$(now_iso); S_STARTED_UNIX=$(now_unix)
+    S_LOG="$STATE_DIR/$S_ID.log"
+    : > "$S_LOG"; chmod 0644 "$S_LOG"
+    write_state
+    # Serialize with ordinary updates. The Python helper also owns the fence
+    # lock, and handles TERM by attempting bounded package recovery.
+    flock -n "$LOCK_FILE" timeout --signal=TERM --kill-after=180 1200 \
+        /usr/bin/python3 /opt/proxypilot/scripts/browser-runtime-operation.py "$operation" 2>&1 | track_output
+    local -a codes=("${PIPESTATUS[@]}")
+    rc=${codes[0]}
+    [ "${codes[1]}" -eq 0 ] || rc=98
+    S_FINISHED_AT=$(now_iso); S_EXIT="$rc"
+    if [ "$rc" -eq 0 ]; then
+        S_STATUS=success; S_PHASE="Browser runtime $operation complete"
+    else
+        S_STATUS=failed; S_PHASE="Browser runtime $operation failed"
+        S_REASON="Fixed browser runtime operation exited $rc; inspect operation status before retrying"
+    fi
+    write_state
+    : > "$STATE_DIR/done.$S_ID"
     return "$rc"
 }
 

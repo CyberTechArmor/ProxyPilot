@@ -126,3 +126,22 @@ export function operationalSelectedBrowserMigration1118(db) {
       BEGIN SELECT RAISE(ABORT,'Selected-browser event is immutable'); END;
   `);
 }
+
+// Run with disableFks in the migration wrapper, outside its transaction. Child
+// foreign keys retain the original name; every existing row/pin is copied.
+export function operationalPublicNavigationMigration1123(db){
+  const table=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='ops_selected_browser_runs'").get();
+  if(db.prepare('PRAGMA table_info(ops_selected_browser_runs)').all().some(c=>c.name==='execution_mode'))return;
+  const objects=db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name='ops_selected_browser_runs' AND type IN('index','trigger') AND sql IS NOT NULL").all();
+  const columns=db.prepare('PRAGMA table_info(ops_selected_browser_runs)').all().map(c=>c.name);
+  let sql=table.sql.replace('ops_selected_browser_runs','ops_selected_browser_runs_expanded')
+    .replace('guide_id TEXT NOT NULL','guide_id TEXT').replace('guide_sha256 TEXT NOT NULL','guide_sha256 TEXT').replace('consent_sha256 TEXT NOT NULL','consent_sha256 TEXT');
+  sql=sql.replace('id TEXT PRIMARY KEY',"execution_mode TEXT NOT NULL DEFAULT 'agent' CHECK(execution_mode IN('agent','public_navigation')), id TEXT PRIMARY KEY");
+  sql=sql.slice(0,sql.lastIndexOf(')'))+", CHECK((execution_mode='agent' AND guide_id IS NOT NULL AND guide_sha256 IS NOT NULL AND consent_sha256 IS NOT NULL) OR (execution_mode='public_navigation' AND guide_id IS NULL AND guide_sha256 IS NULL AND consent_sha256 IS NULL)))";
+  db.exec(sql);
+  db.exec(`INSERT INTO ops_selected_browser_runs_expanded(${columns.join(',')}) SELECT ${columns.join(',')} FROM ops_selected_browser_runs`);
+  db.exec('DROP TABLE ops_selected_browser_runs; ALTER TABLE ops_selected_browser_runs_expanded RENAME TO ops_selected_browser_runs');
+  for(const object of objects)db.exec(object.sql);
+  db.exec(`CREATE TRIGGER ops_selected_browser_mode_pin BEFORE UPDATE OF execution_mode ON ops_selected_browser_runs WHEN NEW.execution_mode IS NOT OLD.execution_mode BEGIN SELECT RAISE(ABORT,'Selected browser mode is immutable'); END;`);
+  if(db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Public-navigation migration foreign key integrity failure');
+}

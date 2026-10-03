@@ -185,6 +185,7 @@ class GatewayPolicy:
         if (not isinstance(text, str) or len(text.encode()) > 200000 or
                 strict_json(text) != configuration or digest(text) != identity['policy_sha256']):
             raise Denied('POLICY_HASH_MISMATCH')
+        self.public_navigation=configuration.get('mode')=='public_navigation'
         self._configuration = copy.deepcopy(configuration)
         self.identity = copy.deepcopy(identity)
         self.configuration_json = text
@@ -318,6 +319,9 @@ class GatewayPolicy:
     def destination(self, parts, role, additions=None):
         self.check_fresh()
         self.protected_url(parts)
+        if self.public_navigation:
+            if role not in ('navigation','resource') or parts['port'] not in (80,443):raise Denied('PUBLIC_DESTINATION_DENIED')
+            return dict(id='public-'+digest(parts['origin'])[:32],origin=parts['origin'],roles=['navigation','resource'],session_headers='omit')
         base = self.origins.get(parts['origin'])
         temporary = (additions or {}).get(parts['origin'])
         if temporary is not None and 'roles' not in temporary:
@@ -330,6 +334,9 @@ class GatewayPolicy:
         return copy.deepcopy(item)
 
     def classify(self, parts, destination, method, resource_type, body_bytes):
+        if self.public_navigation:
+            if method not in ('GET','HEAD','OPTIONS') or body_bytes!=0:raise Denied('PUBLIC_WRITE_DISABLED')
+            return 'read'
         # All overlaps count. A narrow read rule cannot shadow a wider write rule.
         keys = {k for k, _ in parse_qsl(parts['query'], keep_blank_values=True, strict_parsing=False)}
         matches = [r for r in self.rules if r['destination_id'] == destination['id'] and

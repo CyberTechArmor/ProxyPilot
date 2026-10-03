@@ -79,6 +79,9 @@ class FixtureHost:
         out.parent.mkdir(parents=True,exist_ok=True)
         out.write_bytes(value);out.chmod(mode)
 
+    def public_inventory(self):
+        return dict(v=1,vm_uuid=p.VM_UUID,protected_hosts=['localhost','edge.fractionate.ai'],protected_addresses=['127.0.0.1','::1','93.184.216.35'])
+
     def sources(self):
         return self.revision,copy.deepcopy(self.source),dict(path='/reviewed-checkout',record_sha256='9'*64)
 
@@ -130,6 +133,25 @@ class PackageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.host=FixtureHost(Path(self.temp.name))
         self.package=p.Package(self.host,lambda:self.host.now)
+
+    def test_public_inventory_dns_rotation_cannot_change_reviewed_package_plan(self):
+        # Exercise production cache against trusted temporary inventory inputs.
+        for directory in ('/etc/caddy/sites','/etc/caddy/custom'):
+            self.host.tree.path(directory).mkdir(parents=True,exist_ok=True)
+        calls=[]
+        def execute(argv,timeout=30,input=None):
+            if argv[0]=='ip':return p.encoded([{'addr_info':[{'local':'192.0.2.3'}]}])
+            calls.append(argv)
+            return p.encoded(['8.8.8.8' if len(calls)==1 else '1.1.1.1'])
+        self.host.execute=execute
+        self.host.public_inventory=lambda:p.Host.public_inventory(self.host)
+        first=self.package.plan('install')
+        self.package.review('install',first['plan_sha256'],authority='authenticated-host-runner')
+        plan,files=self.package.reviewed('install',first['plan_sha256'])
+        inventory=p.strict(files[p.JOURNALS[0]])['public_navigation_inventory']
+        self.assertIn('8.8.8.8',inventory['protected_addresses']);self.assertNotIn('1.1.1.1',inventory['protected_addresses'])
+        self.assertEqual(len(calls),1)
+        self.assertEqual(self.host.tree.pin(p.TRANSACTION+'/public-inventory-plan.json')['mode'],0o600)
 
     def authorize(self,operation):
         plan=self.package.plan(operation)

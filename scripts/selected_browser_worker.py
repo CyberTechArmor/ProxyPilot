@@ -151,7 +151,7 @@ def validate_selected_config(value, refused):
                 c['destinations']['off_list'] != 'pause_and_escalate_before_send' or
                 c['permissions']['external_change_approval'] != 'per_action' or
                 c['permissions']['preauthorization_refs'] != [] or
-                c['authentication'] != {'mode': 'manual_takeover', 'session_lifetime': 'attempt', 'persist_session': False} or
+                c['authentication'] != {'mode': 'disabled' if c.get('mode')=='public_navigation' else 'manual_takeover', 'session_lifetime': 'attempt', 'persist_session': False} or
                 c['artifacts']['capture_during_manual_auth'] is not False or
                 c['artifacts']['record_video'] is not False or
                 not set(c['permissions']['actions']).issubset(KINDS)):
@@ -299,6 +299,8 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
                     self.ticketed_documents.discard(key)
                 self._invalidate()
                 temporary = None
+            if self.config.get('mode')=='public_navigation' and key:
+                return dict(id='public-'+hashlib.sha256(key.encode()).hexdigest()[:32],origin=key,roles=['navigation','resource'],session_headers='omit')
             return temporary['destination'] if temporary else self.destinations.get(key)
 
         def grant_destination(self, destination, expires_at):
@@ -619,7 +621,7 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
                 raise refused('OBSERVATION_UNAVAILABLE')
             observation = {'untrusted': True, 'url': safe_url(raw.get('url', '')),
                            'title': clean_text(raw.get('title', '')),
-                           'text': clean_text(raw.get('text', ''), min(MAX_TEXT_BYTES, self.config['model']['max_prompt_bytes'])),
+                           'text': clean_text(raw.get('text', ''), min(MAX_TEXT_BYTES, (self.config.get('model') or {}).get('max_prompt_bytes',16000))),
                            'elements': [{'element_ref': n['ref'], 'kind': n['kind'], 'label': clean_text(n['label'])}
                                         for n in raw['nodes']],
                            'selection_ref': raw['selection_ref'], 'manual_auth': False}

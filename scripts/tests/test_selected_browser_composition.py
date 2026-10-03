@@ -105,7 +105,11 @@ class Origin(BaseHTTPRequestHandler):
     def do_GET(self):
         Origin.received.append((self.command, self.headers.get('Host'), self.path, b''))
         icon = '<link rel="icon" href="data:,">'
-        if self.path == '/navigation':
+        if self.path == '/public-start':
+            self.send_response(302);self.send_header('Location',OTHER+'/public-page');self.end_headers();return
+        if self.path == '/public-page':
+            body=icon+'<h1>Public redirect destination</h1><img src="https://selected.example/asset.png">'
+        elif self.path == '/navigation':
             body = icon + '<h1>Original page</h1><a href="https://frame.example/visit">Approved next visit</a>'
         elif self.path == '/resource':
             body = icon + '<h1>Resource page</h1><img src="https://frame.example/asset.png">'
@@ -513,6 +517,7 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
                 max_actions=10, max_seconds=600, max_tokens=10000, max_usd=.25),
             configuration_json=text, configuration_sha256=policy, guide_version_id=fixture.GUIDE,
             guide_hash='c' * 64, consent_hash='d' * 64, deadline_at=s.stamp(time.time() + 600))
+        if self.c.get('mode')=='public_navigation':spec.update(guide_version_id=None,guide_hash=None,consent_hash=None)
         return spec
 
     def test_real_discovery_reply_hold_reports_phase_at_transport_deadline_and_cleans_owned_browser(self):
@@ -760,6 +765,28 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.assertEqual(proof['attempt_id'],self.ref['attempt_id'])
         self.assertEqual(proof['request_ref'],request_ref)
         self.assertFalse(proof['replay_allowed'])
+
+    def test_public_navigation_redirect_resource_and_cleanup_with_real_chromium(self):
+        self.c=json.loads((ROOT.parent/'contracts/browser-agent/fixtures/public-navigation.draft.json').read_text())
+        self.host.marker_missing=True
+        self.host.public_navigation_inventory=lambda:dict(v=1,vm_uuid=s.VM_UUID,protected_hosts=['controller.example'],protected_addresses=['10.185.17.1','10.185.17.179'])
+        self.host.selected_managed_policy_hash=lambda:hashlib.sha256(s.runner.live_policy_bytes()).hexdigest()
+        self.supervisor.turn_credentials=lambda _:[]
+        self.launch('/public-start')
+        ordinal,envelope=self.action('navigate')
+        result=self.poll(ordinal)
+        self.assertEqual(result['kind'],'done',self.diagnostics())
+        self.assertTrue(any(host=='frame.example' and path=='/public-page' for _,host,path,_ in Origin.received),self.diagnostics())
+        self.assertTrue(any(path=='/asset.png' for _,_,path,_ in Origin.received),self.diagnostics())
+        observation=self.runtime.observe(self.ref)
+        self.assertIn('Public redirect destination',observation['observation'])
+        self.assertEqual(self.runtime.pending(self.ref)['pending'],[])
+        self.assertEqual(self.host.registry.gateway.status()['effects_sent'],0)
+        receipt=self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))
+        # Stop removes the gateway; eager diagnostics must not dereference it.
+        self.assertTrue(all(receipt['closed'].values()),repr(receipt))
+        self.assertIsNone(self.supervisor.state['active'])
+        self.assertFalse(self.host.live_browser_members())
 
     def test_navigation_escalation_grant_settles_unsent_action_and_offers_new_exact_path(self):
         self.launch()

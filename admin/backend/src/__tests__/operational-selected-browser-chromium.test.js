@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { operationsFixture } from './helpers/operations-fixture.js';
-import { operationalSelectedBrowserMigration1118 } from '../lib/operational-selected-browser-schema.js';
+import { operationalSelectedBrowserMigration1118, operationalPublicNavigationMigration1123 } from '../lib/operational-selected-browser-schema.js';
 import { operationalBrowserArtifactsMigration1119 } from '../lib/operational-browser-artifacts-schema.js';
 import { operationalBrowserConversionMigration1120 } from '../lib/operational-browser-conversion.js';
 import { createSelectedBrowserRuntime, operationalSelectedBrowserRuntimeMigration1121 } from '../lib/operational-selected-browser-runtime.js';
@@ -77,7 +77,7 @@ async function actualBrowserContinuation(t, slowSetup = false) {
   try {
     const bootstrap = await client.request('fixture_bootstrap');
     for (const migrate of [operationalSelectedBrowserMigration1118, operationalBrowserArtifactsMigration1119,
-      operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122]) migrate(f.adapter);
+      operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122, operationalPublicNavigationMigration1123]) migrate(f.adapter);
     f.db.exec('ALTER TABLE sessions ADD COLUMN sudo_until TEXT');
     const owner = f.addUser(), p = f.store.create(owner,{name:'Cross-language browser proof'});
     const guide = f.store.saveDraft(owner,p.id,1,{title:'Selected local pages',instructions:'Read selected pages with explicit destination approval.'}).version;

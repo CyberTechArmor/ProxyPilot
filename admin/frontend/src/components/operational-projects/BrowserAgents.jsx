@@ -30,6 +30,7 @@ function Hash({label,value}) {return <div><dt>{label}</dt><dd className="font-mo
 export function BrowserAgents({base,project,onChanged=async()=>{}}) {
   const paths=browserPaths(base),[runs,setRuns]=useState([]),[run,setRun]=useState(null),[assets,setAssets]=useState([]);
   const [busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[lost,setLost]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState(''),[conversion,setConversion]=useState(null);
+  const [publicUrl,setPublicUrl]=useState(''),[publicReady,setPublicReady]=useState(null),publicStartKey=useRef(null);
   const controller=useRef(null),epoch=useRef(0),lock=useRef(false),mounted=useRef(false);
   const owner=project.own_role==='owner'&&!project.archived_at;
   const operator=['owner','editor','operator','reviewer'].includes(project.own_role)&&!project.archived_at;
@@ -39,7 +40,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     setError(`${e.message}${e.code?` (${e.code})`:''}${e.status===412?' Your entered settings are retained. Reload or reconcile the current revision before retrying.':''}`);
   }
   async function load(signal) {
-    const result=await api.get(paths.runs,signal);if(!signal?.aborted)setRuns(result.runs||[]);
+    const result=await api.get(paths.runs,signal);if(!signal?.aborted){setRuns(result.runs||[]);const active=result.runs?.find(item=>item.execution_mode==='public_navigation'&&!TERMINAL.includes(item.state));if(active){const current=await api.get(`${paths.runs}/${active.id}`,signal);if(!signal?.aborted)setRun(current);}}
   }
   useEffect(()=>{
     mounted.current=true;const c=new AbortController(),gen=++epoch.current;controller.current=c;setLoading(true);setLost(false);setError('');setRun(null);setAssets([]);setRuns([]);setConversion(null);
@@ -57,7 +58,18 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     catch(e){if(mounted.current&&gen===epoch.current&&!signal?.aborted)fail(e);}
     finally{lock.current=false;if(mounted.current&&gen===epoch.current)setBusy(false);}
   }
-  return <>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}<BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
+  return <>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}<Panel title="Public browser" description="Open a public website in the isolated browser and watch it live.">
+    <Field label="Website" type="url" placeholder="https://example.com" value={publicUrl} disabled={busy||lost} onChange={e=>{setPublicUrl(e.target.value);setPublicReady(null);publicStartKey.current=null;}}/>
+    <Action disabled={!operator||busy||loading||lost||!publicUrl.trim()||runs.some(item=>!TERMINAL.includes(item.state))} onClick={()=>perform(async signal=>{
+      publicStartKey.current??=crypto.randomUUID();
+      setRun(await api.write(`${base}/public-browser`,{url:publicUrl.trim(),project_revision:project.revision,idempotency_key:publicStartKey.current},null,'POST',signal));publicStartKey.current=null;
+    },'Public browser requested. Inspect its activity and live view.')}>Open browser</Action>
+    <Action variant="outline" disabled={!operator||busy||lost||!publicUrl.trim()} onClick={()=>perform(async signal=>setPublicReady((await api.get(`${base}/public-browser?url=${encodeURIComponent(publicUrl.trim())}`,signal)).readiness),'Browser readiness measured.',{refresh:false})}>Check browser readiness</Action>
+    {publicReady&&<><Readiness value={publicReady}/><details><summary className="cursor-pointer min-h-11 py-3 text-sm">Measured browser capabilities</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(publicReady)}</pre></details></>}
+    <p className="text-sm text-muted-foreground">Model tasks, private sign-in, files and internal websites are unavailable in this mode.</p>
+    <p role="status" className="text-sm">{busy?'Working…':message}</p>
+    {run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun base={base} paths={paths} data={run} busy={busy} setData={setRun} perform={perform}/>}
+  </Panel><BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
     privateUnavailable={lost} onPrivateClear={clearPrivate}
     renderPreparation={draft=>draft.editable&&<div className="space-y-4">
       <PrivateAssets paths={paths} assets={assets} setAssets={setAssets} busy={draft.busy} owner={owner} perform={perform}/>
@@ -72,7 +84,23 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
         {operator&&<Action variant="outline" disabled={draft.busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Run authority verified. Submit the intended action explicitly.',{refresh:false})}>Verify run authority</Action>}</div>
       {draft.saved&&<BrowserExecution key={draft.saved.id} paths={paths} project={project} draft={draft} owner={owner} operator={operator} perform={perform} setRun={setRun}/>}
       <div className="space-y-3"><h3 className="font-semibold">Browser run history</h3>{!runs.length?<p className="text-sm text-muted-foreground">No selected-browser runs yet.</p>:<ul className="space-y-2">{runs.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><p className="text-sm font-medium break-words">{draft.saved?.id===item.configuration_id?draft.saved.configuration.name:'Browser agent'} · {words(item.state)}</p><p className="text-xs text-muted-foreground break-all">{item.created_at||item.id}</p></div><Action variant="outline" disabled={draft.busy} onClick={()=>perform(async signal=>setRun(await api.get(`${paths.runs}/${item.id}`,signal)),'Run record loaded.',{refresh:false})}>Inspect browser run</Action></li>)}</ul>}</div>
-      {run&&<BrowserRun base={base} paths={paths} data={run} project={project} busy={draft.busy} setData={setRun} perform={perform}/>}</section>}/></>;
+      {run&&run.run.execution_mode!=='public_navigation'&&<BrowserRun base={base} paths={paths} data={run} project={project} busy={draft.busy} setData={setRun} perform={perform}/>}</section>}/></>;
+}
+
+function PublicBrowserRun({base,paths,data,busy,setData,perform}) {
+  const run=data.run,active=!TERMINAL.includes(run.state),[liveState,setLiveState]=useState('connecting');
+  const root=`${paths.runs}/${run.id}`;
+  return <section aria-label="Public browser activity" className="space-y-3 min-w-0">
+    <p role="status" className="text-sm">{words(run.state)} · {active?words(liveState):'Browser closed'} · {run.usage.requests} requests · {run.usage.response_bytes.toLocaleString()} response bytes</p>
+    {run.result_code&&<p className="text-sm break-words">{words(run.result_code)}</p>}
+    <Action variant="outline" disabled={busy||!data.controls.can_cancel} onClick={()=>perform(async signal=>{
+      setData(await api.write(`${root}/cancel`,{},run.revision,'POST',signal));
+    },'Browser stopped. Inspect the cleanup receipt.')}>Stop browser</Action>
+    {active&&data.controls.can_live&&<LiveBrowser base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>}
+    {data.receipts?.map((receipt,i)=><p key={i} className="text-sm">Cleanup: {Object.entries(receipt.closed||{}).map(([part,closed])=>`${words(part)} ${closed?'closed':'unverified'}`).join(' · ')}</p>)}
+    {run.uncertain&&<p role="alert" className="text-sm text-destructive">Cleanup or an effect remains unverified. Inspect the run record before another launch.</p>}
+    <details><summary className="cursor-pointer min-h-11 py-3 text-sm">Browser run record</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(data)}</pre></details>
+  </section>;
 }
 
 function BrowserExecution({paths,project,draft,owner,operator,perform,setRun}) {

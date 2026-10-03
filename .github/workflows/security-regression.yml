@@ -54,6 +54,11 @@ jobs:
             esac
           done
           node --test "${tests[@]}"
+      - name: Install actual selected-runner browser on disposable CI host
+        run: |
+          node admin/backend/node_modules/playwright-core/cli.js install --with-deps chromium
+          BROWSER_PATH="$(node --input-type=module -e "import { chromium } from './admin/backend/node_modules/playwright-core/index.mjs'; console.log(chromium.executablePath())")"
+          sudo ln -sf "$BROWSER_PATH" /usr/bin/chromium
       - name: Actual Chromium lifecycle and signed host continuation
         working-directory: admin/backend
         run: node --test src/__tests__/operational-selected-browser-chromium.test.js

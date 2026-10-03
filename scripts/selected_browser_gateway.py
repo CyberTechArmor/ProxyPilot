@@ -35,7 +35,7 @@ if _policy is None or Path(_policy.__file__).resolve() != _policy_path.resolve()
     _policy = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_policy)
 for _name in ('Denied', 'GatewayPolicy', 'HEX', 'METHODS', 'RESOURCE_TYPES', 'UUID', 'canonical',
-              'digest', 'exact', 'safe_int', 'strict_json', 'url_parts'):
+              'build_public_target', 'digest', 'exact', 'safe_int', 'strict_json', 'url_parts'):
     globals()[_name] = getattr(_policy, _name)
 
 TICKET_HEADER = 'x-proxypilot-request-token'
@@ -168,6 +168,8 @@ class PinnedConnection(http.client.HTTPConnection):
         # The selected numerical address is used by the actual socket. There is
         # no second DNS lookup, proxy environment, tunnel, or certificate bypass.
         sock = socket.create_connection((self.address, self.parts['port']), timeout=self.timeout)
+        if str(ipaddress.ip_address(sock.getpeername()[0]))!=self.address or sock.getpeername()[1]!=self.parts['port']:
+            sock.close();raise Denied('CONNECTION_TARGET_CHANGED')
         if self.parts['scheme'] == 'https':
             try:
                 context = ssl.create_default_context()
@@ -273,6 +275,8 @@ class AttemptGateway:
     def _freeze(self, code, origin=None, request_ref=None):
         if self.state == 'revoked':
             return
+        if self.policy.public_navigation and code not in ('USER_PAUSED','GATEWAY_PAUSED','REQUEST_BUDGET_EXHAUSTED','RESPONSE_BUDGET_EXHAUSTED','TIME_BUDGET_EXHAUSTED','LEDGER_WRITE_FAILED'):
+            self._audit('public_request_refused',dict(code=code,origin=origin,request_ref=request_ref));return
         if self.state == 'paused' and self.reason == 'USER_PAUSED' and code == 'GATEWAY_PAUSED':
             self._audit('paused_request_blocked', dict(code=code, origin=origin, request_ref=request_ref))
             return
@@ -296,7 +300,9 @@ class AttemptGateway:
             with self.lock:
                 self._check()
                 self.policy.protected_url(p)
-                if p['origin'] not in self.policy.origins and p['origin'] not in self.additions:
+                if self.policy.public_navigation:
+                    self.policy.destination(p,'resource')
+                elif p['origin'] not in self.policy.origins and p['origin'] not in self.additions:
                     raise Denied('OFF_LIST_DESTINATION')
             return p
         except Denied as e:
@@ -649,7 +655,10 @@ class AttemptGateway:
             answers = self.resolver(parts)
             with self.lock:
                 self._check()
-                target = self.extra_targets.get(parts['origin']) or self.policy.targets[parts['origin']]
+                if self.policy.public_navigation:
+                    target=build_public_target(parts['origin'],answers,self.route_reader(answers),self.policy.protected_hosts,self.policy.protected_addresses)
+                else:
+                    target = self.extra_targets.get(parts['origin']) or self.policy.targets[parts['origin']]
                 addresses = self.policy.screen_answers(parts, answers, target)
                 if self.route_reader(target['addresses']) != target['route_sha256']:
                     raise Denied('NETWORK_ROUTE_CHANGED')

@@ -1,0 +1,113 @@
+import {z} from 'zod';
+import {selectedFail} from './operational-selected-browser-contract.js';
+const template={
+  "schema": "proxypilot.browser-agent.proposal.v1",
+  "workflow": "selected_browser_v1",
+  "name": "Public browser",
+  "work": {
+    "instructions": "Open the public website for live viewing.",
+    "success_criteria": [
+      "Public page visible until Stop or the time limit."
+    ],
+    "guide_ref": null,
+    "source_inputs": []
+  },
+  "destinations": {
+    "network_scope": "explicit_destinations",
+    "network_policy_ref": null,
+    "allowed_origins": [
+      {
+        "id": "public-entry",
+        "origin": "https://example.com",
+        "roles": [
+          "navigation",
+          "resource"
+        ],
+        "session_headers": "omit"
+      }
+    ],
+    "entry_urls": [
+      "https://example.com/"
+    ],
+    "off_list": "pause_and_escalate_before_send",
+    "off_list_approval": {
+      "scope": "exact_destination_and_purpose",
+      "lifetime": "attempt",
+      "persist_to_allowlist": false,
+      "wildcards": false
+    },
+    "subresources": "explicit_origins_only",
+    "redirects": "same_policy",
+    "popups": "same_policy",
+    "request_rules": [],
+    "unclassified_requests": "pause_and_escalate_before_send",
+    "websockets": "blocked_pending_selected_site_transport_review"
+  },
+  "permissions": {
+    "actions": [
+      "navigate",
+      "read",
+      "scroll",
+      "wait"
+    ],
+    "external_change_approval": "per_action",
+    "preauthorization_refs": [],
+    "start": "explicit_current_revision"
+  },
+  "authentication": {
+    "mode": "disabled",
+    "session_lifetime": "attempt",
+    "persist_session": false
+  },
+  "model": null,
+  "budgets": {
+    "max_seconds": 900,
+    "max_actions": 20,
+    "max_model_calls": 0,
+    "max_tokens": 0,
+    "max_usd": 0,
+    "max_requests": 1500,
+    "max_response_bytes": 104857600,
+    "max_artifact_bytes": 33554432,
+    "cpu": 1,
+    "memory_mib": 1024,
+    "temporary_disk_mib": 512
+  },
+  "artifacts": {
+    "visibility": "run_authorized_users",
+    "record_video": false,
+    "retention_days": 14,
+    "capture_during_manual_auth": false,
+    "download_max_bytes": 16777216,
+    "upload_max_bytes": 16777216,
+    "download_mime_types": [
+      "application/pdf",
+      "text/plain",
+      "text/csv",
+      "image/png",
+      "image/jpeg"
+    ],
+    "upload_asset_refs": [],
+    "clipboard": {
+      "scope": "attempt_private",
+      "human_exchange": "explicit_import_export",
+      "max_bytes": 65536
+    }
+  },
+  "supervision": {
+    "live_view": true,
+    "pause": true,
+    "stop": true,
+    "takeover": false,
+    "escalation": "project_inbox",
+    "report": "project_activity"
+  },
+  "mode": "public_navigation"
+};
+export const publicNavigationInput=z.object({url:z.string().trim().min(8).max(2048),project_revision:z.number().int().positive(),idempotency_key:z.string().uuid()}).strict();
+export const isPublicNavigation=c=>c?.mode==='public_navigation';
+export function publicNavigationConfiguration(url){
+ let u;try{u=new URL(url);}catch{selectedFail(400,'PUBLIC_URL_INVALID');}
+ if(!['http:','https:'].includes(u.protocol)||u.username||u.password||/[\\\s\x00-\x1f]/.test(url)||u.hostname.endsWith('.'))selectedFail(400,'PUBLIC_URL_INVALID');
+ const c=structuredClone(template);c.destinations.entry_urls=[u.href];c.destinations.allowed_origins[0].origin=u.origin;return c;
+}

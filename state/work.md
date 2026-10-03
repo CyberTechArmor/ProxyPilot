@@ -1,3 +1,15 @@
+# Authorized scope: public navigation — 2026-10-03
+
+Outcome: an authorized user opens a supported public website in the selected isolated browser, watches it live, stops it and launches again.
+Done when: W1 explicit public mode without model/guide/private storage; W2 dynamic public redirects/resources with DNS and connection screening; W3 measured readiness and protected inventory; W4 website/Open browser/live/Stop frontend; W5 independent review and CI; W6 merge, ordinary app update, dedicated runtime upgrade, actual public-site/lifecycle/restart/update proof.
+Failure cases that count as done: protected/private/metadata/mixed DNS refusal, launch failure, cancellation, cleanup failure, interrupted runtime operation and recovery, preserved historical data/configuration.
+Excluded: Incus upgrades, other hosted applications, local/Duo access, temporary SSH keys, model tasks, private login, files, internal destinations and wider UI redesign.
+Prerequisites: P1 authenticated cloud UI for the fixed runtime operation and live verification (sign-in completed); P2 root-owned protected inventory retained independently of whole-feature acceptance.
+
+## Follow-ups
+
+Existing unrelated work below is retained.
+
 # Work — MCP tools for Full Platform setup and management (size L)
 
 Branch: `claude/mcp-platform-setup-tools-sny7bk` (against the release installed from PR #620)
@@ -170,3 +182,13 @@ download did not:
 ## Cloud continuation — 2026-10-03
 
 Active isolated implementation: `standards/cloud-continuation-20261003`. Scope and evidence: [work-cloud-continuation-20261003.md](work-cloud-continuation-20261003.md), [change record](change-records/2026-10-03-build-identity-guidance.md). Existing historical work above is preserved.
+
+
+## Browser runtime takeover — 2026-10-03
+
+PR732 and PR733 are reviewed, CI-passed, merged and deployed. Current running
+checkpoint: cad71e96f6. See `state/browser-delivery-20261003.md` for capability
+status and `state/handoff.md` for the exact continuation. Actual installation
+is blocked by the missing callable new MCP tool / signed-out cloud browser,
+not by a request for renewed authorization. Public/browser-model/auth/files/internal
+and subsequent visual batches remain unfinished.

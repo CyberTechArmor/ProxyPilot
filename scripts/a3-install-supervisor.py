@@ -133,7 +133,7 @@ def plan_files(source_dir=Path(__file__).resolve().parent):
         data = (source_dir / name).read_bytes()
         if name.endswith('.json'):
             schemas = json.loads(data)
-            if not isinstance(schemas, dict) or set(schemas) != {'configuration', 'action'}:
+            if not isinstance(schemas, dict) or set(schemas) not in ({'configuration', 'action'},{'configuration','action','public_configuration'}):
                 raise ValueError(f'Unreviewed schema bundle: {name}')
         elif not (data.startswith(b'#!/usr/bin/env python3\n') or
                   name in SELECTED_SOURCES and data.startswith(b'"""')):

@@ -50,6 +50,19 @@ test('import cannot weaken the user-selected per-action and destination approval
   fails(400, () => validateBrowserDraftImport(named), 'BROWSER_DRAFT_INVALID');
 });
 
+test('legacy and public draft validation retain exact field paths and reject mode crossover', () => {
+  const publicDraft = JSON.parse(readFileSync(new URL('../../../../contracts/browser-agent/fixtures/public-navigation.draft.json', import.meta.url), 'utf8'));
+  for (const configuration of [body().configuration, publicDraft]) {
+    assert.throws(() => validateBrowserDraftImport({configuration:{...configuration,work:null}}), error =>
+      error.code === 'BROWSER_DRAFT_INVALID' && error.extra.issues.some(issue => issue.path.join('.') === 'configuration.work'));
+  }
+  const legacy = body().configuration;
+  for (const mode of ['public_navigation', 'unknown']) {
+    fails(400, () => validateBrowserDraftImport({configuration:{...legacy,mode}}), 'BROWSER_DRAFT_INVALID');
+  }
+  fails(400, () => validateBrowserDraftImport({configuration:{...publicDraft,mode:'unknown'}}), 'BROWSER_DRAFT_INVALID');
+});
+
 test('exact internal names, addresses and ports are draft metadata with no reachability or execution grant', withWorld(w => {
   for (const origin of ['https://intranet', 'https://internal.example.com:8443', 'https://10.24.8.12', 'https://[fd12::1]:8443', 'http://intranet:8080']) {
     const b = body(), d = b.configuration.destinations;

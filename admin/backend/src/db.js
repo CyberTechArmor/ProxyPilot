@@ -1,6 +1,6 @@
 import { websiteReviewMigration1116 } from './lib/operational-website-review.js';
 import { operationalBrowserDraftMigration1117 } from './lib/operational-browser-agent-configurations.js';
-import { operationalSelectedBrowserMigration1118 } from './lib/operational-selected-browser-schema.js';
+import { operationalPublicNavigationMigration1123, operationalSelectedBrowserMigration1118 } from './lib/operational-selected-browser-schema.js';
 import { operationalBrowserArtifactsMigration1119 } from './lib/operational-browser-artifacts-schema.js';
 import { operationalBrowserConversionMigration1120 } from './lib/operational-browser-conversion.js';
 import { operationalSelectedBrowserRuntimeMigration1121 } from './lib/operational-selected-browser-runtime.js';
@@ -2069,6 +2069,7 @@ export function initDatabase() {
   runMigration(db, 1120, 'browser_agent_conversions', operationalBrowserConversionMigration1120);
   runMigration(db, 1121, 'selected_browser_host_pins', operationalSelectedBrowserRuntimeMigration1121);
   runMigration(db, 1122, 'selected_browser_authentication_readback', operationalSelectedBrowserAuthMigration1122);
+  runMigration(db, 1123, 'selected_browser_public_navigation', operationalPublicNavigationMigration1123, {disableFks:true});
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

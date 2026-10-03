@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import proposal from './operational-browser-agent-proposal.schema.json' with { type: 'json' };
+import publicProposal from './operational-public-navigation.schema.json' with {type:'json'};
 import { OperationsError } from './operational-projects-logic.js';
 
 export const BROWSER_DRAFT_CONTRACT = 'browser-agent-draft.v1';
@@ -47,9 +48,11 @@ export function canonicalBrowserDraft(value) {
   return JSON.stringify(value);
 }
 export const browserDraftHash = text => createHash('sha256').update(text, 'utf8').digest('hex');
-export const browserAgentProposalSchema = compile(proposal);
+const agentProposalSchema = compile(proposal), publicProposalSchema = compile(publicProposal);
+export const browserAgentProposalSchema = z.union([agentProposalSchema, publicProposalSchema]);
 const source = z.string().min(1).refine(v => !!v.trim() && Buffer.byteLength(v, 'utf8') <= 100000);
-const inputSchema = z.object({ configuration: browserAgentProposalSchema, source_text: source.optional() }).strict();
+const inputSchema = z.object({ configuration: agentProposalSchema, source_text: source.optional() }).strict();
+const publicInputSchema = z.object({ configuration: publicProposalSchema, source_text: source.optional() }).strict();
 
 // Only draft shape/cross-field validation. No URL fetch, DNS, filesystem, vault,
 // grant, model or browser call occurs. Future runtime policy needs separate proof.
@@ -57,7 +60,9 @@ export function validateBrowserDraftImport(input) {
   let bytes;
   try { bytes = Buffer.byteLength(JSON.stringify(input), 'utf8'); } catch { refuse('BROWSER_DRAFT_INVALID'); }
   if (!Number.isFinite(bytes) || bytes > BROWSER_DRAFT_MAX_BYTES) refuse('BROWSER_DRAFT_TOO_LARGE');
-  const parsed = inputSchema.safeParse(input);
+  // Select the strict trusted contract before parsing, so field errors remain
+  // actionable instead of collapsing into a top-level union mismatch.
+  const parsed = (input?.configuration?.mode === 'public_navigation' ? publicInputSchema : inputSchema).safeParse(input);
   if (!parsed.success) refuse('BROWSER_DRAFT_INVALID', { issues: parsed.error.issues.slice(0, 16).map(issue => ({
     path: issue.path,
     message: issue.code === 'unrecognized_keys' ? 'Remove unsupported fields from this object.'
@@ -71,6 +76,7 @@ export function validateBrowserDraftImport(input) {
   // User-selected policy is explicit destinations and per-action approval.
   // Imported network-policy references remain unverified metadata, never grants.
   const destinations = c.destinations.allowed_origins;
+  if(c.mode==='public_navigation'&&destinations.some(d=>d.session_headers!=='omit'||d.roles.includes('authentication')))refuse('PUBLIC_CREDENTIALS_DISABLED');
   if (new Set(destinations.map(d => d.id)).size !== destinations.length ||
       new Set(destinations.map(d => d.origin)).size !== destinations.length) refuse('BROWSER_DESTINATION_DUPLICATE');
   for (const d of destinations) {

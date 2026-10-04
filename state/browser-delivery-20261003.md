@@ -1,4 +1,4 @@
-# Current delivery checkpoint — 2026-10-04 01:56 UTC
+# Current delivery checkpoint — 2026-10-04 02:03 UTC
 
 This checkpoint supersedes the older statuses below and preserves their failures.
 Public browsing acceptance remains incomplete. No new deployment or runtime
@@ -11,7 +11,7 @@ installation was started after the last successful application update.
 | Public wording, viewer status and safe errors | Merged | PR741 merge78142fcd5fe85887014da653a1a1b9f761e2cea3; independent review and workflows37167296480/37167296488 green | Public mode explains no guide/model consent; browser state and unavailable video/images are distinct |
 | Frame backoff and active-run readiness guards | Merged | PR741; real Chromium checks at five widths, Stop disposes30sec retry, server performs no idle probe while active/cleanup-unverified | Clear safe failure reason; bounded polling; readiness disabled during execution |
 | Latest application deployment | Blocked | PR741 deployment call returned non-JSON refusal and started no operation; exact refusal reason was lost by response parsing; latest operation remainsacea49e5 | Running site is still PR740/b1e387ef; no claim that merged UI fixes are deployed |
-| Per-request public denial without freezing all viewing | In progress | PR742 reviewed head03a9f30cac299239a26184dfb6f8b92cab022fb5; worker public refusal fix plus atomic selected CONNECT transition; old-code race reproduced, new-code regression passes; fresh CI37169448683/37169448718 running | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
+| Per-request public denial without freezing all viewing | In progress | PR742 reviewed head668fbc6c936ed17bf1dc83a3807b3bc93061ca8d; worker public refusal plus gateway atomic transition/socket duplicate-refusal fixes; both old-code races reproduced, new tests pass; fresh CI37169866413/37169866411 running | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
 | Actual redirected-page compatibility | In progress | Real Python downloads run593799c0 retained frame500/429 failure; new worker not installed; fixture redirects are not production acceptance | Visible supported redirected page with resources beyond the initial origin still needs real proof |
 | Continuous live video | Blocked | Real video connection remains failed; transient public images work on the homepage and relaunch | Image viewing currently available; continuous video not proven |
 | Ordinary update with installed expanded runner | Verified | Updateacea49e5 succeeded00:54:02Z; flags empty; runtime preserved; real visible launches followed | Normal application update preserves runtime and resumes healthy browsing |
@@ -36,7 +36,7 @@ Repeat successful visible launch:
 PR742 changes only the selected worker and associated tests/record:
 - Expected new worker SHA25677ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
 - Installed/loaded worker remainsb72eac75173d83187d58273dcc2752c83fbf8a057b233a9f0e00d76c078ca717.
-- New gateway SHA25652e1cd9f64cd14ee1047224e9b948fce959ecc5c0f5a4c468b34589f9313af0c;
+- New gateway SHA25602433df09948099f4c1204d1fde10a64b077a717fd50d3feaf27ad261afea18f;
   installed/loaded gateway remains21f7297a6f466460957f2e8da45dc7e100abc2764212113924db66170e5da096.
 - Other five helper bytes unchanged. Ordinary updates deliberately preserve the
   installed generation; only the fixed dedicated Install can commit the new worker.
@@ -73,6 +73,19 @@ PR742 changes only the selected worker and associated tests/record:
 - Independent gateway tests16pass and public-navigation17pass. Full gateway
   file44pass, one existing Unix socket test blocked by workspace EPERM; CI
   must verify that boundary. No permission or peer-identity protection bypass.
+- Atomic-head Security37169448683 backend111339226959 again failed Node action4
+  before Python. The socket wrapper repeated the already finalized CONNECT
+  refusal outside the atomic check, recreating the same ordering bug. A second
+  real socketpair/barrier/grant regression fails old wrapper and passes the fix.
+  Old socket receives403; no TLS/DNS/upstream/request/effect; newer grant remains
+  running. Malformed CONNECT parsing still pauses and never reaches admission.
+- Final reviewed PR742 head668fbc6c936ed17bf1dc83a3807b3bc93061ca8d;
+  exact local/remote treefbe51bd5d2db934161ef09d5202eeb7f2d7029cd matches.
+  Gateway+transport+public targeted suite45pass, plus malformed-header control1pass.
+  Node fixture now retains bounded fixed ledger-order summaries without full
+  metadata, page text, headers or bodies. No assertion/timeout/permission relaxation.
+  Fresh CI37169866413/37169866411 running; not merged/deployed/installed.
+  These proven source races are not asserted as the established live/CI cause.
 - Local actual Chromium133 diagnostic case passed once including cleanup;
   in-memory test binary substitution is not CI Chromium149 equivalence.
   Earlier three-case local probe passed action assertions but its third teardown

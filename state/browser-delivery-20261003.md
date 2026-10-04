@@ -1,4 +1,80 @@
-# Current delivery checkpoint — 2026-10-04 03:19 UTC
+# Current delivery checkpoint — 2026-10-04 03:28 UTC
+
+The newly requested normal application deployment succeeded. Dashboard, host
+agent and clean source checkout all match d2331e251fc1a58443adfd979112192810b0d283.
+PR741 UI improvements and PR742 runtime source are deployed. The installed and
+loaded runner remains the previous generation: the dedicated Install stopped
+at fresh passkey authentication before invocation. Runtime upgrade and final
+redirect/recovery acceptance remain incomplete.
+
+| Item | Status | Evidence / deployment | What I should see or be able to do |
+|---|---|---|---|
+| Application and host-agent deployment | Verified | Fixed update f50c2f71-80b9-48e0-a328-7de8191231f3 succeeded03:24:10Z exit0; expected/to/running/agent/clean source d2331e251fc1a58443adfd979112192810b0d283 | Profile → Application settings → Running build d2331e251f; checkout up to date |
+| Public URL, Open, activity and visible images | Verified | After restart, real Python homepage rendered in run57a0690e-9f34-4189-8f65-a0226787beea,33requests/592617bytes | Operations → Public browser verification — 2026-10-03 → Agents → Public browser |
+| Public wording and separate viewer state | Verified | Actual deployed UI explains public browsing without guide/model consent and displays Browser running alongside Video unavailable — browser images below | Execution status and viewer availability are distinct; optional private/model/files/internal capability limitations are explicit |
+| Safe frame errors, backoff and readiness guards | Deployed | Reviewed PR741 source is running; readiness control visibly disabled during real run; source regression/five-width checks passed before merge | Failed image requests explain a30sec retry; readiness is unavailable during active browsing; Stop disposes polling |
+| Stop and physical cleanup on new deployment | Verified | Run57a0690e cancelled; fence2,uncertain:false, all four signed closed flags true; cgroup absent, unit inactive/not-found, empty member/process/mount lists;0pending/inflight/effects | Stop removes live viewing and displays Viewing ended plus cleanup receipt; Open becomes available again |
+| Another successful visible launch | Verified | Historical consecutive runs33c66c5f/242947d1 succeeded; new post-update run57a0690e visibly opened after dashboard restart | The current installed runner remains usable after application restart; no final upgraded-helper acceptance claimed |
+| Public per-request refusal and gateway ordering source | Deployed | PR742 reviewed/green-CI source included in running app delivery; installed gateway/worker bytes are still old | Source is ready for fixed dedicated Install; final runtime behavior is not yet deployed |
+| Independent review and final CI | Verified | PR741 and PR742 independently reviewed; final Security37169866413/configured-boundary37169866411 successful,560Python tests with33skips | Source gates passed; they do not establish installed new-helper or live redirect acceptance |
+| Dedicated final runtime Install and Recover | Blocked | Install button reached Confirm with passkey before invocation; modal cancelled without credentials; latest operation still f50c2f71, no new runtime operation ID | Profile → Application settings → Browser runtime → Install requires fresh authenticated passkey verification; Recover proof follows installation |
+| Installed and loaded current helper identity | Verified | Idle readiness measured workerb72eac75173d83187d58273dcc2752c83fbf8a057b233a9f0e00d76c078ca717/gateway21f7297a6f466460957f2e8da45dc7e100abc2764212113924db66170e5da096; all8capabilities verified | Current installed runner is measured; final worker77ef9851/gateway02433df0 are not installed |
+| Protected inventory and supporting services | Verified | Inventory207436e8d78da2912e0f5482e8c723643886bd6c332c451abeb07484ece2e75e unchanged; fence active/exited, supervisor/origin proxy/broker/TURN/agent active/running | Host/address protection remains measured; no idle-only probe was made during the active attempt |
+| Actual redirected-page compatibility | Blocked | Prior Python downloads593799c0 frame500/429 failure retained; final worker/gateway uninstalled | Real redirect/resources/live viewing must be checked on the upgraded runner |
+| Continuous live video | Blocked | New run again has video unavailable; actual transient images visibly work | Live image viewing works; continuous video remains unproven |
+| Ordinary update preserving current expanded runtime | Verified | f50c2f71 flags empty; preserve_selected, preserved:true,runtime_changed:false,committed:true; new visible launch/clean Stop followed | Application updates preserve the installed generation, protect data and restart healthy; Incus was not upgraded |
+| Ordinary update after final runtime upgrade | Blocked | Final two-helper generation not installed | Check preservation and another visible launch after installing worker77ef9851/gateway02433df0 |
+| Broader redesign/model/private-login/files/internal workflows | Not started | Separate follow-up scope | These are not prerequisites for public browsing |
+
+Deployment evidence:
+- Fixed normal update03:23:03–03:24:10Z, flags empty, from b1e387efc648eccd7feebcd2ef19620b32574854
+  to d2331e251fc1a58443adfd979112192810b0d283. Dashboard built03:23:21Z.
+- Log /var/lib/proxypilot/update/f50c2f71-80b9-48e0-a328-7de8191231f3.log;
+  private DB backup /opt/proxypilot/data/db/backups/proxypilot.db.pre-update-20261003-232303.
+- Preservation reports acceptance_created:false/readiness_recheck_required:true.
+  No readiness boolean or acceptance marker was fabricated.
+- New fixed Install was blocked before host request at fresh passkey verification,
+  not denied by the package transaction. The previous installationea96d3e0
+  genuinely succeeded; this does not install current source by itself.
+- New expected gateway SHA25602433df09948099f4c1204d1fde10a64b077a717fd50d3feaf27ad261afea18f;
+  worker77ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
+  Other five helpers unchanged. Ordinary app update deliberately preserved the
+  installed gateway21f7297a/workerb72eac75, confirmed by idle measured readiness.
+- Update log retains ERR_ERL_UNEXPECTED_X_FORWARDED_FOR. The normal update still
+  completed with a healthy dashboard and actual launch/Stop; no causal claim or
+  unrelated proxy/security change was made to address that logged warning.
+
+Actual live proof after this deployment:
+- https://www.python.org/; run57a0690e-9f34-4189-8f65-a0226787beea;
+  attempt68c0a1e2-7ec9-409a-833d-4260906fd647;
+ 03:26:14.490Z start, signed physical Stop03:27:09Z.
+- Actual Python logo/navigation/content visibly rendered in the isolated browser;
+  changing live image timestamps03:26:46.223/03:26:51.558/03:26:56.771Z.
+ 33requests/592617response bytes; one action; zero model calls/tokens/usd/artifact bytes.
+- All four signed closure flags true; fence2; statecancelled; uncertain:false.
+ 0effects_sent/effects_uncertain/auth_effects_acknowledged/inflight/pending_count;
+  ledgera63ef913d119b9386590142dac00fef8936dd2dcb3aeb2f4a9edbd902b110a64.
+  cgroup absent, inactive/not-found worker unit, empty members/worker processes/
+  workspace mounts; TERM15, result success, runtime54.715s.
+- Screenshot proxypilot-deployed-public-1791084413202.jpg and raw signed public
+  Stop record proxypilot-deployed-stop-57a0690e.json are saved as private user
+  evidence. They are not public GitHub attachments. All public attempts stopped.
+- Historical downloads/other failed views, CI failures, local PID teardown refusal,
+  and uncertain legacy record remain retained below. Passing source fixtures and
+  active services are not newly installed-runtime redirect acceptance.
+
+No Incus upgrade, unrelated hosted application update, owner-local computer or
+temporary SSH key was used. Existing data, credentials and history preserved.
+Prior refused actions and cancelled authentication were not routed around.
+The earlier application-update refusal is now superseded by the user's explicit
+new deployment request and genuine successful fixed operation, not a rewritten
+historical success.
+
+---
+
+## Previous checkpoint — retained history
+
+### Previous delivery checkpoint — 2026-10-04 03:19 UTC
 
 ## Fresh status check — 2026-10-04 03:19 UTC
 

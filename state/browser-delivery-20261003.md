@@ -1,3 +1,69 @@
+# Current delivery checkpoint — 2026-10-04 02:12 UTC
+
+This checkpoint supersedes earlier statuses below and preserves their evidence
+and failures. Source implementation, review, CI and merge are complete for the
+current public browsing follow-up. Deployment/runtime/live acceptance remains
+incomplete. No new application update or dedicated runtime operation started.
+
+| Item | Status | Evidence / deployment | What I should see or be able to do |
+|---|---|---|---|
+| Public URL, Open, activity and visible images | Verified | Running dashboard/agent/clean source b1e387efc648eccd7feebcd2ef19620b32574854; actual Python homepage rendered in runs33c66c5f and242947d1 | Operations → Public browser verification — 2026-10-03 → Agents → Public browser |
+| Stop, physical cleanup and another visible launch | Verified | Both homepage runs have all four signed closure flags true, no pending/inflight/effects/uncertainties; repeat run242947d1 visibly rendered | Stop closes the isolated attempt and removes images; Open launches another browser |
+| Public wording, separate viewer status and safe errors | Merged | PR741 merge78142fcd5fe85887014da653a1a1b9f761e2cea3, independently reviewed/green CI; included in main | Public browsing explains no guide/model consent; execution and failed video/image viewing states are distinct |
+| Frame backoff and active-run readiness guards | Merged | PR741; five-width real Chromium checks and server no-idle-probe regressions | Useful safe error and30sec failure retry; Stop disposes polling; readiness disabled while active |
+| Public per-request refusal and gateway ordering | Merged | PR742 merged2331e251fc1a58443adfd979112192810b0d283; reviewed head668fbc6c936ed17bf1dc83a3807b3bc93061ca8d, exact treefbe51bd5d2db934161ef09d5202eeb7f2d7029cd | Denied resources stay blocked without freezing later allowed public viewing; old CONNECT refusal cannot overwrite newer grant |
+| Independent review and final CI | Verified | Security37169866413 and configured-boundary37169866411 success on final reviewed head;560Python tests/296.619s,33skips; real Chromium continuation and dashboard checks pass | Source gates passed; fixtures do not establish newly installed runtime or live redirect acceptance |
+| Application deployment of PR741/742 | Blocked | Latest update remainsacea49e5 successful to b1e387ef; newer update request refused before starting and its full refusal reason was lost during parsing; main nowd2331e2 | Current UI remains PR740; merged wording/runtime source has not reached the running app |
+| Dedicated final runtime Install and Recover | Blocked | Fixed controls stopped at fresh-auth wall before invocation; no new operation ID; prior cancelled authentication respected | Profile → Application settings → Browser runtime fixed Install/Recover requires a fresh authenticated cloud session |
+| Final installed/loaded helper generation | Blocked | Installed workerb72eac75/gateway21f7297a; expected new worker77ef9851/gateway02433df0 not installed | After fixed Install, measure installed and loaded hashes plus VM/fence/Chromium/gateway/view prerequisites |
+| Actual redirected-page compatibility | Blocked | Python downloads run593799c0 retains frame500/429 failure; source fixture redirect successes are not runtime acceptance | See a real supported redirected public page and resources beyond its starting origin on the upgraded runner |
+| Continuous live video | Blocked | Real video connection remains failed; transient images visibly work for homepage and repeat launch | Image viewing available; continuous video remains unproven |
+| Last ordinary-update compatibility | Verified | Updateacea49e5 succeeded00:54:02Z, flags empty, preserve_selected/runtime_changed:false, installed hashes unchanged; visible launches followed | Normal app update preserved the then-installed expanded runner and restarted healthy |
+| Ordinary update after final runtime upgrade | Blocked | New two-helper generation not installed; compatibility must be checked afterward | Normal update preserves the final worker/gateway generation and another visible launch works |
+| Broader UI redesign/model/private-login/files/internal workflows | Not started | Separate follow-up scope, not a prerequisite for public URL browsing | Optional unavailable capabilities stay separate from public mode |
+
+New source generation:
+- Gateway SHA25602433df09948099f4c1204d1fde10a64b077a717fd50d3feaf27ad261afea18f.
+- Worker SHA25677ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
+- Other five helpers unchanged. Ordinary update delivers source but preserves
+  installed generation; only the fixed dedicated Install commits new helpers.
+- Final main SHA d2331e251fc1a58443adfd979112192810b0d283 includes PR741 and PR742.
+- Running/agent/clean checkout independently still b1e387efc648eccd7feebcd2ef19620b32574854.
+- Last measured eight prerequisites belong to the current installed generation;
+  protected inventory SHA207436e8d78da2912e0f5482e8c723643886bd6c332c451abeb07484ece2e75e
+  remains preserved. No acceptance marker or readiness boolean was fabricated.
+
+Real proof remains:
+- Homepage run33c66c5f-7b0e-4bb6-bfaa-147edebe2e56,33requests/592460bytes,
+  actual repeated pixels and frameGET200/201442bytes; clean Stop.
+- Homepage repeat run242947d1-fceb-41cd-a2ee-81a22dcfd53f,
+  attempt6562e497-9d68-48c5-9d57-abed9c8bfa1b;01:12:39.727–01:13:51.962Z;
+  actual Python logo/navigation/carousel;33requests/592460bytes; zero model calls,
+  tokens/usd/artifact bytes.
+- Repeat signed cleanup ledger2f2317dce50e80e585ce95fcd5e552a04bca983725e964a1a9ecca34c740111d;
+  all four closure flags true, absent cgroup, inactive/not-found unit, empty
+  process/member/mount lists, zero pending/inflight/effects/uncertainties.
+- Downloads failure and earlier uncertain legacy record remain retained.
+  Public fixture DNS/transport mapping is not end-to-end installed-boundary proof.
+- Private screenshots and raw signed receipts are saved as private user artifacts,
+  not GitHub attachments. All public attempts are stopped.
+
+Earlier CI failures, the local PID-identity teardown refusal and workspace Unix
+socket permission block remain documented below. Both CONNECT ordering defects
+were independently reproduced on old source and pass deterministic regressions
+on the fix. Final CI now passes; their causal link to prior CI/live failures
+is not asserted as established.
+
+The earlier fixed Installea96d3e0-87d4-4aec-9425-d0d8ba681e5c genuinely succeeded.
+The new post-update Install/Recover requirement remains uninvoked due to fresh
+authentication, not a claim that runtime installation never occurred.
+No Incus upgrade, unrelated hosted application update, owner-local computer or
+temporary SSH key was used. No active-run idle boundary probe was performed.
+
+---
+
+## Historical checkpoints and failures (preserved)
+
 # Current delivery checkpoint — 2026-10-04 02:03 UTC
 
 This checkpoint supersedes the older statuses below and preserves their failures.

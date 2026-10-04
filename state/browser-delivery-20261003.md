@@ -1,3 +1,59 @@
+# Current delivery checkpoint — 2026-10-04 01:04 UTC
+
+This checkpoint supersedes the older statuses below and preserves their failures.
+Public browsing acceptance is still incomplete.
+
+| Item | Status | Evidence / deployment | What I should see or be able to do |
+|---|---|---|---|
+| Public URL entry, Open and activity | Deployed | PR740 merged b1e387efc648eccd7feebcd2ef19620b32574854; dashboard, agent and clean source match | Operations → Public browser verification — 2026-10-03 → Agents → Public browser |
+| Independent review and relevant CI | Verified | Exact reviewed head3a8769ba8ca053180d6916086633da61f6038673; workflows37165470478 and37165470499 green before merge | Reviewed boundaries and real Chromium frontend checks at five widths |
+| Visible public browser images | Verified | Real https://www.python.org/ homepage displayed in run33c66c5f-7b0e-4bb6-bfaa-147edebe2e56; frame GET200/201442bytes; repeated capture timestamps | Actual Python page through transient images when video fails |
+| Continuous live video | Blocked | Real live video remains failed; image fallback works for the first homepage run | Images currently provide viewing; continuous video is not proven |
+| Viewing after redirect/relaunch | In progress | Run593799c0-de4a-485e-9467-6b143712299b opened https://www.python.org/downloads;14requests/336618bytes; frame500 then429 cooldown; no visible page | Reliable visible redirected page and another visible launch remain required |
+| Stop and cleanup | Verified | Both post-update runs cancelled; all four signed closure flags true; no pending/inflight/effects/uncertainties | Stop removes live images, enables Open and closes browser/network/session/temp files |
+| Public-mode wording and error clarity | Not started | Current surrounding Agents instructions still describe guide/consent; viewer status appears beside run state and frame error is generic | Clear public-mode instructions and separate execution/viewer status |
+| Ordinary update with expanded runtime | Verified | Updateacea49e5-8e15-41d5-a5ab-5aed598eeac2 succeeded00:54:02Z; flags empty; preserve_selected/runtime_changed:false; installed helper hashes unchanged; real visible launch followed | Ordinary app update preserves runner, restarts healthy and allows actual browsing |
+| Installed and loaded capability readiness | Verified | All eight measured prerequisites verified after update; seven helper hashes match new source; protected inventory preserved | Actual installed/loaded identity, VM, fence, Chromium, gateway, viewing and protection evidence |
+| Post-update fixed Install and Recover | Blocked | Install clicked after update but fresh-auth wall prevented invocation; no new operation ID; prior cancelled authentication handoff respected | Fixed authorized operations require a fresh authenticated session before install/recovery proof |
+
+First visible post-update run:
+- Run33c66c5f-7b0e-4bb6-bfaa-147edebe2e56; attempta9b2d5e2-98a3-4793-81ce-87ae6f473f88.
+- Started00:56:21.116Z, stopped00:57:50.064Z;33requests/592460bytes; zero model calls/tokens/usd/artifact bytes.
+- Signed closure: inactive/not-found unit, absent cgroup, no worker processes,
+  unit members or workspace mounts;0uncertain ordinals; all closure flags true.
+- Cleanup ledgerdae24474988ab5aa66edc502e10c4e772128717d686fc2a9f1d6d476afd18f12.
+
+Second launch retains a genuine viewing failure:
+- Run593799c0-de4a-485e-9467-6b143712299b; attempt7915f27d-76f4-436d-a374-d3124be8f0ba.
+- Started00:58:20.065Z, stopped01:02:48.845Z;14requests/336618bytes.
+- Frame endpoint500 at00:59:11.600Z then429 at00:59:16.650Z; no cause inferred from status alone.
+- Scoped worker journal showed only unit start; no causal diagnosis established.
+- Signed closure: all flags true; absent cgroup; inactive/not-found unit; empty
+  process/member/mount lists;0pending/inflight/effects/uncertain ordinals.
+- Cleanup ledger127256340dd7cb8a24cdfcb402c93c22225e1a78d5a87023222f251e42bd08d3.
+- The public entry redirects to the trailing-slash URL according to independent
+  official-site retrieval, but this is not claimed as runner redirect acceptance.
+
+CI failures are retained in the historical record:
+- Initial frontend fixture failure reproduced and corrected with no weakened assertions.
+- Corrected-head backend first failed the existing navigation escalation test.
+  One independently approved unchanged retry passed548tests,33skips in264.074s.
+  Cause remains unproven; later new frame test uses a fresh fixture.
+- Final frontend, broker and security checks all passed on the merged head.
+
+No Incus upgrade or other application update was requested. Ordinary update log:
+`/var/lib/proxypilot/update/acea49e5-8e15-41d5-a5ab-5aed598eeac2.log`.
+The earlier dedicated Installea96d3e0-87d4-4aec-9425-d0d8ba681e5c succeeded;
+PR740 changed no runtime helper bytes. Fresh-auth still blocks the explicitly
+required post-update Install and fixed Recover operations.
+
+Private screenshots and raw signed proof remain private user artifacts, not
+GitHub attachments. A screenshot/export or connector outage is not browsing proof.
+
+---
+
+## Historical checkpoints (preserved)
+
 # Public browsing delivery — verified checkpoint 2026-10-04
 
 The latest user authorization supersedes historical independent-terminal and

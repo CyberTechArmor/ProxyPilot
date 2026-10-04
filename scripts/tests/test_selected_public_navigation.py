@@ -47,6 +47,14 @@ class PublicGatewayTests(unittest.TestCase):
             with self.assertRaises(p.Denied):gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
             gate.connection_factory.assert_not_called();self.assertEqual(gate.status()['requests'],1)
             self.assertEqual(gate.status()['inflight'],0)
+            self.assertEqual(gate.status()['effects_sent'],0)
+            self.assertEqual(gate.state,'running')
+            # Refusal neither creates contact nor prevents reviewing a fresh
+            # safe request. Actual peer screening still happens at forwarding.
+            gate.resolver.return_value=['1.1.1.1']
+            next_ticket=gate.review_request('later',self.meta(gate,'https://later.public.example/'))
+            self.assertEqual(next_ticket['decision'],'allow')
+            gate.connection_factory.assert_not_called()
 
 
     def test_dual_stack_forward_uses_verified_subset_and_rechecks_only_that_route(self):

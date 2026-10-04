@@ -275,6 +275,8 @@ class AttemptGateway:
         self.pending, self.tickets = {}, {}
         self.additions, self.extra_targets, self.purposes = {}, {}, {}
         self.connections = set()
+        self.public_navigation_evidence = dict(completed_redirects=0,cross_origin_resources=0,
+            last_completed_document_origin=None,last_completed_document_url_sha256=None)
         self.ledger.append('attempt_registered', dict(identity=policy.identity, policy_sha256=policy.identity['policy_sha256'],
                                                       network_plan_sha256=policy.network_plan_sha256))
 
@@ -625,7 +627,7 @@ class AttemptGateway:
                 self.pending.pop(self.tickets.pop(token)['request_ref'], None)
             if expired and self.state != 'revoked':
                 self._freeze('REQUEST_TICKET_EXPIRED')
-            return dict(schema='proxypilot.selected-browser.gateway-status.v1', identity=self.policy.identity,
+            result = dict(schema='proxypilot.selected-browser.gateway-status.v1', identity=self.policy.identity,
                         state=self.state, reason=self.reason, requests=self.requests,
                         response_bytes=self.response_bytes, ledger_sha256=self.ledger.sha256,
                         effects_sent=self.effects_sent, effects_uncertain=self.effects_uncertain, inflight=self.inflight,
@@ -633,6 +635,9 @@ class AttemptGateway:
                         outstanding_requests=len(self.pending),
                         network_plan_sha256=self.policy.network_plan_sha256,
                         destinations=len(self.policy.origins), temporary_destinations=len(self.additions))
+            if self.policy.public_navigation:
+                result['public_navigation_evidence'] = self.public_navigation_evidence.copy()
+            return result
 
     def admit(self, method, url, headers, body):
         with self.lock:
@@ -741,14 +746,20 @@ class AttemptGateway:
             response_headers = response.getheaders()
             locations = [v for k, v in response_headers if k.lower() == 'location']
             if 300 <= response.status < 400:
-                if len(locations) != 1:
+                # RFC 9110: 304 selects the client's cached representation,
+                # and 300 may present choices without a preferred Location.
+                # Neither is necessarily a new network destination. Retain
+                # strict Location admission for actual URI redirects and
+                # screen any optional Location before returning it to Chrome.
+                if len(locations) > 1 or (response.status not in (300, 304) and not locations):
                     raise Denied('REDIRECT_INVALID')
-                redirect = url_parts(urljoin(parts['url'], locations[0]))
-                with self.lock:
-                    self.policy.destination(redirect, record['metadata']['role'], self.additions)
-                    temporary = self.purposes.get((redirect['origin'], record['metadata']['role']))
-                    if temporary and temporary['expires_at'] <= self.clock():
-                        raise Denied('DESTINATION_GRANT_EXPIRED')
+                if locations:
+                    redirect = url_parts(urljoin(parts['url'], locations[0]))
+                    with self.lock:
+                        self.policy.destination(redirect, record['metadata']['role'], self.additions)
+                        temporary = self.purposes.get((redirect['origin'], record['metadata']['role']))
+                        if temporary and temporary['expires_at'] <= self.clock():
+                            raise Denied('DESTINATION_GRANT_EXPIRED')
             chunks = []
             while True:
                 with self.lock:
@@ -782,6 +793,18 @@ class AttemptGateway:
             with self.lock:
                 response_ref = self._audit('response_completed', dict(request_ref=record['request_ref'], status=response.status,
                                                         bytes=sum(map(len, chunks)), effect=record['effect']))
+                if self.policy.public_navigation:
+                    evidence=self.public_navigation_evidence
+                    if response.status in (300,301,302,303,307,308) and locations:
+                        evidence['completed_redirects'] += 1
+                    seed=url_parts(self.policy.configuration['destinations']['entry_urls'][0])['origin']
+                    if record['metadata']['role']=='resource' and parts['origin'] != seed:
+                        evidence['cross_origin_resources'] += 1
+                    if record['metadata']['resource_type']=='document' and 200<=response.status<300:
+                        # This is the most recently completed document response,
+                        # which can be an iframe; never claim a top-frame URL.
+                        evidence['last_completed_document_origin']=parts['origin']
+                        evidence['last_completed_document_url_sha256']=digest(parts['url'])
                 if record['request_ref'] in self.auth_effects:
                     self.auth_effects[record['request_ref']].update(ledger_response_ref=response_ref,transport_complete=True)
             return response.status, clean, b''.join(chunks)
@@ -807,9 +830,11 @@ class AttemptGateway:
                 conn.close()
 
 
-def read_request(reader):
+def read_request(reader, allow_empty=False):
     line = reader.readline(MAX_HEADER_BYTES + 1)
-    if not line or len(line) > MAX_HEADER_BYTES or not line.endswith(b'\r\n'):
+    if not line:
+        raise Denied('HTTP_REQUEST_EMPTY' if allow_empty else 'HTTP_REQUEST_INVALID')
+    if len(line) > MAX_HEADER_BYTES or not line.endswith(b'\r\n'):
         raise Denied('HTTP_REQUEST_INVALID')
     try:
         method, target, version = line[:-2].decode('ascii').split(' ')
@@ -880,7 +905,7 @@ def serve_selected_socket(request, gateway, tls):
             client.settimeout(max(.1, min(gateway.policy.expires_at,
                 gateway.started_at + gateway.policy.configuration['budgets']['max_seconds']) - gateway.clock()))
             reader, writer = client.makefile('rb'), client.makefile('wb')
-            method, target, headers = read_request(reader)
+            method, target, headers = read_request(reader, allow_empty=True)
             if (not target.startswith('/') or target.startswith('//') or '#' in target or
                     headers.get('host') != parts['origin'].split('://', 1)[1]):
                 raise Denied('HTTP_TARGET_INVALID')
@@ -901,6 +926,14 @@ def serve_selected_socket(request, gateway, tls):
         status, response_headers, body = gateway.forward(method, url, headers, body)
         send_response(writer, status, response_headers, body)
     except (Denied, OSError, ssl.SSLError, http.client.HTTPException) as e:
+        if isinstance(e, Denied) and e.code == 'HTTP_REQUEST_EMPTY' and client is not None:
+            # A successful approved CONNECT/TLS negotiation can be speculative
+            # or cancelled before Chromium sends any HTTP bytes. No request
+            # reached forward(), consumed a ticket or contacted an upstream.
+            # Keep malformed nonempty lines and incomplete headers fatal.
+            with gateway.lock:
+                gateway._audit('client_closed_without_request', dict(code=e.code, stage='tls_request'))
+            return
         if not connect_refusal_finalized:
             with gateway.lock:
                 try:

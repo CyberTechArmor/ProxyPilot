@@ -174,6 +174,18 @@ class SelectedBrowserSupervisor:
             self.fail('BROWSER_GATEWAY_UNAVAILABLE_OR_ACTIVE')
         return marker, boundary
 
+    def _readiness(self, configuration):
+        # Public-address agent tasks need the same measured installed boundary
+        # as public viewing. Historical whole-feature acceptance cannot grant
+        # model, credential, action or file authority. Their independent
+        # contracts are still checked at each operation. A policy reference is
+        # reserved for separately reviewed exact internal reachability; never
+        # adopt that policy from the public inventory.
+        if (configuration.get('mode') == 'public_navigation' or
+                configuration['destinations']['network_policy_ref'] is None):
+            return self._public_readiness()
+        return self._acceptance()
+
     def _sign(self, payload):
         body = self.h.canonical(payload)
         return 'sbr1.%s.%s' % (self.h.b64url(body), self.h.b64url(self.s.host.sign(body)))
@@ -185,7 +197,7 @@ class SelectedBrowserSupervisor:
                    isolation=False, destinations=False, site_policy=False, reachability='pending_launch_check',
                    vm_uuid=self.h.VM_UUID, valid_until=self.h.stamp(self.s.clock() + 30))
         try:
-            marker, boundary = self._public_readiness() if c.get('mode')=='public_navigation' else self._acceptance()
+            marker, boundary = self._readiness(c)
             # Validate destinations against protected inventory without target
             # DNS. Dummy public pins are NOT installed or returned as authority.
             for d in c['destinations']['allowed_origins']:
@@ -208,7 +220,7 @@ class SelectedBrowserSupervisor:
                        isolation=True, destinations=True, site_policy=True, vm_uuid=boundary['vm_uuid'],
                        valid_until=self.h.stamp(min(marker['expires_at'], self.s.clock() + 30)),
                        code=None if not self.s._live() else 'ACTIVE_ATTEMPT')
-            if c.get('mode')=='public_navigation':
+            if c.get('mode')=='public_navigation' or c['destinations']['network_policy_ref'] is None:
                 out.update(capabilities={k:'verified' for k in ('installed_helpers','loaded_helpers','vm','fence','chromium_policy','gateway','live_view','protected_inventory')},
                            helper_hashes=self.loaded_files.copy(),protected_inventory_sha256=self.policy.digest(self.policy.canonical({k:marker[k] for k in ('protected_hosts','protected_addresses')})))
         except Exception as e:
@@ -303,7 +315,7 @@ class SelectedBrowserSupervisor:
                     self.fail('ACTIVE_ATTEMPT')
                 if params['attempt_id'] in self.s.state['attempts'] or params['run_id'] in self.s.state['runs']:
                     self.fail('ATTEMPT_EXISTS')
-            marker, boundary = self._public_readiness() if c.get('mode')=='public_navigation' else self._acceptance()
+            marker, boundary = self._readiness(c)
             deadline = min(supplied_deadline, self.s.clock() + limits['max_seconds'])
             network = self._network_plan(c, marker, deadline)
             ident = dict(project_id=params['project_id'], run_id=params['run_id'], attempt_id=params['attempt_id'],
@@ -821,8 +833,8 @@ class SelectedBrowserSupervisor:
 
     def grant_destination(self, params):
         a = self._ref(params, ('grant', 'destination'))
-        marker, _ = self._acceptance()
         c = self.policy.strict_json(a['configuration_json'])
+        marker, _ = self._readiness(c)
         destination = params['destination']
         grant = params['grant']
         if (not self.h.exact(destination, ('id','origin','roles','session_headers')) or
@@ -1216,6 +1228,17 @@ class SelectedBrowserSupervisor:
                 self.fail('TEARDOWN_NETWORK_UNVERIFIED')
             a['selected_final_network'] = {k:status[k] for k in fields}
             a['selected_final_network'].update(pending_count=status['outstanding_requests'],ledger_sha256=status['ledger_sha256'])
+            if self.policy.strict_json(a['configuration_json']).get('mode')=='public_navigation':
+                value=status.get('public_navigation_evidence')
+                keys=('completed_redirects','cross_origin_resources','last_completed_document_origin','last_completed_document_url_sha256')
+                if (not self.h.exact(value,keys) or any(not self.h.safe_int(value[k]) or value[k]>status['requests'] for k in keys[:2]) or
+                        (value[keys[2]] is None)!=(value[keys[3]] is None)):
+                    self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+                if value[keys[2]] is not None:
+                    parts=self.policy.url_parts(value[keys[2]],origin_only=True)
+                    if parts['origin']!=value[keys[2]] or not isinstance(value[keys[3]],str) or not self.h.HEX64.fullmatch(value[keys[3]]):
+                        self.fail('TEARDOWN_NETWORK_UNVERIFIED')
+                a['selected_public_navigation_evidence']=value.copy()
             a['gateway_ledger_sha256'] = status['ledger_sha256']
             self.s._save()
             if status['inflight'] or status['outstanding_requests']:
@@ -1268,6 +1291,8 @@ class SelectedBrowserSupervisor:
                    policy_sha256=a['policy_sha256'], final_network=a['selected_final_network'],
                    closed=dict(browser=descendants, network=bool(a.get('gateway_released') or not a.get('gateway_registered')),
                                                                 session=workspace, temporary_files=workspace))
+        if a.get('selected_public_navigation_evidence'):
+            out['public_navigation_evidence']=a['selected_public_navigation_evidence']
         payload = dict(kind='selected-browser-teardown', **out, original_fence=a['original_fence'], reason=reason,
                        vm_uuid=self.h.VM_UUID, boot_id=a.get('boot_id'), workspace_id=a.get('workspace_id'),
                        network_plan_sha256=a.get('network_plan_sha256'), gateway_ledger_sha256=a.get('gateway_ledger_sha256'),

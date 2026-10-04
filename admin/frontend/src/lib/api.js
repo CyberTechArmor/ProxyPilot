@@ -2557,6 +2557,10 @@ export const browserAgentsApi = {
 // Administrators' Operations toggles (Operations, agent metadata, agent runs).
 // Changing one needs sudo; the shared request() opens the sudo prompt.
 export const operationsSettingsApi = {
+  setupSourceMemory: async () => {
+    await requestSudo();
+    return request('/operations-settings/source-memory', { method: 'POST', cache: 'no-store', noReplay: true, body: JSON.stringify({}) });
+  },
   get: () => request('/operations-settings', { cache: 'no-store' }),
   set: (name, enabled) => request(`/operations-settings/${encodeURIComponent(name)}`, {
     method: 'PUT', cache: 'no-store', body: JSON.stringify({ enabled }) }),

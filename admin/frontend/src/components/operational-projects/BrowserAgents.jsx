@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { FileText, Maximize2, Minimize2 } from 'lucide-react';
 import { browserAgentsApi as api } from '@/lib/api';
 import { requestAgentControl } from '@/lib/agent-control';
@@ -139,6 +140,7 @@ function BrowserExecution({paths,project,draft,owner,operator,perform,setRun}) {
   }
   return <section aria-label="Saved configuration execution" className="rounded-md border p-3 space-y-3 min-w-0">
     <h4 className="font-semibold">Runtime readiness for saved revision {saved.revision}</h4><Readiness value={ready}/>
+    {ready?.checks?.some(check=>check.code==='PRIVATE_SOURCE_MEMORY_UNAVAILABLE')&&<p className="text-sm break-words">An administrator must set up private Source Memory in <Link to="/operational-projects" className="inline-flex min-h-11 items-center text-primary underline">Projects &amp; SOPs → Operations settings</Link>, then have the owner restart the dashboard backend and check readiness.</p>}
     <Action variant="outline" disabled={blocked} onClick={()=>execute(async signal=>setReady((await api.get(`${paths.configurations}/${saved.id}/readiness`,signal)).readiness),'Runtime readiness refreshed.')}>Check readiness</Action>
     <div className="border-t pt-3 space-y-2"><p className="font-medium text-sm">Model disclosure consent: {ready?.model_consent?.allowed===true||ready?.checks?.find(c=>['model_consent','owner_consent'].includes(c.kind))?.state==='ready'||consent?.allowed===true?'given':consent?.allowed===false?'withdrawn':'check readiness'}</p><p className="text-sm text-muted-foreground">The model can receive the approved guide and bounded selected-page content. Only the owner can allow it for this saved revision; credentials stay in the controlled browser session.</p>
       {owner&&<><label className="flex min-h-11 items-start gap-3 py-2 text-sm"><input className="mt-1 shrink-0" type="checkbox" checked={reviewed} disabled={blocked} onChange={e=>setReviewed(e.target.checked)}/><span>I reviewed: {BROWSER_CONSENT}.</span></label><div className="flex flex-wrap gap-2"><Action disabled={blocked||!reviewed} onClick={()=>execute(signal=>consentDecision(signal,true),'Owner consent recorded for this revision. No run started.')}>Give model consent</Action><Action variant="outline" disabled={blocked} onClick={()=>execute(signal=>consentDecision(signal,false),'Model consent withdrawn.')}>Withdraw model consent</Action></div></>}

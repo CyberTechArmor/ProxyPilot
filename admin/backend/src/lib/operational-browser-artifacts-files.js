@@ -18,7 +18,7 @@ export function createBrowserArtifactFiles(root) {
     let p = root;
     for (;;) {
       const s = fs.lstatSync(p);
-      if (!s.isDirectory() || s.isSymbolicLink() || (p === root && (s.mode & 0o077 || s.uid !== process.getuid()))) unavailable();
+      if (!s.isDirectory() || s.isSymbolicLink() || (p === root && ((s.mode & 0o777) !== 0o700 || s.uid !== process.getuid()))) unavailable();
       if (path.dirname(p) === p) break;
       p = path.dirname(p);
     }

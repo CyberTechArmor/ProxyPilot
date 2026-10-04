@@ -888,6 +888,77 @@ class LocalTransportTests(unittest.TestCase):
         self.assertIn(b'fixture response', actual)
         self.assertEqual(len(self.received), 1)
 
+    def test_cancelled_empty_tls_tunnel_preserves_ticket_and_does_not_freeze(self):
+        gate = self.gate()
+        reply = gate.review_request('read', metadata(gate.policy))
+        host, client = socket.socketpair()
+        thread = threading.Thread(target=g.serve_selected_socket, args=(host, gate, self.tls), daemon=True)
+        thread.start()
+        try:
+            client.sendall(b'CONNECT site.example:443 HTTP/1.1\r\nHost: site.example:443\r\n\r\n')
+            self.assertIn(b'200 Connection Established', client.recv(1024))
+            context = ssl.create_default_context(cafile=str(self.cert))
+            tls_client = context.wrap_socket(client, server_hostname='site.example')
+            try:
+                tls_client.unwrap()  # TLS close_notify, zero HTTP request bytes.
+            except ssl.SSLError:
+                pass  # The proxy closes rather than negotiating further TLS.
+            tls_client.close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(gate.state, 'running')
+            self.assertIsNone(gate.reason)
+            self.assertEqual(gate.status()['requests'], 0)
+            self.assertEqual(gate.status()['effects_sent'], 0)
+            self.assertEqual(len(self.connected), 0)
+            self.assertEqual(self.received, [])
+            self.assertEqual(gate.ledger.rows[-1]['kind'], 'client_closed_without_request')
+            self.assertEqual(gate.ledger.rows[-1]['data'], {'code': 'HTTP_REQUEST_EMPTY', 'stage': 'tls_request'})
+            # The exact single-use ticket is still usable for its original read.
+            status, _, _ = gate.forward('GET', 'https://site.example/',
+                {g.TICKET_HEADER: reply['ticket']}, b'')
+            self.assertEqual(status, 200)
+            self.assertEqual(gate.status()['requests'], 1)
+            gate.revoke()
+            self.assertEqual(gate.final_status()['inflight'], 0)
+            self.assertEqual(gate.pending, {})
+        finally:
+            client.close()
+            host.close()
+            thread.join(timeout=3)
+
+    def test_nonempty_partial_tls_request_still_freezes_before_contact(self):
+        gate = self.gate()
+        reply = gate.review_request('read', metadata(gate.policy))
+        host, client = socket.socketpair()
+        thread = threading.Thread(target=g.serve_selected_socket, args=(host, gate, self.tls), daemon=True)
+        thread.start()
+        try:
+            client.sendall(b'CONNECT site.example:443 HTTP/1.1\r\nHost: site.example:443\r\n\r\n')
+            self.assertIn(b'200 Connection Established', client.recv(1024))
+            context = ssl.create_default_context(cafile=str(self.cert))
+            tls_client = context.wrap_socket(client, server_hostname='site.example')
+            tls_client.sendall(b'GET / HTTP/1.1')
+            try:
+                tls_client.unwrap()
+            except ssl.SSLError:
+                pass
+            tls_client.close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(gate.state, 'paused')
+            self.assertEqual(gate.reason, 'HTTP_REQUEST_INVALID')
+            self.assertEqual(gate.status()['requests'], 0)
+            self.assertEqual(len(self.connected), 0)
+            self.assertEqual(self.received, [])
+            gate.revoke()
+            self.assertEqual(gate.final_status()['inflight'], 0)
+            self.assertEqual(gate.pending, {})
+        finally:
+            client.close()
+            host.close()
+            thread.join(timeout=3)
+
 
     def test_plain_http_proxy_exact_ticket_with_real_local_upstream(self):
         plain=ThreadingHTTPServer(('127.0.0.1',0),self.server.RequestHandlerClass)
@@ -1009,6 +1080,12 @@ class DurableControlTests(unittest.TestCase):
                 recovered.server_close()
 
     def test_parser_duplicate_folding_smuggling_and_unsupported_transport(self):
+        with self.assertRaises(p.Denied) as empty:
+            g.read_request(io.BytesIO(b''), allow_empty=True)
+        self.assertEqual(empty.exception.code, 'HTTP_REQUEST_EMPTY')
+        with self.assertRaises(p.Denied) as initial_empty:
+            g.read_request(io.BytesIO(b''))
+        self.assertEqual(initial_empty.exception.code, 'HTTP_REQUEST_INVALID')
         for raw in (b'GET / HTTP/1.1\r\nHost: x\r\nHost: y\r\n\r\n',
                     b'GET / HTTP/1.1\r\n folded: x\r\n\r\n',
                     b'GET / HTTP/2.0\r\n\r\n',

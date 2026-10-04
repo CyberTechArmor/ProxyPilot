@@ -830,9 +830,11 @@ class AttemptGateway:
                 conn.close()
 
 
-def read_request(reader):
+def read_request(reader, allow_empty=False):
     line = reader.readline(MAX_HEADER_BYTES + 1)
-    if not line or len(line) > MAX_HEADER_BYTES or not line.endswith(b'\r\n'):
+    if not line:
+        raise Denied('HTTP_REQUEST_EMPTY' if allow_empty else 'HTTP_REQUEST_INVALID')
+    if len(line) > MAX_HEADER_BYTES or not line.endswith(b'\r\n'):
         raise Denied('HTTP_REQUEST_INVALID')
     try:
         method, target, version = line[:-2].decode('ascii').split(' ')
@@ -903,7 +905,7 @@ def serve_selected_socket(request, gateway, tls):
             client.settimeout(max(.1, min(gateway.policy.expires_at,
                 gateway.started_at + gateway.policy.configuration['budgets']['max_seconds']) - gateway.clock()))
             reader, writer = client.makefile('rb'), client.makefile('wb')
-            method, target, headers = read_request(reader)
+            method, target, headers = read_request(reader, allow_empty=True)
             if (not target.startswith('/') or target.startswith('//') or '#' in target or
                     headers.get('host') != parts['origin'].split('://', 1)[1]):
                 raise Denied('HTTP_TARGET_INVALID')
@@ -924,6 +926,14 @@ def serve_selected_socket(request, gateway, tls):
         status, response_headers, body = gateway.forward(method, url, headers, body)
         send_response(writer, status, response_headers, body)
     except (Denied, OSError, ssl.SSLError, http.client.HTTPException) as e:
+        if isinstance(e, Denied) and e.code == 'HTTP_REQUEST_EMPTY' and client is not None:
+            # A successful approved CONNECT/TLS negotiation can be speculative
+            # or cancelled before Chromium sends any HTTP bytes. No request
+            # reached forward(), consumed a ticket or contacted an upstream.
+            # Keep malformed nonempty lines and incomplete headers fatal.
+            with gateway.lock:
+                gateway._audit('client_closed_without_request', dict(code=e.code, stage='tls_request'))
+            return
         if not connect_refusal_finalized:
             with gateway.lock:
                 try:

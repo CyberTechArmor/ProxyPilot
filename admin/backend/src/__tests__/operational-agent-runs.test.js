@@ -1,3 +1,4 @@
+import { historicalDemoCall } from './helpers/historical-demo-call.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
@@ -13,8 +14,9 @@ const sudo = (req, res, next) => req.sudo === true ? next()
 function routed(w, options = {}) {
   const router = createOperationsRouter({ Router: fixtureRouter, store: w.f.store, enabled: true, agentsEnabled: true,
     lookupLimiter: (_r, _s, n) => n(), agentRuns: w.service, requireSudo: sudo, ...options });
+  const fixtureCall = historicalDemoCall(w, request => router.dispatch(request), options.agentRuns !== null && options.enabled !== false && options.agentsEnabled !== false);
   const call = (user, method, path, body = {}, extra = {}) =>
-    router.dispatch({ method, path, body, user, headers: extra.headers ?? {}, query: extra.query ?? {}, sudo: extra.sudo });
+    fixtureCall({ method, path, body, user, headers: extra.headers ?? {}, query: extra.query ?? {}, sudo: extra.sudo });
   return { router, call };
 }
 async function until(fn, label, ms = 5000) {
@@ -76,7 +78,8 @@ test('configuration: execution needs the supervisor configured; without it EXECU
   assert.equal(list.statusCode, 200);
   assert.equal(list.body.execution.available, false);
   assert.equal(list.body.profiles[0].ready, false);
-  assert.match(list.body.profiles[0].reasons[0], /no worker supervisor is configured/);
+  assert.ok(list.body.profiles[0].reasons.some(reason => /no worker supervisor is configured/.test(reason)));
+  assert.match(list.body.profiles[0].reasons[0], /retired/);
   const start = await call(w.users.operator, 'POST', `/${w.p.id}/agent-runs`, { profile_id: w.profile.id });
   assert.deepEqual([start.statusCode, start.body.code, start.body.reason], [503, 'EXECUTION_UNAVAILABLE', 'not_configured']);
   const approve = await call(w.users.operator, 'POST', `/agent-approvals/${w.p.id}`, {}, { sudo: true });
@@ -92,7 +95,7 @@ test('roles: run roles see and start runs; a viewer is refused with the reason; 
     const list = await call(w.users[role], 'GET', `/${w.p.id}/agent-runs`);
     assert.equal(list.statusCode, 200, role);
     assert.equal(list.body.own_role, role);
-    assert.equal(list.body.profiles[0].ready, true, `${role}: ${list.body.profiles[0].reasons}`);
+    assert.equal(list.body.profiles[0].ready, false, `${role}: ${list.body.profiles[0].reasons}`);
     assert.equal(list.body.profiles[0].binding.username, 'a4-fixture@demo.fractionate.ai');
   }
   const viewer = await call(w.users.viewer, 'GET', `/${w.p.id}/agent-runs`);
@@ -394,7 +397,7 @@ test('profile settings: consent is owner-only with If-Match and the typed statem
     { headers: { 'if-match': '"99"' } })).statusCode, 412);
   const ok = await call(w.users.owner, 'PUT', path, { model_guide_consent: true, reviewed_statement: CONSENT }, rev);
   assert.deepEqual([ok.statusCode, ok.body.profile.model_guide_consent], [200, true]);
-  assert.equal((await call(w.users.owner, 'GET', `/${w.p.id}/agent-runs`)).body.profiles[0].ready, true);
+  assert.equal((await call(w.users.owner, 'GET', `/${w.p.id}/agent-runs`)).body.profiles[0].ready, false);
   const version = w.approveGuide('A guide with no hard rules.');
   const profile = w.f.store.profile(w.users.owner, w.p.id, w.profile.id).profile;
   w.f.store.assignProfile(w.users.owner, w.p.id, w.profile.id, profile.revision, { guide_version_id: version.id });

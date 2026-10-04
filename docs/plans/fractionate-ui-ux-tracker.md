@@ -1,5 +1,26 @@
 # Fractionate UI/UX alignment tracker
 
+## Current owner-directed UI release — 2026-10-04
+
+This section supersedes the historical ownership, exposed-demo and reference-retrieval wording below. Work is in cloud isolated worktrees; the owner performs production updates. Original Library reference bytes were retrieved and inspected on October 4. No production mutation was performed for this slice.
+
+| Item | Status | Evidence / deployment | What I should see or be able to do |
+| --- | --- | --- | --- |
+| Projects original hierarchy | In progress | New two tall Overview cards and full-width Access; independent source68c8c18a approved; integrated10journeys/seven-width overflow passed; publication/CI blocked | Projects & SOPs first, 210px desktop navigation, project/detail split, Guide & material and Version & readiness |
+| Four-step browser setup | In progress | Seven fixture journeys; six-width checks; final narrow stepper corrected; seven exact integrated journeys and four Lighthouse100 audits passed | Work → Connections → Controls → Review; plain website/objective fields; editable inert settings; exact review before execution |
+| Original Add connection dialog | In progress | Six-width create/edit/conflict/history/revoke, keyboard/focus, axe0 and mobile Lighthouse100 fixtures | Centered600px dialog, aligned fields, segmented types; contributor-private inert plans, no secret intake |
+| General-runner Flightdeck | In progress | Six-width native/fallback/fullscreen/approval/Stop fixtures; independent final source review approved; publication/CI blocked | Active browser fills work area,64/36 browser and review rail,32px task title, compact controls, Task/Recent activity; project list returns after Stop |
+| Agents overview | In progress | Real API metadata fixture, bounded6-project batches, six-width axe0 and Lighthouse100 | Two-column cards for loaded real runs; explicit project setup/run links; no invented thumbnails or fleet concurrency |
+| Demo retirement | In progress | Access-checked410 for start/resume, retained historical Stop/approval/recovery; local historical lifecycle journeys passed; exact final CI blocked | No demo creation/start/practice/resume; historical sign-in records and controls remain behind disclosures |
+| Project connection plans everywhere | In progress | Global Connections permission/current-revision/identity-race fixture, six-width axe0 and Lighthouse100 | Choose permitted project, manage own inert plans in Connections, setup and project Access; existing broker records remain in storage |
+| PR747 necessary metadata dependency | Blocked | Independently source-reviewed; exact91621229 CI passed; automatic approval review rejected merge | Draft connection records and durable human comments; enrollment/OAuth execution remain unavailable |
+| Exact candidate merge / owner update | Blocked | Source publication and merge approval review rejected; final source68c8c18a independently approved; CI blocked until publication | Concrete reviewed PR first; owner ordinary app update after merge; no runtime Install for this UI slice |
+| Deployed acceptance | Blocked | Waiting for owner update; fixtures are not deployed/provider proof | Verify running source/dashboard/agent and unchanged installed/loaded helpers, then serialized actual public browsing, Stop and UI checks |
+
+No numerical completion percentage or pixel-perfect acceptance is assigned. Follow [current release procedure](fractionate-ui-first-release-20261004.md) and [reference comparison](fractionate-ui-ux-visual-review.md). Preserve the frozen broader backend candidates until this UI phase is accepted.
+
+## Historical October 2 evidence (not current acceptance)
+
 Owner: Thomas. Started 2026-10-02; repository implementation and verification on Duo.
 Branch: `ui/mockup-alignment-20261002`. Frozen product source: `00b5c68d0816cb0921a2caee71a11adcf8d71ec7`.
 Thomas authorized draft PR publication on 2026-10-02. Final demo labels/navigation are being verified before publication; merge and deployment remain pending separate decisions.

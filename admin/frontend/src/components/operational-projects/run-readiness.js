@@ -3,7 +3,7 @@
 export const PILOT_ORIGIN = 'https://demo.fractionate.ai';
 
 // Presentation labels never replace the saved section or API identities.
-export const DEMO_RUNS_LABEL = 'Demo sign-in runs';
+export const DEMO_RUNS_LABEL = 'Historical runs';
 export const operationSectionLabel = section => section === 'Agent runs' ? DEMO_RUNS_LABEL : section;
 export const operationsToggleLabel = toggle => toggle.name === 'agent_runs' ? DEMO_RUNS_LABEL : toggle.label;
 

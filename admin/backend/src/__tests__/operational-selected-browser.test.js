@@ -99,6 +99,8 @@ test('start pins exact config/guide, omits unset project caps, remains separate 
   const started=await w.service.start(w.owner,w.p.id,w.config.id,input);assert.equal(started.run.state,'running');assert.equal((await w.service.start(w.owner,w.p.id,w.config.id,input)).run.id,started.run.id);assert.equal(w.calls.filter(c=>c[0]==='launch').length,1);
   const launch=w.calls[0][1];assert.equal(launch.project_id,w.p.id);assert.equal(launch.configuration_revision,1);assert.equal(launch.workspace_id,started.run.attempt_id);
   assert.equal(w.f.db.prepare('SELECT COUNT(*) AS n FROM ops_agent_runs').get().n,0);
+  assert.equal(started.run.configuration_name,w.config.configuration.name);
+  assert.equal(w.service.get(w.viewer,w.p.id,started.run.id).run.configuration_name,w.config.configuration.name);
   assert.throws(()=>w.f.db.prepare("UPDATE ops_selected_browser_runs SET configuration_sha256=? WHERE id=?").run('a'.repeat(64),started.run.id),/immutable/);
 }));
 test('configured owner cap narrows finite agent budget; missing cap never invents a default',withWorld(async w=>{

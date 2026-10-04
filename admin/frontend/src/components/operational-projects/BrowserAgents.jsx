@@ -29,7 +29,7 @@ function Hash({label,value}) {return <div><dt>{label}</dt><dd className="font-mo
 
 // Private source text stays in React memory and the versioned project record;
 // never in browser storage, a URL, a console, or a provisioning request.
-export function BrowserAgents({base,project,onChanged=async()=>{}}) {
+export function BrowserAgents({base,project,onChanged=async()=>{},onDeckChange,browserRunId}) {
   const paths=browserPaths(base),[runs,setRuns]=useState([]),[run,setRun]=useState(null),[assets,setAssets]=useState([]);
   const [busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[lost,setLost]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState(''),[conversion,setConversion]=useState(null);
   const [publicUrl,setPublicUrl]=useState(''),[publicReady,setPublicReady]=useState(null),publicStartKey=useRef(null);
@@ -42,13 +42,13 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     setError(`${e.message}${e.code?` (${e.code})`:''}${e.status===412?' Your entered settings are retained. Reload or reconcile the current revision before retrying.':''}`);
   }
   async function load(signal) {
-    const result=await api.get(paths.runs,signal);if(!signal?.aborted){setRuns(result.runs||[]);const active=result.runs?.find(item=>item.execution_mode==='public_navigation'&&!TERMINAL.includes(item.state));if(active){const current=await api.get(`${paths.runs}/${active.id}`,signal);if(!signal?.aborted)setRun(current);}}
+    const result=await api.get(paths.runs,signal);if(!signal?.aborted){setRuns(result.runs||[]);const active=browserRunId?{id:browserRunId}:result.runs?.find(item=>!TERMINAL.includes(item.state));if(active){const current=await api.get(`${paths.runs}/${encodeURIComponent(active.id)}`,signal);if(!signal?.aborted)setRun(current);}}
   }
   useEffect(()=>{
     mounted.current=true;const c=new AbortController(),gen=++epoch.current;controller.current=c;setLoading(true);setLost(false);setError('');setRun(null);setAssets([]);setRuns([]);setConversion(null);
     load(c.signal).catch(e=>{if(!c.signal.aborted&&gen===epoch.current)fail(e);}).finally(()=>{if(!c.signal.aborted&&gen===epoch.current)setLoading(false);});
     return()=>{mounted.current=false;epoch.current++;c.abort();};
-  },[base,project.own_role,project.archived_at]);
+  },[base,project.own_role,project.archived_at,browserRunId]);
   useEffect(()=>{
     if(!run?.run?.id||TERMINAL.includes(run.run.state)||lost)return;
     const c=new AbortController(),gen=epoch.current,timer=setInterval(()=>api.get(`${paths.runs}/${run.run.id}`,c.signal).then(value=>{if(!c.signal.aborted&&gen===epoch.current)setRun(value);}).catch(e=>{if(!c.signal.aborted&&gen===epoch.current)fail(e);}),2000);
@@ -60,7 +60,11 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     catch(e){if(mounted.current&&gen===epoch.current&&!signal?.aborted)fail(e);}
     finally{lock.current=false;if(mounted.current&&gen===epoch.current)setBusy(false);}
   }
-  return <>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}<Panel title="Public browser" description="Open a public website in the isolated browser and watch it live.">
+  const deckActive=!!run && !TERMINAL.includes(run.run.state) && !lost;
+  useEffect(()=>{onDeckChange?.(deckActive);return()=>onDeckChange?.(false);},[deckActive,onDeckChange]);
+  return <div className="min-w-0 space-y-4" data-browser-agent-workspace>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}{run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun key={run.run.id} base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform}/>}
+    {run&&run.run.execution_mode!=='public_navigation'&&<BrowserRun key={run.run.id} base={base} paths={paths} data={run} project={project} busy={busy} setData={setRun} perform={perform}/>}
+    <div hidden={deckActive}><Panel title="Public browser" description="Open a public website in the isolated browser and watch it live.">
     <Field label="Website" type="url" placeholder="https://example.com" value={publicUrl} disabled={busy||lost} onChange={e=>{setPublicUrl(e.target.value);setPublicReady(null);publicStartKey.current=null;}}/>
     <Action disabled={!operator||busy||loading||lost||!publicUrl.trim()||runs.some(item=>!TERMINAL.includes(item.state))} onClick={()=>perform(async signal=>{
       publicStartKey.current??=crypto.randomUUID();
@@ -70,8 +74,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     {publicReady&&<><Readiness value={publicReady}/><details><summary className="cursor-pointer min-h-11 py-3 text-sm">Measured browser capabilities</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(publicReady)}</pre></details></>}
     <p className="text-sm text-muted-foreground">Model tasks, private sign-in, files and internal websites are unavailable in this mode.</p>
     <p role="status" className="text-sm">{busy?'Working…':message}</p>
-    {run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun key={run.run.id} base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform}/>}
-  </Panel>{run&&run.run.execution_mode!=='public_navigation'&&<BrowserRun key={run.run.id} base={base} paths={paths} data={run} project={project} busy={busy} setData={setRun} perform={perform}/>}<details className="rounded-md border p-3" open={!run}><summary className="min-h-11 cursor-pointer py-3 font-medium">Browser task setup and history</summary><BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
+  </Panel></div><div hidden={deckActive}><details className="rounded-md border p-3" open={!run}><summary className="min-h-11 cursor-pointer py-3 font-medium">Browser task setup and history</summary><BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
     privateUnavailable={lost} onPrivateClear={clearPrivate}
     renderPreparation={draft=>draft.editable&&<div className="space-y-4">
       <PrivateAssets paths={paths} assets={assets} setAssets={setAssets} busy={draft.busy} owner={owner} perform={perform}/>
@@ -86,7 +89,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
         {operator&&<Action variant="outline" disabled={draft.busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Run authority verified. Submit the intended action explicitly.',{refresh:false})}>Verify run authority</Action>}</div>
       {draft.saved&&<BrowserExecution key={draft.saved.id} paths={paths} project={project} draft={draft} owner={owner} operator={operator} perform={perform} setRun={setRun}/>}
       <div className="space-y-3"><h3 className="font-semibold">Browser run history</h3>{!runs.length?<p className="text-sm text-muted-foreground">No selected-browser runs yet.</p>:<ul className="space-y-2">{runs.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><p className="text-sm font-medium break-words">{draft.saved&&draft.saved.id===item.configuration_id?draft.saved.configuration.name:'Browser agent'} · {words(item.state)}</p><p className="text-xs text-muted-foreground break-all">{item.created_at||item.id}</p></div><Action variant="outline" disabled={draft.busy} onClick={()=>perform(async signal=>setRun(await api.get(`${paths.runs}/${item.id}`,signal)),'Run record loaded.',{refresh:false})}>Inspect browser run</Action></li>)}</ul>}</div>
-</section>}/></details></>;
+</section>}/></details></div></div>;
 }
 
 function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
@@ -100,7 +103,7 @@ function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
     <PublicBrowserFrames key={`${run.attempt_id}:${run.fence}`} root={root} attemptId={run.attempt_id} fence={run.fence}/>:
     <LiveBrowser key={`${run.attempt_id}:${run.fence}`} base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>):
     <div className="flex aspect-[16/10] items-center justify-center rounded-md bg-muted/30 p-6 text-center"><div className="space-y-2"><h4 className="text-lg font-semibold">{active?'Browser view unavailable':'Browser session ended'}</h4><p className="text-sm text-muted-foreground">{active?'Inspect Activity for the measured launch state.':'The transient browser image is cleared. Inspect Activity and Review for the outcome and cleanup.'}</p></div></div>;
-  return <BrowserFlightdeck title="Public browser" state={words(run.state)} actions={actions} browser={browser}
+  return <BrowserFlightdeck title={run.configuration_name||'Public browser'} subtitle={`Run ${run.id.slice(0,8)} · Public website`} task="Open the public website within the verified destination policy. No model or approved guide is required." recent={run.result_code?`Outcome: ${words(run.result_code)}`:`${(run.usage.requests??0).toLocaleString()} requests · ${(run.usage.response_bytes??0).toLocaleString()} response bytes`} state={words(run.state)} actions={actions} browser={browser}
     activity={<><h4 className="font-semibold">Run activity</h4><p>{active?'The isolated browser is active.':'The browser has ended.'}</p><p>{active?`Video: ${imageOnly?'unavailable — transient images are available':words(liveState)}`:'Viewing ended.'}</p>
       {run.launch_failure_code?<p role="alert" className="break-words">Browser launch refused: {words(run.launch_failure_code)}</p>:run.result_code&&<p className="break-words">Outcome: {words(run.result_code)}</p>}
       <dl className="space-y-2"><Hash label="Started" value={run.started_at}/><Hash label="Ended" value={run.ended_at}/></dl>
@@ -245,7 +248,7 @@ function BrowserRun({base,paths,data,project,busy,setData,perform}) {
     <details className="rounded-md border p-3"><summary className="min-h-11 cursor-pointer py-3 font-medium">Receipts and cleanup evidence</summary><ul className="space-y-3 text-sm">{(data.receipts||[]).map((receipt,index)=><li key={receipt.id||index} className="rounded-md border p-3 min-w-0"><pre className="whitespace-pre-wrap break-words text-xs [overflow-wrap:anywhere]">{pretty(receipt)}</pre></li>)}</ul>{!data.receipts?.length&&<p className="text-sm">No verified receipts are available yet. A requested action alone does not prove completion or cleanup.</p>}</details></>;
   const outcome=<>{!report&&data.report_visibility==='withheld'&&<p role="status" className="rounded-md border p-3 text-sm">The report is withheld because its private evidence or current disclosure consent is unavailable. Check cited page evidence for the exact source status. {data.report_code}</p>}
     {report&&<section className="space-y-3 text-sm"><h3 className="font-semibold">Run report</h3><p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{report.summary}</p>{report.uncertainty&&<p className="break-words">Uncertainty: {report.uncertainty}</p>}<ul className="space-y-2">{report.limitations?.map((text,index)=><li key={index} className="break-words">{text}</li>)}</ul><ul className="space-y-2">{report.citations?.map((citation,index)=>{const url=typeof citation==='string'?citation:citation.url,href=safeBrowserCitation(url);return <li key={index}>{href?<a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center break-all underline">{typeof citation==='string'?citation:citation.title||url}</a>:<span className="break-words">Evidence reference: {typeof citation==='string'?citation:pretty(citation)}</span>}</li>;})}</ul></section>}</>;
-  return <BrowserFlightdeck title="Browser task" state={words(run.state)} actions={actions} browser={browser} reviewCount={reviewCount}
+  return <BrowserFlightdeck title={run.configuration_name||'Browser task'} subtitle={`Run ${run.id.slice(0,8)} · Bounded website task`} task="Follow the pinned settings. Ask before each consequential change." recent={run.result_code?`Outcome: ${words(run.result_code)}`:pending.length?`${pending.length} requests held for exact review`:`Recorded state: ${words(run.state)}`} state={words(run.state)} actions={actions} browser={browser} reviewCount={reviewCount}
     activity={<><h4 className="font-semibold">Task outcome</h4>{!report&&data.report_visibility!=='withheld'&&<p>{active?'The bounded task is active. Review requests and actual recorded use below.':'No readable report is available for this run. Inspect its result and evidence before concluding the task succeeded.'}</p>}{run.result_code&&<p className="break-words">Result: {words(run.result_code)}</p>}{outcome}{metrics}</>}
     details={<><h4 className="font-semibold">Run details and evidence</h4>{identity}{evidence}</>}
     review={<>{uncertainty}{approvals}{!pending.length&&!data.uncertainties?.some(item=>item.state==='unresolved')&&<p>No requests are waiting for review. Each future consequential change still requires its own exact approval.</p>}</>}/>;

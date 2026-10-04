@@ -337,3 +337,7 @@ Tests: `website-review.browser.mjs`, `website-review-integrated.browser.mjs`,
 `website-review-runtime.browser.mjs` and `website-review-lighthouse.mjs` in
 `admin/frontend/tests`. The sessions, public-site transport and model answers
 are scripted fixtures; these checks do not prove production execution.
+
+## General browser UI-first slice — 2026-10-04
+
+Projects/Overview, four-step browser setup, active Flightdeck, Agents overview and project-scoped connection plans use mobile-first layout at360/375/390/768/1280/1920. Per-slice browser fixtures record guard-disabled overflow,44px primary controls, keyboard/focus and axe0; mobile Lighthouse100 was measured for Agents and the connection pages/dialog. Integrated stepper/whole-word label corrections, all four setup Lighthouse100 audits and independent source68c8c18a review passed. Publication and exact-head CI remain blocked release gates. Original Library pixels were retrieved and inspected in cloud. These are scripted fixture results, not owner deployment or real-provider acceptance. See fractionate-ui-first-release-20261004 and current UI tracker.

@@ -24,6 +24,24 @@ export const SUDO_PASSWORD = 'harness-password';
 export const SUDO_TOTP = '246810';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
+// Populate signed historical lifecycle fixtures without invoking a retired
+// production POST or implying current demo UI/API support. No HTTP endpoint
+// exposes these helpers; only the browser test's Node process can call them.
+export async function seedHistoricalRun(world, { role = 'operator', practice = null } = {}) {
+  const user = world.users[role];
+  if (!user) throw new Error(`Unknown historical fixture role: ${role}`);
+  return world.service.start(user, world.p.id, { profile_id: world.profile.id,
+    credential_binding_id: world.binding?.binding_id ?? null,
+    ...(practice ? { practice: { fixture_mode: practice } } : {}) });
+}
+
+export async function seedHistoricalResume(world, runId, { role = 'operator' } = {}) {
+  const user = world.users[role];
+  if (!user) throw new Error(`Unknown historical fixture role: ${role}`);
+  return world.service.resume(user, world.p.id, runId);
+}
+
+
 function cookies(req) {
   return Object.fromEntries(String(req.headers.cookie || '').split(/;\s*/).filter(Boolean).map(part => {
     const at = part.indexOf('=');
@@ -112,5 +130,8 @@ export async function startHarness({ execution = true, delayMs = 350, toggles = 
     } });
   await server.listen();
   const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
-  return { origin, world, requests, sudoUntil, controlGrants, close: async () => { await server.close(); world.f.close(); } };
+  return { origin, world, requests, sudoUntil, controlGrants,
+    seedHistoricalRun: options => seedHistoricalRun(world, options),
+    seedHistoricalResume: (runId, options) => seedHistoricalResume(world, runId, options),
+    close: async () => { await server.close(); world.f.close(); } };
 }

@@ -1,0 +1,5 @@
+# UI-first source candidate and demo retirement
+
+Owner handoff prioritizes the five original UI references and supersedes exposed-demo preservation. Isolated implementers supplied project/Flightdeck, four-step setup, real-session Agents, private inert connection plans and historical demo-retirement slices; independent reviewer owns final acceptance. Root integrates onto mainf891 with necessary PR747 metadata dependency only. Broader frozen candidates remain untouched.
+
+This record is source preparation, not a merge/deployment claim. Follow docs/plans/fractionate-ui-first-release-20261004.md and the current tracker. Independent source68c8c18a/tree351a2e98 review approved; final build and six-width fixtures passed. Exact-head CI is blocked until publication. Automatic approval review rejected GitHub tree publication and PR747 merge; mainline was not mutated through an alternate operation. Owner production update boundary remains. No dedicated runtime Install, separate manual service restart or Incus upgrade is required by this UI slice; owner ordinary app Update performs its normal application reload.

@@ -1,6 +1,6 @@
 // A7 browser journeys against the UI harness (agent-runs-harness.mjs): the live
 // view and dashboard takeover, the agent-control prompt, decisions after a run,
-// resume, practice runs, the Review tab with the model summary, and layout at
+// Node-seeded historical resume/practice records (no exposed demo launches), the Review tab with the model summary, and layout at
 // six widths. The signalling path is real (the dashboard's own Neko client →
 // the live WebSocket route → the A7 service → the launcher → the scripted
 // supervisor's relay); only the browser's WebRTC is stubbed (a canvas video
@@ -66,6 +66,7 @@ async function as(role, { width = 1280, height = 900, theme = 'dark', live = tru
   }, { user: { id: u.id, username: u.username, role: 'user' }, theme });
   if (live) await ctx.addInitScript(stubWebRtc);
   const page = await ctx.newPage(); page.setDefaultNavigationTimeout(90000);
+  page.fixtureRole = role;
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
   page.on('response', r => { if (r.status() >= 500 || (r.status() === 404 && r.url().includes('/api/') && !shell404.test(r.url()) && !r.url().includes('/operational-projects/'))) page.errors.push(`${r.status()} ${r.url()}`); });
@@ -84,13 +85,12 @@ async function journey(name, fn) {
   catch (error) { report.journeys.push({ name, passed: false, error: error.message }); console.log(`not ok - ${name}\n  ${error.stack}`); throw error; }
   finally { for (const ctx of contexts.splice(0)) await ctx.close(); resetScenario(); await settleAll({ stopActive: true }); }
 }
-async function startFromUi(page) {
-  await page.goto(runsUrl());
-  const start = page.getByRole('button', { name: 'Start run' });
-  await start.waitFor(WAIT);
-  await start.click();
-  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
-  return new URL(page.url()).searchParams.get('run');
+async function openHistoricalRun(page, {practice=null} = {}) {
+  const {run} = await h.seedHistoricalRun({role:page.fixtureRole,practice});
+  await page.goto(runsUrl(run.id));
+  await page.getByRole('button', {name:/Back to (?:run history|.*runs)/}).waitFor(WAIT);
+  assert.equal(await page.getByRole('button',{name:'Start run',exact:true}).count(),0);
+  return run.id;
 }
 const approvalCard = page => page.getByRole('region', { name: 'Approval needed' });
 async function sudoIfAsked(page) {
@@ -177,10 +177,10 @@ try {
     assert.equal(h.requests.some(r => r.method === 'POST' && r.path === `/api/operational-projects/${p.id}/agent-runs`), false);
     assert.deepEqual(page.errors, []);
   });
-  await journey('live view and takeover: confirm it is you once, control the browser, give it back, decide, resume', async () => {
+  await journey('historical live takeover: confirm, control, give back and reconcile; Resume stays retired', async () => {
     resetScenario();
     const page = await as('operator');
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     await page.locator('[data-testid="live-browser"][data-live-state="live"]').waitFor(WAIT);
     // Relay candidates only, with this viewer's own TURN credential.
@@ -233,9 +233,14 @@ try {
     const review = await page.getByTestId('run-review').innerText();
     assert.match(review, /omar-operator took over/);
     assert.match(review, /keys, \d+ clicks, \d+ scrolls \(what was typed is never recorded\)/);
-    // Resume: a new linked run.
-    await page.getByRole('button', { name: 'Resume as a new run' }).click();
-    await page.waitForURL(url => new URL(url).searchParams.get('run') !== runId, WAIT);
+    assert.equal(await page.getByRole('button',{name:'Resume as a new run'}).count(),0);
+    const resume = await page.request.post(`${h.origin}/api/operational-projects/${h.world.p.id}/agent-runs/${runId}/resume`,
+      {headers:{'X-CSRF-Token':'a7-csrf'},data:{}});
+    assert.equal(resume.status(),410);
+    assert.equal((await resume.json()).code,'DEMO_EXECUTION_RETIRED');
+    // Historical linked provenance still reads correctly, using internal fixture setup.
+    const {run:linked} = await h.seedHistoricalResume(runId,{role:'operator'});
+    await page.goto(runsUrl(linked.id));
     await page.getByRole('button', { name: `Resumes run ${runId.slice(0, 8)}` }).waitFor(WAIT);
     await page.getByRole('button', { name: 'Stop run' }).click();
     assert.deepEqual([...page.errors, ...other.errors], []);
@@ -244,7 +249,7 @@ try {
   await journey('a timed-out sign-in blocks the profile until a person decides it (360 px)', async () => {
     resetScenario({ outcome: 'timeout' });
     const page = await as('editor', { width: 360, height: 780, live: false });
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await approveInUi(page);
     await page.getByTestId('reconcile').waitFor(WAIT);
     await page.getByText('Blocks the next start').waitFor(WAIT);
@@ -256,36 +261,27 @@ try {
     assert.equal(step.params.action, 'submit_bound_fixture');
     assert.equal(step.params.ordinal, 3);
     await layoutCheck(page, 'reconcile');
-    await page.goto(runsUrl());
-    await page.getByText(/may or may not have happened/).first().waitFor(WAIT);
-    assert.equal(await page.getByRole('button', { name: 'Start run' }).isDisabled(), true);
-    await page.getByRole('button', { name: 'Open the run to decide' }).click();
-    await page.waitForURL(url => new URL(url).searchParams.get('run') === runId, WAIT);
+    // Existing uncertain history remains actionable without offering another launch.
+    assert.equal(h.world.service.list(h.world.users.owner,h.world.p.id).profiles[0].reconcile_run_id,runId);
+    assert.equal(await page.getByRole('button',{name:'Start run',exact:true}).count(),0);
     const item = page.locator('[data-testid^="reconcile-step:"]');
     await item.getByRole('button', { name: 'It happened' }).click();
     await confirmItsMe(page);
     await item.getByText('Decided').waitFor(WAIT);
     await page.goto(runsUrl());
-    await page.getByRole('button', { name: 'Start run' }).and(page.locator(':enabled')).waitFor(WAIT);
+    await page.getByRole('heading',{name:/Run history|run history/}).first().waitFor(WAIT);
+    assert.equal(await page.getByRole('button',{name:'Start run',exact:true}).count(),0);
     assert.deepEqual(page.errors, []);
   });
 
-  await journey('practice run: choose the demo behaviour; the Review tab says it matched; the model summary is shown', async () => {
+  await journey('historical practice outcome: Review preserves matched result, consented summary and fixture cleanup', async () => {
     resetScenario({ outcome: 'challenge_required' });
-    const owner = await as('owner', { live: false });
-    await owner.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
-    await owner.getByLabel(/I reviewed: Send this profile's finished runs/).check();
-    await owner.getByRole('button', { name: 'Allow summaries' }).click();
-    await owner.getByText('Model summaries of finished runs: allowed').waitFor(WAIT);
+    const owner = h.world.users.owner;
+    const profile = h.world.f.store.profile(owner,h.world.p.id,h.world.profile.id).profile;
+    h.world.f.store.modelSummaryConsent(owner,h.world.p.id,profile.id,profile.revision,
+      {model_summary_consent:true,reviewed_statement:"Send this profile's finished runs, as typed facts, to the model provider for a summary"});
     const page = await as('operator', { width: 375, height: 800, live: false });
-    await page.goto(runsUrl());
-    await page.getByRole('button', { name: 'Practice run…' }).click();
-    const dialog = page.getByRole('dialog').filter({ hasText: 'Start a practice run' });
-    await dialog.waitFor(WAIT);
-    await layoutCheck(page, 'practice-dialog', { dialog: true });
-    await page.setViewportSize({ width: 375, height: 800 });
-    await dialog.getByLabel(/Extra check/).check();
-    await dialog.getByRole('button', { name: 'Start practice run' }).click();
+    await openHistoricalRun(page,{practice:'challenge'});
     await page.getByText('Practice: Extra check').first().waitFor(WAIT);
     await approveInUi(page);
     // On a phone the result is in the Activity panel, not shown beside Browser.
@@ -296,13 +292,13 @@ try {
     await page.getByTestId('run-summary').getByText(h.world.supervisor.scenario.summaryText).waitFor(WAIT);
     await layoutCheck(page, 'review');
     assert.deepEqual(applied.slice(-2), ['challenge', 'normal']);
-    assert.deepEqual([...page.errors, ...owner.errors], []);
+    assert.deepEqual(page.errors, []);
   });
 
   await journey('no live install: a quiet note and still frames, no retry', async () => {
     resetScenario({ liveError: 'LIVE_UNAVAILABLE' });
     const page = await as('operator', { live: false });
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await page.getByText('Live video is not set up on this installation; still frames are shown.').waitFor(WAIT);
     await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
     assert.equal(await page.getByRole('button', { name: 'Try live video again' }).count(), 0);
@@ -313,7 +309,7 @@ try {
   await journey('layout: live pane, takeover bar, confirmation and the agent-control prompt at six widths', async () => {
     resetScenario();
     const page = await as('reviewer');
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await page.locator('[data-testid="live-browser"][data-live-state="live"]').waitFor(WAIT);
     await layoutCheck(page, 'live-pane');
     assert.deepEqual(await deadControls(page), []);

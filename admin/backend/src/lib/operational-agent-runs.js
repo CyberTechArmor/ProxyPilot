@@ -31,6 +31,7 @@ export class AgentRunError extends OperationsError {
 }
 const refuse = (status, code, message, extra) => { throw new AgentRunError(status, code, message, extra); };
 export const AGENT_PILOT_ORIGIN = 'https://demo.fractionate.ai';
+const DEMO_RETIRED_MESSAGE = 'Demo sign-in execution has been retired. Use the public or selected-site browser. Existing runs remain available for history and cleanup.';
 const ACTIVE = ['prepared', 'starting', 'running', 'cancelling'];
 const RUN_ROLES = ['operator', 'editor', 'reviewer'];
 const HELP_CLASSES = new Set(['challenge_required', 'interrupted', 'uncertain_step', 'model_uncertain', 'taken_over',
@@ -185,7 +186,7 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
 
   // Why a profile cannot start, in words; empty means Start can act.
   function readiness(p, row) {
-    const reasons = [];
+    const reasons = [DEMO_RETIRED_MESSAGE];
     if (!execution.available) reasons.push(execution.message);
     if (p.archived_at) reasons.push('The operation is archived.');
     if (!p.site_origin) reasons.push('The project site is not set.');
@@ -296,10 +297,6 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
     const reconciliation = result ? runSubjects(db, r.id) : null;
     const takeovers = takeoversOf(r.id);
     const origin = base.origin;
-    const resumeReason = !execution.available ? execution.message : !result ? 'The run has not ended.'
-      : result.needs_human !== 1 ? 'Only a run that ended needing a person can be resumed.'
-        : origin.resumed_as_run_id ? 'This run was already resumed.'
-          : reconciliation?.gating.length ? 'Decide the uncertain sign-in or sign-out first.' : null;
     return {
       run: { ...base, fence: r.fence, deadline_at: r.deadline_at, policy_digest: r.policy_digest,
         guide_hash: r.guide_hash, guide_version_id: r.guide_version_id, guide_version_number: v?.version_number ?? null,
@@ -320,7 +317,7 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
         view: execution.available && running ? { enabled: true, reason: null }
           : { enabled: false, reason: !execution.available ? execution.message
             : r.state === 'prepared' || r.state === 'starting' ? 'The browser is starting.' : 'The browser is gone: the run is not running.' },
-        resume: resumeReason ? { enabled: false, reason: resumeReason } : { enabled: true, reason: null },
+        resume: { enabled: false, reason: DEMO_RETIRED_MESSAGE },
         reconcile: reconciliation?.items.length ? { enabled: true, reason: null }
           : { enabled: false, reason: result ? 'Nothing in this run needs a decision.' : 'The run has not ended.' },
         live: execution.available && running ? { enabled: true, reason: null }
@@ -503,6 +500,13 @@ export function createAgentRunService({ db, coordinator = null, launcher = null,
 
   return {
     execution,
+    // Public routes never reach the dormant legacy launch methods below. Keep
+    // those methods for historical lifecycle fixtures; they have no wire entry.
+    rejectNewDemoRun(actor, projectId, runId = null) {
+      access(actor, projectId, 'run');
+      if (runId !== null) runIn(projectId, runId);
+      refuse(410, 'DEMO_EXECUTION_RETIRED', DEMO_RETIRED_MESSAGE);
+    },
     capabilities: () => ({ agent_runs_enabled: true, agent_execution_available: execution.available,
       agent_execution_reason: execution.reason, agent_execution_message: execution.message }),
     list(actor, projectId, input = {}) {

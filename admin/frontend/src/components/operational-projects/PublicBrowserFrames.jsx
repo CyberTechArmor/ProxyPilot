@@ -37,7 +37,7 @@ export function PublicBrowserFrames({root,attemptId,fence}) {
   return <section aria-label="Live public browser images" className="space-y-2 min-w-0">
     <p className="text-sm">Video unavailable. Browser images refresh every five seconds while available.</p>
     {frame?<><img src={`data:image/png;base64,${frame.png_base64}`} width={frame.width} height={frame.height}
-      alt="Current public website in the isolated browser" className="w-full max-w-full h-auto rounded-md"/>
+      alt="Current public website in the isolated browser" className="w-full max-w-full aspect-[16/10] object-contain rounded-md bg-zinc-950"/>
       <p className="text-xs text-muted-foreground break-words">Updated {frame.captured_at}</p></>:
       <p role="status" className="text-sm">{error||'Connecting to the browser image…'}</p>}
   </section>;

@@ -23,7 +23,7 @@ const pending={id:'00000000-0000-4000-8000-000000000021',title:'Summarize',instr
 let role='owner',draftState='published',stale=false,denied=false,connectionState='normal',evidenceEnabled=false,draftRevision=1,serverText=guide.instructions;
 let evidenceReferences=[];
 const reviewedWebsite={website_review_enabled:true,website_review_contract:'website-review.v1',website_review_strategy:'http_extract_v1'};
-let websiteGate={...reviewedWebsite},demoRunsEnabled=false;
+let websiteGate={...reviewedWebsite},demoRunsEnabled=false,summaryEnabled=false,summaryRows=[],summaryDenied=false,heldSummary=null,delaySummary=false;
 const retainedReference={demonstration_id:'00000000-0000-4000-8000-000000000041',revision_id:'00000000-0000-4000-8000-000000000042',item_position:0,object_id:'00000000-0000-4000-8000-000000000043',annotation_id:'00000000-0000-4000-8000-000000000044',available:false};
 const draft=()=>({title:draftState==='pending'?pending.title:guide.title,instructions:draftState==='pending'?pending.instructions:serverText,revision:draftRevision,status:draftState,pending_submission:draftState==='pending'?pending:null,contributors:[owner.id],evidence:{references:evidenceReferences}});
 const requests=[],errors=[],agents=[];
@@ -37,7 +37,7 @@ await page.route('**/api/**',async route=>{
  const answer=(data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
  if(path==='/api/auth/verify')return answer({user:owner});
  if(path==='/api/branding')return answer({name:'Fractionate',logo:null});
- if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled,can_manage_settings:false,...websiteGate});
+ if(path==='/api/operational-projects/capabilities')return answer({enabled:true,ui_available:true,agents_metadata_enabled:true,evidence_enabled:evidenceEnabled,agent_runs_enabled:demoRunsEnabled||summaryEnabled,selected_browser_contract:summaryEnabled?'selected-browser.v1':null,can_manage_settings:false,...websiteGate});
  if(path==='/api/connections/capabilities')return answer({mode:'disabled',intake_enabled:false,execution_enabled:false,adapters:[],reason:'BROKER_NOT_ACTIVATED'});
  if(path==='/api/connections')return answer({connections:connectionState==='empty'?[]:connectionState==='restricted'?[{...connection,status:'revoked',rights:['view','use'] }]:[connection]});
  if(path.endsWith('/enrollment-intents'))return answer({intent:{id:'metadata-only',status:'awaiting_activation'},intake_enabled:false});
@@ -49,6 +49,7 @@ await page.route('**/api/**',async route=>{
  const prefix='/api/operational-projects/';
  if(path.startsWith(prefix)){
   if(denied)return answer({error:'Project access was revoked'},403);
+  if(path.endsWith('/browser-agent-runs')){if(summaryDenied)return answer({error:'Run access revoked'},403);if(delaySummary&&path.includes(project.id)){heldSummary=route;return;}return answer({runs:path.includes(project.id)?summaryRows:[]});}
   if(path.endsWith('/demonstrations'))return answer({demonstrations:[],next_cursor:null});
   if(path.endsWith('/draft/evidence')&&method==='PUT'){
    if(request.headers()['if-match']!==`"${draftRevision}"`)return answer({error:'Draft revision changed'},412);
@@ -81,6 +82,13 @@ async function journey(name,fn){await fn();report.journeys.push({name,passed:tru
 async function loaded(section='Overview'){await page.goto(detail(section));await page.locator('[data-selected-project]').waitFor();await page.getByRole('heading',{name:project.name,exact:true}).waitFor();}
 async function audit(width,state){
  await page.addStyleTag({content:'html,body{overflow-x:visible!important}'});
+ // Viewport changes dispatch ResizeObserver on the next rendered frame.
+ // Require the actual selected tab to become fully visible before measuring.
+ await page.waitForFunction(()=>{
+  const nav=document.querySelector('[aria-label="Operation sections"]'),selected=nav?.querySelector('[aria-pressed="true"]');
+  if(!selected)return true;const box=nav.getBoundingClientRect(),item=selected.getBoundingClientRect();
+  return item.left>=box.left-1&&item.right<=box.right+1;
+ },null,{timeout:3000});
  const sizes=await page.evaluate(()=>{
   const nav=document.querySelector('[aria-label="Operation sections"]'),selected=nav?.querySelector('[aria-pressed="true"]');
   const box=nav?.getBoundingClientRect(),item=selected?.getBoundingClientRect();
@@ -92,35 +100,26 @@ async function audit(width,state){
  report.layout.push({width,state,...sizes});
 }
 try{
- await journey('demo profiles and runs link to the separate reviewed website workflow without changing saved routes',async()=>{
+ await journey('retired profiles expose history without new execution and website routes retain exact capability gating',async()=>{
   try{
-   await loaded('Agents');await page.getByRole('heading',{name:'Demo sign-in profiles',exact:true}).waitFor();
-   let link=page.getByRole('link',{name:'Open website reviews',exact:true});
-   assert.equal(await link.getAttribute('href'),`/operational-projects/${project.id}?section=Website%20reviews`);
-   await link.click();await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();
-   demoRunsEnabled=true;await loaded('Agent runs');await page.getByRole('heading',{name:'Demo sign-in runs',exact:true}).waitFor();
-   assert.equal(new URL(page.url()).searchParams.get('section'),'Agent runs','the saved demo section identity remains compatible');
-   assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Demo sign-in runs',exact:true}).getAttribute('aria-pressed'),'true');
-   link=page.getByRole('link',{name:'Open website reviews',exact:true});
-   assert.equal(await link.getAttribute('href'),`/operational-projects/${project.id}?section=Website%20reviews`);
-   await link.click();await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();
-   for(const gate of [{...reviewedWebsite,website_review_enabled:false},{...reviewedWebsite,website_review_enabled:'true'},{...reviewedWebsite,website_review_contract:'website-review.v2'},{...reviewedWebsite,website_review_strategy:'browser_extract_v1'},{}]){
-    websiteGate=gate;
-    for(const section of ['Agents','Agent runs']){
-     const before=requests.length;await loaded(section);await page.getByRole('heading',{name:section==='Agents'?'Demo sign-in profiles':'Demo sign-in runs',exact:true}).waitFor();
-     assert.equal(await page.getByRole('link',{name:'Open website reviews',exact:true}).count(),0,'unreviewed website capability must not expose the demo navigation link');
-     assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Website reviews',exact:true}).count(),0);
-     assert(!requests.slice(before).some(r=>/\/website-review-(agents|runs)/.test(r.path)),'a rejected capability must not mount or read the website workflow');
-    }
-   }
-   websiteGate={...reviewedWebsite};
-   for(const width of [375,1536]){
+   for(const width of [360,375,390,768,1280,1920]){
     await page.setViewportSize({width,height:width<640?812:1024});
-    await loaded('Agents');await page.getByRole('heading',{name:'Demo sign-in profiles',exact:true}).waitFor();await audit(width,'demo-profiles');await shot(`demo-profiles-${width}`);
-    await loaded('Agent runs');await page.getByRole('heading',{name:'Demo sign-in runs',exact:true}).waitFor();await audit(width,'demo-runs');await shot(`demo-runs-${width}`);
-    await page.getByRole('link',{name:'Open website reviews',exact:true}).click();await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();await audit(width,'website-from-demo');await shot(`website-from-demo-${width}`);
+    await loaded('Agents');
+    assert.equal(await page.getByRole('button',{name:'Create profile',exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Add an agent',exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Start',exact:true}).count(),0);
+    demoRunsEnabled=true;await loaded('Agent runs');await page.getByRole('heading',{name:'Historical sign-in runs',exact:true}).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('section'),'Agent runs','saved historical route identity remains compatible');
+    assert.equal(await page.getByRole('button',{name:/Start run|Practice|Resume execution/}).count(),0);
+    await audit(width,'historical-runs');
+    await loaded('Website reviews');await page.getByRole('heading',{name:'Public website reviews',exact:true}).waitFor();await page.getByText('No website review agents yet.',{exact:true}).waitFor();await audit(width,'website-reviews');
    }
-   assert(!requests.some(r=>r.method==='POST'&&(/\/agent-runs$|\/website-review-runs$/.test(r.path))),'navigation starts no demo or website execution');
+   for(const gate of [{...reviewedWebsite,website_review_enabled:false},{...reviewedWebsite,website_review_enabled:'true'},{...reviewedWebsite,website_review_contract:'website-review.v2'},{...reviewedWebsite,website_review_strategy:'browser_extract_v1'},{}]){
+    websiteGate=gate;const before=requests.length;await loaded('Overview');
+    assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Website reviews',exact:true}).count(),0);
+    assert(!requests.slice(before).some(r=>/\/website-review-(agents|runs)/.test(r.path)),'rejected capability never mounts the extraction workflow');
+   }
+   assert(!requests.some(r=>r.method==='POST'&&(/\/agent-runs$|\/website-review-runs$/.test(r.path))),'navigation starts no execution');
   }finally{websiteGate={...reviewedWebsite};demoRunsEnabled=false;await page.setViewportSize({width:1536,height:1024});}
  });
  if(!demoNavigationOnly){
@@ -133,16 +132,18 @@ try{
   await page.waitForURL(/operational-projects\/00000000-0000-4000-8000-000000000030/);
   const created=requests.filter(r=>r.path==='/api/operational-projects'&&r.method==='POST');assert.equal(created.length,1);assert.deepEqual(created[0].body.members||[],[]);
  });
- await journey('overview summary hierarchy and separate Details actions',async()=>{
-  await loaded();for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();
+ await journey('two-column reference overview and separate Details actions',async()=>{
+  await loaded();for(const title of ['Guide & material','Version & readiness','Browser tasks','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();
   assert.equal(await page.getByLabel('Archive reason').count(),0);assert.equal(await page.getByLabel('Purpose (optional)',{exact:true}).count(),0);
   await shot('overview-office-1536');
   const fit=await page.evaluate(()=>{
    const list=document.querySelector('[data-project-browser]').getBoundingClientRect(),detail=document.querySelector('[data-selected-project]').getBoundingClientRect();
-   const access=[...document.querySelectorAll('h2')].find(h=>h.textContent==='Access & connections').closest('section').getBoundingClientRect();
+   const access=[...document.querySelectorAll('h2,h3')].find(h=>h.textContent==='Access & connections').closest('section').getBoundingClientRect();
    return {width:innerWidth,height:innerHeight,list_width:list.width,detail_width:detail.width,list_fraction:list.width/(list.width+detail.width),access_bottom:access.bottom};
   });report.reference_fit.overview=fit;
   assert(fit.list_fraction>=0.38&&fit.list_fraction<=0.42,`Reference project-list proportion: ${JSON.stringify(fit)}`);
+  assert.equal(await page.locator('[data-overview-summary]>section').count(),2,'two tall reference cards');
+  assert.equal(await page.locator('[data-infrastructure-navigation]').count(),0,'no administrative account routes for this user');
   assert(fit.access_bottom<=fit.height,`Overview Access card should fit the first reference-size viewport: ${JSON.stringify(fit)}`);
   await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Details',exact:true}).click();await page.getByLabel('Purpose (optional)',{exact:true}).waitFor();
  });
@@ -167,26 +168,33 @@ try{
   evidenceEnabled=false;evidenceReferences=[];draftRevision=1;serverText=guide.instructions;draftState='published';
  });
  await journey('same frozen project state has identical theme geometry',async()=>{
-  let baseline;const palettes=[];for(const theme of ['office','latte','midnight']){await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),theme);palettes.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));for(const title of ['Guide & material','Version & readiness','Agents','Recent activity','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();const geometry=await page.evaluate(()=>[...document.querySelectorAll('[data-project-workspace], [data-project-browser], [data-selected-project], main h1, main h2')].map(e=>({tag:e.tagName,text:e.tagName==='H1'||e.tagName==='H2'?e.textContent:null,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));if(baseline)assert.deepEqual(geometry,baseline);else baseline=geometry;report.geometry.push({theme,geometry});await shot(`overview-${theme}-1536`);}
+  let baseline;const palettes=[];for(const theme of ['office','latte','midnight']){await page.evaluate(t=>localStorage.setItem('pp-theme',t),theme);await loaded();assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),theme);palettes.push(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor));for(const title of ['Guide & material','Version & readiness','Browser tasks','Access & connections'])await page.getByRole('heading',{name:title,exact:true}).waitFor();const geometry=await page.evaluate(()=>[...document.querySelectorAll('[data-project-workspace], [data-project-browser], [data-selected-project], main h1, main h2')].map(e=>({tag:e.tagName,text:e.tagName==='H1'||e.tagName==='H2'?e.textContent:null,font:getComputedStyle(e).fontFamily,size:getComputedStyle(e).fontSize,rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height]})));if(baseline)assert.deepEqual(geometry,baseline);else baseline=geometry;report.geometry.push({theme,geometry});await shot(`overview-${theme}-1536`);}
   assert.equal(new Set(palettes).size,3,'Each selected theme must render its own palette');report.theme_palettes=palettes;
  });
- await journey('setup geometry, draft save separation and unsupported capability',async()=>{
-  await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByLabel('Agent name',{exact:true}).fill('Invoice assistant');await shot('setup-work-office-1536');
-  const workFooter=await page.getByRole('button',{name:'Next: Connections',exact:true}).boundingBox();
-  report.reference_fit.work={viewport:{width:1536,height:1024},footer_action:workFooter};
-  assert(workFooter.y+workFooter.height<=1024,`Work continuation should fit the first reference-size viewport: ${JSON.stringify(workFooter)}`);
-  await page.getByRole('button',{name:'Next: Connections',exact:true}).click();await page.getByRole('button',{name:'Select connection',exact:true}).waitFor();await page.getByRole('button',{name:'Select connection',exact:true}).click();await shot('setup-connections-office-1536');
-  const controls=await page.getByRole('button',{name:'Next: Controls',exact:true}).boundingBox();
-  const selected=await page.getByRole('button',{name:'Remove selection',exact:true}).evaluate(button=>{const box=button.closest('li').getBoundingClientRect();return {top:box.top,bottom:box.bottom,height:box.height};});
-  report.reference_fit.connections={viewport:{width:1536,height:1024},selected_card:selected,footer_action:controls};
-  assert(selected.height<=112,`Selected connection should follow the reference card rhythm: ${JSON.stringify(selected)}`);
-  assert(controls.y+controls.height<=1024,`Setup continuation should fit the first reference-size viewport: ${JSON.stringify(controls)}`);
-  await page.getByRole('button',{name:'Add connection',exact:true}).click();await page.getByRole('dialog').waitFor();assert.equal(await page.getByRole('dialog').locator('input[type=password]').count(),0);await shot('add-connection-office-1536');await page.keyboard.press('Escape');await page.getByRole('dialog').waitFor({state:'hidden'});await page.getByRole('button',{name:'Next: Controls',exact:true}).click();await shot('setup-controls-office-1536');await page.getByRole('button',{name:'Next: Review',exact:true}).click();await shot('setup-review-office-1536');const before=requests.length;await page.getByRole('button',{name:'Save draft',exact:true}).click();await page.getByRole('heading',{name:'Readiness checklist',exact:true}).waitFor();assert(!requests.slice(before).some(r=>r.method==='POST'&&(/assignments|agent-runs|tasks/.test(r.path))));assert.equal(agents.at(-1).execution_enabled,false);
+ await journey('sample setup retired without changing project data or hidden API availability',async()=>{
+  await page.evaluate(()=>localStorage.setItem('pp-theme','office'));await loaded('Agents');
+  assert.equal(await page.getByRole('button',{name:'Add an agent',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'Load example',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:'Create profile',exact:true}).count(),0);
+  assert(!requests.some(r=>r.method==='POST'&&(/agent-configurations|agent-profiles|assignments|tasks/.test(r.path))));
+ });
+ await journey('Overview general-run metadata shares current help/list and discards denied or delayed project records',async()=>{
+  summaryEnabled=true;summaryRows=[{id:'00000000-0000-4000-8000-000000000091',state:'awaiting_approval',execution_mode:'agent',configuration_name:'Review current invoices'},...Array.from({length:4},(_,i)=>({id:`ended-${i}`,state:'completed',execution_mode:'public_navigation'}))];
+  await loaded();await page.getByText('Review current invoices needs your attention',{exact:true}).waitFor();
+  const recent=page.locator('[data-recent-browser-runs]');assert.equal(await recent.locator('li').count(),3);
+  assert.equal(await page.getByRole('link',{name:'Open browser session',exact:true}).getAttribute('href'),`/operational-projects/${project.id}?section=Agents&browser_run=00000000-0000-4000-8000-000000000091`);
+  for(const width of [360,375,390,768,1280,1920]){await page.setViewportSize({width,height:width<640?844:1080});await audit(width,'overview-general-runs');await shot(`overview-general-runs-${width}`);}
+  summaryRows=[];await recent.getByRole('button',{name:'Refresh browser records',exact:true}).click();await page.getByText('No browser runs recorded yet.',{exact:true}).waitFor();assert.equal(await page.locator('[data-browser-run-help]').count(),0);
+  delaySummary=true;await recent.getByRole('button',{name:'Refresh browser records',exact:true}).click();await page.waitForFunction(()=>!!document.querySelector('[data-recent-browser-runs] [role=status]'));
+  await page.goto(`${origin}/operational-projects/${projects[1].id}?section=Overview`);await page.getByRole('heading',{name:projects[1].name,exact:true}).waitFor();await page.getByText('No browser runs recorded yet.',{exact:true}).waitFor();
+  await heldSummary?.fulfill({json:{runs:[{id:'old-private-run',state:'awaiting_approval',configuration_name:'Old private task'}]}}).catch(()=>{});delaySummary=false;heldSummary=null;assert.equal(await page.getByText(/Old private task/).count(),0);
+  summaryDenied=true;await page.goto(detail());await page.getByRole('alert').filter({hasText:'Project access is unavailable.'}).waitFor();assert.equal(await page.locator('[data-project-overview]').count(),0);summaryDenied=false;summaryEnabled=false;
+  assert(!requests.some(r=>r.method==='POST'&&r.path.endsWith('/browser-agent-runs')));
  });
  for(const width of [360,375,390,768,1280,1536,1920]){
   await page.setViewportSize({width,height:width<640?812:1024});await loaded();await audit(width,'overview');if([375,768,1920].includes(width))await shot(`overview-office-${width}`);
   await page.getByRole('button',{name:'New project',exact:true}).click();await page.getByRole('dialog').waitFor();await audit(width,'new-project');if(width===375)await shot('new-project-office-375');await page.keyboard.press('Escape');
-  await loaded('Agents');await page.getByRole('button',{name:'Add an agent',exact:true}).click();await page.getByRole('button',{name:'Next: Connections',exact:true}).click();await page.getByRole('button',{name:'Select connection',exact:true}).waitFor();await audit(width,'setup-connections');if([375,768,1920].includes(width))await shot(`setup-connections-office-${width}`);await page.getByRole('button',{name:'Add connection',exact:true}).click();await page.getByRole('dialog').waitFor();await audit(width,'add-connection');if([375,768,1920].includes(width))await shot(`add-connection-office-${width}`);await page.keyboard.press('Escape');
+  await loaded('Agents');await audit(width,'agents-without-demo');
  }
  }
  assert.deepEqual(errors,[]);console.log(demoNavigationOnly?'PASS demo labels, strict website navigation gate and desktop/phone overflow audit':'PASS UI alignment fixture journeys and seven-width overflow audit');

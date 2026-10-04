@@ -21,6 +21,7 @@ import Migrations from '@/pages/Migrations';
 import Projects from '@/pages/Projects';
 import Connections from '@/pages/Connections';
 import OperationalProjects from '@/pages/OperationalProjects';
+import BrowserSessions from '@/pages/BrowserSessions';
 import OperationalProjectDetail from '@/pages/OperationalProjectDetail';
 import ProjectSettings from '@/pages/ProjectSettings';
 import ProjectDetail from '@/pages/ProjectDetail';
@@ -128,6 +129,7 @@ function App() {
         <Route path="projects" element={<Projects />} />
         <Route path="connections" element={<Connections />} />
         <Route path="operational-projects" element={<OperationalProjects />} />
+        <Route path="agents" element={<BrowserSessions />} />
         <Route path="operational-projects/:id" element={<OperationalProjectDetail />} />
         {/* Everything that is not a project lives under Settings (the gear in
             the Projects header); the list itself stays the default view. */}

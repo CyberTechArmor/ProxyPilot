@@ -1,4 +1,18 @@
-# Current delivery checkpoint — 2026-10-04 02:12 UTC
+# Current delivery checkpoint — 2026-10-04 03:19 UTC
+
+## Fresh status check — 2026-10-04 03:19 UTC
+
+Read-only update inspection confirms the running dashboard, host agent and clean
+main checkout remain b1e387efc648eccd7feebcd2ef19620b32574854. Latest main is
+d2331e251fc1a58443adfd979112192810b0d283. The latest operation remains
+acea49e5-8e15-41d5-a5ab-5aed598eeac2, successful with empty flags; no newer update
+has started. The selected supervisor, origin proxy, broker, TURN and host agent
+are active/running; fence is active/exited. These service states do not prove
+a newer installed helper generation or redirect browsing. No fresh runtime
+identity measurement, deployment, installation or live launch occurred in this
+status check. Tracker statuses below are unchanged. Prior deployment refusal
+and cancelled fresh authentication remain respected; no alternate shell or
+service action was used to bypass them.
 
 This checkpoint supersedes earlier statuses below and preserves their evidence
 and failures. Source implementation, review, CI and merge are complete for the

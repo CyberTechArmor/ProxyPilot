@@ -6,6 +6,7 @@ import { requestSudo } from '@/lib/sudo';
 import { Action, Choice, Field, Panel } from './shared';
 import { LiveBrowser } from './LiveBrowser';
 import { PublicBrowserFrames } from './PublicBrowserFrames';
+import { BrowserFlightdeck } from './BrowserFlightdeck';
 import { BrowserAuthenticationReadback } from './BrowserAuthenticationReadback';
 import { createBrowserFullscreen } from './browser-fullscreen';
 import { BrowserConfigurations } from './BrowserConfigurations';
@@ -84,32 +85,37 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
       <div className="flex flex-wrap gap-2"><Action variant="outline" disabled={draft.busy||loading} onClick={()=>perform(signal=>load(signal),'Browser runs refreshed.',{refresh:false})}>Refresh browser runs</Action>
         {operator&&<Action variant="outline" disabled={draft.busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Run authority verified. Submit the intended action explicitly.',{refresh:false})}>Verify run authority</Action>}</div>
       {draft.saved&&<BrowserExecution key={draft.saved.id} paths={paths} project={project} draft={draft} owner={owner} operator={operator} perform={perform} setRun={setRun}/>}
-      <div className="space-y-3"><h3 className="font-semibold">Browser run history</h3>{!runs.length?<p className="text-sm text-muted-foreground">No selected-browser runs yet.</p>:<ul className="space-y-2">{runs.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><p className="text-sm font-medium break-words">{draft.saved?.id===item.configuration_id?draft.saved.configuration.name:'Browser agent'} · {words(item.state)}</p><p className="text-xs text-muted-foreground break-all">{item.created_at||item.id}</p></div><Action variant="outline" disabled={draft.busy} onClick={()=>perform(async signal=>setRun(await api.get(`${paths.runs}/${item.id}`,signal)),'Run record loaded.',{refresh:false})}>Inspect browser run</Action></li>)}</ul>}</div>
+      <div className="space-y-3"><h3 className="font-semibold">Browser run history</h3>{!runs.length?<p className="text-sm text-muted-foreground">No selected-browser runs yet.</p>:<ul className="space-y-2">{runs.map(item=><li key={item.id} className="rounded-md border p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><p className="text-sm font-medium break-words">{draft.saved&&draft.saved.id===item.configuration_id?draft.saved.configuration.name:'Browser agent'} · {words(item.state)}</p><p className="text-xs text-muted-foreground break-all">{item.created_at||item.id}</p></div><Action variant="outline" disabled={draft.busy} onClick={()=>perform(async signal=>setRun(await api.get(`${paths.runs}/${item.id}`,signal)),'Run record loaded.',{refresh:false})}>Inspect browser run</Action></li>)}</ul>}</div>
       {run&&run.run.execution_mode!=='public_navigation'&&<BrowserRun base={base} paths={paths} data={run} project={project} busy={draft.busy} setData={setRun} perform={perform}/>}</section>}/></>;
 }
 
 function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
   const run=data.run,active=!TERMINAL.includes(run.state),[liveState,setLiveState]=useState('connecting');
   const cleanupBlocked=data.uncertainties?.some(item=>item.kind==='CLEANUP_UNVERIFIED'&&item.state==='unresolved');
-  const root=`${paths.runs}/${run.id}`;
-  return <section aria-label="Public browser activity" className="space-y-3 min-w-0">
-    <p role="status" className="text-sm">Browser: {words(run.state)} · {run.usage.requests} requests · {run.usage.response_bytes.toLocaleString()} response bytes</p>
-    <p className="text-sm">{active?`Video: ${['failed','unavailable','closed'].includes(liveState)?'unavailable — browser images below':words(liveState)}`:'Viewing ended.'}</p>
-    {run.launch_failure_code?<p className="text-sm break-words">Browser launch refused: {words(run.launch_failure_code)}</p>:run.result_code&&<p className="text-sm break-words">{words(run.result_code)}</p>}
-    <Action variant="outline" disabled={busy||!data.controls.can_cancel} onClick={()=>perform(async signal=>{
-      setData(await api.write(`${root}/cancel`,{},run.revision,'POST',signal));
-    },'Browser stopped. Inspect the cleanup receipt.')}>Stop browser</Action>
-    {active&&data.controls.can_live&&(['failed','unavailable','closed'].includes(liveState)?
-      <PublicBrowserFrames key={`${run.attempt_id}:${run.fence}`} root={root} attemptId={run.attempt_id} fence={run.fence}/>:
-      <LiveBrowser base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>)}
-    {data.receipts?.map((receipt,i)=><p key={i} className="text-sm">Cleanup: {Object.entries(receipt.closed||{}).map(([part,closed])=>`${words(part)} ${closed?'closed':'unverified'}`).join(' · ')}</p>)}
-    {run.uncertain&&<p role="alert" className="text-sm text-destructive">Cleanup or an effect remains unverified. Inspect the run record before another launch.</p>}
-    {operator&&!active&&cleanupBlocked&&<div className="space-y-2 text-sm"><p>Verify your session, then retry cleanup explicitly. The installed supervisor must prove closure; this never restarts the browser or deletes the run record.</p><div className="flex flex-wrap gap-2">
-      <Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Session verified. Select Retry verified cleanup.',{refresh:false})}>Verify session for cleanup</Action>
-      <Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setData(await api.write(`${root}/retry-cleanup`,{},run.revision,'POST',signal)),'Cleanup checked. Inspect the receipt and check browser readiness again.')}>Retry verified cleanup</Action>
-    </div></div>}
-    <details><summary className="cursor-pointer min-h-11 py-3 text-sm">Browser run record</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(data)}</pre></details>
-  </section>;
+  const root=`${paths.runs}/${run.id}`,receipts=data.receipts||[];
+  const imageOnly=['failed','unavailable','closed'].includes(liveState);
+  const actions=<><Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setData(await api.get(root,signal)),'Run refreshed.',{refresh:false})}>Refresh run</Action>
+    <Action variant="destructive" disabled={busy||!data.controls.can_cancel} onClick={()=>perform(async signal=>setData(await api.write(`${root}/cancel`,{},run.revision,'POST',signal)),'Browser stopped. Inspect the cleanup receipt.')}>Stop browser</Action></>;
+  const browser=active&&data.controls.can_live?(imageOnly?
+    <PublicBrowserFrames key={`${run.attempt_id}:${run.fence}`} root={root} attemptId={run.attempt_id} fence={run.fence}/>:
+    <LiveBrowser key={`${run.attempt_id}:${run.fence}`} base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>):
+    <div className="flex aspect-[16/10] items-center justify-center rounded-md bg-muted/30 p-6 text-center"><div className="space-y-2"><h4 className="text-lg font-semibold">{active?'Browser view unavailable':'Browser session ended'}</h4><p className="text-sm text-muted-foreground">{active?'Inspect Activity for the measured launch state.':'The transient browser image is cleared. Inspect Activity and Review for the outcome and cleanup.'}</p></div></div>;
+  return <BrowserFlightdeck title="Public browser" state={words(run.state)} actions={actions} browser={browser}
+    activity={<><h4 className="font-semibold">Run activity</h4><p>{active?'The isolated browser is active.':'The browser has ended.'}</p><p>{active?`Video: ${imageOnly?'unavailable — transient images are available':words(liveState)}`:'Viewing ended.'}</p>
+      {run.launch_failure_code?<p role="alert" className="break-words">Browser launch refused: {words(run.launch_failure_code)}</p>:run.result_code&&<p className="break-words">Outcome: {words(run.result_code)}</p>}
+      <dl className="space-y-2"><Hash label="Started" value={run.started_at}/><Hash label="Ended" value={run.ended_at}/></dl>
+      <h4 className="font-semibold">Recorded use</h4><p>{(run.usage.requests??0).toLocaleString()} requests · {(run.usage.response_bytes??0).toLocaleString()} response bytes</p>
+      <p className="text-muted-foreground">This mode opens a public page without model calls, private sign-in or retained screenshots.</p></>}
+    details={<><h4 className="font-semibold">Run details</h4><dl className="space-y-3"><Hash label="Run ID" value={run.id}/><Hash label="Attempt ID" value={run.attempt_id}/><Hash label="Policy SHA-256" value={run.policy_sha256}/><Hash label="Revision / fence" value={`${run.revision} / ${run.fence}`}/></dl>
+      <h4 className="font-semibold">Finite limits</h4><dl className="space-y-1">{Object.entries(run.budgets||{}).map(([key,value])=><div key={key} className="flex flex-wrap gap-2"><dt className="capitalize">{words(key)}:</dt><dd>{String(value)}</dd></div>)}</dl>
+      <details><summary className="cursor-pointer min-h-11 py-3">Technical run record</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(data)}</pre></details></>}
+    review={<><h4 className="font-semibold">Cleanup and recovery</h4>{!receipts.length&&<p className="text-muted-foreground">No verified cleanup receipt yet. Stop requests and ended states alone do not prove physical cleanup.</p>}
+      {receipts.map((receipt,i)=><section key={i} className="rounded-md border p-3 space-y-2"><h5 className="font-medium">Cleanup receipt {i+1}</h5><ul className="space-y-1">{Object.entries(receipt.closed||{}).map(([part,closed])=><li key={part} className="capitalize">{words(part)}: {closed?'closed':'unverified'}</li>)}</ul></section>)}
+      {run.uncertain&&<p role="alert" className="text-destructive">Cleanup or an effect remains unverified. Inspect the run record before another launch.</p>}
+      {operator&&!active&&cleanupBlocked&&<div className="space-y-2"><p>Verify your session, then retry cleanup explicitly. The installed supervisor must prove closure; this never restarts the browser or deletes the run record.</p><div className="flex flex-wrap gap-2">
+        <Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Session verified. Select Retry verified cleanup.',{refresh:false})}>Verify session for cleanup</Action>
+        <Action variant="outline" disabled={busy} onClick={()=>perform(async signal=>setData(await api.write(`${root}/retry-cleanup`,{},run.revision,'POST',signal)),'Cleanup checked. Inspect the receipt and check browser readiness again.')}>Retry verified cleanup</Action>
+      </div></div>}</>} reviewCount={cleanupBlocked?1:0}/>;
 }
 
 function BrowserExecution({paths,project,draft,owner,operator,perform,setRun}) {

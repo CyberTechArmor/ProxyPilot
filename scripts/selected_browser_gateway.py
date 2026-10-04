@@ -858,12 +858,19 @@ def serve_selected_socket(request, gateway, tls):
     reader = request.makefile('rb')
     writer = request.makefile('wb')
     client = None
+    connect_refusal_finalized = False
     try:
         method, target, headers = read_request(reader)
         if method == 'CONNECT':
             if headers.get('host') != target or set(headers) - {'host', 'proxy-connection', 'user-agent'}:
                 raise Denied('CONNECT_INVALID')
-            parts = gateway.check_connect(target)
+            try:
+                parts = gateway.check_connect(target)
+            except Denied:
+                # check_connect finalized this refusal atomically. Repeating
+                # it here could overwrite a grant committed after that check.
+                connect_refusal_finalized = True
+                raise
             writer.write(b'HTTP/1.1 200 Connection Established\r\n\r\n')
             writer.flush()
             reader.close()
@@ -894,11 +901,12 @@ def serve_selected_socket(request, gateway, tls):
         status, response_headers, body = gateway.forward(method, url, headers, body)
         send_response(writer, status, response_headers, body)
     except (Denied, OSError, ssl.SSLError, http.client.HTTPException) as e:
-        with gateway.lock:
-            try:
-                gateway._freeze(e.code if isinstance(e, Denied) else 'CLIENT_TRANSPORT_FAILED')
-            except Denied:
-                pass
+        if not connect_refusal_finalized:
+            with gateway.lock:
+                try:
+                    gateway._freeze(e.code if isinstance(e, Denied) else 'CLIENT_TRANSPORT_FAILED')
+                except Denied:
+                    pass
         try:
             send_response(writer, 403)
         except (OSError, ValueError):

@@ -509,6 +509,78 @@ class GatewayTests(unittest.TestCase):
         gate.connection_factory.assert_not_called()
         self.assertEqual(gate.status()['effects_sent'], 0)
 
+    def test_socket_wrapper_does_not_repeat_an_old_connect_refusal_after_grant(self):
+        gate = self.make()
+        self.assertDenied('OFF_LIST_DESTINATION', gate.check_connect, 'other.example:443')
+        checked, granted = threading.Event(), threading.Event()
+        original = gate.check_connect
+        barrier_failures = []
+        def ordered_check(authority):
+            try:
+                return original(authority)
+            except p.Denied:
+                checked.set()
+                if not granted.wait(2):
+                    barrier_failures.append('grant did not finish before socket refusal')
+                raise
+        gate.check_connect = ordered_check
+        destination = dict(id='temporary', origin='https://other.example', roles=['navigation'], session_headers='omit')
+        target = dict(origin=destination['origin'], scope='public', addresses=['8.8.8.8'], port=443,
+                      route_sha256='b' * 64, reviewed=True)
+        grant = dict(schema='proxypilot.selected-browser.destination-grant.v1', id=APPROVAL,
+                     identity=gate.policy.identity, origin=destination['origin'], roles=destination['roles'],
+                     purpose_sha256='c' * 64, expires_at=NOW + 120, persist_to_allowlist=False, wildcards=False)
+        host, client = socket.socketpair()
+        client.settimeout(2)
+        tls = Mock()
+        server = threading.Thread(target=g.serve_selected_socket, args=(host, gate, tls))
+        server.start()
+        try:
+            client.sendall(b'CONNECT other.example:443 HTTP/1.1\r\nHost: other.example:443\r\n\r\n')
+            self.assertTrue(checked.wait(2))
+            gate.grant_destination(grant, destination, target)
+            granted.set()
+            self.assertIn(b'403', client.recv(1024))
+        finally:
+            granted.set()
+            server.join(2)
+            client.close()
+            host.close()
+        self.assertFalse(server.is_alive())
+        self.assertEqual(barrier_failures, [])
+        self.assertEqual(gate.state, 'running')
+        self.assertIsNone(gate.reason)
+        self.assertEqual(gate.purposes[(destination['origin'], 'navigation')], grant)
+        tls.wrap_socket.assert_not_called()
+        gate.resolver.assert_not_called()
+        gate.connection_factory.assert_not_called()
+        self.assertEqual(gate.status()['requests'], 0)
+        self.assertEqual(gate.status()['effects_sent'], 0)
+
+    def test_socket_parse_refusal_still_freezes_without_contact(self):
+        gate = self.make()
+        gate.check_connect = Mock(wraps=gate.check_connect)
+        host, client = socket.socketpair()
+        client.settimeout(2)
+        tls = Mock()
+        server = threading.Thread(target=g.serve_selected_socket, args=(host, gate, tls))
+        server.start()
+        try:
+            client.sendall(b'CONNECT site.example:443 HTTP/1.1\r\nHost: other.example:443\r\n\r\n')
+            self.assertIn(b'403', client.recv(1024))
+        finally:
+            server.join(2)
+            client.close()
+            host.close()
+        self.assertFalse(server.is_alive())
+        self.assertEqual(gate.state, 'paused')
+        self.assertEqual(gate.reason, 'CONNECT_INVALID')
+        gate.check_connect.assert_not_called()
+        tls.wrap_socket.assert_not_called()
+        gate.resolver.assert_not_called()
+        gate.connection_factory.assert_not_called()
+        self.assertEqual(gate.status()['requests'], 0)
+
     def test_cancel_while_dns_pending_cannot_open_socket_after_lookup_returns(self):
         entered,release=threading.Event(),threading.Event()
         def resolver(_):

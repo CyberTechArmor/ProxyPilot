@@ -62,3 +62,22 @@ New gateway SHA25652e1cd9f64cd14ee1047224e9b948fce959ecc5c0f5a4c468b34589f9313af
 new worker SHA25677ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
 Other five helper sources are unchanged. Dedicated fixed runtime Install is
 required after ordinary application deployment to load these two helpers.
+
+Atomic-check head03a9f30cac299239a26184dfb6f8b92cab022fb5 still failed
+the same Node action4 case. Further source review found the socket wrapper
+repeating check_connect's already finalized Denied outside that atomic lock,
+reopening the grant/refusal race. A real socketpair barrier regression with
+an actual destination grant fails before the wrapper change and passes after;
+the old socket receives403, no TLS/upstream/DNS/request/effect occurs, and the
+new grant remains running. Only that finalized CONNECT refusal skips duplicate
+freezing; parser, transport and forward failures retain their existing handling.
+A malformed CONNECT-header control still pauses with CONNECT_INVALID and
+never calls policy admission or TLS. Local targeted gateway/transport/public
+suite45pass, plus the added malformed-header control passes.
+Final gateway SHA25602433df09948099f4c1204d1fde10a64b077a717fd50d3feaf27ad261afea18f.
+Earlier hashes/checks remain historical; installed gateway is still21f7297a.
+The relation to live/CI failures remains unproven until those actual checks pass.
+The Node fixture's diagnostics now also retain the last16 gateway ledger
+sequence/kind/hash and fixed bounded refusal/grant fields, reducing to8/4rows
+at its existing size fallbacks. It records ordering without page text, request
+headers/bodies or discarded payloads; no runtime or assertion behavior changes.

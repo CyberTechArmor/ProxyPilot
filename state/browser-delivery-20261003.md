@@ -1,4 +1,4 @@
-# Current delivery checkpoint — 2026-10-04 01:51 UTC
+# Current delivery checkpoint — 2026-10-04 01:56 UTC
 
 This checkpoint supersedes the older statuses below and preserves their failures.
 Public browsing acceptance remains incomplete. No new deployment or runtime
@@ -11,7 +11,7 @@ installation was started after the last successful application update.
 | Public wording, viewer status and safe errors | Merged | PR741 merge78142fcd5fe85887014da653a1a1b9f761e2cea3; independent review and workflows37167296480/37167296488 green | Public mode explains no guide/model consent; browser state and unavailable video/images are distinct |
 | Frame backoff and active-run readiness guards | Merged | PR741; real Chromium checks at five widths, Stop disposes30sec retry, server performs no idle probe while active/cleanup-unverified | Clear safe failure reason; bounded polling; readiness disabled during execution |
 | Latest application deployment | Blocked | PR741 deployment call returned non-JSON refusal and started no operation; exact refusal reason was lost by response parsing; latest operation remainsacea49e5 | Running site is still PR740/b1e387ef; no claim that merged UI fixes are deployed |
-| Per-request public denial without freezing all viewing | In progress | PR742 reviewed diagnostic head4abd573ad25366b87877979c0ffa4574f438f0c0;34worker/17gateway tests pass; first CI and one approved diagnostic retry failed distinct existing private cases; fresh CI37169152962/37169152950 running | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
+| Per-request public denial without freezing all viewing | In progress | PR742 reviewed head03a9f30cac299239a26184dfb6f8b92cab022fb5; worker public refusal fix plus atomic selected CONNECT transition; old-code race reproduced, new-code regression passes; fresh CI37169448683/37169448718 running | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
 | Actual redirected-page compatibility | In progress | Real Python downloads run593799c0 retained frame500/429 failure; new worker not installed; fixture redirects are not production acceptance | Visible supported redirected page with resources beyond the initial origin still needs real proof |
 | Continuous live video | Blocked | Real video connection remains failed; transient public images work on the homepage and relaunch | Image viewing currently available; continuous video not proven |
 | Ordinary update with installed expanded runner | Verified | Updateacea49e5 succeeded00:54:02Z; flags empty; runtime preserved; real visible launches followed | Normal application update preserves runtime and resumes healthy browsing |
@@ -36,7 +36,9 @@ Repeat successful visible launch:
 PR742 changes only the selected worker and associated tests/record:
 - Expected new worker SHA25677ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
 - Installed/loaded worker remainsb72eac75173d83187d58273dcc2752c83fbf8a057b233a9f0e00d76c078ca717.
-- Other six helper bytes unchanged. Ordinary updates deliberately preserve the
+- New gateway SHA25652e1cd9f64cd14ee1047224e9b948fce959ecc5c0f5a4c468b34589f9313af0c;
+  installed/loaded gateway remains21f7297a6f466460957f2e8da45dc7e100abc2764212113924db66170e5da096.
+- Other five helper bytes unchanged. Ordinary updates deliberately preserve the
   installed generation; only the fixed dedicated Install can commit the new worker.
 - Source mismatch between per-request public gateway/supervisor denial and
   worker freezing is established. It is not claimed as the diagnosed cause of
@@ -58,7 +60,19 @@ PR742 changes only the selected worker and associated tests/record:
   bounded synthetic result/gateway/request/ledger/Fetch ordering before teardown.
   Independently approved and published at4abd573ad25366b87877979c0ffa4574f438f0c0;
   tree9a3e76e39a449d2e5aae80569b3ec28fa6c3f122 independently matches local.
-- Fresh CI37169152962/37169152950 is running; no merge/deployment/acceptance yet.
+- Diagnostic-head Security37169152962 failed the original Node action4
+  GATEWAY_PAUSED case again, before Python diagnostics could run. No unchanged
+  retry. The old-code CONNECT/refusal/grant race is now deterministically
+  reproduced using real gateway grants and barrier-controlled lock ordering.
+  Atomic validation/state/refusal handling under one RLock passes, preserves
+  old request denial, exact wire approval and reverse-order unsafe refusal.
+  The causal link to observed CI remains unproven.
+- Independently reviewed final PR742 head03a9f30cac299239a26184dfb6f8b92cab022fb5;
+  local/remote tree87c637a6bddc55aa80e17d652553ff0d03f3367c matches exactly.
+  Fresh CI37169448683/37169448718 running; not merged/deployed/installed.
+- Independent gateway tests16pass and public-navigation17pass. Full gateway
+  file44pass, one existing Unix socket test blocked by workspace EPERM; CI
+  must verify that boundary. No permission or peer-identity protection bypass.
 - Local actual Chromium133 diagnostic case passed once including cleanup;
   in-memory test binary substitution is not CI Chromium149 equivalence.
   Earlier three-case local probe passed action assertions but its third teardown

@@ -741,14 +741,20 @@ class AttemptGateway:
             response_headers = response.getheaders()
             locations = [v for k, v in response_headers if k.lower() == 'location']
             if 300 <= response.status < 400:
-                if len(locations) != 1:
+                # RFC 9110: 304 selects the client's cached representation,
+                # and 300 may present choices without a preferred Location.
+                # Neither is necessarily a new network destination. Retain
+                # strict Location admission for actual URI redirects and
+                # screen any optional Location before returning it to Chrome.
+                if len(locations) > 1 or (response.status not in (300, 304) and not locations):
                     raise Denied('REDIRECT_INVALID')
-                redirect = url_parts(urljoin(parts['url'], locations[0]))
-                with self.lock:
-                    self.policy.destination(redirect, record['metadata']['role'], self.additions)
-                    temporary = self.purposes.get((redirect['origin'], record['metadata']['role']))
-                    if temporary and temporary['expires_at'] <= self.clock():
-                        raise Denied('DESTINATION_GRANT_EXPIRED')
+                if locations:
+                    redirect = url_parts(urljoin(parts['url'], locations[0]))
+                    with self.lock:
+                        self.policy.destination(redirect, record['metadata']['role'], self.additions)
+                        temporary = self.purposes.get((redirect['origin'], record['metadata']['role']))
+                        if temporary and temporary['expires_at'] <= self.clock():
+                            raise Denied('DESTINATION_GRANT_EXPIRED')
             chunks = []
             while True:
                 with self.lock:

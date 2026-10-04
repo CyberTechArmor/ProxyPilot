@@ -114,6 +114,45 @@ class PublicGatewayTests(unittest.TestCase):
         with self.assertRaises(p.Denied):gate.admit('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
         gate.resolver.assert_not_called();self.assertEqual(gate.status()['state'],'revoked')
 
+    def response_gate(self,status,headers=(),body=b''):
+        gate=self.gate()
+        response=Mock(status=status);response.getheaders.return_value=list(headers)
+        response.read.side_effect=[body,b''] if body else [b'']
+        conn=Mock();conn.getresponse.return_value=response;gate.connection_factory.return_value=conn
+        url='https://selected.example/';token=gate.review_request('response',self.meta(gate,url))
+        return gate,conn,url,token
+
+    def test_cache_revalidation_and_choices_without_location_complete_and_keep_accounting(self):
+        for status,body in ((304,b''),(300,b'<a href="/english">English</a>')):
+            with self.subTest(status=status):
+                gate,conn,url,token=self.response_gate(status,[('ETag','"fixture"')],body)
+                self.assertEqual(gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b''),
+                    (status,[('ETag','"fixture"')],body))
+                self.assertEqual(gate.status()['requests'],1);self.assertEqual(gate.status()['response_bytes'],len(body))
+                self.assertEqual(gate.status()['effects_sent'],0);self.assertEqual(gate.status()['inflight'],0)
+                self.assertEqual(gate.ledger.rows[-1]['kind'],'response_completed');conn.close.assert_called_once()
+                with self.assertRaises(p.Denied):gate.admit('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+                gate.connection_factory.assert_called_once()
+
+    def test_actual_redirects_still_require_unambiguous_location(self):
+        for status in (301,302,303,305,307,308):
+            for headers in ([],[('Location','/one'),('Location','/two')]):
+                with self.subTest(status=status,headers=headers):
+                    gate,conn,url,token=self.response_gate(status,headers)
+                    with self.assertRaises(p.Denied) as error:gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+                    self.assertEqual(error.exception.code,'REDIRECT_INVALID');conn.close.assert_called_once()
+                    self.assertEqual(gate.status()['inflight'],0);self.assertEqual(gate.status()['effects_sent'],0)
+
+    def test_optional_location_still_screens_protected_target_without_contact(self):
+        for status in (300,304):
+            for target in ('https://controller.example/private','http://169.254.169.254/','http://127.0.0.1/'):
+                with self.subTest(status=status,target=target):
+                    gate,conn,url,token=self.response_gate(status,[('Location',target)])
+                    with self.assertRaises(p.Denied):gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+                    gate.resolver.assert_called_once();gate.connection_factory.assert_called_once();conn.request.assert_called_once()
+                    conn.close.assert_called_once();self.assertEqual(gate.status()['inflight'],0)
+                    self.assertEqual(gate.status()['effects_sent'],0)
+
 class PublicSupervisorTests(unittest.TestCase):
     setUp=supervisors.SelectedSupervisorTests.setUp
     tearDown=supervisors.SelectedSupervisorTests.tearDown

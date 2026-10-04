@@ -665,6 +665,11 @@ class LocalTransportTests(unittest.TestCase):
                     self.connection.shutdown(socket.SHUT_RDWR)
                     self.connection.close()
                     return
+                if self.path == '/not-modified':
+                    self.send_response(304)
+                    self.send_header('ETag', '"fixture"')
+                    self.end_headers()
+                    return
                 self.send_response(302 if self.path == '/redirect' else 200)
                 if self.path == '/redirect':
                     self.send_header('Location', 'https://outside.example/private?secret=hidden')
@@ -847,6 +852,19 @@ class LocalTransportTests(unittest.TestCase):
         self.assertEqual(len(self.connected), 1)
         self.assertEqual(gate.state, 'paused')
         self.assertNotIn('hidden', p.canonical(gate.ledger.rows))
+
+    def test_closed_origin_cache_revalidation_over_real_tls_remains_read_only(self):
+        gate = self.gate()
+        reply = gate.review_request('cached', metadata(gate.policy, '/not-modified'))
+        status, headers, body = gate.forward('GET', 'https://site.example/not-modified',
+            {g.TICKET_HEADER: reply['ticket'], 'if-none-match': '"fixture"'}, b'')
+        self.assertEqual((status, body), (304, b''))
+        self.assertIn(('ETag', '"fixture"'), headers)
+        self.assertEqual(len(self.received), 1)
+        self.assertEqual(self.received[0][2]['if-none-match'], '"fixture"')
+        self.assertEqual(gate.status()['effects_sent'], 0)
+        self.assertEqual(gate.status()['inflight'], 0)
+        self.assertEqual(gate.ledger.rows[-1]['kind'], 'response_completed')
 
     def test_connect_mitm_socket_has_real_policy_and_wire_body_check(self):
         gate = self.gate()

@@ -6,6 +6,7 @@ import {OperationsError,assertOperation,assertRevision,parse} from '../lib/opera
 import {selectedDecisionSchema,selectedReconcileSchema,selectedHumanInputSchema,SELECTED_BROWSER_CONSENT} from '../lib/operational-selected-browser-contract.js';
 import {selectedAuthConfirmationInputSchema,SELECTED_BROWSER_AUTH_STATEMENT} from '../lib/operational-selected-browser-auth-contract.js';
 import {csrfProtection} from '../middleware/csrf.js';
+import {browserRunCommentInputSchema} from '../lib/operational-browser-run-comments.js';
 import {fixtureRouter,operationsFixture} from './helpers/operations-fixture.js';
 
 function fixture({assetBodyParser}={}) {
@@ -52,7 +53,10 @@ function fixture({assetBodyParser}={}) {
     normalizeScreenshot(actor,scope,id,options){access(actor,scope.project_id,'run');calls.push({name:'normalize',scope,id,options});return{id:assetId};},
     clipboardImport(actor,scope,input){access(actor,scope.project_id,'run');if(!actor.elevated||!actor.control_verified)throw new OperationsError(403,'Proof required');calls.push({name:'clipboard_import',scope,input});return{id:assetId};},
     clipboardExport(actor,scope,id){access(actor,scope.project_id,'run');if(!actor.elevated||!actor.control_verified)throw new OperationsError(403,'Proof required');calls.push({name:'clipboard_export',scope,id});return{text:'explicit private text'};}};
-  const runtime={runs:runService,conversion,artifacts:{store:artifactStore,service:artifactService}},router=fixtureRouter();
+  const comments={list(actor,p,rid,page){access(actor,p);if(rid!==runId)throw new OperationsError(404,'Run not found');calls.push({name:'comments_list',p,rid,page});return{comments:[],next_cursor:null};},
+    append(actor,p,rid,body){access(actor,p,'run');if(rid!==runId)throw new OperationsError(404,'Run not found');parse(
+      browserRunCommentInputSchema,body);calls.push({name:'comments_append',p,rid,body});return{comment:{id:randomUUID(),text:body.text},replayed:false};}};
+  const runtime={runs:runService,conversion,comments,artifacts:{store:artifactStore,service:artifactService}},router=fixtureRouter();
   router.use((req,res,next)=>{try{req.operationsActor={...req.user,requestId:randomUUID()};f.store.assertActor(req.operationsActor);next();}catch(err){res.status(err.status||500).json({error:'Account refused'});}});
   const agentsOnly=(_req,res,next)=>metadata?next():res.status(404).json({error:'Not found'}),runsOnly=(_req,res,next)=>runs?next():res.status(404).json({error:'Not found'});
   registerBrowserRoutes(router,{runtime:()=>runtime,store:f.store,agentsOnly,runsOnly,assetBodyParser,controlVerified:r=>r.verified===true,
@@ -127,6 +131,26 @@ test('source ledger is read-only, current-project gated and rejects arbitrary re
     assert.equal((await f.send('GET',`${f.root}/sources`,{}, {user:f.outsider})).statusCode,404);
     f.runGate(false);assert.equal((await f.send('GET',`${f.root}/sources`)).statusCode,404);
     assert.equal((await f.send('POST',`${f.root}/sources`)).statusCode,404);
+  }finally{f.close();}
+});
+
+test('human comments history uses current grants/CSRF and strict bounded pagination independently of execution',async()=>{
+  const f=fixture();try{
+    const path=`${f.root}/comments`,body={text:'Deliberate human note',idempotency_key:randomUUID()};
+    f.runGate(false);
+    const read=await f.send('GET',path,{}, {user:f.viewer,query:{limit:'2',after:'3'}});
+    assert.equal(read.statusCode,200);assert.deepEqual(f.calls[0].page,{limit:2,after:3});
+    assert.equal((await f.send('POST',path,body,{sudo:false,verified:false})).statusCode,201);
+    assert.equal((await f.send('POST',path,body,{user:f.viewer})).statusCode,403);
+    assert.equal((await f.send('POST',path,body,{headers:{'if-match':'"6"'}})).statusCode,403);
+    assert.equal((await f.send('POST',path,{...body,model_disclosure:true})).statusCode,400);
+    assert.equal((await f.send('GET',path,{}, {query:{after:'9007199254740992'}})).statusCode,400);
+    assert.equal((await f.send('GET',path,{}, {query:{limit:'51'}})).statusCode,400);
+    assert.equal((await f.send('GET',path,{}, {user:f.outsider})).statusCode,404);
+    assert.equal((await f.send('POST',path,body,{user:{...f.owner,mcp:true}})).statusCode,403);
+    assert.equal(f.calls.filter(c=>c.name==='comments_append').length,1);
+    f.gate(false);assert.equal((await f.send('GET',path)).statusCode,404);
+    assert.equal(f.calls.filter(c=>c.name==='comments_list').length,1);
   }finally{f.close();}
 });
 

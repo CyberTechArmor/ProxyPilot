@@ -9,6 +9,8 @@ const noSudo = (_req,res) => res.status(401).json({error:'sudo_required',sudo_re
 const emptySchema=z.object({}).strict();
 const id=z.string().uuid(),positive=z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const pageQuery=z.object({after:id.optional(),limit:z.string().regex(/^\d{1,2}$/).transform(Number).refine(n=>n>=1&&n<=50).optional()}).strict();
+const commentsQuery=z.object({after:z.string().regex(/^[1-9]\d{0,15}$/).transform(Number).refine(Number.isSafeInteger).optional(),
+  limit:pageQuery.shape.limit}).strict();
 const attemptBody=z.object({attempt_id:id,fence:positive}).strict();
 const attemptQuery=z.object({attempt_id:id,fence:z.string().regex(/^[1-9]\d{0,14}$/).transform(Number).refine(Number.isSafeInteger)}).strict();
 const maxFile=16777216,maxBase64=4*Math.ceil(maxFile/3);
@@ -131,6 +133,13 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
   },{status:202,action:'browser_run_start'}));
 
   router.get(runs,agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'runs'),'list')(a,r.params.id);}));
+  // Deliberate human history remains usable when execution/provider/storage is
+  // unavailable. Comments are never passed to a model or a browser command.
+  router.get(`${runs}/:runId/comments`,agentsOnly,agent((r,a)=>
+    method(available(r,'comments'),'list')(a,r.params.id,r.params.runId,query(r,commentsQuery))));
+  router.post(`${runs}/:runId/comments`,agentsOnly,agent((r,a)=>{
+    query(r);return method(available(r,'comments'),'append')(a,r.params.id,r.params.runId,r.body);
+  },{status:201,action:'browser_run_comment'}));
   router.post(runs,agentsOnly,runsOnly,elevated,run((r,a)=>{
     const input=parse(selectedStartSchema.extend({configuration_id:id}).strict(),r.body),{configuration_id,...start}=input;
     assertRevision(expected(r),start.configuration_revision);return method(available(r,'runs'),'start')(a,r.params.id,configuration_id,start);

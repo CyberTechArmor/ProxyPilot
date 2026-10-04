@@ -10,6 +10,7 @@ import { operationsFixture } from './helpers/operations-fixture.js';
 import { operationalSelectedBrowserMigration1118, operationalPublicNavigationMigration1123 } from '../lib/operational-selected-browser-schema.js';
 import { operationalBrowserArtifactsMigration1119 } from '../lib/operational-browser-artifacts-schema.js';
 import { operationalBrowserConversionMigration1120 } from '../lib/operational-browser-conversion.js';
+import { operationalBrowserRunCommentsMigration1125 } from '../lib/operational-browser-run-comments.js';
 import { browserArtifactsConfiguration, createSelectedBrowserAttestationVerifier, createSelectedBrowserRuntime,
   operationalSelectedBrowserRuntimeMigration1121 } from '../lib/operational-selected-browser-runtime.js';
 import { browserDraftHash, canonicalBrowserDraft } from '../lib/operational-browser-agent-proposal.js';
@@ -59,7 +60,8 @@ function world({ hostChange = () => {}, configured = true, privateStorage = conf
   streamOpening = () => {}, authPathPreview = '/signin' } = {}) {
   const f = operationsFixture();
   for (const migrate of [operationalSelectedBrowserMigration1118, operationalBrowserArtifactsMigration1119,
-    operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122, operationalPublicNavigationMigration1123]) migrate(f.adapter);
+    operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122, operationalPublicNavigationMigration1123,
+    operationalBrowserRunCommentsMigration1125]) migrate(f.adapter);
   f.db.exec('ALTER TABLE sessions ADD COLUMN sudo_until TEXT');
   const owner = f.addUser(), p = f.store.create(owner, { name: 'Selected runtime test' });
   const guide = f.store.saveDraft(owner, p.id, 1, { title: 'Current guide', instructions: 'Read selected pages and report sources.' }).version;
@@ -279,6 +281,20 @@ test('unconfigured runtime keeps drafts blocked without host or private storage'
     await assert.rejects(w.start, e => e.code === 'INSTALLED_SELECTED_BROWSER_PROOF_REQUIRED');
     assert.equal(w.f.db.prepare('SELECT count(*) n FROM ops_selected_browser_runs').get().n, 0);
   } finally { await w.close(); }
+});
+
+test('human run comments persist without execution, provider or file authority and never change run pins',async()=>{
+  const w=world();try{
+    w.consent();const started=await w.start(),before=w.get(started.run.id).run;
+    w.enable(false);const callCount=w.calls.length;
+    const note=w.runtime.comments.append(w.owner,w.p.id,started.run.id,{text:'Human review of this run',idempotency_key:randomUUID()});
+    assert.equal(note.replayed,false);assert.equal(w.runtime.comments.list(w.owner,w.p.id,started.run.id).comments[0].id,note.comment.id);
+    assert.equal(w.calls.length,callCount);assert.equal(w.get(started.run.id).run.revision,before.revision);
+    assert.equal(w.get(started.run.id).run.fence,before.fence);
+    const event=w.f.db.prepare("SELECT metadata_json FROM ops_project_events WHERE subject_id=? AND action='browser_run_comment_added'").get(note.comment.id);
+    assert.ok(event);assert.ok(!event.metadata_json.includes(note.comment.text));
+    w.metadata(false);assert.throws(()=>w.runtime.comments.list(w.owner,w.p.id,started.run.id),e=>e.code==='BROWSER_METADATA_DISABLED');
+  }finally{await w.close();}
 });
 
 test('forged host available booleans cannot enable start despite working private storage', async () => {

@@ -1,6 +1,7 @@
 import { assessConfigurationConnections } from '../lib/operational-configuration-readiness.js';
 import { randomUUID } from 'node:crypto';
 import { registerBrowserRoutes } from './operational-browser.js';
+import { registerBrowserConnectionRoutes } from './operational-browser-connections.js';
 import { OperationsError, parse, revision, schemas } from '../lib/operational-projects-logic.js';
 
 // Sudo is injected (middleware/auth.js requireSudo in the server). Without it
@@ -86,6 +87,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   if (evidenceRouter) router.use('/:id/demonstrations', evidenceRouter);
   const empty = req => parse(schemas.empty, req.body ?? {});
   const agentsOnly = (_req,res,next) => agentsOn() ? next() : res.status(404).json({error:'Not found'});
+  registerBrowserConnectionRoutes(router,{store,agentsOnly,expected,requireSudo});
   const selectedRunsOnly=(_req,res,next)=>agentsOn()&&on(agentRunsEnabled)&&browserRuntime?next():res.status(404).json({error:'Not found'});
   if(browserRuntime)registerBrowserRoutes(router,{runtime:browserRuntime,store,agentsOnly,runsOnly:selectedRunsOnly,expected,
     requireSudo,controlVerified,assetBodyParser:browserAssetBodyParser});

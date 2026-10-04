@@ -11,6 +11,7 @@ import { createBrowserConversionService } from './operational-browser-conversion
 import { createBrowserArtifactsStore } from './operational-browser-artifacts-store.js';
 import { createBrowserArtifactsService } from './operational-browser-artifacts-service.js';
 import { createBrowserArtifactFiles } from './operational-browser-artifacts-files.js';
+import { createBrowserRunComments } from './operational-browser-run-comments.js';
 import { createBrowserArtifactImageRedactor } from './operational-browser-artifacts-image-decoder.js';
 import { createBrowserArtifactPdfDecoder } from './operational-browser-artifacts-pdf-decoder.js';
 import { createEvidenceDecoder } from './operational-evidence-decoder.js';
@@ -87,6 +88,9 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
   const one=(sql,...args)=>db.prepare(sql).get(...args),all=(sql,...args)=>db.prepare(sql).all(...args),write=(sql,...args)=>db.prepare(sql).run(...args);
   const stamp=()=>new Date(clock()).toISOString();
   const access=(actor,pid,operation='read')=>{if(!isMetadataEnabled())fail('BROWSER_METADATA_DISABLED');const p=store.get(actor,pid);assertOperation(p.own_role,operation,!!p.archived_at);return {p,role:p.own_role};};
+  const comments=createBrowserRunComments({one,all,run:write,tx:fn=>db.transaction(fn).immediate(),access,now:stamp,uuid:randomUUID,
+    event:(actor,pid,action,subject,metadata)=>write('INSERT INTO ops_project_events(project_id,actor_id,action,subject_id,created_at,request_id,metadata_json) VALUES(?,?,?,?,?,?,?)',
+      pid,actor.id,action,subject,stamp(),actor.requestId||randomUUID(),JSON.stringify(metadata))});
   const actorFor=ref=>{const r=one('SELECT * FROM ops_selected_browser_runs WHERE id=? AND attempt_id=?',ref.run_id,ref.attempt_id);if(!r)fail('BROWSER_ATTEMPT_UNKNOWN');return {id:r.started_by,jti:r.starter_session_id,human:true};};
   const scopeFor=ref=>{const r=one('SELECT project_id FROM ops_selected_browser_runs WHERE id=? AND attempt_id=?',ref.run_id,ref.attempt_id);if(!r)fail('BROWSER_ATTEMPT_UNKNOWN');return {project_id:r.project_id,...identity(ref),fence:1};};
   // Private storage scope omits execution policy metadata by construction.
@@ -412,7 +416,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
       }finally{busy=false;}
     }
   };
-  return {runs,conversion,artifacts,live,execution:{configured:!!runner,reason},
+  return {runs,conversion,artifacts,comments,live,execution:{configured:!!runner,reason},
     async startMaintenance(){await runs.recover();if(!closed&&!timer){timer=scheduleInterval(()=>tick().catch(()=>log({code:'BROWSER_MAINTENANCE_REFUSED'})),5000);timer.unref?.();}},
     async close(){closed=true;cancelInterval(timer);for(const id of viewers.keys())live.closeLive(id);await conversion.close();files?.close();}};
 }

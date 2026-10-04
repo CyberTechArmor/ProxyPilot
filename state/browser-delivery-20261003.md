@@ -1,4 +1,4 @@
-# Current delivery checkpoint — 2026-10-04 01:37 UTC
+# Current delivery checkpoint — 2026-10-04 01:51 UTC
 
 This checkpoint supersedes the older statuses below and preserves their failures.
 Public browsing acceptance remains incomplete. No new deployment or runtime
@@ -11,7 +11,7 @@ installation was started after the last successful application update.
 | Public wording, viewer status and safe errors | Merged | PR741 merge78142fcd5fe85887014da653a1a1b9f761e2cea3; independent review and workflows37167296480/37167296488 green | Public mode explains no guide/model consent; browser state and unavailable video/images are distinct |
 | Frame backoff and active-run readiness guards | Merged | PR741; real Chromium checks at five widths, Stop disposes30sec retry, server performs no idle probe while active/cleanup-unverified | Clear safe failure reason; bounded polling; readiness disabled during execution |
 | Latest application deployment | Blocked | PR741 deployment call returned non-JSON refusal and started no operation; exact refusal reason was lost by response parsing; latest operation remainsacea49e5 | Running site is still PR740/b1e387ef; no claim that merged UI fixes are deployed |
-| Per-request public denial without freezing all viewing | In progress | PR742 head09408cffa375ad4c5876433e29a2444dfd55e09d independently approved;34worker and17gateway/navigation tests pass; CI backend111335836219 failed existing private continuation case, under independent assessment | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
+| Per-request public denial without freezing all viewing | In progress | PR742 reviewed diagnostic head4abd573ad25366b87877979c0ffa4574f438f0c0;34worker/17gateway tests pass; first CI and one approved diagnostic retry failed distinct existing private cases; fresh CI37169152962/37169152950 running | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
 | Actual redirected-page compatibility | In progress | Real Python downloads run593799c0 retained frame500/429 failure; new worker not installed; fixture redirects are not production acceptance | Visible supported redirected page with resources beyond the initial origin still needs real proof |
 | Continuous live video | Blocked | Real video connection remains failed; transient public images work on the homepage and relaunch | Image viewing currently available; continuous video not proven |
 | Ordinary update with installed expanded runner | Verified | Updateacea49e5 succeeded00:54:02Z; flags empty; runtime preserved; real visible launches followed | Normal application update preserves runtime and resumes healthy browsing |
@@ -43,9 +43,28 @@ PR742 changes only the selected worker and associated tests/record:
   the observed downloads failure.
 - Unknown/malformed/private/fatal budget/ledger/pause denials still stop;
   denied requests receive no continuation, ticket, replay or upstream contact.
-- CI failure at existing private actualBrowserContinuation line169 is retained;
-  the configured-boundary dashboard's same Chromium step passed. No retry or
-  acceptance is inferred without assessment.
+- First CI failure at existing private actualBrowserContinuation line169 is retained;
+  the configured-boundary dashboard's same Chromium step passed. Independent
+  reviewer allowed one unchanged diagnostic retry111336754583.
+- The retry passed that Node Chromium continuation but failed existing Python
+  test_sent_write_then_off_list_resource_cannot_be_settled_or_replayed line918:
+  expected request_approval, got done.556tests/295.931s,33skips; one failure.
+- No further unchanged retry. Cause remains unknown because its returned result
+  and first refusal were absent from the log. The prior CONNECT/grant race is a
+  source-permitted candidate for the first failure, not established cause; the
+  second case has no destination grant before failure.
+- A diagnostic-only test change preserves POST-before-approval refusal, exact
+  approval-kind assertion, waits, PID protection and production code. It captures
+  bounded synthetic result/gateway/request/ledger/Fetch ordering before teardown.
+  Independently approved and published at4abd573ad25366b87877979c0ffa4574f438f0c0;
+  tree9a3e76e39a449d2e5aae80569b3ec28fa6c3f122 independently matches local.
+- Fresh CI37169152962/37169152950 is running; no merge/deployment/acceptance yet.
+- Local actual Chromium133 diagnostic case passed once including cleanup;
+  in-memory test binary substitution is not CI Chromium149 equivalence.
+  Earlier three-case local probe passed action assertions but its third teardown
+  refused a fixture PID identity mismatch. That is retained as a failed probe,
+  and no ownership guard was bypassed. Scoped process inspection found no
+  remaining fixture processes.
 
 No Incus upgrade, unrelated application update, temporary SSH key or owner-local
 computer was used. All public attempts are stopped; active-run idle checks were

@@ -363,14 +363,14 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
             <DialogDescription>
               {info?.updateAvailable
                 ? `v${info.currentVersion} → v${info.latestVersion}${info.latest_sha_short ? ` (${info.latest_sha_short})` : ''}`
-                : 'The ProxyPilot checkout is current. Update now still checks and upgrades host Incus and verifies image auto-update settings.'}
+                : 'The ProxyPilot checkout is current. Enable force rebuild to rebuild the application.'}
             </DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto space-y-3 text-sm">
             <ul className="list-disc pl-5 space-y-1">
                 {(info?.updateAvailable || rebuild) && <li>The ProxyPilot database is backed up first and restored automatically if the application update fails.</li>}
                 {(info?.updateAvailable || rebuild) && <li>Pulls the latest code from GitHub{info?.github?.repo ? ` (${info.github.repo})` : ''}{installed?.branch ? ` on ${installed.branch}` : ''}, rebuilds the host agent, installs dependencies and builds the dashboard.</li>}
-              <li>Checks and upgrades the host Incus package to the current stable release, after saving its database and storage checkpoint. Incus management and guests may be interrupted during the upgrade; recovery from a failed Incus schema change may need operator work.</li>
+              <li>Incus package and image settings remain unchanged.</li>
                 {(info?.updateAvailable || rebuild) && <li>Rebuilds and restarts the dashboard. The API is unavailable during its restart. This page keeps polling and reconnects.</li>}
             </ul>
             <div className="flex items-center justify-between gap-3 rounded-md border p-3">

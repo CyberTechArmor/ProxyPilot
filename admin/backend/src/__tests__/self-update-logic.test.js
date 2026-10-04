@@ -267,4 +267,11 @@ test('the MCP confirm message names the downtime and the exact re-call', () => {
   assert.match(MCP_RUN_CONFIRM_MESSAGE, /1–2 minutes/);
   assert.match(MCP_RUN_CONFIRM_MESSAGE, /confirm: true/);
   assert.match(MCP_RUN_CONFIRM_MESSAGE, /rebuild: true/);
+  assert.match(MCP_RUN_CONFIRM_MESSAGE, /Incus package and image settings remain unchanged/);
+  assert.doesNotMatch(MCP_RUN_CONFIRM_MESSAGE, /Incus checkpoint|Incus stable package upgrade|guests may be interrupted/);
+  assert.deepEqual(flagsFromOptions({ rebuild: false }), []);
+  assert.equal(validateUpdateFlags(['--upgrade-incus']).ok, false);
+  const panel = readFileSync(new URL('../../../frontend/src/components/SelfUpdatePanel.jsx', import.meta.url), 'utf8');
+  assert.match(panel, /Incus package and image settings remain unchanged/);
+  assert.doesNotMatch(panel, /upgrades host Incus|Checks and upgrades the host Incus/);
 });

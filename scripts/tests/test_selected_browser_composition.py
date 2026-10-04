@@ -915,8 +915,18 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.assertEqual(self.poll(first)['kind'],'done')
         ordinal,_ = self.action('submit')
         review = self.poll(ordinal)
-        self.assertEqual(review['kind'],'request_approval')
-        self.assertFalse(any(r[0]=='POST' for r in Origin.received))
+        # Synthetic fixture only: retain the first refusal and request ordering
+        # before teardown. A generic `done` cannot stand in for wire approval.
+        gate = self.host.registry.gateway
+        fetch_log = self.root / 'guest/fetch-fixture.log'
+        diagnostic = repr(dict(ordinal=ordinal, result=review, gateway=gate.status(),
+            pending=gate.pending, ledger_rows=gate.ledger.rows[-48:],
+            browser_wire=self.browser_wire[-48:], upstream=self.upstream[-48:],
+            received=[(method, host, path, len(body)) for method, host, path, body in Origin.received[-48:]],
+            trace=self.host.trace[-48:],
+            fetch=fetch_log.read_text()[-8192:] if fetch_log.exists() else ''))
+        self.assertFalse(any(r[0]=='POST' for r in Origin.received),diagnostic)
+        self.assertEqual(review['kind'],'request_approval',diagnostic)
         self.approve_wire_request(review['request'])
         result = self.poll(ordinal,kinds=('off_list','uncertain'))
         if result['kind'] == 'uncertain':

@@ -314,26 +314,27 @@ class AttemptGateway:
     def check_connect(self, authority):
         # CONNECT only creates local intercepted TLS. Unknown hosts are denied
         # before target DNS, target socket or any upstream request byte.
-        try:
-            # CONNECT always names an explicit port, canonical HTTP origins omit
-            # the default port. Normalize only this required CONNECT syntax.
-            origin_authority = authority[:-4] if authority.endswith(':443') else authority
-            p = url_parts('https://' + origin_authority)
-            expected = ('[' + p['host'] + ']' if ':' in p['host'] else p['host']) + ':' + str(p['port'])
-            if authority != expected:
-                raise Denied('CONNECT_INVALID')
-            with self.lock:
+        # A refusal must be finalized under the same lock as its state check.
+        # Otherwise an old paused CONNECT can freeze a newer destination grant.
+        with self.lock:
+            try:
+                # CONNECT always names an explicit port, canonical HTTP origins omit
+                # the default port. Normalize only this required CONNECT syntax.
+                origin_authority = authority[:-4] if authority.endswith(':443') else authority
+                p = url_parts('https://' + origin_authority)
+                expected = ('[' + p['host'] + ']' if ':' in p['host'] else p['host']) + ':' + str(p['port'])
+                if authority != expected:
+                    raise Denied('CONNECT_INVALID')
                 self._check()
                 self.policy.protected_url(p)
                 if self.policy.public_navigation:
                     self.policy.destination(p,'resource')
                 elif p['origin'] not in self.policy.origins and p['origin'] not in self.additions:
                     raise Denied('OFF_LIST_DESTINATION')
-            return p
-        except Denied as e:
-            with self.lock:
+                return p
+            except Denied as e:
                 self._freeze(e.code)
-            raise
+                raise
 
     def review_request(self, request_ref, metadata):
         if not isinstance(request_ref, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_ref):
@@ -857,12 +858,19 @@ def serve_selected_socket(request, gateway, tls):
     reader = request.makefile('rb')
     writer = request.makefile('wb')
     client = None
+    connect_refusal_finalized = False
     try:
         method, target, headers = read_request(reader)
         if method == 'CONNECT':
             if headers.get('host') != target or set(headers) - {'host', 'proxy-connection', 'user-agent'}:
                 raise Denied('CONNECT_INVALID')
-            parts = gateway.check_connect(target)
+            try:
+                parts = gateway.check_connect(target)
+            except Denied:
+                # check_connect finalized this refusal atomically. Repeating
+                # it here could overwrite a grant committed after that check.
+                connect_refusal_finalized = True
+                raise
             writer.write(b'HTTP/1.1 200 Connection Established\r\n\r\n')
             writer.flush()
             reader.close()
@@ -893,11 +901,12 @@ def serve_selected_socket(request, gateway, tls):
         status, response_headers, body = gateway.forward(method, url, headers, body)
         send_response(writer, status, response_headers, body)
     except (Denied, OSError, ssl.SSLError, http.client.HTTPException) as e:
-        with gateway.lock:
-            try:
-                gateway._freeze(e.code if isinstance(e, Denied) else 'CLIENT_TRANSPORT_FAILED')
-            except Denied:
-                pass
+        if not connect_refusal_finalized:
+            with gateway.lock:
+                try:
+                    gateway._freeze(e.code if isinstance(e, Denied) else 'CLIENT_TRANSPORT_FAILED')
+                except Denied:
+                    pass
         try:
             send_response(writer, 403)
         except (OSError, ValueError):

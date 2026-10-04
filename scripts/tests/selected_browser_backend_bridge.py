@@ -28,10 +28,21 @@ def diagnostics(fixture):
     """Bounded local-fixture evidence, including failed/released launch state."""
     try:
         gate=fixture.host.registry.gateway
+        # Synthetic-only refusal/grant ordering; fixed fields keep row contents
+        # bounded and exclude page text, headers, bodies and discarded payloads.
+        ledger=[]
+        if gate:
+            for row in gate.ledger.rows[-16:]:
+                data={key:(value[:128] if isinstance(value,str) else value)
+                    for key,value in row['data'].items()
+                    if key in ('code','request_ref','grant_id','approval_id','effect','sent','replay_allowed','origin')
+                    and isinstance(value,(str,bool,int))}
+                ledger.append(dict(sequence=row['sequence'],kind=row['kind'][:64],sha256=row['sha256'],data=data))
         attempts=list(fixture.supervisor.state['attempts'].values())
         workers=list(fixture.supervisor.workers.items())
         value=dict(browser_version=fixture.chromium_version,
             gateway=gate.status() if gate else None,
+            gateway_ledger=ledger,
             attempts=[dict(attempt_id=a['attempt_id'],state=a['state'],selected_mode=a.get('selected_mode'),
                 selected_code=a.get('selected_code'),stop_reason=a.get('stop_reason'),exit=a.get('exit'),
                 spawned=a.get('spawned'),gateway_registered=a.get('gateway_registered')) for a in attempts[:4]],
@@ -44,12 +55,15 @@ def diagnostics(fixture):
             received=[dict(method=m[:16],host=h[:128],path=p[:160],body_bytes=len(b)) for m,h,p,b in Origin.received[-10:]],
             upstream=fixture.upstream[-10:],contacts=fixture.host.contacts[-10:],trace=fixture.host.trace[-20:])
         if len(json.dumps(value).encode())>16000:
+            value['gateway_ledger']=value['gateway_ledger'][-8:]
             value['chromium_log']=value['chromium_log'][-1000:]
             value['fetch_log']=value['fetch_log'][-512:]
             for worker in value['workers']:worker['stderr']=worker['stderr'][-1000:]
             value['trace']=value['trace'][-10:]
         if len(json.dumps(value).encode())>16000:
             return dict(browser_version=fixture.chromium_version[:256],diagnostic_truncated=True,
+                gateway=gate.status() if gate else None,
+                gateway_ledger=ledger[-4:],
                 attempts=[dict(attempt_id=a['attempt_id'],state=a['state']) for a in attempts[:4]],
                 workers=[dict(attempt_id=aid,ready=w.ready.is_set(),ended=w.ended.is_set(),
                     stderr=w.stderr_tail.decode('utf-8','replace')[-256:]) for aid,w in workers[:4]],

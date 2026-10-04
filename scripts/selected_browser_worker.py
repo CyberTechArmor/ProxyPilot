@@ -39,6 +39,13 @@ MAX_TEXT_BYTES = 12000
 MAX_ELEMENTS = 48
 MAX_CANDIDATES = 192
 MAX_REQUESTS_PENDING = 64
+# Ordinary, fixed host refusals cancel only that request in public mode. Unknown
+# protocol/authority failures and all local budget/deadline failures still halt.
+PUBLIC_REQUEST_REFUSALS = frozenset(('PUBLIC_WRITE_DISABLED', 'PROTECTED_DESTINATION',
+    'PROTECTED_ADDRESS', 'PUBLIC_DESTINATION_DENIED', 'OFF_LIST_DESTINATION',
+    'DESTINATION_ROLE_DENIED', 'DNS_LOOKUP_UNVERIFIED', 'DNS_LOOKUP_TIMEOUT',
+    'DNS_LOOKUP_CAPACITY', 'NETWORK_TARGET_UNVERIFIED', 'NETWORK_ROUTE_CHANGED',
+    'NETWORK_ROUTE_UNVERIFIED', 'CONNECTION_TARGET_CHANGED', 'REQUEST_TRANSPORT_UNSUPPORTED'))
 SENSITIVE = re.compile(r'password|passwd|secret|token|otp|one.time|verification.code|credit.card|cvv|cvc|ssn', re.I)
 
 
@@ -367,8 +374,9 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
             self.resources = {}
             self.frame_contexts = {}
 
-        def _refused_request(self, params, session, code):
-            self.frozen = True
+        def _refused_request(self, params, session, code, fatal=True):
+            if fatal:
+                self.frozen = True
             self._invalidate()
             self.cdp.notify('Fetch.failRequest', {'requestId': params['requestId'], 'errorReason': 'BlockedByClient'}, session)
             self.channel.emit({'event': 'selected_request_blocked', 'code': code, **self.identity()})
@@ -446,6 +454,15 @@ def selected_browser_class(base, refused, *, validate_configuration=None, valida
                 pending = self.requests.pop(decision['request_ref'], None)
             if pending is None:
                 return {'accepted': False}
+            if (self.config.get('mode') == 'public_navigation' and
+                    set(decision) == {'request_ref', 'decision', 'code'} and
+                    decision.get('decision') == 'block' and
+                    isinstance(decision.get('code'), str) and
+                    decision.get('code') in PUBLIC_REQUEST_REFUSALS and
+                    not self.frozen and not self.paused and time.monotonic() <= pending['expires']):
+                # The gateway never authorized contact. Fail this Fetch only;
+                # no ticket, retry, unfreeze or screenshot authority is minted.
+                return self._refused_request(pending['params'], pending['session'], decision['code'], fatal=False)
             if (decision.get('decision') != 'allow' or set(decision) != {'request_ref', 'decision', 'ticket'} or
                     not isinstance(decision.get('ticket'), str) or not HEX.fullmatch(decision['ticket']) or
                     self.frozen or self.paused or time.monotonic() > pending['expires']):

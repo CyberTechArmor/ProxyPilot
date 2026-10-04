@@ -114,6 +114,9 @@ try {
     const field = page.getByLabel('Connection name', { exact: true }); await field.focus();
     for (let i = 0; i < 16; i++) { await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => !!document.activeElement.closest('[role="dialog"]')), true, 'focus stays in dialog'); }
     await page.keyboard.press('Escape'); await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    // Radix schedules close autofocus after unmount; hidden alone precedes it.
+    const opener = await page.getByRole('button', { name: 'Add connection', exact: true }).elementHandle();
+    await page.waitForFunction(button => document.activeElement === button, opener, { timeout: 5000 });
     assert.equal(await page.getByRole('button', { name: 'Add connection', exact: true }).evaluate(el => document.activeElement === el), true, 'focus returns to opener');
     assert.equal(state.calls.filter(c => c.method !== 'GET').length, 0);
     await add(page, 'Role loss canary'); await page.getByRole('button', { name: 'Cancel', exact: true }).click();

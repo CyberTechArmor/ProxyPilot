@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setImmediate as immediate } from 'node:timers/promises';
 import { operationsFixture } from './helpers/operations-fixture.js';
 import { operationalSelectedBrowserMigration1118, operationalPublicNavigationMigration1123 } from '../lib/operational-selected-browser-schema.js';
@@ -1131,6 +1131,30 @@ test('artifact configuration needs dedicated path, finite quota and independent 
     assert.equal(browserArtifactsConfiguration({ ...env, OPERATIONS_BROWSER_ARTIFACT_DIR: root }).available, false);
   }
   assert.equal(browserArtifactsConfiguration({ ...env, OPERATIONS_BROWSER_ARTIFACT_QUOTA_BYTES: 'Infinity' }).available, false);
+});
+
+test('packaged backend layout accepts private storage outside the image and refuses every application tree', async () => {
+  const fixture = mkdtempSync(path.join(tmpdir(), 'pp-packaged-storage-'));
+  const application = path.join(fixture, 'app'), backend = path.join(application, 'backend');
+  const source = fileURLToPath(new URL('../../', import.meta.url));
+  try {
+    mkdirSync(backend, { recursive: true });
+    cpSync(path.join(source, 'src'), path.join(backend, 'src'), { recursive: true,
+      filter: filename => !['__tests__', 'mock2'].includes(path.basename(filename)) });
+    writeFileSync(path.join(backend, 'package.json'), JSON.stringify({ type: 'module' }));
+    symlinkSync(path.join(source, 'node_modules'), path.join(backend, 'node_modules'), 'dir');
+    const { browserArtifactsConfiguration: packaged } = await import(pathToFileURL(path.join(backend, 'src/lib/operational-selected-browser-runtime.js')));
+    const privateRoot = path.join(fixture, 'private');
+    const env = { OPERATIONS_BROWSER_ARTIFACT_BOUNDARY_REVIEWED: 'true', OPERATIONS_BROWSER_ARTIFACT_DIR: privateRoot, OPERATIONS_BROWSER_ARTIFACT_QUOTA_BYTES: '268435456' };
+    assert.equal(packaged(env).available, true, 'a sibling of the packaged application is outside its boundary');
+    for (const root of [application, backend, path.join(application, 'frontend/dist'), fixture, '/']) {
+      assert.equal(packaged({ ...env, OPERATIONS_BROWSER_ARTIFACT_DIR: root }).available, false, root);
+    }
+    const { createSourceMemorySetup } = await import(pathToFileURL(path.join(backend, 'src/lib/operations-source-memory-setup.js')));
+    const w = operationsFixture();
+    try { assert.equal(createSourceMemorySetup({ db: w.db, env: {}, root: privateRoot }).status().can_setup, true); }
+    finally { w.close(); }
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
 });
 
 for (const storageState of ['missing', 'unsafe']) test('review flag cannot start a browser with ' + storageState + ' private storage', async () => {

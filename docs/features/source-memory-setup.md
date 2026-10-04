@@ -34,6 +34,10 @@ The existing runtime adapter must still initialize successfully; otherwise Sourc
 Memory remains unavailable. The ordinary installed Docker layout already mounts
 `/var/lib/proxypilot`; setup neither adds mounts nor falls back to another root.
 Native/custom deployments must make that fixed boundary available deliberately.
+The storage validator excludes the whole source checkout in a repository layout,
+or the whole `/app` application tree in the packaged Docker layout. It excludes
+ancestors too; the Docker image's shorter path must not make `/` the application
+boundary and prevent setup of the dedicated `/var/lib/proxypilot` storage.
 
 Installation quota is 256 MiB; existing account/project caps remain 128 MiB,
 individual objects remain at most 16 MiB, and reservation, retention, deletion,

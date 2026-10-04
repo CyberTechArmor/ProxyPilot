@@ -494,11 +494,14 @@ test('1123 copies historical run pins and dependent records, retains triggers an
 test('public readiness reflects global cleanup and active guards without leaking project identity',async()=>{
  const w=publicWorld({receipt:false});try{
   const p2=w.f.store.create(w.owner,{name:'Another project'}),started=await w.open();
+  let idleProbes=0;w.runner.readiness=()=>{idleProbes++;throw new Error('Idle boundary probe must be skipped');};
   const active=await w.service.publicReadiness(w.owner,p2.id,'https://selected.example/');
   assert.equal(active.can_start,false);assert(active.checks.some(c=>c.code==='ATTEMPT_ALREADY_ACTIVE'));
+  assert.equal(idleProbes,0,'No idle guest boundary probe during active execution');
   const stopped=await w.service.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
   const ready=await w.service.publicReadiness(w.owner,p2.id,'https://selected.example/');
   assert.equal(ready.can_start,false);assert(ready.checks.some(c=>c.code==='CLEANUP_UNVERIFIED'));
+  assert.equal(idleProbes,0,'No idle guest boundary probe during unverified cleanup');
   for(const privateValue of [stopped.run.id,w.p.id,w.owner.id])assert(!JSON.stringify(ready).includes(privateValue));
   await rejected(403,()=>w.service.retryCleanup(w.owner,w.p.id,stopped.run.id,stopped.run.revision),'AGENT_CONTROL_VERIFICATION_REQUIRED');
  }finally{w.f.close();}

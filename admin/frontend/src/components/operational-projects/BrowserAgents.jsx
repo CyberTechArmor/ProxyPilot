@@ -65,7 +65,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
       publicStartKey.current??=crypto.randomUUID();
       setRun(await api.write(`${base}/public-browser`,{url:publicUrl.trim(),project_revision:project.revision,idempotency_key:publicStartKey.current},null,'POST',signal));publicStartKey.current=null;
     },'Public browser requested. Inspect its activity and live view.')}>Open browser</Action>
-    <Action variant="outline" disabled={!operator||busy||lost||!publicUrl.trim()} onClick={()=>perform(async signal=>setPublicReady((await api.get(`${base}/public-browser?url=${encodeURIComponent(publicUrl.trim())}`,signal)).readiness),'Browser readiness measured.',{refresh:false})}>Check browser readiness</Action>
+    <Action variant="outline" disabled={!operator||busy||loading||lost||!publicUrl.trim()||runs.some(item=>!TERMINAL.includes(item.state))} onClick={()=>perform(async signal=>setPublicReady((await api.get(`${base}/public-browser?url=${encodeURIComponent(publicUrl.trim())}`,signal)).readiness),'Browser readiness measured.',{refresh:false})}>Check browser readiness</Action>
     {publicReady&&<><Readiness value={publicReady}/><details><summary className="cursor-pointer min-h-11 py-3 text-sm">Measured browser capabilities</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(publicReady)}</pre></details></>}
     <p className="text-sm text-muted-foreground">Model tasks, private sign-in, files and internal websites are unavailable in this mode.</p>
     <p role="status" className="text-sm">{busy?'Working…':message}</p>
@@ -93,7 +93,8 @@ function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
   const cleanupBlocked=data.uncertainties?.some(item=>item.kind==='CLEANUP_UNVERIFIED'&&item.state==='unresolved');
   const root=`${paths.runs}/${run.id}`;
   return <section aria-label="Public browser activity" className="space-y-3 min-w-0">
-    <p role="status" className="text-sm">{words(run.state)} · {active?words(liveState):'Browser closed'} · {run.usage.requests} requests · {run.usage.response_bytes.toLocaleString()} response bytes</p>
+    <p role="status" className="text-sm">Browser: {words(run.state)} · {run.usage.requests} requests · {run.usage.response_bytes.toLocaleString()} response bytes</p>
+    <p className="text-sm">{active?`Video: ${['failed','unavailable','closed'].includes(liveState)?'unavailable — browser images below':words(liveState)}`:'Viewing ended.'}</p>
     {run.launch_failure_code?<p className="text-sm break-words">Browser launch refused: {words(run.launch_failure_code)}</p>:run.result_code&&<p className="text-sm break-words">{words(run.result_code)}</p>}
     <Action variant="outline" disabled={busy||!data.controls.can_cancel} onClick={()=>perform(async signal=>{
       setData(await api.write(`${root}/cancel`,{},run.revision,'POST',signal));

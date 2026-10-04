@@ -114,6 +114,8 @@ try{
   await page.reload();
   await page.getByRole('button',{name:'Inspect browser run',exact:true}).click();
   const publicRun=page.getByRole('region',{name:'Public browser activity',exact:true});
+  await publicRun.getByText('Viewing ended.',{exact:true}).waitFor();
+  assert.equal(await publicRun.getByText('Viewing ended. Browser closed.',{exact:true}).count(),0,'Unverified terminal closure is not claimed');
   await publicRun.getByText('Browser launch refused: NETWORK ROUTE UNVERIFIED',{exact:true}).waitFor();
   await publicRun.getByRole('button',{name:'Verify session for cleanup',exact:true}).waitFor();
   await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
@@ -131,10 +133,11 @@ try{
   await page.addInitScript(()=>{window.WebSocket=class{constructor(){throw new Error('Fixture video unavailable');}};});
   publicData={...publicData,run:{...publicData.run,state:'running',fence:1,revision:8,result_code:null,launch_failure_code:null,uncertain:false},controls:{can_cancel:true,can_live:true},receipts:[],uncertainties:[]};
   const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGqkAAAAASUVORK5CYII=';
-  let frameCalls=0,heldFrame,holdFrames=false,frameHeld;
+  let frameCalls=0,heldFrame,holdFrames=false,failFrames=false,frameHeld;
   const heldRequest=new Promise(resolve=>{frameHeld=resolve;});
   await page.route('**/browser-agent-runs/'+publicId+'/public-frame?*',async r=>{
     const query=new URL(r.request().url()).searchParams;assert.equal(query.get('attempt_id'),attemptId);assert.equal(query.get('fence'),'1');frameCalls++;
+    if(failFrames)return r.fulfill({status:503,json:{error:'PUBLIC_VIEW_SUPERVISOR_TIMEOUT',code:'PUBLIC_VIEW_SUPERVISOR_TIMEOUT'}});
     if(holdFrames){heldFrame=r;frameHeld();return;}
     return r.fulfill({json:{png_base64:png,width:1,height:1,attempt_id:attemptId,fence:1,captured_at:'2026-10-04T00:00:00Z'}});
   });
@@ -148,6 +151,8 @@ try{
   await frameImage.waitFor();
   await page.waitForFunction(()=>document.querySelector('img[alt="Current public website in the isolated browser"]')?.naturalWidth===1);
   assert.equal(await frameImage.evaluate(img=>img.complete&&img.naturalWidth===1),true);
+  await publicRun.getByText('Browser: running · 0 requests · 0 response bytes',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Check browser readiness',exact:true}).isDisabled(),true,'Active run disables idle readiness');
   for(const width of [360,375,768,1280,1920]){
     await page.setViewportSize({width,height:800});
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth),true,'Public frame overflow at '+width);
@@ -161,5 +166,19 @@ try{
   await page.waitForTimeout(5100);assert.equal(frameCalls,callsBeforeStop,'No frame poll after Stop');
   assert.equal(await frameImage.count(),0);assert.equal(await page.getByRole('region',{name:'Live public browser images',exact:true}).count(),0);
   report.checks.push('video failure renders current transient public frame at all widths; Stop removes image, stops polling and discards late in-flight frame');
+  // A failed capture backs off rather than polling every5s. Stop must dispose
+  // that longer timer too; this fixture never invokes a real runtime operation.
+  failFrames=true;holdFrames=false;
+  publicData={...publicData,run:{...publicData.run,state:'running',fence:1,revision:8},controls:{can_cancel:true,can_live:true},receipts:[]};
+  await page.reload();
+  await publicRun.getByText(/The browser image request timed out\. Another image will be requested in 30 seconds/).waitFor();
+  const failedCalls=frameCalls;await page.waitForTimeout(6100);
+  assert.equal(frameCalls,failedCalls,'Failed capture does not poll again after5s');
+  await page.getByRole('button',{name:'Stop browser',exact:true}).click();
+  await page.getByText('Browser stopped. Inspect the cleanup receipt.',{exact:true}).first().waitFor();
+  await page.waitForTimeout(30500);
+  assert.equal(frameCalls,failedCalls,'Stop disposes30s error retry timer');
+  assert.equal(await frameImage.count(),0);
+  report.checks.push('fixed timeout refusal shown clearly; failed frame backs off30s; Stop disposes long retry with no further polling');
   assert.deepEqual(report.page_errors,[]);assert.equal(h.requests.some(r=>r.method!=='GET'&&/\/start|\/model-consent|\/convert/.test(r.path)),false);assert.equal(h.world.supervisor.calls.length,0);report.passed=true;
 }finally{await context.close();await h.close();await browser.close();if(artifacts)writeFileSync(`${artifacts}/report.json`,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));}

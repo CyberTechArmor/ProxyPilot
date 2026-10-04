@@ -239,7 +239,14 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
       // The supervisor bounds this read at30s. Closing the socket cannot cancel
       // a guest capture, so let that bound finish before our transport deadline.
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),35000);timer.unref?.();
-      let raw;try{raw=await request('selected_browser_view',identity(ref),{signal:controller.signal});}finally{clearTimeout(timer);}
+      let raw;try{raw=await request('selected_browser_view',identity(ref),{signal:controller.signal});}
+      catch(error){
+        // Only fixed refusal codes cross this public endpoint. Never expose
+        // runtime messages, page URLs/text, diagnostics or arbitrary codes.
+        const publicErrors=new Set(['BROWSER_PROTOCOL','CHANNEL_CLOSED','OBSERVATION_DESTINATION_UNAUTHORIZED',
+          'SUPERVISOR_TIMEOUT','SUPERVISOR_UNREACHABLE','SUPERVISOR_PROTOCOL','CANCELLED']);
+        fail(publicErrors.has(error?.code)?'PUBLIC_VIEW_'+error.code:'PUBLIC_VIEW_UNAVAILABLE');
+      }finally{clearTimeout(timer);}
       const parsed=z.object({png_base64:z.string().min(4).max(3*1024*1024),width:z.number().int().min(1).max(4096),height:z.number().int().min(1).max(4096)}).strict().safeParse(raw);
       if(!parsed.success||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw.png_base64))fail('PUBLIC_VIEW_INVALID');
       const png=Buffer.from(raw.png_base64,'base64');

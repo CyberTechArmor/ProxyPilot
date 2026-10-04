@@ -163,12 +163,15 @@ export function createSelectedBrowserService({db,runner=null,model=null,artifact
   }
   async function publicReadiness(actor,projectId,url){
     const {p}=access(actor,projectId,'run'),c=publicNavigationConfiguration(url),validated=validateBrowserDraftImport({configuration:c});
-    let status;try{status=await runner?.readiness?.({project_id:projectId,configuration:c,configuration_sha256:validated.configuration_sha256,policy_sha256:validated.configuration_sha256});}catch{/* explicit unreachable capability */}
-    const ready=!!(status?.available&&status?.verified_supervisor&&status?.verified_isolation&&status?.verified_destinations&&status?.verified_site_policy&&status?.policy_sha256===validated.configuration_sha256);
     // The host is shared: use the same global admission blockers as openPublic.
     // Return only the reason, never another project's run or user identity.
     const cleanup=!!one("SELECT 1 FROM ops_selected_browser_uncertainties WHERE kind='CLEANUP_UNVERIFIED' AND state='unresolved'");
     const active=!!one("SELECT 1 FROM ops_selected_browser_runs WHERE state IN('preparing','running','paused','awaiting_approval','human_control','stopping')");
+    // Guest boundary measurements require idle execution. Never invoke that
+    // probe while an attempt or unverified cleanup may still own the boundary.
+    if(active||cleanup)return {can_start:false,checks:[{kind:'browser_lifecycle',state:'blocked',code:cleanup?'CLEANUP_UNVERIFIED':'ATTEMPT_ALREADY_ACTIVE'}],capabilities:{},helper_hashes:{},protected_inventory_sha256:null,valid_until:null};
+    let status;try{status=await runner?.readiness?.({project_id:projectId,configuration:c,configuration_sha256:validated.configuration_sha256,policy_sha256:validated.configuration_sha256});}catch{/* explicit unreachable capability */}
+    const ready=!!(status?.available&&status?.verified_supervisor&&status?.verified_isolation&&status?.verified_destinations&&status?.verified_site_policy&&status?.policy_sha256===validated.configuration_sha256);
     const checks=[{kind:'runtime',state:ready?'ready':'blocked',code:ready?'READY':status?.code??'BROWSER_RUNTIME_UNAVAILABLE'},
       {kind:'project_limits',state:limitsCheck(p,c)?'ready':'blocked',code:limitsCheck(p,c)?'READY':'PROJECT_LIMITS_REQUIRED'},
       {kind:'browser_lifecycle',state:!cleanup&&!active?'ready':'blocked',code:cleanup?'CLEANUP_UNVERIFIED':active?'ATTEMPT_ALREADY_ACTIVE':'READY'}];

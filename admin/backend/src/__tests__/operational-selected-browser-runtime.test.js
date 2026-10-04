@@ -1238,6 +1238,22 @@ test('public frame reaches installed selected view with exact wire identity, no 
   assert.equal(w.calls.filter(c=>c.method==='selected_browser_model').length,0);assert.equal(w.runtime.artifacts,null);assert.equal(w.get(run.id).run.usage.artifact_bytes,0);
  }finally{await w.close();}
 });
+for(const code of ['BROWSER_PROTOCOL','CHANNEL_CLOSED','OBSERVATION_DESTINATION_UNAUTHORIZED',
+ 'SUPERVISOR_TIMEOUT','SUPERVISOR_UNREACHABLE','SUPERVISOR_PROTOCOL','CANCELLED',
+ 'SECRET_INTERNAL_ADDRESS',undefined])test('public viewing exposes only fixed refusal code '+String(code),async()=>{
+ const w=world({privateStorage:false,hostChange:(method,out)=>{
+  if(method==='selected_browser_view')throw Object.assign(new Error('private page URL and diagnostic text'),{code});
+  return out;
+ }});try{
+  w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});
+  const {run}=await openPublic(w);
+  const expected=!code||code==='SECRET_INTERNAL_ADDRESS'?'PUBLIC_VIEW_UNAVAILABLE':'PUBLIC_VIEW_'+code;
+  await assert.rejects(()=>w.runtime.runs.publicFrame(w.owner,w.p.id,run.id,{attempt_id:run.attempt_id,fence:run.fence}),error=>{
+   assert.equal(error.status,503);assert.equal(error.code,expected);assert.equal(error.message,expected);return true;
+  });
+  assert.equal(w.runtime.artifacts,null);assert.equal(w.get(run.id).run.usage.artifact_bytes,0);
+ }finally{await w.close();}
+});
 for(const [name,change] of [
  ['unknown fields',raw=>({...raw,untrusted_page_url:'https://private.invalid/secret'})],
  ['bad base64',raw=>({...raw,png_base64:'not a PNG'})],

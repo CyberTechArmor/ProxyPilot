@@ -1,4 +1,5 @@
 import {isPublicNavigation} from './operational-public-navigation.js';
+import {z} from 'zod';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -234,6 +235,17 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
     if(current.viewer!==prior.viewer||current.conn!==prior.conn||!same(current.context,prior.context))fail('AUTHENTICATION_CONTROLLER_STALE');
   };
   const runner=client?{
+    async view(ref){
+      // The supervisor bounds this read at30s. Closing the socket cannot cancel
+      // a guest capture, so let that bound finish before our transport deadline.
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),35000);timer.unref?.();
+      let raw;try{raw=await request('selected_browser_view',identity(ref),{signal:controller.signal});}finally{clearTimeout(timer);}
+      const parsed=z.object({png_base64:z.string().min(4).max(3*1024*1024),width:z.number().int().min(1).max(4096),height:z.number().int().min(1).max(4096)}).strict().safeParse(raw);
+      if(!parsed.success||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw.png_base64))fail('PUBLIC_VIEW_INVALID');
+      const png=Buffer.from(raw.png_base64,'base64');
+      if(png.length<24||!png.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||png.toString('ascii',12,16)!=='IHDR'||png.readUInt32BE(16)!==raw.width||png.readUInt32BE(20)!==raw.height)fail('PUBLIC_VIEW_INVALID');
+      return parsed.data;
+    },
     async readiness(input){
       try{if(!isPublicNavigation(input.configuration))files?.verify();}catch{return {contract_version:CONTRACT,available:false,code:'BROWSER_PRIVATE_STORAGE_UNAVAILABLE'};}
       const raw=await request('selected_browser_status',{configuration_json:canonicalBrowserDraft(input.configuration),configuration_sha256:input.configuration_sha256});

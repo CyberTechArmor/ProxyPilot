@@ -105,6 +105,7 @@ function world({ hostChange = () => {}, configured = true, privateStorage = conf
       if (method === 'selected_browser_status') out = attest({ contract_version: 'selected-browser.v1', supervisor_version: 'selected-browser.v1',
         policy_sha256: params.configuration_sha256, available: true, verified_supervisor: true, isolation: true, destinations: true,
         site_policy: true, vm_uuid: vm, valid_until: new Date(now + 30000).toISOString(), reachability: 'pending_launch_check' }, 'selected-browser-status');
+      else if(method==='selected_browser_view')out={png_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGqkAAAAASUVORK5CYII=',width:1,height:1};
       else if (method === 'selected_browser_model_status') out = attestModel({ contract_version: 'selected-browser-model.v1', available: true,
         price_table_revision: 1, prices: { input: 0.2, output: 1, cache_write: 0.2 }, valid_until: new Date(now + 30000).toISOString() }, 'selected-browser-model-status');
       else if (method === 'selected_browser_launch') {
@@ -1225,4 +1226,27 @@ test('a never-admitted proof cannot replace existing launch pins or recover an a
    await assert.rejects(()=>w.runtime.runs.retryCleanup(w.owner,w.p.id,stopped.run.id,stopped.run.revision),e=>e.code==='SIGNED_CLEANUP_RECEIPT_REQUIRED');
   }finally{await w.close();}
  }
+});
+
+test('public frame reaches installed selected view with exact wire identity, no private files or model call',async()=>{
+ const w=world({privateStorage:false});try{
+  w.session();w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});
+  const {run}=await openPublic(w),frame=await w.runtime.runs.publicFrame(w.owner,w.p.id,run.id,{attempt_id:run.attempt_id,fence:run.fence});
+  assert.equal(frame.width,1);assert.equal(frame.height,1);
+  const requests=w.calls.filter(c=>c.method==='selected_browser_view');assert.equal(requests.length,1);
+  assert.deepEqual(requests[0].params,{run_id:run.id,attempt_id:run.attempt_id,fence:1,policy_sha256:run.policy_sha256});
+  assert.equal(w.calls.filter(c=>c.method==='selected_browser_model').length,0);assert.equal(w.runtime.artifacts,null);assert.equal(w.get(run.id).run.usage.artifact_bytes,0);
+ }finally{await w.close();}
+});
+for(const [name,change] of [
+ ['unknown fields',raw=>({...raw,untrusted_page_url:'https://private.invalid/secret'})],
+ ['bad base64',raw=>({...raw,png_base64:'not a PNG'})],
+ ['wrong dimensions',raw=>({...raw,width:2})],
+ ['oversize',raw=>({...raw,png_base64:'A'.repeat(3*1024*1024+4)})],
+ ['wrong signature',raw=>({...raw,png_base64:Buffer.from('this is not a png header').toString('base64')})]
+])test('public view suppresses '+name,async()=>{
+ const w=world({privateStorage:false,hostChange:(method,out)=>method==='selected_browser_view'?change(out):out});try{
+  w.session();w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});
+  const {run}=await openPublic(w);await assert.rejects(()=>w.runtime.runs.publicFrame(w.owner,w.p.id,run.id,{attempt_id:run.attempt_id,fence:run.fence}),e=>e.code==='PUBLIC_VIEW_INVALID');
+ }finally{await w.close();}
 });

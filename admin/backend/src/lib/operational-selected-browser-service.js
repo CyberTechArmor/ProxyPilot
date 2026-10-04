@@ -528,6 +528,34 @@ export function createSelectedBrowserService({db,runner=null,model=null,artifact
   }
   async function release(actor,projectId,runId,expected){const initial=checked(actor,projectId,runId,expected,{proof:true});if(initial.state!=='human_control'||!ownsController(initial,actor))fail(403,'TAKEOVER_NOT_YOURS');await refresh(actor,projectId,runId);const r=tx(()=>{const current=runRow(projectId,runId);if(current.fence!==initial.fence||current.state!=='human_control'||!ownsController(current,actor))fail(403,'TAKEOVER_NOT_YOURS');control(actor);livePins(current);if(hasUnconfirmedEffects(current))fail(409,'AUTHENTICATION_READBACK_REQUIRED');const n=JSON.parse(current.network_state_json);if(n.inflight_action||n.pending_count||one("SELECT 1 FROM ops_selected_browser_approvals WHERE run_id=? AND state IN('pending','approved')",runId))fail(409,'REQUEST_CONTINUATION_REQUIRED');event(current,'TAKEOVER_RELEASE_AUTHORIZED',{},actor);return mutate(current,'preparing',{result_code:'RELEASING_CONTROL'});});try{await runner.release(identity(r),{controller_id:actor.id,session_id:actor.jti??null});tx(()=>{const current=runRow(projectId,runId);if(current.state==='preparing'&&current.fence===r.fence){livePins(current);mutate(current,'paused',{manual_auth:0,controller_user_id:null,controller_session_id:null,result_code:null});}});}catch{await terminate(r,'failed','RELEASE_UNCERTAIN');}return get(actor,projectId,runId);}
   function assertLive(actor,projectId,runId){access(actor,projectId,'read');const r=runRow(projectId,runId);if(r.execution_mode!=='public_navigation')control(actor,{elevation:false});else livePins(r);if(!ACTIVE.has(r.state)||r.state==='stopping')fail(409,'LIVE_UNAVAILABLE');if(r.manual_auth&&!ownsController(r,actor))fail(403,'MANUAL_AUTH_PRIVATE');return {...identity(r),project_id:projectId,controller_id:ownsController(r,actor)?actor.id:null,session_id:actor.jti??null,manual_auth:r.manual_auth===1};}
+  // One transient frame at a time across the shared runner. No frame cache,
+  // artifact, model observation, URL, or page text is retained by this service.
+  let frameBusy=false,frameNext=0;
+  function publicFrameIdentity(actor,projectId,runId,pins){
+    if(!validId(pins?.attempt_id)||!Number.isSafeInteger(pins?.fence)||pins.fence<1)fail(400,'PUBLIC_VIEW_PINS_INVALID');
+    assertLive(actor,projectId,runId);const r=runRow(projectId,runId);
+    const session=validId(actor.jti)&&one('SELECT * FROM sessions WHERE id=? AND user_id=?',actor.jti,actor.id);
+    if(!session||session.revoked_at||session.expires_at<=stamp())fail(403,'HUMAN_SESSION_REQUIRED');
+    if(r.execution_mode!=='public_navigation'||!isPublicNavigation(JSON.parse(r.configuration_json))||r.manual_auth||r.controller_user_id)fail(409,'PUBLIC_VIEW_UNAVAILABLE');
+    if(r.state!=='running'||r.attempt_id!==pins.attempt_id||r.fence!==pins.fence)fail(409,'PUBLIC_VIEW_FENCED');
+    return identity(r);
+  }
+  async function publicFrame(actor,projectId,runId,pins){
+    const initial=publicFrameIdentity(actor,projectId,runId,pins);
+    if(typeof runner?.view!=='function')fail(503,'PUBLIC_VIEW_UNAVAILABLE');
+    if(frameBusy||clock().getTime()<frameNext)fail(429,'PUBLIC_VIEW_RATE_LIMITED');
+    frameBusy=true;frameNext=clock().getTime()+2000;
+    try{
+      const frame=await runner.view(initial);
+      const current=publicFrameIdentity(actor,projectId,runId,pins);
+      if(hash(current)!==hash(initial))fail(409,'PUBLIC_VIEW_FENCED');
+      return {png_base64:frame.png_base64,width:frame.width,height:frame.height,attempt_id:initial.attempt_id,fence:initial.fence,captured_at:stamp()};
+    }catch(error){
+      // A lost reply does not prove the guest read finished. Avoid queuing
+      // another capture during its fixed30s host execution bound.
+      frameNext=clock().getTime()+30000;throw error;
+    }finally{frameBusy=false;}
+  }
   async function live(actor,projectId,runId,options={}){const permitted=assertLive(actor,projectId,runId);return runner.live({run_id:permitted.run_id,attempt_id:permitted.attempt_id,fence:permitted.fence,policy_sha256:permitted.policy_sha256},{...options,controller_id:permitted.controller_id,session_id:permitted.session_id,manual_auth:permitted.manual_auth});}
   async function controlInput(actor,projectId,runId,expected,input){
     const value=parse(selectedHumanInputSchema,input),r=tx(()=>{const current=checked(actor,projectId,runId,expected,{proof:true});if(current.state!=='human_control'||!ownsController(current,actor))fail(403,'TAKEOVER_NOT_YOURS');livePins(current);if(runner.assertTakeover(identity(current),{controller_id:actor.id,session_id:actor.jti??null})!==true)fail(409,'VERIFIED_LIVE_VIEWER_REQUIRED');const usage=JSON.parse(current.usage_json),c=JSON.parse(current.configuration_json);if(usage.actions>=c.budgets.max_actions)fail(409,'ACTION_BUDGET_EXHAUSTED');usage.actions++;const next=mutate(current,'human_control',{ordinal:current.ordinal+1,usage_json:JSON.stringify(usage)});event(next,'HUMAN_INPUT_RESERVED',{kind:value.kind,ordinal:next.ordinal},actor);return next;});
@@ -552,5 +580,5 @@ export function createSelectedBrowserService({db,runner=null,model=null,artifact
   async function recover(){const rows=all("SELECT * FROM ops_selected_browser_runs WHERE state IN('preparing','running','paused','awaiting_approval','human_control','stopping')");for(const r of rows)await terminate(r,'failed','PROCESS_RECOVERY_NO_REPLAY');return {recovered:rows.length};}
   async function pump(runId,{maxSteps=20}={}){if(one('SELECT execution_mode FROM ops_selected_browser_runs WHERE id=?',runId)?.execution_mode==='public_navigation')return 'running';if(!Number.isSafeInteger(maxSteps)||maxSteps<1||maxSteps>100)fail(400,'INVALID_PUMP_LIMIT');for(let i=0;i<maxSteps;i++){const r=one('SELECT * FROM ops_selected_browser_runs WHERE id=?',runId);if(!r||r.state!=='running')break;await step({id:r.started_by},r.project_id,r.id,r.revision);if(one("SELECT 1 FROM ops_selected_browser_steps WHERE run_id=? AND state='reserved'",runId))break;}return one('SELECT state FROM ops_selected_browser_runs WHERE id=?',runId)?.state??null;}
   async function sweep(){const rows=all("SELECT * FROM ops_selected_browser_runs WHERE state IN('preparing','running','paused','awaiting_approval','human_control')");for(const r of rows){try{livePins(r);}catch(e){await terminate(r,'failed',e.code??'CURRENT_ACCESS_LOST');}}return {checked:rows.length};}
-  return {readiness,publicReadiness,consent,start,openPublic,get,list,sources,refresh,step,pump,pause,resume,cancel,decision,takeover,release,authenticationReadback,confirmAuthentication,controlInput,viewerClosed,assertLive,live,reconcile,retryCleanup,recover,sweep,authorizeAttempt,verifyInputDraftApproval,verifyRetainedInputDraftApproval,verifyObservationOrigin};
+  return {readiness,publicReadiness,consent,start,openPublic,get,list,sources,refresh,step,pump,pause,resume,cancel,decision,takeover,release,authenticationReadback,confirmAuthentication,controlInput,viewerClosed,assertLive,live,publicFrame,reconcile,retryCleanup,recover,sweep,authorizeAttempt,verifyInputDraftApproval,verifyRetainedInputDraftApproval,verifyObservationOrigin};
 }

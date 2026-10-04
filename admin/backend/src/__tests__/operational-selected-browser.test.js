@@ -547,3 +547,49 @@ test('a failed launch diagnostic write still performs fenced cleanup',async()=>{
   assert.equal(record.receipts.length,1);assert(record.receipts[0].closed.network);assert.equal(w.calls.filter(c=>c[0]==='stop').length,1);
  }finally{w.f.close();}
 });
+
+function frameSession(w,actor=w.owner){actor.jti=randomUUID();w.f.db.prepare('INSERT INTO sessions(id,user_id,expires_at) VALUES(?,?,?)').run(actor.jti,actor.id,new Date(Date.parse(w.now())+3600000).toISOString());return actor;}
+const framePins=run=>({attempt_id:run.attempt_id,fence:run.fence});
+test('public transient frames require a current session and exact active public pins; no model or artifact storage',async()=>{
+ const w=publicWorld({runnerChanges:{view:async()=>({png_base64:'fixture-png',width:1280,height:800,secret:'never expose'})}});try{
+  const {run}=await w.open(),pins=framePins(run);
+  await rejected(403,()=>w.service.publicFrame(w.owner,w.p.id,run.id,pins),'HUMAN_SESSION_REQUIRED');frameSession(w);
+  await rejected(409,()=>w.service.publicFrame(w.owner,w.p.id,run.id,{...pins,fence:2}),'PUBLIC_VIEW_FENCED');
+  await rejected(404,()=>w.service.publicFrame(frameSession(w,w.outsider),w.p.id,run.id,pins));
+  let viewIdentity;const originalView=w.runner.view;w.runner.view=async ref=>{viewIdentity=ref;return originalView(ref);};
+  const frame=await w.service.publicFrame(w.owner,w.p.id,run.id,pins);
+  assert.deepEqual(viewIdentity,{run_id:run.id,attempt_id:run.attempt_id,fence:run.fence,policy_sha256:run.policy_sha256});
+  assert.equal(frame.png_base64,'fixture-png');assert.equal(Object.hasOwn(frame,'secret'),false);assert.equal(frame.attempt_id,run.attempt_id);
+  await rejected(429,()=>w.service.publicFrame(w.owner,w.p.id,run.id,pins),'PUBLIC_VIEW_RATE_LIMITED');
+  w.advance(2000);await w.service.publicFrame(w.owner,w.p.id,run.id,pins);
+  assert.equal(w.service.get(w.owner,w.p.id,run.id).run.usage.artifact_bytes,0);assert.equal(w.calls.filter(c=>c[0]==='model').length,0);
+  const stopped=await w.service.cancel(w.owner,w.p.id,run.id,w.service.get(w.owner,w.p.id,run.id).run.revision);
+  await rejected(409,()=>w.service.publicFrame(w.owner,w.p.id,run.id,pins));assert.equal(stopped.receipts[0].closed.browser,true);
+ }finally{w.f.close();}
+});
+for(const change of ['stop','revoke','withdraw'])test('public frame is suppressed when '+change+' happens during capture',async()=>{
+ const w=publicWorld();try{
+  frameSession(w);const {run}=await w.open();let finish;
+  w.runner.view=()=>new Promise(resolve=>{finish=resolve;});
+  const pending=w.service.publicFrame(w.owner,w.p.id,run.id,framePins(run));
+  await rejected(429,()=>w.service.publicFrame(w.owner,w.p.id,run.id,framePins(run)));
+  if(change==='stop')await w.service.cancel(w.owner,w.p.id,run.id,w.service.get(w.owner,w.p.id,run.id).run.revision);
+  else if(change==='revoke')w.f.db.prepare('UPDATE sessions SET revoked_at=? WHERE id=?').run(w.now(),w.owner.jti);
+  else w.f.db.prepare("UPDATE users SET role='pending' WHERE id=?").run(w.owner.id);
+  finish({png_base64:'discarded',width:1280,height:800});await assert.rejects(pending,e=>[403,409].includes(e.status));
+ }finally{w.f.close();}
+});
+test('agent mode is never exposed through the public frame endpoint',withWorld(async w=>{
+ frameSession(w);w.consent();const {run}=await w.start();w.runner.view=()=>assert.fail('Private runner capture');
+ await rejected(409,()=>w.service.publicFrame(w.owner,w.p.id,run.id,framePins(run)),'PUBLIC_VIEW_UNAVAILABLE');
+}));
+
+test('lost public capture reply cools down host reads before a fresh bounded capture',async()=>{
+ const w=publicWorld();try{
+  frameSession(w);const {run}=await w.open();let captures=0;
+  w.runner.view=async()=>{captures++;throw new Error('lost capture reply');};
+  await assert.rejects(()=>w.service.publicFrame(w.owner,w.p.id,run.id,framePins(run)));
+  w.advance(5000);await rejected(429,()=>w.service.publicFrame(w.owner,w.p.id,run.id,framePins(run)));assert.equal(captures,1);
+  w.advance(25000);await assert.rejects(()=>w.service.publicFrame(w.owner,w.p.id,run.id,framePins(run)));assert.equal(captures,2);
+ }finally{w.f.close();}
+});

@@ -142,6 +142,7 @@ jobs:
           node tests/browser-sessions.browser.mjs
           node tests/browser-connections.browser.mjs
           node tests/global-browser-connections.browser.mjs
+          node tests/source-memory-setup.browser.mjs
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

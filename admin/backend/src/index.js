@@ -10,6 +10,7 @@ import { createOperationsRouter } from './routes/operational-projects.js';
 import { createWebsiteReviewRuntime } from './lib/operational-website-review-runtime.js';
 import { createOperationsStore } from './lib/operational-projects-store.js';
 import { effectiveToggles } from './lib/operations-toggles.js';
+import { createSourceMemorySetup, localBrowserArtifactsConfiguration } from './lib/operations-source-memory-setup.js';
 import { createOperationsSettingsRouter } from './routes/operations-settings.js';
 import { evidenceConfiguration, createEvidenceRuntime } from './lib/operational-evidence-runtime.js';
 import { agentRunsConfiguration, createAgentRunRuntime } from './lib/operational-agent-runtime.js';
@@ -635,7 +636,8 @@ const agentRuns = createAgentRunRuntime(agentRunsConfig, { db: getDb(),
   audit: (actor, action, details) => logAudit(actor?.id ?? null, action, 'operational_agent_run', details?.run_id ?? null, details, null) });
 const operationsToggle = name => () => effectiveToggles(getDb())[name];
 const selectedBrowserEnabled=()=>{const t=effectiveToggles(getDb());return t.operations&&t.agents_metadata&&t.agent_runs;};
-const browserRuntime=createSelectedBrowserRuntime(agentRunsConfig,{db:getDb(),store:operationsStore,isEnabled:selectedBrowserEnabled,
+const localArtifactConfig=localBrowserArtifactsConfiguration(getDb());
+const browserRuntime=createSelectedBrowserRuntime(agentRunsConfig,{artifactConfig:localArtifactConfig,db:getDb(),store:operationsStore,isEnabled:selectedBrowserEnabled,
   isMetadataEnabled:()=>{const t=effectiveToggles(getDb());return t.operations&&t.agents_metadata;},
   log:entry=>console.log('[selected-browser]',JSON.stringify(entry))});
 const websiteReviews = createWebsiteReviewRuntime({db:getDb(),store:operationsStore});
@@ -645,7 +647,7 @@ const brokerTaskDispatch = createBrokerTaskDispatch({db:getDb(),store:operations
 const brokerTaskProposals = createBrokerTaskProposals({db:getDb(),store:operationsStore,dispatch:brokerTaskDispatch});
 app.use('/api/connections', authenticateToken, blockPendingRole, createConnectionsRouter({ Router: express.Router, store: operationsStore, bridge: connectionBridge, requireSudo }));
 app.use('/api/operations-settings', authenticateToken, blockPendingRole, createOperationsSettingsRouter({
-  Router: express.Router, db: getDb, requireAdmin, requireSudo }));
+  Router: express.Router, db: getDb, requireAdmin, requireSudo, sourceMemory:createSourceMemorySetup({db:getDb(),active:()=>!!browserRuntime.artifacts,activationAttempted:()=>localArtifactConfig.available===true}) }));
 app.use('/api/operational-projects', authenticateToken, blockPendingRole, createOperationsRouter({
   Router: express.Router,
   enabled: operationsToggle('operations'),

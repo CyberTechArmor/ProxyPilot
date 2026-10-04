@@ -351,3 +351,69 @@ ancestor/symlink and directory-identity preflight; each file operation repeats
 checks. Browser host readiness independently requires signed installed
 Incus/nft/gateway/managed-policy/Neko acceptance. None of these changes remove
 existing backend root-equivalent access or authorize deployment.
+
+## Explicit local Source Memory setup — 2026-10-04
+
+This review accepts only the `host_files` candidate in
+`lib/operations-source-memory-setup.js`: the fixed
+`/var/lib/proxypilot/browser-private` directory. The standard backend already has
+that host path through its existing `/var/lib/proxypilot` mount. No new mount,
+host command, namespace pivot, agent method, executable or parser is added.
+S6/SEC-01–03 remain open; this is an application contract inside the existing
+root-equivalent backend, not an independent host privilege boundary.
+
+The only mutation entry point is
+`POST /api/operations-settings/source-memory {}`. It requires the current
+administrator role, session authentication, double-submit CSRF and sudo. The
+UI obtains fresh sudo before sending one non-replayed setup request. No caller
+path, quota, contents, shell, credentials or decoder choice is accepted, and no
+MCP writer exposes this review. Custom environment storage configuration and
+`OPERATIONS_BROWSER_LOCAL_STORAGE_DISABLED=true` are preserved. Stock blank/
+false environment settings are left unchanged; the administrator's explicit
+review is recorded separately in the database after filesystem verification.
+
+The service creates at most one fixed directory beneath preexisting safe
+ancestors. It pins ancestor identities and opens the reviewed parent with
+`O_DIRECTORY|O_NOFOLLOW`; creation through that descriptor cannot follow a
+swapped ancestor into another directory. Unexpected `EEXIST`, occupied
+unreviewed roots, links, unsafe ancestor permissions, a different service UID,
+non-0700 root permissions or changed directory identity refuse. It never
+recursively creates parents, chmods/chowns existing paths, migrates private
+bytes or chooses another storage root.
+
+A bounded constant probe is written as one opaque UUID object through the
+existing private file adapter, then read with exact length/SHA256 checks and
+deleted. Objects are mode 0600 with no symlinks or hardlinks. The original
+probed root device/inode remains pinned through the review transaction; the
+receipt and its digest-linked audit commit atomically only after successful
+write/read/hash/delete verification and current role/custody checks. Refusal
+cannot persist activation. Cleanup never deletes unknown replacement bytes,
+and descriptor close/buffer clearing still run if cleanup fails.
+
+Setup reports verification pending an owner-performed dashboard backend restart.
+It does not restart a service or enable storage in the running artifact service.
+On the next ordinary backend start, the review/audit linkage, same physical root,
+service UID, exact 0700 mode and existing out-of-checkout storage validator must
+pass before the existing runtime adapter is initialized. A failed initialization
+reports unavailable, not pending restart. Runtime file operations recheck custody;
+there is no local fallback after refusal.
+
+The fixed installation quota is 256 MiB; existing 128 MiB account/project caps,
+16 MiB object maximum, reservations, retention, leases, deletion accounting,
+source disclosure and exact action approvals are unchanged. No model consent,
+run, guide approval or parser boundary is granted. A setting copied without its
+linked audit, a missing/replaced root or a different physical restore target
+refuses. Full same-host database/audit restoration against the same root can
+retain the installation review; the review itself grants no source lease,
+consent or execution authority, and existing current authority/expiry checks
+still apply. Host root can alter the database and storage, so no independent
+audit/custody or encrypted-backup guarantee is claimed.
+
+Source evidence is the real HTTP CSRF/sudo setup test, deterministic ancestor/
+root replacement and creation-race tests, malformed/restore/audit tests, exact
+permission refusal tests, and the existing artifact/runtime regressions in
+`operational-browser-source-memory-setup.test.js`. Browser journeys exercise
+fresh-sudo cancellation, no POST before verification, one exact setup POST,
+non-replay on refusal and honest pending/unavailable responses. Installed
+host storage verification, activation and any owner restart remain separate
+from this static inventory acceptance.

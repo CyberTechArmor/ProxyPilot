@@ -170,6 +170,9 @@
     "admin/backend/src/lib/operational-evidence-decoder.js": {
       "process_api: import { spawn } from 'node:child_process';": 1
     },
+    "admin/backend/src/lib/operations-source-memory-setup.js": {
+      "host_files: export const SOURCE_MEMORY_ROOT = '/var/lib/proxypilot/browser-private';": 1
+    },
     "admin/backend/src/lib/platform-vpn-sync.js": {
       "host_namespace: // (vpn-startup.js callProxypilot, nsenter-aware). refreshVpnNetworks records": 1
     },

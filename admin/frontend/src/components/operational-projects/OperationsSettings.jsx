@@ -18,13 +18,26 @@ export function OperationsSettings({ onChanged }) {
     if (busy) return;
     setBusy(toggle.name); setError(''); setMessage('');
     try {
-      setState(await operationsSettingsApi.set(toggle.name, enabled));
+      const changed = await operationsSettingsApi.set(toggle.name, enabled);
+      setState(previous => ({ ...changed, ...(previous?.source_memory ? { source_memory: previous.source_memory } : {}) }));
       setMessage(`${operationsToggleLabel(toggle)} turned ${enabled ? 'on' : 'off'}.`);
       window.dispatchEvent(new Event('pp-operations-changed'));
       await onChanged?.();
     } catch (e) {
       setError(e.status === 401 ? 'Sudo was not confirmed, so nothing changed.' : e.message);
     } finally { setBusy(''); }
+  }
+  async function setupSourceMemory() {
+    if (busy) return;
+    setBusy('source_memory'); setError(''); setMessage('');
+    try {
+      const changed = await operationsSettingsApi.setupSourceMemory(); setState(changed);
+      setMessage(changed.source_memory?.state === 'reload_required' ? 'Private storage verified. The owner must restart the dashboard backend to activate Source Memory.'
+        : changed.source_memory?.state === 'available' ? 'Private Source Memory is active.'
+        : changed.source_memory?.message || 'Private Source Memory is unavailable. The owner must inspect it.');
+      await onChanged?.();
+    } catch (e) { setError(e.status === 401 ? 'Sudo was not confirmed, so nothing changed.' : e.message); }
+    finally { setBusy(''); }
   }
   return <Panel title="Operations settings">
     <p className="text-sm">Administrators turn these on for everyone on this installation. Each needs the one above it. A change asks for your sudo confirmation and is recorded in the audit log.</p>
@@ -33,6 +46,15 @@ export function OperationsSettings({ onChanged }) {
     {!state ? <p role="status">Loading settings…</p> : <ul className="space-y-3">{state.toggles.map(toggle =>
       <Toggle key={toggle.name} toggle={toggle} busy={!!busy} labels={Object.fromEntries(state.toggles.map(t => [t.name, operationsToggleLabel(t)]))}
         onChange={enabled => change(toggle, enabled)}/>)}</ul>}
+    {state?.source_memory && <section className="rounded-md border p-3 min-w-0 space-y-3" aria-label="Source Memory setup">
+      <div><h3 className="font-medium">Private Source Memory</h3><p className="text-sm break-words">{state.source_memory.state === 'available' ? 'Available · private storage is active.' : state.source_memory.state === 'reload_required' ? 'Verified · owner backend restart required before Source Memory is available.' : state.source_memory.state === 'not_configured' ? 'Not configured · public browsing remains available.' : state.source_memory.message}</p></div>
+      {state.source_memory.can_setup && <>
+        <p className="text-sm break-words">Review and enable the fixed local private directory for this installation. This explicit action reviews the default storage boundary while preserving the existing environment file. It verifies ownership, permissions and writing, reading, checksum and deletion before saving approval.</p>
+        <p className="text-sm break-words">256 MiB installation quota; accounts and projects are capped at 128 MiB. Existing retention, source disclosure and action approvals still apply. This does not configure image or PDF parsers or start work.</p>
+        <Action disabled={!!busy} className="w-full sm:w-auto sm:min-h-11" onClick={setupSourceMemory}>Review and enable local Source Memory</Action>
+      </>}
+      {state.source_memory.state === 'reload_required' && <p className="text-sm text-muted-foreground break-words">Ask the installation owner to restart the dashboard backend, or perform the ordinary app update that restarts it. Refresh this page afterward and check readiness. Refreshing the browser alone does not activate storage.</p>}
+    </section>}
   </Panel>;
 }
 

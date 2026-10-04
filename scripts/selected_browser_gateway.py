@@ -314,26 +314,27 @@ class AttemptGateway:
     def check_connect(self, authority):
         # CONNECT only creates local intercepted TLS. Unknown hosts are denied
         # before target DNS, target socket or any upstream request byte.
-        try:
-            # CONNECT always names an explicit port, canonical HTTP origins omit
-            # the default port. Normalize only this required CONNECT syntax.
-            origin_authority = authority[:-4] if authority.endswith(':443') else authority
-            p = url_parts('https://' + origin_authority)
-            expected = ('[' + p['host'] + ']' if ':' in p['host'] else p['host']) + ':' + str(p['port'])
-            if authority != expected:
-                raise Denied('CONNECT_INVALID')
-            with self.lock:
+        # A refusal must be finalized under the same lock as its state check.
+        # Otherwise an old paused CONNECT can freeze a newer destination grant.
+        with self.lock:
+            try:
+                # CONNECT always names an explicit port, canonical HTTP origins omit
+                # the default port. Normalize only this required CONNECT syntax.
+                origin_authority = authority[:-4] if authority.endswith(':443') else authority
+                p = url_parts('https://' + origin_authority)
+                expected = ('[' + p['host'] + ']' if ':' in p['host'] else p['host']) + ':' + str(p['port'])
+                if authority != expected:
+                    raise Denied('CONNECT_INVALID')
                 self._check()
                 self.policy.protected_url(p)
                 if self.policy.public_navigation:
                     self.policy.destination(p,'resource')
                 elif p['origin'] not in self.policy.origins and p['origin'] not in self.additions:
                     raise Denied('OFF_LIST_DESTINATION')
-            return p
-        except Denied as e:
-            with self.lock:
+                return p
+            except Denied as e:
                 self._freeze(e.code)
-            raise
+                raise
 
     def review_request(self, request_ref, metadata):
         if not isinstance(request_ref, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_ref):

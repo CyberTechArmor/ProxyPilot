@@ -38,3 +38,27 @@ overridden only in memory passed; CI Chromium149 remains the authoritative
 CI composition check. Earlier local three-case probe passed action assertions
 but refused cleanup on a fixture PID identity mismatch in its third case;
 that probe is not a full passing run. No ownership check was bypassed.
+
+Fresh diagnostic CI at4abd573ad25366b87877979c0ffa4574f438f0c0 reproduced
+the Node action4 GATEWAY_PAUSED failure; the Python stage was not reached.
+No unchanged retry. A barrier-controlled selected-gateway regression now
+deterministically demonstrates the source-permitted stale refusal race:
+check_connect releases its state-check lock, a real destination grant resumes
+the gateway, then the old refusal reacquires the lock and pauses that newer
+generation. Old code fails paused!=running; no DNS/socket/effect occurred.
+
+Keep canonical CONNECT validation, state/destination checks and refusal/freeze
+transition under one RLock. The old CONNECT remains denied; the later grant
+wins; a fresh Document still requires exact wire approval. A reverse-order
+control proves a genuinely later unsafe CONNECT still refuses and pauses.
+This preserves selected-runner lifecycle ordering and existing configurations;
+it adds no private authentication or legacy-demo capability. Its relation to
+the observed CI failures remains a candidate, not a proven causal diagnosis.
+
+Local gateway/public suite:61passed, one existing Unix control-socket test
+blocked by managed workspace PermissionError at socket creation; no permission
+or peer-UID protection bypass. Disposable CI remains required for that boundary.
+New gateway SHA25652e1cd9f64cd14ee1047224e9b948fce959ecc5c0f5a4c468b34589f9313af0c;
+new worker SHA25677ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
+Other five helper sources are unchanged. Dedicated fixed runtime Install is
+required after ordinary application deployment to load these two helpers.

@@ -436,6 +436,79 @@ class GatewayTests(unittest.TestCase):
         gate.resolver.assert_not_called()
         gate.connection_factory.assert_not_called()
 
+    def test_old_connect_refusal_cannot_overwrite_a_new_destination_grant(self):
+        gate = self.make()
+        original = gate.policy.configuration_json
+        self.assertDenied('OFF_LIST_DESTINATION', gate.check_connect, 'other.example:443')
+        checked, granted = threading.Event(), threading.Event()
+        errors, barrier_failures = [], []
+        connector = None
+        class OrderedLock:
+            def __init__(self):
+                self.lock, self.depth = threading.RLock(), threading.local()
+            def __enter__(self):
+                self.lock.acquire()
+                self.depth.value = getattr(self.depth, 'value', 0) + 1
+                return self
+            def __exit__(self, kind, value, traceback):
+                self.depth.value -= 1
+                self.lock.release()
+                if (threading.current_thread() is connector and self.depth.value == 0 and
+                        isinstance(value, p.Denied) and value.code == 'GATEWAY_PAUSED'):
+                    checked.set()
+                    if not granted.wait(2):
+                        barrier_failures.append('grant did not finish at refusal barrier')
+                return False
+        gate.lock = OrderedLock()
+        destination = dict(id='temporary', origin='https://other.example', roles=['navigation'], session_headers='omit')
+        target = dict(origin=destination['origin'], scope='public', addresses=['8.8.8.8'], port=443,
+                      route_sha256='b' * 64, reviewed=True)
+        grant = dict(schema='proxypilot.selected-browser.destination-grant.v1', id=APPROVAL,
+                     identity=gate.policy.identity, origin=destination['origin'], roles=destination['roles'],
+                     purpose_sha256='c' * 64, expires_at=NOW + 120, persist_to_allowlist=False, wildcards=False)
+        def connect():
+            try:
+                gate.check_connect('other.example:443')
+            except p.Denied as error:
+                errors.append(error.code)
+        connector = threading.Thread(target=connect)
+        connector.start()
+        try:
+            self.assertTrue(checked.wait(2), 'CONNECT did not reach the ordered refusal barrier')
+            gate.grant_destination(grant, destination, target)
+        finally:
+            granted.set()
+            connector.join(2)
+        self.assertFalse(connector.is_alive())
+        self.assertEqual(barrier_failures, [])
+        self.assertEqual(errors, ['GATEWAY_PAUSED'])  # Old request remains denied.
+        self.assertEqual(gate.state, 'running')
+        self.assertIsNone(gate.reason)
+        self.assertEqual(gate.policy.configuration_json, original)
+        self.assertEqual(gate.purposes[(destination['origin'], 'navigation')], grant)
+        gate.resolver.assert_not_called()
+        gate.connection_factory.assert_not_called()
+        self.assertEqual(gate.status()['effects_sent'], 0)
+        self.assertEqual(gate.status()['requests'], 0)
+        fresh = dict(metadata(gate.policy), url=destination['origin'] + '/')
+        self.assertEqual(gate.review_request('fresh-document', fresh)['decision'], 'approval_required')
+        self.assertEqual(gate.status()['effects_sent'], 0)
+
+    def test_new_unsafe_connect_after_grant_still_refuses_without_contact(self):
+        gate = self.make()
+        destination = dict(id='temporary', origin='https://other.example', roles=['navigation'], session_headers='omit')
+        target = dict(origin=destination['origin'], scope='public', addresses=['8.8.8.8'], port=443,
+                      route_sha256='b' * 64, reviewed=True)
+        grant = dict(schema='proxypilot.selected-browser.destination-grant.v1', id=APPROVAL,
+                     identity=gate.policy.identity, origin=destination['origin'], roles=destination['roles'],
+                     purpose_sha256='c' * 64, expires_at=NOW + 120, persist_to_allowlist=False, wildcards=False)
+        gate.grant_destination(grant, destination, target)
+        self.assertDenied('OFF_LIST_DESTINATION', gate.check_connect, 'third.example:443')
+        self.assertEqual(gate.state, 'paused')
+        gate.resolver.assert_not_called()
+        gate.connection_factory.assert_not_called()
+        self.assertEqual(gate.status()['effects_sent'], 0)
+
     def test_cancel_while_dns_pending_cannot_open_socket_after_lookup_returns(self):
         entered,release=threading.Event(),threading.Event()
         def resolver(_):

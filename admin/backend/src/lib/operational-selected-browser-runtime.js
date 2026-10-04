@@ -71,7 +71,10 @@ export function createSelectedBrowserAttestationVerifier({publicKeyPem,vmUuid,cl
 export function browserArtifactsConfiguration(env=process.env){
   const root=env.OPERATIONS_BROWSER_ARTIFACT_DIR;
   const quota=Number(env.OPERATIONS_BROWSER_ARTIFACT_QUOTA_BYTES);
-  const checkout=fileURLToPath(new URL('../../../../',import.meta.url));
+  // Source checkout: <repo>/admin/backend/src/lib; packaged image: /app/backend/src/lib.
+  // The image omits the admin directory, so four parents would incorrectly be /.
+  const application=path.resolve(fileURLToPath(new URL('../../../',import.meta.url)));
+  const checkout=path.basename(application)==='admin'?path.dirname(application):application;
   const within=(a,b)=>{const r=path.relative(b,a);return !r||(!r.startsWith('..'+path.sep)&&r!=='..'&&!path.isAbsolute(r));};
   if(env.OPERATIONS_BROWSER_ARTIFACT_BOUNDARY_REVIEWED!=='true'||!root||!path.isAbsolute(root)||within(root,checkout)||within(checkout,root)||
     !Number.isSafeInteger(quota)||quota<16777216||quota>2147483648)return {available:false};

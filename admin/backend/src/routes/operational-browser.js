@@ -169,6 +169,12 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
     return method(available(r,'artifacts').service,'asset')(a,r.params.id,metadata,[bytes]);
   },{status:201,action:'browser_private_asset_stage'}));
   router.get(`${assets}/:assetId`,agentsOnly,agent((r,a)=>{query(r);return {artifact:method(available(r,'artifacts').store,'asset')(a,r.params.id,r.params.assetId)};}));
+  router.post(`${assets}/:assetId/discard`,agentsOnly,agent((r,a)=>{
+    empty(r);query(r);
+    // Revoke use/read leases now; the existing maintenance job removes the
+    // physical object when active writes finish. Keep the historical pins.
+    return {artifact:method(available(r,'artifacts').store,'cancel')(a,r.params.id,r.params.assetId)};
+  },{action:'browser_private_asset_discard'}));
   router.patch(`${assets}/:assetId/review`,agentsOnly,agent((r,a)=>({artifact:method(available(r,'artifacts').store,'reviewAsset')(a,r.params.id,r.params.assetId,r.body)}),{action:'browser_private_asset_review'}));
   router.post(`${assets}/:assetId/model-review`,agentsOnly,elevated,agent((r,a)=>({artifact:method(available(r,'artifacts').store,'reviewAssetModel')(a,r.params.id,r.params.assetId,r.body)}),{action:'browser_private_source_disclosure'}));
   router.get(`${assets}/:assetId/content`,agentsOnly,agent((r,a,res)=>{

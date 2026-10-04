@@ -208,6 +208,11 @@ export function createBrowserArtifactsService({store,files,decodeImage,redactIma
         return {...resolved,content};
       } finally { store.closeRead(l); }
     },
+    verifySourceAsset(actor,project,ref,{approved_for_model=false}={}) {
+      store.sourceAsset(actor,project,ref,{approved_for_model});
+      const l=store.openAssetRead(actor,project,ref.id,'model');
+      return verifyRetainedFile(actor,l,()=>store.sourceAsset(actor,project,ref,{approved_for_model}));
+    },
     async modelInputs(actor,scope,refs) {
       const resolved=store.modelSources(actor,scope,refs),inputs=[];let size=0,imageBytes=0;
       for (const ref of resolved.refs) {

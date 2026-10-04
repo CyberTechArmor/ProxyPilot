@@ -154,7 +154,7 @@ def main():
                         ('selected_browser_action','selected_browser_poll_action','selected_browser_grant_destination') else {}))
                     if method == 'selected_browser_model_status':
                         value = dict(contract_version='selected-browser-model.v1', available=True,
-                                     price_table_revision=1, prices=dict(input=.2, output=1, cache_write=.2),
+                                     price_table_revision=1, prices=dict(input='0.2', output='1', cache_write='0.2', cached_input='0.02'),
                                      valid_until=s.stamp(time.time()+30))
                         out = dict(value, attestation=fixture.runtime.model._attest(dict(kind='selected-browser-model-status', **value)))
                     elif method == 'selected_browser_model':

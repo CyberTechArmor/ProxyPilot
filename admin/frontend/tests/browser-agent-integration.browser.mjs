@@ -113,20 +113,26 @@ try{
   });
   await page.reload();
   await page.getByRole('button',{name:'Inspect browser run',exact:true}).click();
-  const publicRun=page.getByRole('region',{name:'Public browser activity',exact:true});
+  const publicRun=page.getByRole('region',{name:'Browser Flightdeck',exact:true});
+  await publicRun.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Activity',exact:true}).click();
   await publicRun.getByText('Viewing ended.',{exact:true}).waitFor();
   assert.equal(await publicRun.getByText('Viewing ended. Browser closed.',{exact:true}).count(),0,'Unverified terminal closure is not claimed');
   await publicRun.getByText('Browser launch refused: NETWORK ROUTE UNVERIFIED',{exact:true}).waitFor();
+  await publicRun.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Review (1)',exact:true}).click();
   await publicRun.getByRole('button',{name:'Verify session for cleanup',exact:true}).waitFor();
   await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
   await page.getByRole('alert').filter({hasText:'Cleanup needs a verified session. (ELEVATION_REQUIRED)'}).waitFor();
   await page.waitForTimeout(100);
   assert.equal(retries,1);assert.equal(await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).count(),1);
   await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).click();
-  await runtime.getByText('Cleanup checked. Inspect the receipt and check browser readiness again.',{exact:true}).waitFor();
+  await page.getByText('Cleanup checked. Inspect the receipt and check browser readiness again.',{exact:true}).first().waitFor();
   assert.equal(retries,2);assert.equal(await publicRun.getByRole('button',{name:'Retry verified cleanup',exact:true}).count(),0);
-  await publicRun.getByText('Cleanup: browser closed · network closed · session closed · temporary files closed',{exact:true}).waitFor();
-  assert.equal(await page.getByText(publicId,{exact:true}).count(),1);
+  for(const part of ['browser','network','session','temporary files'])await publicRun.getByText(`${part}: closed`,{exact:true}).waitFor();
+  await publicRun.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Details',exact:true}).click();
+  assert.equal(await publicRun.getByText(publicId,{exact:true}).count(),1);
+  const setupDisclosure=page.getByText('Browser task setup and history',{exact:true});
+  if(await setupDisclosure.count())await setupDisclosure.click();
+  assert.equal(await runtime.getByRole('button',{name:'Inspect browser run',exact:true}).count(),1,'Cleanup retains the historical run');
   report.checks.push('uncertain public-run history offers explicit verified cleanup; elevation refusal stays visible with no replay; signed closure hides retry and retains the run');
   // Force a video failure, then verify the real public fallback renders only
   // current ephemeral frames and drops a late response after Stop. Fixture only.
@@ -151,7 +157,8 @@ try{
   await frameImage.waitFor();
   await page.waitForFunction(()=>document.querySelector('img[alt="Current public website in the isolated browser"]')?.naturalWidth===1);
   assert.equal(await frameImage.evaluate(img=>img.complete&&img.naturalWidth===1),true);
-  await publicRun.getByText('Browser: running · 0 requests · 0 response bytes',{exact:true}).waitFor();
+  await publicRun.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Activity',exact:true}).click();
+  await publicRun.getByText('0 requests · 0 response bytes',{exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'Check browser readiness',exact:true}).isDisabled(),true,'Active run disables idle readiness');
   for(const width of [360,375,768,1280,1920]){
     await page.setViewportSize({width,height:800});

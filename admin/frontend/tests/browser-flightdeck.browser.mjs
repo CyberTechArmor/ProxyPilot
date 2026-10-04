@@ -9,8 +9,8 @@ const browser=await chromium.launch({executablePath:process.env.BROWSER_EXE||'/t
 const page=await browser.newPage({viewport:{width:1536,height:1024}}),errors=[];
 page.on('pageerror',e=>errors.push(e.message));
 const rid='22222222-2222-4222-8222-222222222222',aid='33333333-3333-4333-8333-333333333333';
-let state='running',imageRequests=0,starts=0,stops=0,cleanup=false,cleanupBlocked=false;
-const data=()=>({run:{id:rid,execution_mode:'public_navigation',state,revision:1,attempt_id:aid,fence:1,usage:{requests:33,response_bytes:592617},budgets:{max_seconds:300,max_requests:100},started_at:'2026-10-04T10:00:00Z',ended_at:state==='cancelled'?'2026-10-04T10:01:00Z':null},controls:{can_cancel:state==='running',can_live:state==='running'},receipts:cleanup?[{closed:{browser:true,network:true,session:true,temporary_files:true}}]:[],uncertainties:cleanupBlocked?[{kind:'CLEANUP_UNVERIFIED',state:'unresolved'}]:[]});
+let state='running',mode='public_navigation',imageRequests=0,starts=0,stops=0,cleanup=false,cleanupBlocked=false,pending=[],decisions=[];
+const data=()=>({run:{id:rid,execution_mode:mode,state,revision:1,attempt_id:aid,fence:1,usage:{requests:33,response_bytes:592617},budgets:{max_seconds:300,max_requests:100},started_at:'2026-10-04T10:00:00Z',ended_at:state==='cancelled'?'2026-10-04T10:01:00Z':null},controls:{can_cancel:['running','awaiting_approval'].includes(state),can_live:mode==='public_navigation'&&state==='running',can_approve:pending.length>0},receipts:cleanup?[{closed:{browser:true,network:true,session:true,temporary_files:true}}]:[],uncertainties:cleanupBlocked?[{kind:'CLEANUP_UNVERIFIED',state:'unresolved'}]:[],pending_approvals:pending,report:mode==='agent'?{summary:'Reviewed task result from the bounded fixture.',limitations:['Synthetic provider; no real task acceptance.'],citations:['https://example.com/report']}:null});
 await page.addInitScript(()=>{
  localStorage.setItem('pp-theme','office');
  // Deliberately stuck signalling exercises the real component fallback deadline.
@@ -26,6 +26,7 @@ await page.route('**/api/**',async route=>{
  if(p.endsWith('/browser-agent-runs'))return answer({runs:[data().run]});
  if(p.endsWith('/public-browser')){starts++;return answer(data());}
  if(p.endsWith('/public-frame')){imageRequests++;return answer({attempt_id:aid,fence:1,width:1,height:1,captured_at:'2026-10-04T10:00:05Z',png_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=='});}
+ if(p.endsWith('/decision')){decisions.push(r.postDataJSON());pending=[];state='running';return answer(data());}
  if(p.endsWith('/cancel')){stops++;state='cancelled';cleanup=true;return answer(data());}
  if(p.endsWith('/'+rid))return answer(data());
  return answer({});
@@ -52,7 +53,13 @@ try{
  await new Promise(r=>setTimeout(r,5500));assert.equal(imageRequests,before,'Stop physically unmounts image polling');
  await deck.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Review',exact:true}).click();await deck.getByText('temporary files: closed',{exact:false}).waitFor();assert.deepEqual(errors,[]);
  cleanupBlocked=true;await deck.getByRole('button',{name:'Refresh run',exact:true}).click();await deck.getByText('1 review item needs your attention.',{exact:false}).waitFor();assert.equal(await deck.getByText(/request.*held for your review/).count(),0);await deck.getByRole('button',{name:'Retry verified cleanup',exact:true}).waitFor();
- state='running';cleanup=false;cleanupBlocked=false;
+ mode='agent';state='awaiting_approval';cleanup=false;cleanupBlocked=false;pending=[{id:'approval-1',kind:'consequential_action',state:'pending',action_sha256:'a'.repeat(64),expires_at:new Date(Date.now()+600000).toISOString(),purpose:'Submit the reviewed form',packet:{operation:{kind:'submit',url:'https://example.com/form'}}}];
+ await page.goto(origin+'/flightdeck-test');await page.getByRole('button',{name:'Inspect browser run',exact:true}).click();const selected=page.getByRole('region',{name:'Browser Flightdeck',exact:true});await selected.waitFor();
+ await selected.getByRole('button',{name:'Approve this request',exact:true}).waitFor();assert.equal(await selected.getByRole('button',{name:'Approve this request',exact:true}).isDisabled(),true);
+ await selected.getByRole('checkbox',{name:/I reviewed the exact destination/}).check();await selected.getByRole('button',{name:'Approve this request',exact:true}).click();await selected.getByText('No requests are waiting for review.',{exact:false}).waitFor();assert.deepEqual(decisions,[{decision:'approve',action_sha256:'a'.repeat(64)}]);
+ for(const width of [360,375,768,1280,1920]){await page.setViewportSize({width,height:width<640?812:1000});await page.addStyleTag({content:'html,body{overflow-x:visible!important}'});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),width);const nav=selected.getByRole('navigation',{name:width<1024?'Browser panels':'Run information panels'});await nav.getByRole('button',{name:'Activity',exact:true}).click();await selected.getByText('Reviewed task result from the bounded fixture.',{exact:true}).waitFor();await nav.getByRole('button',{name:'Details',exact:true}).click();await selected.getByText('Run details and evidence',{exact:true}).waitFor();if(artifact)await page.screenshot({path:`${artifact}/selected-flightdeck-${width}.png`,fullPage:true});}
+ await page.evaluate(axe);const selectedAxe=await page.evaluate(()=>window.axe.run(document.querySelector('[data-browser-flightdeck]'),{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}}));assert.deepEqual(selectedAxe.violations.map(v=>v.id),[]);assert.deepEqual(errors,[]);assert.equal(starts,0);
+ mode='public_navigation';state='running';cleanup=false;cleanupBlocked=false;
  await page.evaluate(()=>sessionStorage.setItem('live-fixture','connected'));await page.goto(origin+'/flightdeck-test');
  await page.getByRole('img',{name:'Current public website in the isolated browser',exact:true}).waitFor({timeout:25000});assert.equal(await page.evaluate(()=>window.__liveCalls),1,'connected peer without decoded video gets one bounded fallback');
  await page.evaluate(()=>sessionStorage.setItem('live-fixture','decoded'));await page.goto(origin+'/flightdeck-test');

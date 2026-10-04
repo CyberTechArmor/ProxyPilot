@@ -85,6 +85,24 @@ test('bridge capability and conservative quotes require a fresh signed price sna
   s.attestation=signature({kind:'selected-browser-model-status',...s});const b=bridge(async()=>s);assert.equal((await b.readiness()).available,true);const quote=await b.quote({purpose:'decision',max_output_tokens:128});assert.equal(quote.tokens,16176);assert.equal(quote.price_table_revision,2);assert(quote.usd>0);
   const forged={...s,prices:{...s.prices,input:'0'}};assert.equal((await bridge(async()=>forged).readiness()).available,false);
 });
+test('malformed signed readiness cannot admit indefinite, invalid or stale cached prices',async()=>{
+  const status={contract_version:BROWSER_MODEL_CONTRACT,available:true,price_table_revision:1,
+    prices:{input:'0.10',cache_write:'0.125',output:'0.50',cached_input:'0.01'},valid_until:new Date(NOW+30000).toISOString()};
+  for(const mutate of [s=>s.valid_until='not-a-date',s=>s.valid_until=new Date(NOW+61000).toISOString(),
+    s=>s.price_table_revision=0,s=>s.prices.input='Infinity',s=>s.prices.output='-1',s=>delete s.prices.cache_write]){
+    const raw=structuredClone(status);mutate(raw);raw.attestation=signature({kind:'selected-browser-model-status',...raw});
+    const model=bridge(async()=>raw);
+    assert.equal((await model.readiness()).available,false);
+    await assert.rejects(()=>model.quote({purpose:'decision',max_output_tokens:128}),rejects('PRICE_UNKNOWN'));
+  }
+  const good={...status,attestation:signature({kind:'selected-browser-model-status',...status})};
+  let available=true,calls=0;
+  const model=bridge(async()=>{calls++;return available?good:{contract_version:BROWSER_MODEL_CONTRACT,available:false,code:'PROVIDER_UNAVAILABLE'};});
+  assert.equal((await model.readiness()).available,true);
+  available=false;assert.equal((await model.readiness()).available,false);
+  await assert.rejects(()=>model.quote({purpose:'decision',max_output_tokens:128}),rejects('PRICE_UNKNOWN'));
+  assert.equal(calls,3,'Failed readiness invalidates the cached quote and requires a fresh status.');
+});
 test('request digest is byte-identical across JavaScript/Python including multilingual text and tiny floating budgets',()=>{
   const r=request();r.input.instructions='Résumé 日本語 😀';r.limits.max_usd=1e-7;
   const code="import importlib.util,json,sys; s=importlib.util.spec_from_file_location('browser_model','scripts/selected-browser-model.py');m=importlib.util.module_from_spec(s);s.loader.exec_module(m);print(m.request_digest(json.load(sys.stdin)))";

@@ -11,11 +11,20 @@ const pin = z.object({ id:z.string().uuid(), sha256:sha }).strict();
 const identity = {run_id:z.string().uuid(),attempt_id:z.string().uuid(),fence:count.refine(n=>n>0),policy_sha256:sha};
 const controller = {controller_id:z.string().uuid(),session_id:z.string().uuid(),viewer_conn_sha256:sha};
 const boundedText = max => z.string().refine(value=>Buffer.byteLength(value,'utf8')<=max);
+// Match the gateway's controller-private endpoint preview contract. Signatures
+// establish the issuing helper, but do not make arbitrary URL paths safe to
+// persist: usernames, opaque IDs and token-bearing segments must be redacted.
+const authenticationPathWords = new Set(['api','v1','v2','v3','auth','authentication','account','accounts',
+  'login','signin','sign-in','logout','signout','oauth','oauth2','oidc','saml','sso','authorize',
+  'callback','token','mfa','challenge','verify','verification','otp','session','sessions']);
+const authenticationPathPreview = boundedText(1000).refine(value=>value.startsWith('/')&&
+  value.split('/').every(segment=>segment===''||segment==='[redacted]'||authenticationPathWords.has(segment.toLowerCase())),
+  'Authentication endpoint preview must redact nonstandard path segments');
 export const selectedAuthRequestSchema = z.object({
   request_ref:requestRef,binding_sha256:sha,request_sha256:sha,url_sha256:sha,
   body_sha256:sha,body_bytes:count,origin:z.string().max(2048),role:z.literal('authentication'),
   method:z.enum(['GET','HEAD','OPTIONS','POST','PUT','PATCH','DELETE']),
-  approval_ref:pin,purpose_sha256:sha,path_preview:boundedText(1000),human_context:boundedText(500),
+  approval_ref:pin,purpose_sha256:sha,path_preview:authenticationPathPreview,human_context:boundedText(500),
   ledger_send_ref:sha,ledger_response_ref:sha,transport_complete:z.literal(true),
 }).strict();
 export const selectedAuthInventorySchema = z.object({

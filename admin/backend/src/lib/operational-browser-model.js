@@ -30,6 +30,10 @@ const reportSchema = z.object({summary:bytes(8192,1),citations:z.array(uuid).max
 const inputDraftSchema=z.object({candidate_id:uuid,text:bytes(12000,1),purpose:bytes(500,1)}).strict();
 const conversionSchema = z.object({configuration:browserAgentProposalSchema, assumptions:z.array(bytes(1000,1)).max(20),
   warnings:z.array(bytes(1000,1)).max(20), ambiguities:z.array(z.object({field:bytes(200,1),question:bytes(1000,1)}).strict()).max(20)}).strict();
+const price=z.string().regex(/^(0|[1-9][0-9]{0,3})(\.[0-9]{1,6})?$/);
+const statusSchema=z.object({contract_version:z.literal(BROWSER_MODEL_CONTRACT),available:z.literal(true),
+  price_table_revision:z.number().int().positive(),prices:z.object({input:price,cache_write:price,output:price,cached_input:price}).strict(),
+  valid_until:z.string().datetime(),attestation:z.string().min(1)}).strict();
 
 export function browserModelRequestDigest(request) {
   const n = Buffer.alloc(8); n.writeDoubleBE(request.limits.max_usd);
@@ -111,9 +115,11 @@ export function createBrowserModelBridge({client,publicKeyPem,clock=()=>Date.now
     return {...r,...(purpose==='decision'?{decision:output}:purpose==='report'?{report:output}:purpose==='draft_input'?{draft:output}:{proposal:output}),usage:{...r.usage,tokens:r.usage.prompt_tokens+r.usage.completion_tokens,usd:Number(r.settled_usd)}};
   }
   const readiness=async()=>{
+      prices=null;
       try {
         const r=await client.request('selected_browser_model_status',{});
         if(r?.contract_version!==BROWSER_MODEL_CONTRACT||r.available!==true)return{available:false,code:r?.code||'BROWSER_MODEL_BRIDGE_UNAVAILABLE'};
+        if(!statusSchema.safeParse(r).success)reject('BROWSER_MODEL_RECEIPT_INVALID');
         const p=attest(r,'pbm1','selected-browser-model-status');
         if(p.contract_version!==BROWSER_MODEL_CONTRACT||p.available!==true||p.price_table_revision!==r.price_table_revision||canonicalBrowserDraft(p.prices)!==canonicalBrowserDraft(r.prices)||p.valid_until!==r.valid_until||Date.parse(p.valid_until)<=clock()||Date.parse(p.valid_until)>clock()+60000)reject('BROWSER_MODEL_RECEIPT_INVALID');
         prices={...r.prices,revision:r.price_table_revision,valid_until:r.valid_until};return{available:true,contract_version:BROWSER_MODEL_CONTRACT,multimodal:true,price_table_revision:r.price_table_revision};

@@ -94,6 +94,55 @@ test('exact durable retry cannot report successful staging after mid-body cancel
   } finally {f.close();}
 });
 
+test('discard revokes exact source use immediately and preserves pins while reporting deferred physical cleanup',async()=> {
+  const f=fixture();
+  try {
+    const bytes=Buffer.from('Private retained original'),a=await f.service.asset(f.owner,f.project,metadata(bytes),[bytes]);
+    f.store.reviewAsset(f.owner,f.project,a.id,assetReview);
+    f.store.reviewAssetModel(f.owner,f.project,a.id,{decision:'approve',reviewed_statement:BROWSER_ARTIFACT_REVIEW_STATEMENT});
+    const l=f.store.openAssetRead(f.owner,f.project,a.id,'model');
+    rejected(()=>f.store.cancel(f.viewer,f.project,a.id),403);
+    rejected(()=>f.store.cancel(f.outsider,f.project,a.id),404);
+    rejected(()=>f.store.cancel(f.owner,f.otherProject,a.id),404);
+    const discarded=f.store.cancel(f.owner,f.project,a.id);
+    assert.equal(discarded.available,false);assert.equal(discarded.availability_reason,'cancelled');
+    assert.equal(discarded.retention.cleanup_pending,true);assert.equal(discarded.retention.recorded_file_state,'sealed');
+    assert.equal(discarded.retention.charged_bytes,bytes.length);assert.equal(discarded.retention.deletion,null);
+    assert.equal(discarded.provenance.created_by,f.owner.id);assert.equal(discarded.created_at,a.created_at);
+    assert.deepEqual(ref(discarded),ref(a));assert.ok(fs.existsSync(path.join(f.root,`${a.id}.blob`)));
+    rejected(()=>f.store.checkRead(f.owner,l),410);
+    await rejects(f.service.resolveSourceAsset(f.owner,f.project,ref(a),{approved_for_model:true}),410);
+    assert.equal(f.service.maintenance({apply:true}).results[0].outcome,'deleted');
+    const deleted=f.store.asset(f.owner,f.project,a.id);
+    assert.equal(deleted.availability_reason,'deleted');assert.equal(deleted.retention.cleanup_pending,false);
+    assert.equal(deleted.retention.charged_bytes,0);assert.equal(deleted.retention.deletion.outcome,'deleted');
+    assert.ok(deleted.retention.deletion.completed_at);assert.deepEqual(ref(deleted),ref(a));assert.equal(deleted.reviews.length,2);
+    assert.equal(fs.existsSync(path.join(f.root,`${a.id}.blob`)),false);
+    assert.equal(f.store.cancel(f.owner,f.project,a.id).retention.deletion.outcome,'deleted');
+    f.revoke();rejected(()=>f.store.asset(f.owner,f.project,a.id),404);
+  } finally {f.close();}
+});
+
+test('retention receipts distinguish interrupted intake, expiry pending cleanup and missing-object tombstones',async()=> {
+  const f=fixture();
+  try {
+    const bytes=Buffer.from('never finalized'),a=f.store.reserveAsset(f.owner,f.project,metadata(bytes));
+    assert.equal(a.availability_reason,'intake_pending');assert.equal(a.retention.cleanup_pending,false);
+    f.advance(600001);
+    const interrupted=f.store.asset(f.owner,f.project,a.id);
+    assert.equal(interrupted.availability_reason,'intake_interrupted');assert.equal(interrupted.retention.cleanup_pending,true);
+    assert.equal(f.service.maintenance({apply:true}).results[0].outcome,'missing');
+    const missing=f.store.asset(f.owner,f.project,a.id);
+    assert.equal(missing.availability_reason,'missing');assert.equal(missing.retention.deletion.outcome,'missing');
+    const sealed=await f.service.asset(f.owner,f.project,metadata(bytes),[bytes]);
+    f.advance(15*86400000);
+    const expired=f.store.asset(f.owner,f.project,sealed.id);
+    assert.equal(expired.state,'expired');assert.equal(expired.availability_reason,'expired');
+    assert.equal(expired.retention.recorded_state,'staged');assert.equal(expired.retention.cleanup_pending,true);
+    assert.equal(expired.retention.deletion,null);assert.equal(expired.retention.recorded_file_state,'sealed');
+  } finally {f.close();}
+});
+
 test('approved project asset resolution rechecks attempt pins, grants, MIME and manual authentication',async()=> {
   const f=fixture();
   try {
@@ -266,6 +315,29 @@ test('private model source needs owner review of exact bytes, fresh source pin a
   } finally {f.close();}
 });
 
+test('synchronous private source verification checks current disclosure and physical originals without parsing or returning bytes',async()=> {
+  const f=fixture();
+  try {
+    const bytes=Buffer.from('Consented original'),a=await f.service.asset(f.owner,f.project,metadata(bytes),[bytes]),pin=ref(a);
+    rejected(()=>f.service.verifySourceAsset(f.owner,f.project,pin,{approved_for_model:true}),403);
+    f.store.reviewAsset(f.owner,f.project,a.id,assetReview);
+    rejected(()=>f.service.verifySourceAsset(f.owner,f.project,pin,{approved_for_model:true}),403);
+    f.store.reviewAssetModel(f.owner,f.project,a.id,{decision:'approve',reviewed_statement:BROWSER_ARTIFACT_REVIEW_STATEMENT});
+    rejected(()=>f.service.verifySourceAsset(f.owner,f.project,pin),403);
+    rejected(()=>f.service.verifySourceAsset(f.viewer,f.project,pin,{approved_for_model:true}),403);
+    const result=f.service.verifySourceAsset(f.owner,f.project,pin,{approved_for_model:true});
+    assert.deepEqual(result,{project_id:f.project,ref:pin,approved_for_model:true});
+    assert.ok(!JSON.stringify(result).includes(bytes.toString('utf8')));
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ops_browser_artifact_read_leases').get().n,0);
+    f.revoke();rejected(()=>f.service.verifySourceAsset(f.owner,f.project,pin,{approved_for_model:true}),404);f.restore();
+    fs.writeFileSync(path.join(f.root,`${a.id}.blob`),Buffer.from('Corrupted original'));
+    assert.throws(()=>f.service.verifySourceAsset(f.owner,f.project,pin,{approved_for_model:true}),/storage unavailable/);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM ops_browser_artifact_read_leases').get().n,0);
+    f.store.cancel(f.owner,f.project,a.id);
+    rejected(()=>f.service.verifySourceAsset(f.owner,f.project,pin,{approved_for_model:true}),410);
+  } finally {f.close();}
+});
+
 test('private model inputs require current consent, exact per-source model review and aggregate prompt bound',async()=> {
   const f=fixture();
   try {
@@ -427,6 +499,9 @@ test('internal page capture pins immutable bounded provenance and cannot borrow 
     const provenance=f.db.prepare('SELECT * FROM ops_browser_observation_sources WHERE artifact_id=?').get(a.id);
     assert.deepEqual(JSON.parse(provenance.snapshot_ref_json),input.snapshot_ref);assert.equal(provenance.origin,input.origin);
     assert.equal(provenance.url_sha256,input.url_sha256);assert.equal(provenance.worker_contract,'selected-browser.v1');
+    assert.deepEqual(a.provenance.snapshot_ref,input.snapshot_ref);assert.equal(a.provenance.origin,input.origin);
+    assert.equal(a.provenance.url_sha256,input.url_sha256);assert.equal(a.provenance.chunker_version,'browser-text.v1');
+    assert.ok(!JSON.stringify(a).includes(input.text));
     assert.throws(()=>f.db.prepare('UPDATE ops_browser_observation_sources SET origin=? WHERE artifact_id=?').run('https://other.example.com',a.id));
     assert.ok(!JSON.stringify(f.db.prepare('SELECT * FROM ops_browser_artifacts').all()).includes(input.text));
     assert.ok(!JSON.stringify(f.db.prepare('SELECT * FROM audit').all()).includes(input.text));

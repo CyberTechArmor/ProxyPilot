@@ -37,11 +37,27 @@ export function createBrowserArtifactsStore({one,all,run,tx,access,event,now,uui
   if (!Number.isInteger(assetRetentionDays) || assetRetentionDays < 1 || assetRetentionDays > 30 || typeof authorizeAttempt !== 'function')
     throw new Error('Browser artifact authorization and retention required');
   const later = ms => new Date(Date.parse(now())+ms).toISOString();
-  const receipt = a => ({id:a.id,project_id:a.project_id,kind:a.kind,state:a.expires_at<=now()?'expired':a.state,
-    sha256:a.sha256,mime_type:a.mime,byte_count:a.byte_count,expires_at:a.expires_at,parent_id:a.parent_id,
-    available:a.file_state==='sealed' && a.expires_at>now() && ['staged','approved'].includes(a.state),
-    reviews:all('SELECT purpose,decision,sha256,reviewed_at FROM ops_browser_artifact_reviews WHERE artifact_id=? ORDER BY purpose',a.id),
-    ...(a.run_id?{run_id:a.run_id,attempt_id:a.attempt_id,fence:a.fence}:{})});
+  function receipt(a) {
+    const expired=a.expires_at<=now(), available=a.file_state==='sealed' && !expired && ['staged','approved'].includes(a.state);
+    const deletion=one('SELECT completed_at,outcome FROM ops_browser_artifact_deletions WHERE artifact_id=?',a.id);
+    const reason=available?null:['deleted','missing'].includes(a.file_state)?a.file_state:
+      ['cancelled','rejected'].includes(a.state)?a.state:expired||a.state==='expired'?'expired':
+      a.state==='reserved'&&a.reservation_until<=now()?'intake_interrupted':'intake_pending';
+    const observation=a.kind==='observation'?one('SELECT snapshot_ref_json,origin,url_sha256,captured_at,worker_contract,chunker_version FROM ops_browser_observation_sources WHERE artifact_id=?',a.id):null;
+    return {id:a.id,project_id:a.project_id,kind:a.kind,state:expired?'expired':a.state,
+      sha256:a.sha256,mime_type:a.mime,byte_count:a.byte_count,expires_at:a.expires_at,parent_id:a.parent_id,available,
+      availability_reason:reason,created_at:a.created_at,
+      retention:{expires_at:a.expires_at,cleanup_pending:!available&&!deletion&&cleanupRequired(a),
+        // This is the durable storage receipt, not a fresh integrity probe or a
+        // claim about backups, replicas, host-root tampering or secure erasure.
+        recorded_file_state:a.file_state,recorded_state:a.state,charged_bytes:a.charged_bytes,deletion:deletion?{...deletion}:null},
+      provenance:{created_by:a.actor_id,parent_id:a.parent_id,
+        ...(observation?{snapshot_ref:JSON.parse(observation.snapshot_ref_json),origin:observation.origin,
+          url_sha256:observation.url_sha256,captured_at:observation.captured_at,
+          worker_contract:observation.worker_contract,chunker_version:observation.chunker_version}:{})},
+      reviews:all('SELECT purpose,decision,sha256,reviewed_at FROM ops_browser_artifact_reviews WHERE artifact_id=? ORDER BY purpose',a.id),
+      ...(a.run_id?{run_id:a.run_id,attempt_id:a.attempt_id,fence:a.fence}:{})};
+  }
   function row(project,id) {
     const a = validId(id) && one('SELECT * FROM ops_browser_artifacts WHERE project_id=? AND id=?',project,id);
     if (!a) fail(404,'Private browser artifact not found');
@@ -162,10 +178,13 @@ export function createBrowserArtifactsStore({one,all,run,tx,access,event,now,uui
       {project_id:a.project_id,run_id:a.run_id,attempt_id:a.attempt_id,fence:a.fence}:null,
       sha256:a.sha256,byte_count:a.byte_count,mime_type:a.mime};
   }
+  function cleanupRequired(a) {
+    return ['cancelled','rejected','expired'].includes(a.state) || a.expires_at<=now() || (a.state==='reserved' && a.reservation_until<=now());
+  }
   function cleanupCandidate(a) {
     if (!a || ['deleted','missing'].includes(a.file_state) || (a.busy_token && a.busy_until>now()) ||
       one('SELECT 1 FROM ops_browser_artifact_read_leases WHERE artifact_id=? AND expires_at>?',a.id,now())) return false;
-    return ['cancelled','rejected','expired'].includes(a.state) || a.expires_at<=now() || (a.state==='reserved' && a.reservation_until<=now());
+    return cleanupRequired(a);
   }
   function uploadBinding(actor,scope,input,intent,manualAllowed=false) {
     const ref=parse(refSchema,input),proof=authorize(actor,scope,intent);

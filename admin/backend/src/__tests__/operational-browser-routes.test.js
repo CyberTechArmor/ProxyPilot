@@ -42,6 +42,7 @@ function fixture({assetBodyParser}={}) {
     convert(actor,p,body){access(actor,p,'edit');calls.push({name:'convert',actor,body});return{conversion:{id:conversionId,state:'queued'}};},
     cancel(actor,p,id){access(actor,p,'edit');calls.push({name:'convert_cancel'});return{conversion:{id,state:'cancelled'}};}};
   const artifactStore={authorizeAssetStage(actor,p){access(actor,p,'edit');return true;},listAssets(actor,p,q){access(actor,p);calls.push({name:'list_assets',q});return{assets:[]};},asset(actor,p,id){access(actor,p);return{id};},
+    cancel(actor,p,id){access(actor,p,'edit');if(id!==assetId)throw new OperationsError(404,'Private browser artifact not found');calls.push({name:'asset_discard',actor,p,id});return{id,available:false,retention:{cleanup_pending:true}};},
     reviewAsset(actor,p,id,body){access(actor,p,'review');calls.push({name:'asset_review',body});return{id};},
     reviewAssetModel(actor,p,id,body){access(actor,p,'review');if(!actor.elevated)throw new OperationsError(403,'Proof required');calls.push({name:'asset_model_review',actor});return{id};},
     listAttempt(actor,scope,page){access(actor,scope.project_id);calls.push({name:'list_artifacts',scope,page});return{artifacts:[]};},
@@ -141,6 +142,26 @@ test('private base64 file route accepts only canonical bounded bytes with exact 
     assert.equal((await f.send('GET',`${f.assets}/${f.assetId}/content`,{}, {query:{purpose:'model'}})).statusCode,400);
     assert.equal((await f.send('GET',`${f.assets}/${f.assetId}/content`,{}, {query:{purpose:'review'}})).headers['content-disposition'],'attachment');
   }finally{f.close();}
+});
+
+test('project source discard checks current edit authority and CSRF without runtime authority or arbitrary cleanup input',async()=> {
+  const f=fixture();
+  try {
+    const path=`${f.assets}/${f.assetId}/discard`;
+    for (const extra of [{user:f.viewer},{user:f.outsider},{user:{...f.owner,mcp:true}},
+      {headers:{'if-match':'"6"'}},{query:{path:'/tmp/private'}}]) {
+      const result=await f.send('POST',path,{},extra);assert.ok([400,403,404].includes(result.statusCode));
+    }
+    for(const body of [{path:'/tmp/private'},{apply:true},{asset_id:randomUUID()}])assert.equal((await f.send('POST',path,body)).statusCode,400);
+    assert.equal(f.calls.length,0);
+    f.runGate(false);
+    const result=await f.send('POST',path,{}, {sudo:false,verified:false});
+    assert.equal(result.statusCode,200);assert.equal(result.body.artifact.retention.cleanup_pending,true);
+    assert.deepEqual(f.calls.map(c=>({name:c.name,p:c.p,id:c.id})),[{name:'asset_discard',p:f.project,id:f.assetId}]);
+    assert.equal((await f.send('POST',`${f.assets}/${randomUUID()}/discard`)).statusCode,404);
+    f.gate(false);assert.equal((await f.send('POST',path)).statusCode,404);
+    assert.equal(f.calls.length,1);
+  } finally {f.close();}
 });
 
 test('large file parsing requires fresh project edit access and finite intake slots reclaimed on response failure',async()=>{

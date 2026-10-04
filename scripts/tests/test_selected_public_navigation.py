@@ -153,6 +153,28 @@ class PublicGatewayTests(unittest.TestCase):
                     conn.close.assert_called_once();self.assertEqual(gate.status()['inflight'],0)
                     self.assertEqual(gate.status()['effects_sent'],0)
 
+    def test_public_evidence_tracks_only_completed_responses_without_paths_or_bodies(self):
+        gate,conn,url,token=self.response_gate(302,[('Location','https://next.public.example/private?q=secret')])
+        gate.forward('GET',url,{g.TICKET_HEADER:token['ticket']},b'')
+        self.assertEqual(gate.status()['public_navigation_evidence'],dict(completed_redirects=1,cross_origin_resources=0,
+            last_completed_document_origin=None,last_completed_document_url_sha256=None))
+        response=Mock(status=200);response.getheaders.return_value=[];response.read.side_effect=[b'page',b'']
+        conn.getresponse.return_value=response
+        next_url='https://next.public.example/private?q=secret'
+        metadata=self.meta(gate,next_url);metadata.update(role='navigation',resource_type='document')
+        token=gate.review_request('next',metadata)
+        gate.forward('GET',next_url,{g.TICKET_HEADER:token['ticket']},b'')
+        evidence=gate.status()['public_navigation_evidence']
+        self.assertEqual(evidence['last_completed_document_origin'],'https://next.public.example')
+        self.assertEqual(evidence['last_completed_document_url_sha256'],hashlib.sha256(next_url.encode()).hexdigest())
+        self.assertNotIn('secret',json.dumps(evidence));self.assertNotIn('page',json.dumps(evidence))
+        response.read.side_effect=[b'asset',b'']
+        metadata=self.meta(gate,'https://next.public.example/asset');metadata.update(role='resource',resource_type='image')
+        token=gate.review_request('asset',metadata)
+        gate.forward('GET',metadata['url'],{g.TICKET_HEADER:token['ticket']},b'')
+        self.assertEqual(gate.status()['public_navigation_evidence']['cross_origin_resources'],1)
+        self.assertEqual(gate.status()['requests'],3)
+
 class PublicSupervisorTests(unittest.TestCase):
     setUp=supervisors.SelectedSupervisorTests.setUp
     tearDown=supervisors.SelectedSupervisorTests.tearDown

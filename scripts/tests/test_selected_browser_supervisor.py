@@ -79,6 +79,15 @@ class SelectedHost(helpers.FakeHost):
             self.marker_tamper(marker)
         return marker
 
+    def public_navigation_inventory(self):
+        # Actual production inventory comes only from the protected installed
+        # journal; this host seam supplies no usable installed proof.
+        return dict(v=1,vm_uuid=s.VM_UUID,protected_hosts=['controller.example'],
+            protected_addresses=['10.185.17.1','10.185.17.179'])
+
+    def selected_managed_policy_hash(self):
+        return hashlib.sha256(s.runner.live_policy_bytes()).hexdigest()
+
     def selected_gateway(self, method, params):
         self.trace.append('gateway:' + method)
         try:
@@ -123,6 +132,7 @@ class SelectedSupervisorTests(unittest.TestCase):
         self.host = SelectedHost(self.root, self.clock)
         self.supervisor = s.Supervisor(host=self.host, journal=self.root / 'state.json', clock=self.clock)
         self.supervisor.live_available = lambda: dict(version=1)
+        self.supervisor.turn_credentials = lambda _: []  # Only the simulated host fixture.
         self.runtime = self.supervisor._selected()
         self.c = json.loads((ROOT.parent / 'contracts/browser-agent/fixtures/general-agent.draft.json').read_text())
         self.c['work']['guide_ref'] = dict(id=GUIDE, sha256='c' * 64)
@@ -168,30 +178,58 @@ class SelectedSupervisorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(raw)
 
-    def test_status_never_dns_or_grants_and_absent_acceptance_stays_unavailable(self):
+    def test_public_address_agent_status_measures_boundary_without_whole_feature_marker(self):
         params = {k:self.spec[k] for k in ('configuration_json','configuration_sha256')}
         self.host.marker_missing = True
         out = self.runtime.status(params)
-        self.assertFalse(out['available'])
-        self.assertFalse(out['isolation'])
-        self.assertEqual(self.host.trace, [])
-        self.decode(out['attestation'])
-        self.host.marker_missing = False
-        out = self.runtime.status(params)
         self.assertTrue(out['available'])
+        self.assertTrue(out['isolation'])
+        proof=self.decode(out['attestation'])
+        self.assertEqual(proof['capabilities']['loaded_helpers'],'verified')
         self.assertEqual(out['reachability'], 'pending_launch_check')
         self.assertEqual(self.host.trace, ['gateway:health'])
         self.assertEqual(self.host.spawns, 0)
         self.assertEqual(self.supervisor.state['attempts'], {})
 
-    def test_helper_hash_boot_and_proof_expiry_blocks_before_resolve(self):
-        for tamper in (lambda m:m['files'].update({'selected_browser_worker.py':'0'*64}),
-                       lambda m:m.update(boot_id=helpers.ATTEMPT2), lambda m:m.update(expires_at=self.clock()-1)):
-            self.host.marker_tamper = tamper
-            with self.assertRaises(s.Refused):
-                self.runtime.launch(self.spec)
-            self.assertEqual(self.host.trace, [])
-            self.assertEqual(self.host.spawns, 0)
+    def test_measured_helper_policy_and_inventory_fail_before_resolve(self):
+        expected=self.runtime.loaded_files['selected_browser_worker.py']
+        self.runtime.loaded_files['selected_browser_worker.py']='0'*64
+        self.assertCode('BROWSER_INSTALLED_HELPER_CHANGED',self.runtime.launch,self.spec)
+        self.runtime.loaded_files['selected_browser_worker.py']=expected
+        self.host.selected_managed_policy_hash=lambda:'0'*64
+        self.assertCode('BROWSER_CHROMIUM_POLICY_UNVERIFIED',self.runtime.launch,self.spec)
+        self.host.selected_managed_policy_hash=lambda:hashlib.sha256(s.runner.live_policy_bytes()).hexdigest()
+        self.host.public_navigation_inventory=lambda:dict(v=1,vm_uuid=s.VM_UUID,protected_hosts=[],protected_addresses=[])
+        self.assertCode('BROWSER_PROTECTED_INVENTORY_REQUIRED',self.runtime.launch,self.spec)
+        self.assertEqual(self.host.trace, []);self.assertEqual(self.host.spawns,0)
+
+    def test_marker_absent_agent_launch_preserves_closed_origins_and_no_internal_authority(self):
+        self.host.marker_missing=True
+        self.runtime.launch(self.spec)
+        gate=self.host.registry.gateway
+        self.assertFalse(gate.policy.public_navigation)
+        gate.resolver=Mock(side_effect=AssertionError('Off-list DNS contact'))
+        with self.assertRaises(self.host.gateway_module.Denied) as error:
+            gate.check_connect('other.public.example:443')
+        self.assertEqual(error.exception.code,'OFF_LIST_DESTINATION');gate.resolver.assert_not_called()
+        receipt=self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))
+        self.assertTrue(all(receipt['closed'].values()))
+
+    def test_no_internal_policy_is_inferred_from_measured_public_inventory(self):
+        self.host.marker_missing=True
+        self.host.selected_resolve=lambda _:['10.9.0.4']
+        self.assertCode('INTERNAL_EXACT_POLICY_REQUIRED',self.runtime.launch,self.spec)
+        self.assertEqual(self.host.spawns,0);self.assertNotIn('gateway:register',self.host.trace)
+
+    def test_explicit_internal_policy_reference_does_not_bypass_its_reviewed_contract(self):
+        self.c['destinations']['network_policy_ref']=dict(id=APPROVAL,sha256='a'*64)
+        raw=self.runtime.contract.canonical_json(self.c)
+        self.host.marker_missing=True
+        self.host.public_navigation_inventory=Mock(side_effect=AssertionError('Public inventory cannot grant internal policy'))
+        out=self.runtime.status(dict(configuration_json=raw,configuration_sha256=hashlib.sha256(raw.encode()).hexdigest()))
+        self.assertFalse(out['available']);self.assertFalse(out['isolation'])
+        self.assertEqual(out['code'],'BROWSER_INSTALLED_ACCEPTANCE_UNVERIFIED')
+        self.host.public_navigation_inventory.assert_not_called();self.assertEqual(self.host.spawns,0)
 
     def test_launch_plan_registered_before_spawn_finite_caps_and_signed_identity(self):
         out = self.runtime.launch(self.spec)

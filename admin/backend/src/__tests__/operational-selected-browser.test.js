@@ -436,6 +436,34 @@ function publicWorld(options={}){
  w.runner.observe=async()=>({snapshot_ref:w.snapshot,observation:'Public page text',source_refs:[],input_targets:[],page:null,candidates:[{candidate_ref:w.candidate.candidate_ref,effect:'read',operation:{kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'}}]});
  w.open=()=>w.service.openPublic(w.owner,w.p.id,{url:'https://selected.example/',project_revision:w.f.store.get(w.owner,w.p.id).revision,idempotency_key:randomUUID()});return w;
 }
+const publicEvidence=()=>({completed_redirects:1,cross_origin_resources:1,last_completed_document_origin:'https://next.example',last_completed_document_url_sha256:'a'.repeat(64)});
+test('signed public navigation aggregates survive cleanup independently of existing final network meters',async()=>{
+ const w=publicWorld();try{
+  const normal=w.runner.stop;w.runner.stop=async identity=>({...await normal(identity),public_navigation_evidence:publicEvidence()});
+  const started=await w.open(),stopped=await w.service.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
+  assert.equal(stopped.run.state,'cancelled');assert.deepEqual(stopped.receipts[0].public_navigation_evidence,publicEvidence());
+  assert.equal(stopped.receipts[0].final_network.requests,1);assert.equal(stopped.run.usage.requests,1);
+  assert.deepEqual(w.service.get(w.viewer,w.p.id,started.run.id).receipts[0].public_navigation_evidence,publicEvidence());
+ }finally{w.f.close();}
+});
+test('malformed public aggregates cannot certify cleanup or disclose URL queries',async()=>{
+ for(const change of [{completed_redirects:2},{cross_origin_resources:-1},{cross_origin_resources:1.5},
+  {last_completed_document_origin:'https://next.example/private?token=secret'},
+  {last_completed_document_origin:'https://user:secret@next.example'},
+  {last_completed_document_url_sha256:null},{page_text:'secret'}]){
+  const w=publicWorld();try{
+   const normal=w.runner.stop;w.runner.stop=async identity=>({...await normal(identity),public_navigation_evidence:{...publicEvidence(),...change}});
+   const started=await w.open(),stopped=await w.service.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
+   assert.equal(stopped.run.state,'uncertain');assert.equal(stopped.receipts.length,0);
+   assert(stopped.uncertainties.some(item=>item.kind==='CLEANUP_UNVERIFIED'));assert(!JSON.stringify(stopped).includes('secret'));
+  }finally{w.f.close();}
+ }
+});
+test('public navigation evidence is refused on private-capable agent receipts',withWorld(async w=>{
+ const normal=w.runner.stop;w.runner.stop=async identity=>({...await normal(identity),public_navigation_evidence:{...publicEvidence(),completed_redirects:0,cross_origin_resources:0}});
+ w.consent();const started=await w.start(),stopped=await w.service.cancel(w.owner,w.p.id,started.run.id,started.run.revision);
+ assert.equal(stopped.receipts.length,0);assert.equal(stopped.run.state,'uncertain');assert(stopped.uncertainties.some(item=>item.kind==='CLEANUP_UNVERIFIED'));
+}));
 test('public mode navigates without guide, model consent, model calls, elevation or private storage; stops and relaunches',async()=>{
  const w=publicWorld();try{
   const started=await w.open();assert.equal(started.run.execution_mode,'public_navigation');assert.equal(started.run.state,'running');

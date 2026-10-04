@@ -108,7 +108,7 @@ class Origin(BaseHTTPRequestHandler):
         if self.path == '/public-start':
             self.send_response(302);self.send_header('Location',OTHER+'/public-page');self.end_headers();return
         if self.path == '/public-page':
-            body=icon+'<h1>Public redirect destination</h1><img src="https://selected.example/asset.png">'
+            body=icon+'<h1>Public redirect destination</h1><img src="https://frame.example/asset.png">'
         elif self.path == '/navigation':
             body = icon + '<h1>Original page</h1><a href="https://frame.example/visit">Approved next visit</a>'
         elif self.path == '/resource':
@@ -455,6 +455,7 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.proxy_thread.start()
         self.supervisor = s.Supervisor(host=self.host, journal=self.root / 'state.json', clock=time.time)
         self.supervisor.live_available = lambda: {'version': 1}
+        self.supervisor.turn_credentials = lambda _: []  # Neko/TURN remains fixture-injected, never attested.
         self.runtime = self.supervisor._selected()
         self.c = json.loads((ROOT.parent / 'contracts/browser-agent/fixtures/general-agent.draft.json').read_text())
         self.c['work']['guide_ref'] = {'id': fixture.GUIDE, 'sha256': 'c' * 64}
@@ -801,6 +802,15 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         receipt=self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))
         # Stop removes the gateway; eager diagnostics must not dereference it.
         self.assertTrue(all(receipt['closed'].values()),repr(receipt))
+        evidence=receipt['public_navigation_evidence']
+        self.assertEqual(evidence['completed_redirects'],1)
+        self.assertGreaterEqual(evidence['cross_origin_resources'],1)
+        self.assertEqual(evidence['last_completed_document_origin'],OTHER)
+        self.assertEqual(evidence['last_completed_document_url_sha256'],hashlib.sha256((OTHER+'/public-page').encode()).hexdigest())
+        self.assertNotIn('/public-page',json.dumps(receipt))
+        signed=json.loads(base64.urlsafe_b64decode(receipt['attestation'].split('.')[1]+'=='))
+        self.assertEqual(signed['public_navigation_evidence'],evidence)
+        self.assertEqual(signed['gateway_ledger_sha256'],receipt['final_network']['ledger_sha256'])
         self.assertIsNone(self.supervisor.state['active'])
         self.assertFalse(self.host.live_browser_members())
 

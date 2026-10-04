@@ -16,18 +16,26 @@ export function LiveBrowser({ base, runId, endpoint, expanded = false, onState, 
   const box = useRef(null), video = useRef(null), typing = useRef(null), client = useRef(null);
   const [state, setState] = useState('connecting'), [control, setControl] = useState({ hasHost: false, mine: false });
   const screen = useRef({ width: 1280, height: 800 }), pressed = useRef(new Set()), moving = useRef(null);
-  const report = useRef({ onState, onControl, onViewer });
+  const report = useRef({ onState, onControl, onViewer }), videoReady = useRef(null);
   useEffect(() => { report.current = { onState, onControl, onViewer }; }, [onState, onControl, onViewer]);
 
   useEffect(() => {
     // A client closed by this effect's own cleanup (leaving the page, or
     // React's development double mount) reports nothing: only a connection
     // that ended by itself makes the page fall back to still frames.
-    let disposed = false;
+    let disposed = false, playing = false;
+    // A connected peer is not proof that video is visible. Keep the fallback
+    // deadline until the video element decodes a frame, including stuck peers.
+    const deadline = setTimeout(() => {
+      if (disposed || playing) return;
+      live.close(); setState('failed'); report.current.onState?.('failed', { reason: 'video_frame_timeout' }); report.current.onViewer?.(null);
+    }, 20000);
     const live = createLiveClient({
       url: endpoint ?? liveUrl(base, runId),
       onState: (name, detail) => {
         if (disposed) return;
+        if (name === 'live' && !playing) return;
+        if (['failed', 'unavailable', 'closed'].includes(name)) clearTimeout(deadline);
         setState(name);
         report.current.onState?.(name, detail);
         report.current.onViewer?.(name === 'live' ? live.viewer : null);
@@ -40,9 +48,13 @@ export function LiveBrowser({ base, runId, endpoint, expanded = false, onState, 
       onControl: (next) => { if (!disposed) { setControl(next); report.current.onControl?.(next); } },
       onScreen: (size) => { screen.current = { width: size.width, height: size.height }; },
     });
+    videoReady.current = () => {
+      if (disposed || playing || !video.current || video.current.readyState < 2 || !video.current.videoWidth) return;
+      playing = true; clearTimeout(deadline); setState('live'); report.current.onState?.('live', { reason: 'decoded_video' }); report.current.onViewer?.(live.viewer);
+    };
     client.current = live;
     live.start();
-    return () => { disposed = true; live.close(); client.current = null; };
+    return () => { disposed = true; clearTimeout(deadline); videoReady.current = null; live.close(); client.current = null; };
   }, [base, runId, endpoint]);
 
   const send = useCallback(buffer => client.current?.input(buffer) ?? false, []);
@@ -122,7 +134,7 @@ export function LiveBrowser({ base, runId, endpoint, expanded = false, onState, 
       aria-label={control.mine ? LIVE_TEXT.controlArea : LIVE_TEXT.videoArea} role={control.mine ? 'application' : undefined}
       className={`relative w-full ${expanded ? 'min-h-0 flex-1' : 'aspect-[16/10] shrink-0'} overflow-hidden rounded-md bg-zinc-950 touch-none focus-visible:outline-none ${control.mine ? 'ring-2 ring-emerald-500 cursor-default' : ''}`}
       data-testid="live-browser" data-live-state={state} data-control={control.mine ? 'mine' : control.hasHost ? 'held' : 'none'}>
-      <video ref={video} muted playsInline autoPlay aria-label={LIVE_TEXT.videoLabel}
+      <video ref={video} onPlaying={() => videoReady.current?.()} muted playsInline autoPlay aria-label={LIVE_TEXT.videoLabel}
         className="absolute inset-0 h-full w-full object-contain pointer-events-none"/>
       {state !== 'live' && <p role="status" className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-zinc-300">
         {LIVE_TEXT.state[state] ?? LIVE_TEXT.state.connecting}</p>}

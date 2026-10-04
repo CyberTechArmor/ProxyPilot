@@ -370,7 +370,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
     async stop(ref){try{return await request('selected_browser_stop',{...identity(ref),reason:ref.reason==='CANCELLED_BY_PERSON'?'cancelled':ref.reason==='REQUESTED_RESULT_REPORTED'?'completed':'failed'});}finally{for(const pin of stagedUploads)if(pin.startsWith(ref.attempt_id+':'))stagedUploads.delete(pin);for(const pin of authenticationInventories.keys())if(pin.startsWith(ref.attempt_id+':'))authenticationInventories.delete(pin);}},
   }:null;
   runs=createSelectedBrowserService({db,runner,model,artifacts:artifacts?.service,clock:()=>new Date(clock()),verifyControl,verifyElevation,verifyReceipt});
-  const conversion=createBrowserConversionService({db,store,model,resolveAsset:artifacts?.service.resolveSourceAsset.bind(artifacts.service),sourceCapabilities:()=>artifacts?.service.sourceCapabilities()||{mime_types:[]},clock,isEnabled});
+  const conversion=createBrowserConversionService({db,store,model,resolveAsset:artifacts?.service.resolveSourceAsset.bind(artifacts.service),verifyAsset:artifacts?.service.verifySourceAsset.bind(artifacts.service),sourceCapabilities:()=>artifacts?.service.sourceCapabilities()||{mime_types:[]},clock,isEnabled});
   const viewers=new Map();
   const viewerEnded=v=>{if(!v||[...viewers.values()].some(other=>other.run_id===v.run_id&&other.user_id===v.user_id&&other.session_id===v.session_id))return;
     void runs.viewerClosed?.(v.identity,{controller_id:v.user_id,session_id:v.session_id}).catch(()=>log({code:'CONTROL_VIEWER_CLEANUP_UNVERIFIED'}));};

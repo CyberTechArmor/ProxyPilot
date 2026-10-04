@@ -107,7 +107,7 @@ function world({ hostChange = () => {}, configured = true, privateStorage = conf
         site_policy: true, vm_uuid: vm, valid_until: new Date(now + 30000).toISOString(), reachability: 'pending_launch_check' }, 'selected-browser-status');
       else if(method==='selected_browser_view')out={png_base64:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGqkAAAAASUVORK5CYII=',width:1,height:1};
       else if (method === 'selected_browser_model_status') out = attestModel({ contract_version: 'selected-browser-model.v1', available: true,
-        price_table_revision: 1, prices: { input: 0.2, output: 1, cache_write: 0.2 }, valid_until: new Date(now + 30000).toISOString() }, 'selected-browser-model-status');
+        price_table_revision: 1, prices: { input: '0.2', output: '1', cache_write: '0.2', cached_input: '0.02' }, valid_until: new Date(now + 30000).toISOString() }, 'selected-browser-model-status');
       else if (method === 'selected_browser_launch') {
         launched = params;
         out = attest({ contract_version: 'selected-browser.v1', run_id: params.run_id, attempt_id: params.attempt_id, fence: params.fence,
@@ -417,6 +417,24 @@ for (const [name, change] of [
     assert.equal(result.run.state, 'uncertain'); assert.equal(result.receipts.length, 0);
     assert.notEqual(result.report_visibility, 'available'); assert.equal(result.report, null);
     assert.ok(result.uncertainties.some(u => u.kind === 'CLEANUP_UNVERIFIED'));
+  } finally { await w.close(); }
+});
+
+for (const preview of ['/signin/private-session-token', '/account/person@example.com',
+  '/oauth/callback?code=private-auth-code', '/signin/%5Bredacted%5D', '/signin/../token',
+  '/signin/private\nheader']) test('signed authentication inventory refuses unredacted endpoint ' + JSON.stringify(preview), async () => {
+  const w = world({ authPathPreview: preview });
+  try {
+    const { started } = await preparedAuthentication(w);
+    await assert.rejects(() => w.runtime.runs.authenticationReadback(w.owner, w.p.id, started.run.id),
+      error => error.code === 'AUTHENTICATION_INVENTORY_UNVERIFIED');
+    assert.equal(w.f.db.prepare('SELECT count(*) n FROM ops_selected_browser_auth_confirmations').get().n, 0);
+    assert.equal(w.f.db.prepare('SELECT count(*) n FROM ops_selected_browser_auth_confirmed_requests').get().n, 0);
+    assert.equal(w.get(started.run.id).run.manual_auth, true);
+    assert.equal(w.get(started.run.id).controls.can_release, false);
+    assert.equal(w.calls.filter(call => ['selected_browser_confirm_authentication', 'selected_browser_model',
+      'selected_browser_observe'].includes(call.method)).length, 0);
+    assert.ok(!JSON.stringify(w.f.db.prepare('SELECT * FROM ops_selected_browser_events').all()).includes(preview));
   } finally { await w.close(); }
 });
 
@@ -909,7 +927,7 @@ function changeSignedAuth(raw, changes, kind) {
 }
 
 test('64 separately approved authentication requests fit the finite inventory-only proof cap without dropped entries', async () => {
-  const w = world({ authPathPreview: '/signin/' + 'p'.repeat(900) });
+  const w = world({ authPathPreview: '/signin/' + '[redacted]/'.repeat(80) });
   try {
     const { started, requests } = await preparedAuthentication(w, 64);
     const { inventory } = await w.runtime.runs.authenticationReadback(w.owner, w.p.id, started.run.id);

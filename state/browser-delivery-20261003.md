@@ -62,6 +62,16 @@ After the clipped screenshot timeout, native screenshot capture succeeded;
 its local evidence shows the Python cancellation and all four closure flags.
 It also includes unrelated project labels and is not uploaded to GitHub.
 
+CI follow-up: corrected-head frontend and credential-broker/dashboard workflows
+passed. Security run37165470478 backend job111327554223 failed548-case
+suite (33skips), existing test_navigation_escalation_grant_settles_unsent_action_and_offers_new_exact_path:
+expected request_approval, actual done. All four runtime helpers and that case
+are unchanged. The only Python addition runs later in its own fresh fixture.
+Independent reviewer approved one unchanged failed-job retry; no assertion,
+timeout or product change. Earlier PR740head full backend passed. The precise
+failure cause remains unproven; original logs retained. Repeated failure
+requires inspecting the returned result/request ledger before proceeding.
+
 # Historical delivery record (superseded; preserved)
 
 # Browser delivery tracker

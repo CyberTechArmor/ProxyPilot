@@ -36,8 +36,12 @@ function abortable(promise,signal){return new Promise((resolve,rejectPromise)=>{
 });}
 export function createBrowserConversionService({db,store,model=null,resolveAsset=null,verifyAsset=null,sourceCapabilities=()=>({mime_types:['text/plain','text/csv']}),clock=()=>Date.now(),schedule=fn=>setImmediate(fn),isEnabled=()=>true}={}) {
   const one=(s,...a)=>db.prepare(s).get(...a),all=(s,...a)=>db.prepare(s).all(...a),run=(s,...a)=>db.prepare(s).run(...a);
-  const stamp=()=>new Date(clock()).toISOString(),executing=new Map();
+  const stamp=()=>new Date(clock()).toISOString(),executing=new Map();let closed=false;
+  const open=()=>{if(closed)reject('BROWSER_CONVERSION_CLOSED');};
+  const cancelModel=id=>{try{void Promise.resolve(model?.cancel?.(id)).catch(()=>{});}catch{/* uncertain spend is retained */}};
+  const interrupted=all("SELECT id FROM ops_browser_conversions WHERE state IN('queued','converting')");
   run("UPDATE ops_browser_conversions SET state='interrupted',result_json=?,updated_at=? WHERE state IN ('queued','converting')",JSON.stringify({code:'INTERRUPTED',requires_new_request:true,model_spend:'may_be_reserved'}),stamp());
+  for(const r of interrupted)cancelModel(r.id);
   const access=(actor,pid,action='read')=>{const p=store.get(actor,pid);assertOperation(p.own_role,action,!!p.archived_at);return p;};
   const owner=(actor,pid)=>{const p=access(actor,pid,'edit');if(p.own_role!=='owner'||actor.mcp===true||actor.human===false)reject('OWNER_MODEL_DISCLOSURE_REQUIRED',403);return p;};
   function row(pid,id){const r=one('SELECT * FROM ops_browser_conversions WHERE project_id=? AND id=?',pid,id);if(!r)reject('NOT_FOUND',404);return r;}
@@ -81,6 +85,7 @@ export function createBrowserConversionService({db,store,model=null,resolveAsset
     return result;
   }
   async function currentProjection(actor,r){
+    const privateAccess=()=>{const p=access(actor,r.project_id);if(p.own_role!=='owner'||actor.id!==r.user_id||actor.mcp===true||actor.human===false)reject('PRIVATE_MODEL_REQUEST_OWNER_REQUIRED',403);};privateAccess();
     const value=projection(r);
     if(r.state!=='completed')return value;
     const pins=value.pins;
@@ -99,20 +104,20 @@ export function createBrowserConversionService({db,store,model=null,resolveAsset
     }catch{available=false;}
     // Lost project access is an authorization failure, not a historical record
     // containing even partially withheld source information.
-    access(actor,r.project_id);
+    privateAccess();
     if(!available)value.result={code:'CONVERSION_SOURCE_UNAVAILABLE',withheld:true,requires_new_request:true,
       requires_review:true,persisted:false,execution_enabled:false};
     return value;
   }
   function check(actor,r,pins,signal){
-    if(signal?.aborted||row(r.project_id,r.id).state==='cancelled')reject('CANCELLED');
+    open();if(signal?.aborted||!ACTIVE.includes(row(r.project_id,r.id).state))reject('CANCELLED');
     if(!isEnabled())reject('BROWSER_CONVERSION_DISABLED');if(clock()>=Date.parse(pins.deadline_at))reject('DEADLINE');
     const p=owner(actor,r.project_id);currentGuide(p,pins.guide_ref);
     if(p.revision!==pins.project_revision||p.owner_user_id!==pins.owner_user_id||p.agent_limits_revision!==pins.project_limits_revision)reject('STALE_CONFIGURATION');return p;
   }
   async function execute(pid,id,actor){
-    const r=row(pid,id);if(r.state!=='queued')return;const pins=JSON.parse(r.pins_json),control=new AbortController();executing.set(id,control);
-    const timer=setTimeout(()=>{control.abort();void model?.cancel?.(id).catch(()=>{});},Math.max(1,Date.parse(pins.deadline_at)-clock()));
+    if(closed)return;const r=row(pid,id);if(r.state!=='queued')return;const pins=JSON.parse(r.pins_json),control=new AbortController();executing.set(id,control);
+    const timer=setTimeout(()=>{control.abort();cancelModel(id);},Math.max(1,Date.parse(pins.deadline_at)-clock()));
     try{
       const p=check(actor,r,pins,control.signal),guide=currentGuide(p,pins.guide_ref);
       const source_inputs=await abortable(sources(actor,pid,pins.source_asset_refs),control.signal);check(actor,r,pins,control.signal);
@@ -149,23 +154,23 @@ export function createBrowserConversionService({db,store,model=null,resolveAsset
       finish(pid,id,code==='CANCELLED'?'cancelled':'blocked',{code,requires_new_request:true,model_spend:row(pid,id).state==='converting'?'may_be_reserved':'not_requested'});
       // Cancel queued admission, without retry/refund assumptions or publishing
       // private model output after cancellation or staleness.
-      void model?.cancel?.(id).catch(()=>{});
+      cancelModel(id);
     }finally{clearTimeout(timer);executing.delete(id);}
   }
   return{
-    async readiness(actor,pid){const p=access(actor,pid);let provider;try{provider=await model?.readiness();}catch{provider=null;}
+    async readiness(actor,pid){open();access(actor,pid);let provider;try{provider=await model?.readiness();}catch{provider=null;}open();const p=access(actor,pid);
       return{contract_version:BROWSER_CONVERSION_CONTRACT,available:p.own_role==='owner'&&!p.archived_at&&isEnabled()&&provider?.available===true,
         code:p.own_role!=='owner'?'OWNER_MODEL_DISCLOSURE_REQUIRED':p.archived_at?'PROJECT_ARCHIVED':!isEnabled()?'BROWSER_CONVERSION_DISABLED':provider?.available===true?null:provider?.code||'BROWSER_MODEL_BRIDGE_UNAVAILABLE',
         disclosure_statement:BROWSER_CONVERSION_DISCLOSURE,requires_review:true,automatic_save:false,automatic_start:false,max_source_text_bytes:6000,max_source_assets:8,
         accepted_source_types:sourceCapabilities().mime_types,image_byte_limit:BROWSER_MODEL_MAX_IMAGE_BYTES,provider:'existing_a4',model:'gpt-6-luna',recommended_limits:{max_seconds:120,max_tokens:30000,max_usd:0.1}};},
-    async convert(actor,pid,body){const v=parse(inputSchema,body),p=owner(actor,pid);assertRevision(v.project_revision,p.revision);currentGuide(p,v.guide_ref);
+    async convert(actor,pid,body){open();const v=parse(inputSchema,body),p=owner(actor,pid);assertRevision(v.project_revision,p.revision);currentGuide(p,v.guide_ref);
       if(new Set(v.source_asset_refs.map(r=>r.id)).size!==v.source_asset_refs.length)reject('SOURCE_INPUT_DUPLICATE',400);
       if(!isEnabled())reject('BROWSER_CONVERSION_DISABLED');
-      const provider=await model?.readiness();if(provider?.available!==true)reject(provider?.code||'BROWSER_MODEL_BRIDGE_UNAVAILABLE');
+      const provider=await model?.readiness();open();if(provider?.available!==true)reject(provider?.code||'BROWSER_MODEL_BRIDGE_UNAVAILABLE');
       // Preflight exact asset review before storing work; recheck after every
       // await and again during execution instead of trusting this result later.
-      await sources(actor,pid,v.source_asset_refs);
-      let id;db.transaction(()=>{const current=owner(actor,pid);assertRevision(v.project_revision,current.revision);currentGuide(current,v.guide_ref);
+      await sources(actor,pid,v.source_asset_refs);open();
+      let id;db.transaction(()=>{open();const current=owner(actor,pid);assertRevision(v.project_revision,current.revision);currentGuide(current,v.guide_ref);
         if(!isEnabled())reject('BROWSER_CONVERSION_DISABLED');
         if(one("SELECT count(*) n FROM ops_browser_conversions WHERE state IN ('queued','converting')").n>=4||one("SELECT count(*) n FROM ops_browser_conversions WHERE project_id=? AND state IN ('queued','converting')",pid).n>=2)reject('CONVERSION_CAPACITY');
         const limits={...v.limits};for(const k of ['max_seconds','max_tokens','max_usd'])if(current.agent_limits?.[k]!=null)limits[k]=Math.min(limits[k],current.agent_limits[k]);
@@ -179,8 +184,8 @@ export function createBrowserConversionService({db,store,model=null,resolveAsset
       }).immediate();schedule(()=>execute(pid,id,{...actor}));return{contract_version:BROWSER_CONVERSION_CONTRACT,conversion:projection(row(pid,id))};},
     async status(actor,pid,id){access(actor,pid);return{contract_version:BROWSER_CONVERSION_CONTRACT,conversion:await currentProjection(actor,row(pid,id))};},
     list(actor,pid){access(actor,pid);return{contract_version:BROWSER_CONVERSION_CONTRACT,conversions:all('SELECT * FROM ops_browser_conversions WHERE project_id=? ORDER BY created_at DESC,id DESC LIMIT 50',pid).map(r=>({id:r.id,state:r.state,source_sha256:r.source_sha256,created_at:r.created_at,updated_at:r.updated_at}))};},
-    async cancel(actor,pid,id){owner(actor,pid);const r=row(pid,id);if(ACTIVE.includes(r.state)){executing.get(id)?.abort();finish(pid,id,'cancelled',{code:'CANCELLED',requires_new_request:true,model_spend:r.state==='converting'?'may_be_reserved':'not_requested'});event(actor,pid,'browser_conversion_cancelled',id,{});void model?.cancel?.(id).catch(()=>{});}
+    async cancel(actor,pid,id){open();owner(actor,pid);const r=row(pid,id);if(ACTIVE.includes(r.state)){executing.get(id)?.abort();finish(pid,id,'cancelled',{code:'CANCELLED',requires_new_request:true,model_spend:r.state==='converting'?'may_be_reserved':'not_requested'});event(actor,pid,'browser_conversion_cancelled',id,{});cancelModel(id);}
       return{conversion:await currentProjection(actor,row(pid,id))};},
-    close(){for(const c of executing.values())c.abort();},
+    close(){if(closed)return;closed=true;for(const r of all("SELECT * FROM ops_browser_conversions WHERE state IN('queued','converting')")){executing.get(r.id)?.abort();finish(r.project_id,r.id,'interrupted',{code:'INTERRUPTED',requires_new_request:true,model_spend:r.state==='converting'?'may_be_reserved':'not_requested'});cancelModel(r.id);}},
   };
 }

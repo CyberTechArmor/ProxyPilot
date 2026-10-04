@@ -1,8 +1,9 @@
+import {registerBrowserRoutes} from '../routes/operational-browser.js';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {readFileSync} from 'node:fs';
-import {operationsFixture} from './helpers/operations-fixture.js';
+import {operationsFixture,fixtureRouter} from './helpers/operations-fixture.js';
 import {BROWSER_CONVERSION_DISCLOSURE,createBrowserConversionService,operationalBrowserConversionMigration1120} from '../lib/operational-browser-conversion.js';
 import {browserDraftHash} from '../lib/operational-browser-agent-proposal.js';
 const rejects=code=>e=>e.code===code;
@@ -156,4 +157,40 @@ test('missing provider capability, usage or over-budget output fails closed and 
       w.scenario.output=output;const r=(await w.start()).conversion;await w.queued.shift()();assert.equal((await w.status(r.id)).state,'blocked');assert.equal((await w.status(r.id)).result.configuration,undefined);
     }
   }finally{w.close();}
+});
+
+test('private original model requests are not shared by project read grants',async()=>{
+  const w=world();try{
+    const body=w.body();body.source_text='Private original request, never approved for sharing.';const job=(await w.start(body)).conversion;
+    for(const actor of [w.editor,w.viewer,w.outsider])await assert.rejects(()=>w.service.status(actor,w.p.id,job.id),e=>[403,404].includes(e.status));
+    assert.equal((await w.status(job.id)).source_text,body.source_text);
+    const router=fixtureRouter();router.use((req,res,next)=>{req.operationsActor=req.user;next();});
+    registerBrowserRoutes(router,{store:w.store,runtime:()=>({conversion:w.service}),agentsOnly:(_r,_s,n)=>n(),runsOnly:(_r,_s,n)=>n()});
+    const reply=await router.dispatch({method:'GET',path:`/${w.p.id}/browser-agent-configurations/conversions/${job.id}`,user:w.viewer,headers:{},query:{},body:{}});
+    assert.equal(reply.statusCode,403);assert(!JSON.stringify(reply.body).includes(body.source_text));
+    const listing=w.service.list(w.viewer,w.p.id);assert(!JSON.stringify(listing).includes(body.source_text));assert(!JSON.stringify(listing).includes('source_text'));
+    await w.queued.shift()();for(const actor of [w.editor,w.viewer])await assert.rejects(()=>w.service.status(actor,w.p.id,job.id),e=>e.status===403);
+    assert.equal((await w.status(job.id)).source_text,body.source_text);
+  }finally{w.close();}
+});
+
+test('terminal conversion close fences held admissions, queued execution and direct provider operations',async()=>{
+  for(const stage of ['readiness','source']){
+    const w=world();try{let entered,release;const waiting=new Promise(r=>{entered=r;}),hold=()=>{entered();return new Promise(r=>{release=r;});};
+      const input=w.body();if(stage==='readiness')w.scenario.beforeReadiness=hold;else{input.source_asset_refs=[{id:randomUUID(),sha256:'a'.repeat(64),mime_type:'text/plain',byte_count:20}];w.scenario.resolve=async(actor,pid,ref)=>{await hold();return{project_id:pid,ref,approved_for_model:true,content:{kind:'text',text:'Reviewed private text'}};};}
+      const admitting=w.start(input);await waiting;w.service.close();release();await assert.rejects(()=>admitting,rejects('BROWSER_CONVERSION_CLOSED'));
+      assert.equal(w.db.prepare('SELECT count(*) n FROM ops_browser_conversions').get().n,0);assert.equal(w.queued.length,0);assert.equal(w.calls.length,0);
+      await assert.rejects(()=>w.start(),rejects('BROWSER_CONVERSION_CLOSED'));await assert.rejects(()=>w.service.readiness(w.owner,w.p.id),rejects('BROWSER_CONVERSION_CLOSED'));await assert.rejects(()=>w.service.cancel(w.owner,w.p.id,randomUUID()),rejects('BROWSER_CONVERSION_CLOSED'));
+    }finally{w.close();}
+  }
+  const w=world();try{const job=(await w.start()).conversion;w.service.close();await w.queued.shift()();assert.equal(w.calls.length,0);assert.equal((await w.status(job.id)).state,'interrupted');assert(w.cancellations.includes(job.id));w.service.close();}finally{w.close();}
+});
+test('conversion close interrupts an outstanding provider without late publication and readiness cannot survive shutdown',async()=>{
+  const w=world();try{let entered,release;const waiting=new Promise(r=>{entered=r;});w.scenario.beforeOutput=()=>{entered();return new Promise(r=>{release=r;});};
+    const job=(await w.start()).conversion,executing=w.queued.shift()();await waiting;w.service.close();release();await executing;
+    const current=await w.status(job.id);assert.equal(current.state,'interrupted');assert.equal(current.result.model_spend,'may_be_reserved');assert.equal(current.result.configuration,undefined);assert(w.cancellations.includes(job.id));
+  }finally{w.close();}
+  const w2=world();try{let entered,release;const waiting=new Promise(r=>{entered=r;});w2.scenario.beforeReadiness=()=>{entered();return new Promise(r=>{release=r;});};
+    const readiness=w2.service.readiness(w2.owner,w2.p.id);await waiting;w2.service.close();release();await assert.rejects(()=>readiness,rejects('BROWSER_CONVERSION_CLOSED'));
+  }finally{w2.close();}
 });

@@ -5,6 +5,7 @@ import { requestAgentControl } from '@/lib/agent-control';
 import { requestSudo } from '@/lib/sudo';
 import { Action, Choice, Field, Panel } from './shared';
 import { LiveBrowser } from './LiveBrowser';
+import { PublicBrowserFrames } from './PublicBrowserFrames';
 import { BrowserAuthenticationReadback } from './BrowserAuthenticationReadback';
 import { createBrowserFullscreen } from './browser-fullscreen';
 import { BrowserConfigurations } from './BrowserConfigurations';
@@ -68,7 +69,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{}}) {
     {publicReady&&<><Readiness value={publicReady}/><details><summary className="cursor-pointer min-h-11 py-3 text-sm">Measured browser capabilities</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(publicReady)}</pre></details></>}
     <p className="text-sm text-muted-foreground">Model tasks, private sign-in, files and internal websites are unavailable in this mode.</p>
     <p role="status" className="text-sm">{busy?'Working…':message}</p>
-    {run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform}/>}
+    {run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun key={run.run.id} base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform}/>}
   </Panel><BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
     privateUnavailable={lost} onPrivateClear={clearPrivate}
     renderPreparation={draft=>draft.editable&&<div className="space-y-4">
@@ -97,7 +98,9 @@ function PublicBrowserRun({base,paths,data,busy,operator,setData,perform}) {
     <Action variant="outline" disabled={busy||!data.controls.can_cancel} onClick={()=>perform(async signal=>{
       setData(await api.write(`${root}/cancel`,{},run.revision,'POST',signal));
     },'Browser stopped. Inspect the cleanup receipt.')}>Stop browser</Action>
-    {active&&data.controls.can_live&&<LiveBrowser base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>}
+    {active&&data.controls.can_live&&(['failed','unavailable','closed'].includes(liveState)?
+      <PublicBrowserFrames key={`${run.attempt_id}:${run.fence}`} root={root} attemptId={run.attempt_id} fence={run.fence}/>:
+      <LiveBrowser base={base} runId={run.id} endpoint={browserLiveEndpoint(base,run.id)} onState={setLiveState}/>)}
     {data.receipts?.map((receipt,i)=><p key={i} className="text-sm">Cleanup: {Object.entries(receipt.closed||{}).map(([part,closed])=>`${words(part)} ${closed?'closed':'unverified'}`).join(' · ')}</p>)}
     {run.uncertain&&<p role="alert" className="text-sm text-destructive">Cleanup or an effect remains unverified. Inspect the run record before another launch.</p>}
     {operator&&!active&&cleanupBlocked&&<div className="space-y-2 text-sm"><p>Verify your session, then retry cleanup explicitly. The installed supervisor must prove closure; this never restarts the browser or deletes the run record.</p><div className="flex flex-wrap gap-2">

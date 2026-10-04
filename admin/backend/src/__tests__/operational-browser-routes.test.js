@@ -228,3 +228,16 @@ test('authentication confirmation strictly binds JSON and If-Match revisions and
     assert.equal((await f.send('POST',path,body)).statusCode,412);assert.equal(f.calls.length,1);
   }finally{f.close();}
 });
+
+test('public frame route requires exact attempt pins and current gates without control/elevation or replay',async()=>{
+ const f=fixture();try{
+  let resolve,received;
+  f.runtime.runs.publicFrame=(actor,pid,id,pins)=>{received={actor,pid,id,pins};return new Promise(done=>{resolve=done;});};
+  assert.equal((await f.send('GET',`${f.root}/public-frame`,{}, {query:{}})).statusCode,400);assert.equal(received,undefined);
+  assert.equal((await f.send('GET',`${f.root}/public-frame`,{}, {query:{attempt_id:f.attempt,fence:'1',url:'https://private.invalid'}})).statusCode,400);
+  const request=f.send('GET',`${f.root}/public-frame`,{}, {query:{attempt_id:f.attempt,fence:'1'},verified:false,sudo:false});
+  await new Promise(r=>setImmediate(r));assert.deepEqual(received.pins,{attempt_id:f.attempt,fence:1});assert.equal(received.id,f.runId);assert.equal(received.pid,f.project);
+  f.runGate(false);resolve({png_base64:'must be suppressed'});const suppressed=await request;
+  assert.equal(suppressed.statusCode,404);assert.equal(JSON.stringify(suppressed.body).includes('must be suppressed'),false);assert.equal(suppressed.headers['cache-control'],'no-store');
+ }finally{f.close();}
+});

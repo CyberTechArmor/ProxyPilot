@@ -791,6 +791,13 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.assertIn('Public redirect destination',observation['observation'])
         self.assertEqual(self.runtime.pending(self.ref)['pending'],[])
         self.assertEqual(self.host.registry.gateway.status()['effects_sent'],0)
+        frame=self.runtime.view(self.ref)
+        self.assertEqual(set(frame),{'png_base64','width','height'})
+        pixels=base64.b64decode(frame['png_base64'],validate=True)
+        self.assertTrue(pixels.startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertEqual(int.from_bytes(pixels[16:20],'big'),frame['width'])
+        self.assertEqual(int.from_bytes(pixels[20:24],'big'),frame['height'])
+        self.assertGreater(len(pixels),100)
         receipt=self.runtime.stop(dict(self.ref,fence=2,reason='cancelled'))
         # Stop removes the gateway; eager diagnostics must not dereference it.
         self.assertTrue(all(receipt['closed'].values()),repr(receipt))

@@ -126,5 +126,36 @@ try{
   await publicRun.getByText('Cleanup: browser closed · network closed · session closed · temporary files closed',{exact:true}).waitFor();
   assert.equal(await page.getByText(publicId,{exact:true}).count(),1);
   report.checks.push('uncertain public-run history offers explicit verified cleanup; elevation refusal stays visible with no replay; signed closure hides retry and retains the run');
+  // Force a video failure, then verify the real public fallback renders only
+  // current ephemeral frames and drops a late response after Stop. Fixture only.
+  await page.addInitScript(()=>{window.WebSocket=class{constructor(){throw new Error('Fixture video unavailable');}};});
+  publicData={...publicData,run:{...publicData.run,state:'running',fence:1,revision:8,result_code:null,launch_failure_code:null,uncertain:false},controls:{can_cancel:true,can_live:true},receipts:[],uncertainties:[]};
+  const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGqkAAAAASUVORK5CYII=';
+  let frameCalls=0,heldFrame;
+  await page.route('**/browser-agent-runs/'+publicId+'/public-frame?*',async r=>{
+    const query=new URL(r.request().url()).searchParams;assert.equal(query.get('attempt_id'),attemptId);assert.equal(query.get('fence'),'1');frameCalls++;
+    if(frameCalls>1){heldFrame=r;return;}
+    return r.fulfill({json:{png_base64:png,width:1,height:1,attempt_id:attemptId,fence:1,captured_at:'2026-10-04T00:00:00Z'}});
+  });
+  await page.route('**/browser-agent-runs/'+publicId+'/cancel',r=>{
+    assert.equal(r.request().method(),'POST');assert.equal(r.request().headers()['if-match'],'"8"');
+    publicData={...publicData,run:{...publicData.run,state:'cancelled',fence:2,revision:9},controls:{can_cancel:false,can_live:false},receipts:[{closed:{browser:true,network:true,session:true,temporary_files:true}}]};
+    return r.fulfill({json:publicData});
+  });
+  await page.reload();
+  const frameImage=page.getByRole('img',{name:'Current public website in the isolated browser',exact:true});
+  await frameImage.waitFor();assert.equal(await frameImage.evaluate(img=>img.complete&&img.naturalWidth===1),true);
+  for(const width of [360,375,768,1280,1920]){
+    await page.setViewportSize({width,height:800});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth),true,'Public frame overflow at '+width);
+    report.layouts.push({width,view:'public transient frame',horizontal_overflow:false});
+  }
+  const nextFrame=page.waitForRequest(r=>r.url().includes('/public-frame?'));await nextFrame;
+  await page.getByRole('button',{name:'Stop browser',exact:true}).click();
+  await page.getByText('Browser stopped. Inspect the cleanup receipt.',{exact:true}).first().waitFor();
+  assert.equal(await frameImage.count(),0);assert.equal(frameCalls,2);
+  await heldFrame.fulfill({json:{png_base64:png,width:1,height:1,attempt_id:attemptId,fence:1,captured_at:'late'}}).catch(()=>{});
+  assert.equal(await frameImage.count(),0);assert.equal(await page.getByRole('region',{name:'Live public browser images',exact:true}).count(),0);
+  report.checks.push('video failure renders current transient public frame at all widths; Stop removes image, stops polling and discards late in-flight frame');
   assert.deepEqual(report.page_errors,[]);assert.equal(h.requests.some(r=>r.method!=='GET'&&/\/start|\/model-consent|\/convert/.test(r.path)),false);assert.equal(h.world.supervisor.calls.length,0);report.passed=true;
 }finally{await context.close();await h.close();await browser.close();if(artifacts)writeFileSync(`${artifacts}/report.json`,JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report,null,2));}

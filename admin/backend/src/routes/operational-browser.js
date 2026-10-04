@@ -136,6 +136,7 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
     assertRevision(expected(r),start.configuration_revision);return method(available(r,'runs'),'start')(a,r.params.id,configuration_id,start);
   },{status:202,action:'browser_run_start'}));
   router.get(`${runs}/:runId`,agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'runs'),'get')(a,r.params.id,r.params.runId);}));
+  router.get(`${runs}/:runId/public-frame`,agentsOnly,runsOnly,run((r,a)=>method(available(r,'runs'),'publicFrame')(a,r.params.id,r.params.runId,query(r,attemptQuery)),{action:'public_browser_view'}));
   router.get(`${runs}/:runId/sources`,agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'runs'),'sources')(a,r.params.id,r.params.runId);}));
   router.get(`${runs}/:runId/authentication-readback`,agentsOnly,runsOnly,elevated,run((r,a)=>{
     query(r);return method(available(r,'runs'),'authenticationReadback')(a,r.params.id,r.params.runId);

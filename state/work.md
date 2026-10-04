@@ -8,6 +8,21 @@ Prerequisites: P1 authenticated cloud UI for the fixed runtime operation and liv
 
 ## Follow-ups
 
+### Public live-view recovery — 2026-10-04
+
+Observed on deployed 8832f51 after successful fixed runtime upgrade ea96d3e0:
+Wikipedia launched with 2 requests/282 bytes; Python launched after verified
+cleanup with 33 requests/592494 bytes. Both video connections failed. The Python
+signalling route returned 101; the precise media failure is unproven.
+In scope: expose the selected runner's existing bounded transient frame operation
+only for active public-navigation attempts, with current session/access/policy,
+attempt/fence rechecks, bounded concurrency/rate, no cache or artifact storage,
+and frontend images refreshed every five seconds when video is unavailable.
+Stop/relaunch must discard old frames. Agent/private authentication behavior and
+legacy demo remain unchanged. Test denial, malformed frames, revocation/Stop
+during capture and frontend lifecycle; independent review, CI and real deployment
+and viewing remain required. Do not count this plan or fixture pixels as proof.
+
 Existing unrelated work below is retained.
 
 # Work — MCP tools for Full Platform setup and management (size L)

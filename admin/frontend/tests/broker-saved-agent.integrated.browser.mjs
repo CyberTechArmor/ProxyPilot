@@ -33,6 +33,7 @@ await withSavedAgentFixture({diagnostic:message=>console.log(message)},async h=>
   const context=await browser.newContext({viewport:{width:1280,height:1000}});await context.addCookies([{name:'pp_fixture_session',value:session,url:origin},{name:'pp_csrf',value:csrf,url:origin}]);
   const page=await context.newPage();page.on('response',async r=>{if(r.url().includes('/api/')&&r.status()>=400)console.error('API refusal',new URL(r.url()).pathname,r.status(),await r.text());});page.setDefaultTimeout(20000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`${origin}/operational-projects/${h.project.id}?section=Agents`);
+  await page.locator('summary').filter({hasText:'Retained configurations and history'}).click();
   const history=page.getByText(/Historical API configurations/);await history.click();
   await page.getByRole('button',{name:'Inspect recorded configuration',exact:true}).click();
   const panel=page.getByRole('region',{name:'Historical API configuration'});await panel.waitFor();

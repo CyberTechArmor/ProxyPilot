@@ -26,14 +26,17 @@ try{
   await context.addInitScript(user=>{localStorage.setItem('user',JSON.stringify(user));localStorage.setItem('mock2HintDismissed','1');},h.world.users.owner);
   await page.goto(`${h.origin}/operational-projects/${project.id}?section=Agents`);
   const panel=page.locator('.browser-configurations'),runtime=page.getByRole('region',{name:'Selected browser runtime',exact:true});
-  await runtime.waitFor();await panel.getByRole('button',{name:'Review configuration Canonical selected configuration',exact:true}).click();
-  assert.equal(await panel.count(),1);assert.equal(await panel.getByLabel('Browser configuration JSON',{exact:true}).count(),1);assert.equal(await panel.getByRole('textbox',{name:'Original source',exact:true}).count(),1);
+  await panel.locator('summary').filter({hasText:/Saved configurations/}).click();
+  await panel.getByRole('button',{name:'Review configuration Canonical selected configuration',exact:true}).click();await runtime.waitFor();
+  assert.equal(await panel.count(),1);assert.equal(await panel.getByLabel('Browser configuration JSON',{exact:true}).count(),1);assert.equal(await panel.getByLabel('Objective',{exact:true}).count(),1);
   assert.equal(await page.getByRole('navigation',{name:'Operation sections'}).getByRole('button',{name:'Browser agents',exact:true}).count(),0);
   assert.equal(await panel.getByText('Execution unavailable. Selected-site browser execution is not included in this release.',{exact:false}).count(),0);
   await runtime.getByRole('button',{name:'Check readiness',exact:true}).click();await runtime.getByText('Runtime readiness refreshed.',{exact:true}).waitFor();
   assert.equal(await runtime.getByRole('button',{name:'Start browser run',exact:true}).isDisabled(),true);await runtime.getByText(/installed, isolated browser runner/).waitFor();
   report.checks.push('API contract presence mounts one canonical editor in Agents even when runtime configured=false; fresh runtime readiness still blocks Start');
+  await panel.getByRole('button',{name:'3. Controls',exact:true}).click();await panel.getByText('Edit prepared work',{exact:true}).click();
   await panel.getByRole('textbox',{name:'Configuration name',exact:true}).fill('Reviewed shared editor revision');
+  await panel.getByRole('button',{name:'4. Review',exact:true}).click();
   assert.equal(await runtime.getByRole('button',{name:'Give model consent',exact:true}).isDisabled(),true);assert.equal(await runtime.getByRole('button',{name:'Check readiness',exact:true}).isDisabled(),true);
   await panel.getByRole('button',{name:'Validate configuration',exact:true}).click();await panel.getByText('Configuration validated. Review before explicitly saving.',{exact:true}).waitFor();
   assert.equal(await panel.getByRole('button',{name:'Save browser configuration',exact:true}).isDisabled(),true);await panel.getByRole('checkbox',{name:/I reviewed this configuration/}).check();
@@ -51,7 +54,7 @@ try{
   await panel.getByRole('button',{name:'New browser configuration',exact:true}).click();
   assert.equal(await panel.getByLabel('Browser configuration JSON',{exact:true}).isVisible(),false);
   await panel.getByLabel('Website URL (optional if included in your request)',{exact:true}).fill('https://selected.example/reports');
-  await panel.getByLabel('Original source',{exact:true}).fill('Summarize reports.');
+  await panel.getByLabel('Objective',{exact:true}).fill('Summarize reports.');
   await panel.getByLabel('Additional task rules',{exact:true}).selectOption('custom');
   await panel.getByLabel('Task rules in plain language',{exact:true}).fill('Exclude archived reports.');
   await panel.getByLabel('Additional task rules',{exact:true}).selectOption('skip');
@@ -67,13 +70,15 @@ try{
   await panel.getByRole('button',{name:'Suggest editable draft',exact:true}).click();
   await panel.getByRole('button',{name:'Place suggestion in editor for review',exact:true}).click();
   assert.match(conversionSource,/Additional task rules:\nExclude archived reports\.$/);
+  await panel.getByRole('button',{name:'3. Controls',exact:true}).click();await panel.getByText('Edit prepared work',{exact:true}).click();
   assert.equal(await panel.getByLabel('Browser task instructions',{exact:true}).inputValue(),conversionSource);
+  await panel.getByRole('button',{name:'4. Review',exact:true}).click();
   assert.equal(await panel.getByRole('button',{name:'Save browser configuration',exact:true}).isDisabled(),true);
   await panel.getByRole('button',{name:'Validate configuration',exact:true}).click();
   await panel.getByRole('checkbox',{name:/I reviewed this configuration/}).check();
   await panel.getByRole('button',{name:'Save browser configuration',exact:true}).click();
   await panel.getByText('Configuration revision 1',{exact:true}).waitFor();
-  assert.equal(await panel.getByLabel('Original source',{exact:true}).inputValue(),conversionSource);
+  assert.equal(await panel.getByLabel('Objective',{exact:true}).inputValue(),conversionSource);
   report.checks.push('request converts without JSON; skipped rules excluded, selected rules included, stale suggestion blocked, explicit save preserves source');
   for(const [width,height]of[[360,640],[375,667],[768,640],[1280,800],[1920,900]]){
     await page.setViewportSize({width,height});await page.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
@@ -112,6 +117,7 @@ try{
     return r.fulfill({json:publicData});
   });
   await page.reload();
+  await panel.getByRole('button',{name:'4. Review',exact:true}).click();
   await page.getByRole('button',{name:'Inspect browser run',exact:true}).click();
   const publicRun=page.getByRole('region',{name:'Browser Flightdeck',exact:true});
   await publicRun.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Activity',exact:true}).click();
@@ -132,6 +138,7 @@ try{
   assert.equal(await publicRun.getByText(publicId,{exact:true}).count(),1);
   const setupDisclosure=page.getByText('Browser task setup and history',{exact:true});
   if(await setupDisclosure.count())await setupDisclosure.click();
+  await panel.getByRole('button',{name:'4. Review',exact:true}).click();
   assert.equal(await runtime.getByRole('button',{name:'Inspect browser run',exact:true}).count(),1,'Cleanup retains the historical run');
   report.checks.push('uncertain public-run history offers explicit verified cleanup; elevation refusal stays visible with no replay; signed closure hides retry and retains the run');
   // Force a video failure, then verify the real public fallback renders only
@@ -158,8 +165,8 @@ try{
   await page.waitForFunction(()=>document.querySelector('img[alt="Current public website in the isolated browser"]')?.naturalWidth===1);
   assert.equal(await frameImage.evaluate(img=>img.complete&&img.naturalWidth===1),true);
   await publicRun.getByRole('navigation',{name:'Run information panels'}).getByRole('button',{name:'Activity',exact:true}).click();
-  await publicRun.getByText('0 requests · 0 response bytes',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:'Check browser readiness',exact:true}).isDisabled(),true,'Active run disables idle readiness');
+  await publicRun.getByRole('complementary',{name:'Run information',exact:true}).getByText('0 requests · 0 response bytes',{exact:true}).waitFor();
+  assert.equal(await page.locator('button').filter({hasText:/^Check browser readiness$/}).isDisabled(),true,'Active run disables idle readiness');
   for(const width of [360,375,768,1280,1920]){
     await page.setViewportSize({width,height:800});
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth),true,'Public frame overflow at '+width);

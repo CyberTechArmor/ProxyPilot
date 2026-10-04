@@ -26,6 +26,8 @@ import {
   MoveRight,
   FolderGit2,
   ClipboardList,
+  Bot,
+  ChevronDown,
   Globe,
   Lock,
   Plug,
@@ -43,7 +45,7 @@ export default function Layout() {
   // to the built-in ProxyPilot name/rocket when unset.
   const branding = useBranding();
   const location = useLocation();
-  const operationsSurface = location.pathname.startsWith('/operational-projects');
+  const operationsSurface = location.pathname.startsWith('/operational-projects') || location.pathname === '/agents' || location.pathname === '/connections';
   const { toasts } = useToast();
 
   // Mobile sidebar drawer state
@@ -291,6 +293,7 @@ export default function Layout() {
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+    ...(operationsEnabled ? [{ name: 'Projects & SOPs', href: '/operational-projects', icon: ClipboardList }, { name: 'Agents', href: '/agents', icon: Bot }, { name: 'Connections', href: '/connections', icon: KeyRound }] : []),
     { name: 'Incus', href: '/incus', icon: Server, adminOnly: true, permission: 'proxy' },
     { name: 'Host Shell', href: '/admin/shell', icon: TerminalSquare, adminOnly: true },
     { name: 'SSH Access', href: '/ssh-access', icon: KeyRound, adminOnly: true },
@@ -310,7 +313,6 @@ export default function Layout() {
     // Mock2 dev/build module — only present when the backend reports it
     // enabled (ADR-001). Hidden entirely on disabled/pinned hosts.
     ...(mock2Enabled ? [{ name: 'Dev Studio', href: '/projects', icon: FolderGit2, adminOnly: true, permission: 'developer' }] : []),
-    ...(operationsEnabled ? [{ name: 'Operations', href: '/operational-projects', icon: ClipboardList }, { name: 'Access · Connections', href: '/connections', icon: KeyRound }] : []),
     { name: 'Users', href: '/users', icon: Users, adminOnly: true },
     { name: 'Profile', href: '/profile', icon: User },
   ];
@@ -324,6 +326,34 @@ export default function Layout() {
       ? item.href === '/profile'
       : (!item.adminOnly || isAdmin || (item.permission && permissions.includes(item.permission)))
   );
+
+  const navigationLink = (item) => {
+    const isActive = location.pathname === item.href || (item.href === '/operational-projects' && location.pathname.startsWith('/operational-projects'));
+    return (
+      <Link
+        key={item.name}
+        to={item.href}
+        className={cn(
+          'flex min-h-11 items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors',
+          isActive
+            ? 'bg-primary text-primary-foreground'
+            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+        )}
+      >
+        <item.icon className="h-5 w-5" />
+        <span className="flex-1">{item.name}</span>
+        {item.badge ? (
+          <span
+            className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-orange-500 text-white text-xs font-semibold"
+            aria-label={`${item.badge} unread`}
+          >
+            {item.badge > 99 ? '99+' : item.badge}
+          </span>
+        ) : null}
+      </Link>
+    );
+
+  };
 
   return (
     <SnapshotExportProvider>
@@ -387,7 +417,7 @@ export default function Layout() {
           // the LARGE viewport — the drawer then extends under the browser's
           // URL bar and its footer is unreachable.
           "fixed top-0 left-0 z-50 w-64 h-viewport bg-sidebar border-r shadow-xl md:shadow-none transform transition-transform duration-200 ease-out",
-          operationsSurface && "md:w-56",
+          operationsSurface && "md:w-[210px]",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           collapsed ? "md:-translate-x-full" : "md:translate-x-0"
         )}
@@ -456,32 +486,11 @@ export default function Layout() {
               reached at all — no scroll, no scrollbar. overflow-y-auto then
               gives it its own scroller. */}
           <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-4 space-y-1">
-            {filteredNavigation.map((item) => {
-              const isActive = location.pathname === item.href || (item.href === '/operational-projects' && operationsSurface);
-              return (
-                <Link
-                  key={item.name}
-                  to={item.href}
-                  className={cn(
-                    'flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors',
-                    isActive
-                      ? 'bg-primary text-primary-foreground'
-                      : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
-                  )}
-                >
-                  <item.icon className="h-5 w-5" />
-                  <span className="flex-1">{item.name}</span>
-                  {item.badge ? (
-                    <span
-                      className="ml-auto inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-orange-500 text-white text-xs font-semibold"
-                      aria-label={`${item.badge} unread`}
-                    >
-                      {item.badge > 99 ? '99+' : item.badge}
-                    </span>
-                  ) : null}
-                </Link>
-              );
-            })}
+            {(operationsSurface ? filteredNavigation.filter(item => ['/','/operational-projects','/agents','/connections','/projects','/profile'].includes(item.href)) : filteredNavigation).map(navigationLink)}
+            {operationsSurface && filteredNavigation.some(item => !['/','/operational-projects','/agents','/connections','/projects','/profile'].includes(item.href)) && <details key={location.pathname} className="group pt-2" data-infrastructure-navigation>
+              <summary className="flex min-h-11 cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"><Server className="h-5 w-5 shrink-0" aria-hidden="true"/>Infrastructure<ChevronDown className="ml-auto h-4 w-4 group-open:rotate-180" aria-hidden="true"/></summary>
+              <div className="mt-1 space-y-1">{filteredNavigation.filter(item => !['/','/operational-projects','/agents','/connections','/projects','/profile'].includes(item.href)).map(navigationLink)}</div>
+            </details>}
           </nav>
 
           {/* Mock2 discoverability hint — admins only, when the module is
@@ -668,7 +677,7 @@ export default function Layout() {
         chromeless ? "pt-0" : "pt-14",
         // Collapsed: leave a thin rail (md:pl-14) so the floating expand button
         // doesn't overlap page content; expanded: clear the full sidebar.
-        collapsed ? "md:pl-14" : operationsSurface ? "md:pl-56" : "md:pl-64",
+        collapsed ? "md:pl-14" : operationsSurface ? "md:pl-[210px]" : "md:pl-64",
       )}>
         <SnapshotExportBanner />
         <div className={cn(

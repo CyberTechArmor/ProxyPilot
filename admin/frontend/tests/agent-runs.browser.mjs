@@ -1,6 +1,7 @@
 // A6 browser journeys against the UI harness (agent-runs-harness.mjs): the real
 // app, routers, stores, A5 coordinator and A6 service; a scripted supervisor;
-// fixture sessions and sudo. Run from admin/frontend:
+// fixture sessions and sudo. Runs are Node-seeded historical lifecycle fixtures;
+// production demo Start/practice/Resume remain retired and are asserted absent. Run from admin/frontend:
 //   node tests/agent-runs.browser.mjs
 // BROWSER_EXE overrides the Chromium path; BROWSER_ARTIFACTS keeps screenshots
 // and writes report.json there.
@@ -32,10 +33,17 @@ async function as(role, { width = 1280, height = 900, theme = 'dark' } = {}) {
     localStorage.setItem('user', JSON.stringify(user)); localStorage.setItem('mock2HintDismissed', '1'); localStorage.setItem('pp-theme', theme);
   }, { user: { id: u.id, username: u.username, role: u.role === 'admin' ? 'admin' : 'user' }, theme });
   const page = await ctx.newPage(); page.setDefaultNavigationTimeout(90000);
+  page.fixtureRole = role;
   page.errors = [];
   page.on('pageerror', e => page.errors.push(e.message));
   page.on('response', r => { if (r.status() >= 500 || (r.status() === 404 && r.url().includes('/api/') && !shell404.test(r.url()) && !r.url().includes('/operational-projects/'))) page.errors.push(`${r.status()} ${r.url()}`); });
   return page;
+}
+async function openInbox(page) {
+  await page.goto(`${h.origin}/operational-projects`);
+  const disclosure=page.locator('summary').filter({hasText:'Historical run requests'});
+  await disclosure.waitFor(WAIT);
+  await disclosure.click();
 }
 const runsUrl = (runId) => `${h.origin}/operational-projects/${h.world.p.id}?section=${encodeURIComponent('Agent runs')}${runId ? `&run=${runId}` : ''}`;
 const shot = async (page, name) => { if (artifacts) await page.screenshot({ path: `${artifacts}/${name}.png`, fullPage: true }); };
@@ -53,13 +61,12 @@ async function journey(name, fn) {
   catch (error) { report.journeys.push({ name, passed: false, error: error.message }); console.log(`not ok - ${name}\n  ${error.stack}`); throw error; }
   finally { for (const ctx of contexts.splice(0)) await ctx.close(); resetScenario(); await settleAll({ stopActive: true }); }
 }
-async function startFromUi(page) {
-  await page.goto(runsUrl());
-  const start = page.getByRole('button', { name: 'Start run' });
-  await start.waitFor(WAIT);
-  await start.click();
-  await page.getByRole('button', { name: 'Back to demo sign-in runs' }).waitFor(WAIT);
-  return new URL(page.url()).searchParams.get('run');
+async function openHistoricalRun(page) {
+  const { run } = await h.seedHistoricalRun({ role: page.fixtureRole });
+  await page.goto(runsUrl(run.id));
+  await page.getByRole('button', { name: /Back to (?:run history|.*runs)/ }).waitFor(WAIT);
+  assert.equal(await page.getByRole('button', { name: 'Start run', exact: true }).count(), 0);
+  return run.id;
 }
 // The run deck: a phone shows one panel at a time behind the bottom bar.
 const panelButton = (page, name) => page.getByRole('navigation', { name: 'Run panels' }).getByRole('button', { name: new RegExp(`^${name}`) });
@@ -134,37 +141,39 @@ async function layoutCheck(page, label, { dialog = false } = {}) {
 
 h = await startHarness();
 try {
-  await journey('roles: run roles may start; a viewer is told why not; an outsider gets 404', async () => {
+  await journey('retirement: run roles read history; new ordinary/practice API calls refuse; viewers and outsiders stay private', async () => {
     for (const role of ['owner', 'operator', 'editor', 'reviewer']) {
       const page = await as(role);
       await page.goto(runsUrl());
-      await page.getByRole('button', { name: 'Start run' }).waitFor(WAIT);
-      assert.equal(await page.getByRole('button', { name: 'Start run' }).isEnabled(), true, role);
-      await page.getByText('Ready. Start pins this profile').waitFor(WAIT);
+      await page.getByRole('heading', { name: /Run history|run history/ }).first().waitFor(WAIT);
+      assert.equal(await page.getByRole('button', { name: 'Start run', exact: true }).count(), 0);
+      assert.equal(await page.getByRole('button', { name: /Practice run|Create.*profile/ }).count(), 0);
+      for (const data of [{profile_id:h.world.profile.id}, {profile_id:h.world.profile.id,practice:{fixture_mode:'slow'}}]) {
+        const response = await page.request.post(`${h.origin}/api/operational-projects/${h.world.p.id}/agent-runs`,
+          { headers: {'X-CSRF-Token':'a6-csrf'}, data });
+        assert.equal(response.status(), 410);
+        assert.equal((await response.json()).code, 'DEMO_EXECUTION_RETIRED');
+      }
       assert.deepEqual(page.errors, [], role);
     }
+    assert.equal(h.world.supervisor.calls.length, 0);
+    assert.equal(h.world.f.db.prepare('SELECT COUNT(*) AS n FROM ops_agent_runs').get().n, 0);
     const viewer = await as('viewer');
     await viewer.goto(runsUrl());
-    await viewer.getByText('Demo sign-in runs are not available to you: Agent runs need run access: owner, operator, editor or reviewer.').waitFor(WAIT);
+    await viewer.getByText(/Agent runs need run access/).waitFor(WAIT);
     assert.equal(await viewer.getByRole('button', { name: 'Start run' }).count(), 0);
-    await viewer.getByRole('button', { name: 'Agents', exact: true }).click();
-    await viewer.getByText('Only the owner can change this.').waitFor(WAIT);
-    await viewer.getByText('Hard rules enforced by code').click();
-    await viewer.getByText('Needs a person\'s approval').waitFor(WAIT);
-    await viewer.getByText('submit_bound_fixture').first().waitFor(WAIT);
-    await viewer.goto(`${h.origin}/operational-projects`);
+    await openInbox(viewer);
     await viewer.getByText('No approval is waiting for you.').waitFor(WAIT);
     assert.deepEqual(await deadControls(viewer), []);
     const outsider = await as('outsider');
     await outsider.goto(runsUrl());
     await outsider.getByText('Operational record not found').waitFor(WAIT);
-    assert.equal(await outsider.getByRole('heading', { name: 'Demo sign-in runs' }).count(), 0);
   });
 
   await journey('desktop context tabs use keyboard navigation and show the run\'s immutable pinned guide', async () => {
     resetScenario({ holds: new Set(['open_login']) });
     const page = await as('operator');
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await page.getByTestId('step-1').waitFor(WAIT);
     const context = page.getByRole('tablist', { name: 'Run context panels' });
     await context.getByRole('tab', { name: 'Activity', exact: true }).focus();
@@ -184,16 +193,16 @@ try {
     assert.deepEqual(page.errors, []);
   });
 
-  await journey('start, rule steps, live browser, approval with sudo and the digest, verified result', async () => {
+  await journey('historical rule steps, browser, approval with sudo and digest, verified result', async () => {
     const page = await as('operator');
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await page.getByTestId('step-1').filter({ hasText: 'Decided by the start rule' }).waitFor(WAIT);
     await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
     await approvalCard(page).waitFor(WAIT);
     await shot(page, 'flow-approval-card');
     // The inbox shows the same approval to another run role.
     const reviewer = await as('reviewer');
-    await reviewer.goto(`${h.origin}/operational-projects`);
+    await openInbox(reviewer);
     await reviewer.getByText('Pending approvals (1)').waitFor(WAIT);
     await page.getByRole('button', { name: 'Review and approve' }).click();
     const dialog = page.getByRole('dialog');
@@ -238,7 +247,7 @@ try {
   await journey('run deck at 1280×800: the whole frame and the latest activity are in view while an approval is open', async () => {
     resetScenario();
     const page = await as('operator', { height: 800 });
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
     await page.getByText('The agent is paused until approval').waitFor(WAIT);
@@ -275,7 +284,7 @@ try {
     assert.deepEqual(await deadControls(page), []);
     // Tab reaches the active context tab; arrow keys expose Guide and Details
     // (verified by the dedicated keyboard journey above).
-    await page.getByRole('button', { name: 'Back to demo sign-in runs' }).focus();
+    await page.getByRole('button', { name: /Back to (?:run history|.*runs)/ }).focus();
     const order = [];
     for (let i = 0; i < 30 && order.at(-1) !== 'context tabs'; i += 1) {
       const where = await page.evaluate(() => {
@@ -299,7 +308,7 @@ try {
   await journey('phone panels: one at a time, the choice survives a refresh (&panel=), the banner follows the panel', async () => {
     resetScenario();
     const page = await as('operator', { width: 375, height: 812 });
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     assert.equal(await approvalCard(page).count(), 1);
     assert.equal(await page.getByRole('button', { name: 'Review and approve' }).count(), 1);
@@ -339,7 +348,7 @@ try {
   await journey('follow-latest: new items keep the feed at the bottom; a reader who scrolled up sees Jump to latest and is not moved', async () => {
     resetScenario();
     const page = await as('operator', { height: 700 });
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     await page.getByText('The agent is paused until approval').waitFor(WAIT);
     const scroller = page.getByTestId('activity-scroller');
@@ -369,7 +378,7 @@ try {
     client.request = async (method, params) => { const reply = await request.call(client, method, params); return method === 'view' ? { ...reply, png_base64: same } : reply; };
     try {
       const page = await as('operator');
-      const runId = await startFromUi(page);
+      const runId = await openHistoricalRun(page);
       await page.getByTestId('step-1').filter({ hasText: 'in progress' }).waitFor(WAIT);
       await page.getByTestId('browser-frame').getByText('Starting the browser…').waitFor(WAIT);
       await page.waitForTimeout(3000);
@@ -390,7 +399,7 @@ try {
   await journey('browser state: LIVE, Paused (no frames), Ended with "Last frame · at step N"; Details tabs by keyboard', async () => {
     resetScenario({ holds: new Set(['open_login']) });
     const page = await as('editor');
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     const pill = page.getByTestId('browser-state');
     await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
     assert.equal((await pill.innerText()).trim(), 'LIVE');
@@ -442,7 +451,7 @@ try {
   await journey('stop mid-run: the run is fenced and says why Stop is gone', async () => {
     resetScenario({ holds: new Set(['open_login']) });
     const page = await as('editor');
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await page.getByTestId('step-2').filter({ hasText: 'in progress' }).waitFor(WAIT);
     await page.getByRole('button', { name: 'Stop run' }).click();
     await result(page, 'Stopped');
@@ -453,7 +462,7 @@ try {
 
   await journey('stale approval: a rotated binding closes the control with the reason', async () => {
     const page = await as('operator');
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     await page.getByRole('button', { name: 'Review and approve' }).click();
     const digest = await digestShown(page);
@@ -469,9 +478,9 @@ try {
     await result(page, 'Approval stale');
   });
 
-  await journey('stale approval: a newly approved guide, then the profile is not ready until reassigned', async () => {
+  await journey('historical stale approval after guide revision; fixture restoration never exposes Start', async () => {
     const page = await as('operator');
-    await startFromUi(page);
+    await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     h.world.approveGuide(guideWith(baseRules, ' Revised after review.'));
     await page.getByRole('button', { name: 'Review and approve' }).click();
@@ -481,44 +490,36 @@ try {
     await page.getByRole('dialog').getByText(/The approval is stale/).waitFor(WAIT);
     await page.keyboard.press('Escape');
     await result(page, 'Approval stale');
-    await page.getByRole('button', { name: 'Back to demo sign-in runs' }).click();
-    await page.getByText('The assigned guide is no longer the current approved version.').waitFor(WAIT);
-    assert.equal(await page.getByRole('button', { name: 'Start run' }).isDisabled(), true);
-    assert.deepEqual(await deadControls(page), []);
-    const owner = await as('owner');
-    await owner.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
-    await owner.getByRole('button', { name: 'Assign current approved guide' }).click();
-    await owner.getByText('Current guide assigned.').waitFor(WAIT);
-    await page.getByRole('button', { name: 'Refresh runs' }).click();
-    await page.getByText('Ready. Start pins this profile').waitFor(WAIT);
+    // Restore fixture guide assignment directly; the retired profile editor is absent.
+    const current = h.world.f.store.get(h.world.users.owner,h.world.p.id).current_version;
+    const profile = h.world.f.store.profile(h.world.users.owner,h.world.p.id,h.world.profile.id).profile;
+    h.world.f.store.assignProfile(h.world.users.owner,h.world.p.id,profile.id,profile.revision,{guide_version_id:current.id});
+    await page.goto(runsUrl());
+    assert.equal(await page.getByRole('button',{name:'Start run',exact:true}).count(),0);
   });
 
-  await journey('owner consent: withdrawing it makes Start say why; giving it needs the reviewed statement', async () => {
-    const owner = await as('owner');
-    await owner.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
-    await owner.getByRole('button', { name: 'Withdraw consent' }).click();
-    await owner.getByText('Consent withdrawn.').waitFor(WAIT);
-    const give = owner.getByRole('button', { name: 'Give consent' });
-    assert.equal(await give.isDisabled(), true);
-    assert.deepEqual(await deadControls(owner), []);
-    const editor = await as('editor');
-    await editor.goto(runsUrl());
-    await editor.getByText('The owner has not consented to sending this profile\'s guide to the model provider.').waitFor(WAIT);
-    assert.equal(await editor.getByRole('button', { name: 'Start run' }).isDisabled(), true);
-    await editor.getByRole('button', { name: 'Agents', exact: true }).click();
-    await editor.getByText('Only the owner can change this.').waitFor(WAIT);
-    assert.equal(await editor.getByRole('button', { name: 'Give consent' }).count(), 0);
-    await owner.getByLabel(/I reviewed: Send this profile's approved guide to the model provider/).check();
-    await give.click();
-    await owner.getByText('Consent given.').waitFor(WAIT);
-    await editor.goto(runsUrl());
-    await editor.getByText('Ready. Start pins this profile').waitFor(WAIT);
+  await journey('historical model consent readiness; retired metadata UI never reopens Start', async () => {
+    const owner = h.world.users.owner;
+    let profile = h.world.f.store.profile(owner,h.world.p.id,h.world.profile.id).profile;
+    h.world.f.store.modelGuideConsent(owner,h.world.p.id,profile.id,profile.revision,{model_guide_consent:false});
+    const page = await as('editor');
+    await page.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
+    assert.equal(await page.getByRole('button',{name:/Give consent|Withdraw consent|Create.*profile|Start run/}).count(),0);
+    const readiness = h.world.service.list(owner,h.world.p.id).profiles[0];
+    assert.equal(readiness.ready,false);
+    assert.ok(readiness.reasons.some(reason=>/has not consented/.test(reason)));
+    profile = h.world.f.store.profile(owner,h.world.p.id,profile.id).profile;
+    h.world.f.store.modelGuideConsent(owner,h.world.p.id,profile.id,profile.revision,
+      {model_guide_consent:true,reviewed_statement:"Send this profile's approved guide to the model provider"});
+    await page.goto(runsUrl());
+    assert.equal(await page.getByRole('button',{name:'Start run',exact:true}).count(),0);
+    assert.equal(h.world.service.list(owner,h.world.p.id).profiles[0].ready,false);
   });
 
   await journey('an approval racing a stop: the open dialog closes itself with the reason', async () => {
     resetScenario();
     const page = await as('operator');
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     await page.getByRole('button', { name: 'Review and approve' }).click();
     const digest = await digestShown(page);
@@ -536,7 +537,7 @@ try {
   await journey('a revoked grant while viewing: the next poll shows the refusal and the live view stops', async () => {
     resetScenario({ holds: new Set(['open_login']) });
     const page = await as('operator');
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
     const owner = await as('owner');
     await owner.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Access`);
@@ -558,7 +559,7 @@ try {
   await journey('refresh and reconnect during an approval at 360px: durable state returns, then approve', async () => {
     resetScenario();
     const page = await as('reviewer', { width: 360 });
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await approvalCard(page).waitFor(WAIT);
     await page.getByRole('button', { name: 'Review and approve' }).click();
     await page.getByRole('dialog').waitFor(WAIT);
@@ -585,12 +586,11 @@ try {
     assert.equal(new URL(page.url()).searchParams.get('run'), runId);
   });
 
-  await journey('keyboard only: start, open the approval, type the digest, confirm sudo, finish', async () => {
+  await journey('keyboard only: seeded history, open approval, type digest, confirm sudo, finish', async () => {
     resetScenario();
     h.sudoUntil.delete(h.world.users.editor.id);
     const page = await as('editor');
-    await page.goto(runsUrl());
-    await page.getByRole('button', { name: 'Start run' }).waitFor(WAIT);
+    await openHistoricalRun(page);
     // Reach a control by Tab alone, and require a visible focus indicator on it.
     async function tabTo(name, limit = 80) {
       for (let i = 0; i < limit; i += 1) {
@@ -606,8 +606,6 @@ try {
       }
       throw new Error(`could not reach "${name}" with Tab`);
     }
-    await tabTo('Start run');
-    await page.keyboard.press('Enter');
     await approvalCard(page).waitFor(WAIT);
     await tabTo('Review and approve');
     await page.keyboard.press('Enter');
@@ -645,7 +643,7 @@ try {
     report.result_classes = [];
     for (const [scenario, label, help, approve] of cases) {
       resetScenario({ delayMs: 60, ...scenario });
-      await startFromUi(page);
+      await openHistoricalRun(page);
       if (approve) await approveInUi(page);
       await result(page, label);
       if (help) await page.getByRole('note').filter({ hasText: `Review needed: ${label}` }).waitFor(WAIT);
@@ -664,7 +662,7 @@ try {
     }
     // A restart while a run is active: fenced, never resumed, needs a person.
     resetScenario({ holds: new Set(['open_login']) });
-    const runId = await startFromUi(page);
+    const runId = await openHistoricalRun(page);
     await panelButton(page, 'Activity').click();
     await page.getByTestId('step-2').filter({ hasText: 'in progress' }).waitFor(WAIT);
     await createRunCoordinator({ db: h.world.f.db, launcher: h.world.supervisor.launcher, verifyTeardown: h.world.supervisor.verifyTeardown }).recover();
@@ -676,7 +674,7 @@ try {
     await result(page, 'Interrupted');
     report.result_classes.push({ label: 'Interrupted', help: true });
     await shot(page, 'help-interrupted');
-    await page.goto(`${h.origin}/operational-projects`);
+    await openInbox(page);
     await page.getByText('Help requests (1)').waitFor(WAIT);
     await page.getByText(/Check the account on the site before you start another run: the coordinator restarted/).waitFor(WAIT);
     await page.getByRole('link', { name: 'Open the run' }).click();
@@ -688,7 +686,7 @@ try {
     resetScenario();
     for (const theme of ['light', 'dark']) {
       const page = await as('owner', { theme });
-      const runId = await startFromUi(page);
+      const runId = await openHistoricalRun(page);
       await approvalCard(page).waitFor(WAIT);
       await page.getByRole('img', { name: /Live browser frame/ }).waitFor(WAIT);
       await layoutCheck(page, `run-detail-${theme}`);
@@ -698,15 +696,14 @@ try {
         await layoutCheck(page, `run-${name.toLowerCase()}-${theme}`);
         assert.deepEqual(await deadControls(page), [], `run-${name}-${theme}`);
       }
-      await page.goto(`${h.origin}/operational-projects`);
+      await openInbox(page);
       await page.getByText('Pending approvals (1)').waitFor(WAIT);
       await layoutCheck(page, `inbox-${theme}`);
       await page.goto(runsUrl());
-      await page.getByRole('heading', { name: 'Run history' }).waitFor(WAIT);
+      await page.getByRole('heading', { name: /Run history|run history/ }).first().waitFor(WAIT);
       await layoutCheck(page, `overview-${theme}`);
       await page.goto(`${h.origin}/operational-projects/${h.world.p.id}?section=Agents`);
-      await page.getByText('Hard rules enforced by code').click();
-      await page.getByText('Needs a person\'s approval').waitFor(WAIT);
+      assert.equal(await page.getByRole('button',{name:/Create.*profile|Start run|Practice run/}).count(),0);
       await layoutCheck(page, `agents-${theme}`);
       assert.deepEqual(await deadControls(page), [], `agents-${theme}`);
       await page.goto(runsUrl(runId));
@@ -728,14 +725,14 @@ try {
     const person = await as('operator');
     await person.goto(`${h.origin}/operational-projects`);
     await person.getByText('Operations is not turned on for this installation. An administrator turns it on in Operations settings.').waitFor(WAIT);
-    assert.equal(await person.getByRole('link', { name: 'Operations' }).count(), 0, 'no sidebar entry for a person while off');
+    assert.equal(await person.getByRole('link', { name: 'Projects & SOPs' }).count(), 0, 'no sidebar entry for a person while off');
     assert.equal(await person.getByRole('heading', { name: 'Operations settings' }).count(), 0);
     const admin = await as('admin', { width: 375 });
     await admin.goto(`${h.origin}/operational-projects`);
     await admin.getByText('Operations is not turned on for this installation. Turn it on in Operations settings below.').waitFor(WAIT);
     await admin.locator('summary').filter({hasText:'Operations settings'}).click();
     await admin.getByText('Turn on Operations first.').first().waitFor(WAIT);
-    assert.equal(await admin.getByRole('button', { name: 'Turn on Demo sign-in runs' }).isDisabled(), true);
+    assert.equal(await admin.getByRole('button', { name: 'Turn on Historical runs' }).isDisabled(), true);
     assert.deepEqual(await deadControls(admin), []);
     await layoutCheck(admin, 'settings-off');
     await admin.setViewportSize({ width: 375, height: 900 });
@@ -746,15 +743,17 @@ try {
     await admin.getByRole('button', { name: 'New project', exact: true }).waitFor(WAIT);
     await admin.getByRole('button', { name: 'Turn on Agent metadata' }).click();
     await admin.getByText('Agent metadata turned on.').waitFor(WAIT);
-    await admin.getByRole('button', { name: 'Turn on Demo sign-in runs' }).click();
-    await admin.getByText('Demo sign-in runs turned on.').waitFor(WAIT);
-    await admin.getByRole('heading', { name: 'Demo sign-in inbox' }).waitFor(WAIT);
+    await admin.getByRole('button', { name: 'Turn on Historical runs' }).click();
+    await admin.getByText('Historical runs turned on.').waitFor(WAIT);
+    await admin.locator('summary').filter({hasText:'Historical run requests'}).click();
+    await admin.getByRole('heading', { name: /inbox/i }).waitFor(WAIT);
     await layoutCheck(admin, 'settings-on');
     const audit = h.world.f.db.prepare("SELECT resource_id FROM audit_log WHERE action='OPERATIONS_TOGGLE_CHANGED' ORDER BY rowid").all();
     assert.deepEqual(audit.map(a => a.resource_id), ['operations', 'agents_metadata', 'agent_runs']);
     await person.goto(runsUrl());
-    await person.getByRole('button', { name: 'Start run' }).waitFor(WAIT);
-    await person.getByRole('link', { name: 'Operations' }).first().waitFor(WAIT);
+    await person.getByRole('heading', {name:/Run history|run history/}).first().waitFor(WAIT);
+    assert.equal(await person.getByRole('button',{name:'Start run',exact:true}).count(),0);
+    await person.getByRole('link', { name: 'Projects & SOPs' }).first().waitFor(WAIT);
     // Off again: the person's next request is refused and the page says why.
     await admin.setViewportSize({ width: 1280, height: 900 });
     await admin.getByRole('button', { name: 'Turn off Operations' }).click();
@@ -772,14 +771,14 @@ try {
 // No supervisor configured: every execution control says why, and nothing runs.
 h = await startHarness({ execution: false });
 try {
-  await journey('execution unavailable: Start says why; the inbox says so; nothing launches', async () => {
+  await journey('execution unavailable: history stays readable; no demo launch is exposed', async () => {
     const page = await as('operator');
     await page.goto(runsUrl());
     await page.getByText('Execution is unavailable: no worker supervisor is configured on this installation. Runs already recorded stay readable.').waitFor(WAIT);
-    assert.equal(await page.getByRole('button', { name: 'Start run' }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Start run' }).count(), 0);
     assert.deepEqual(await deadControls(page), []);
     await layoutCheck(page, 'unavailable');
-    await page.goto(`${h.origin}/operational-projects`);
+    await openInbox(page);
     await page.getByText('Execution is unavailable: no worker supervisor is configured on this installation.').waitFor(WAIT);
     assert.equal(h.world.supervisor.calls.length, 0);
   });

@@ -30,12 +30,12 @@ test('a historical guide is accepted only with the exact run version and content
   assert.equal(matchesPinnedGuide(null, run), false);
 });
 
-test('demo labels preserve saved run routes and real agent setup identities', () => {
-  assert.equal(operationSectionLabel('Agent runs'), 'Demo sign-in runs');
+test('history labels preserve saved run routes and real agent setup identities', () => {
+  assert.equal(operationSectionLabel('Agent runs'), 'Historical runs');
   assert.equal(operationSectionUrl('project/one', 'Agent runs'), '/operational-projects/project%2Fone?section=Agent%20runs');
   for (const section of ['Agents', 'Runs', 'Website reviews', 'Guide']) assert.equal(operationSectionLabel(section), section);
   const toggle = { name: 'agent_runs', label: 'Agent runs' };
-  assert.equal(operationsToggleLabel(toggle), 'Demo sign-in runs');
+  assert.equal(operationsToggleLabel(toggle), 'Historical runs');
   assert.deepEqual(toggle, { name: 'agent_runs', label: 'Agent runs' }, 'display must not mutate the server toggle contract');
   assert.equal(operationsToggleLabel({ name: 'agents_metadata', label: 'Agent metadata' }), 'Agent metadata');
 });

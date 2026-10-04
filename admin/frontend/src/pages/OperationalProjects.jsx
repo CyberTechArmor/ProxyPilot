@@ -39,7 +39,7 @@ export default function OperationalProjects() {
           <div className="flex items-start gap-3 rounded-md border bg-muted/20 p-4"><KeyRound className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><p className="text-sm text-muted-foreground">Project membership and connection permissions are separate. Configuring an agent does not start a run.</p></div>
         </section>
       </div>
-      {runsCapability&&<AgentInbox/>}
+      {runsCapability&&<details className="operations-card rounded-md border bg-card p-4"><summary className="min-h-11 cursor-pointer font-medium flex items-center">Historical run requests</summary><div className="pt-4"><AgentInbox/></div></details>}
       {agentCapability&&<Panel title="Discover projects" description="Only projects whose owners enabled discovery appear here. Access starts when the owner accepts your request." actions={<Action variant="outline" disabled={busy} onClick={()=>loadDirectory()}>Refresh directory</Action>}>
         {!directory.length&&<p className="text-sm text-muted-foreground">No discoverable projects.</p>}
         <ul className="space-y-3">{directory.map(p=><li key={p.id} className="rounded-md border p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0"><div className="min-w-0"><h3 className="font-semibold break-words">{p.name}</h3><p className="text-sm text-muted-foreground">{p.visibility} · {p.request_state==='pending'?'Request pending':'Membership required'}</p></div><Action disabled={p.request_state==='pending'} onClick={async()=>{setError('');try{await api.write(`/${p.id}/access-requests`,{});await loadDirectory();}catch(e){setError(e.message);}}}>Request access</Action></li>)}</ul>

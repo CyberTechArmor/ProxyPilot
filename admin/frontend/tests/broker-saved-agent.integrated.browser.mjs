@@ -1,4 +1,5 @@
-// Actual Operations routes -> local authority source -> mTLS worker -> OpenBao -> TLS ledger.
+// Historical saved API configuration through actual authenticated Operations routes.
+// The retired sample has no product creation/assignment/execution controls.
 // Dashboard session/fresh authentication is an explicit test fixture, not a production-auth proof.
 import assert from 'node:assert/strict';
 import {randomBytes} from 'node:crypto';
@@ -31,35 +32,21 @@ await withSavedAgentFixture({diagnostic:message=>console.log(message)},async h=>
   browser=await chromium.launch({executablePath:process.env.BROWSER_EXE||'/usr/bin/chromium',args:['--no-sandbox']});
   const context=await browser.newContext({viewport:{width:1280,height:1000}});await context.addCookies([{name:'pp_fixture_session',value:session,url:origin},{name:'pp_csrf',value:csrf,url:origin}]);
   const page=await context.newPage();page.on('response',async r=>{if(r.url().includes('/api/')&&r.status()>=400)console.error('API refusal',new URL(r.url()).pathname,r.status(),await r.text());});page.setDefaultTimeout(20000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  const panel=()=>page.getByRole('region',{name:'Broker tasks'});
-  const authenticate=async()=>{const dialog=page.getByRole('dialog');await dialog.getByLabel('Password',{exact:true}).fill('disposable-fixture-password');await dialog.getByLabel('Authenticator Code').fill('123456');await dialog.locator('button[type=submit]').click();await dialog.waitFor({state:'hidden'});};
-  const choose=async operation=>{await panel().getByLabel('Assigned connection').selectOption(h.assignment.id);await panel().getByLabel('Action').selectOption(operation);await panel().getByLabel('Allowed resource').selectOption(h.resource);};
-  const reviewStart=async()=>{await panel().getByRole('button',{name:'Review action readiness'}).click();await panel().getByRole('button',{name:'Start reviewed task'}).click();await authenticate();};
   await page.goto(`${origin}/operational-projects/${h.project.id}?section=Agents`);
-  await page.getByRole('button',{name:'Edit configuration'}).click();
-  await page.getByRole('option',{name:'Disposable worker',exact:true}).waitFor({state:'attached'});assert.equal(await page.getByLabel('Execution environment').inputValue(),h.saved.work.environment_ref);
-  await page.getByRole('button',{name:'3. Controls'}).click();assert.equal(await page.getByLabel('Output destination').inputValue(),h.saved.controls.output_ref);
-  await page.getByRole('button',{name:'Cancel setup'}).click();
+  await page.locator('summary').filter({hasText:'Retained configurations and history'}).click();
+  const history=page.getByText(/Historical API configurations/);await history.click();
+  await page.getByRole('button',{name:'Inspect recorded configuration',exact:true}).click();
+  const panel=page.getByRole('region',{name:'Historical API configuration'});await panel.waitFor();
+  await panel.getByText(h.saved.id,{exact:false}).waitFor();
+  assert.equal(await panel.getByText('Current connection checks',{exact:true}).count(),1);
+  assert.equal(await page.getByRole('button',{name:/Add an agent|Edit configuration|Start reviewed task|Review action readiness/}).count(),0);
+  assert.equal(await page.getByRole('region',{name:'Broker tasks'}).count(),0);
   assert.equal(h.dispatch.list(h.owner,h.project.id,h.saved.id).tasks.length,0);assert.equal(h.getEffects(),0);
-  report.journeys.push('Actual source catalogue resolves saved worker and output; visiting/editing setup starts nothing');
-  await page.getByRole('button',{name:'View readiness'}).click();await choose('item.read');
-  await panel().getByRole('button',{name:'Review action readiness'}).click();await panel().getByRole('button',{name:'Start reviewed task'}).waitFor();assert.equal(h.dispatch.list(h.owner,h.project.id,h.saved.id).tasks.length,0);
-  await panel().getByRole('button',{name:'Start reviewed task'}).click();await authenticate();await panel().getByText('completed',{exact:true}).waitFor();
-  let rows=h.dispatch.list(h.owner,h.project.id,h.saved.id).tasks;assert.equal(rows.length,1);assert.equal(rows[0].receipt.receipts[0].state,'succeeded');assert.equal(rows[0].receipt.receipts[0].operation,'item.read');assert.equal(h.getEffects(),0);
-  report.journeys.push('Explicit saved-agent read traverses actual routes/source/mTLS worker/OpenBao/upstream and completes');
-  await choose('item.set_state');await reviewStart();await panel().getByText('awaiting_approval',{exact:true}).waitFor();assert.equal(h.getEffects(),0);
-  const pending=JSON.parse(await panel().locator('pre').textContent());
-  const preview=h.ok(await h.req(h.human+'/v1/human/approval-preview',h.idp.cert,{method:'POST',headers:h.humanHeaders,data:pending})).preview;
-  const approval=h.ok(await h.req(h.human+'/v1/human/approve',h.idp.cert,{method:'POST',headers:h.humanHeaders,data:{...pending,digest:preview.digest}})).approval;
-  await panel().getByLabel('Issued approval ID').fill(approval.id);await panel().getByRole('button',{name:'Continue with issued approval'}).click();await authenticate();
-  await page.waitForFunction(()=>Array.from(document.querySelectorAll('[role=status]')).filter(e=>e.textContent==='completed').length===2);assert.equal(h.getEffects(),1);
-  report.journeys.push('Actual pending write requires exact independent human approval before browser continuation produces one effect');
-  // Changing current configuration invalidates independently registered checks.
-  h.ops.store.updateConfiguration(h.owner,h.project.id,h.saved.id,h.saved.revision,{controls:{...h.saved.controls,resources:[]}});
-  await panel().getByRole('button',{name:'Review action readiness'}).click();await panel().getByRole('alert').filter({hasText:'saved configuration changed'}).waitFor();assert.equal(await panel().getByRole('button',{name:'Start reviewed task'}).count(),0);assert.equal(h.getEffects(),1);
-  report.journeys.push('Stale saved revision fails closed without another upstream effect');
+  assert.equal(h.ops.store.configuration(h.owner,h.project.id,h.saved.id).agent.id,h.saved.id);
+  report.journeys.push('Actual saved API record and current connection checks remain readable through authenticated routes');
+  report.journeys.push('Retired sample creation, assignment and execution controls are absent; visiting history starts no task or upstream effect');
   assert.deepEqual(errors,[]);
-  if(process.env.BROWSER_ARTIFACTS){mkdirSync(process.env.BROWSER_ARTIFACTS,{recursive:true});await panel().evaluate(el=>{el.scrollIntoView({block:'start'});for(let p=el.parentElement;p;p=p.parentElement)if(p.scrollTop)p.scrollTop=Math.max(0,p.scrollTop-72);});await page.screenshot({path:process.env.BROWSER_ARTIFACTS+'/saved-agent-real-worker.png',fullPage:true});writeFileSync(process.env.BROWSER_ARTIFACTS+'/saved-agent-integration-report.json',JSON.stringify(report,null,2));}
+  if(process.env.BROWSER_ARTIFACTS){mkdirSync(process.env.BROWSER_ARTIFACTS,{recursive:true});await panel.scrollIntoViewIfNeeded();await page.screenshot({path:process.env.BROWSER_ARTIFACTS+'/saved-agent-history.png',fullPage:true});writeFileSync(process.env.BROWSER_ARTIFACTS+'/saved-agent-integration-report.json',JSON.stringify(report,null,2));}
   console.log('PASS '+report.journeys.join('; '));
  }finally{await browser?.close();await vite?.close();}
 });

@@ -1,3 +1,4 @@
+import { historicalDemoCall } from './helpers/historical-demo-call.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -19,7 +20,8 @@ function routed(w, options = {}) {
   const router = createOperationsRouter({ Router: fixtureRouter, store: w.f.store, enabled: true, agentsEnabled: true,
     lookupLimiter: (_r, _s, n) => n(), agentRuns: w.service, requireSudo: sudo,
     controlVerified: req => req.verified === true, ...options });
-  const call = (user, method, route, body = {}, extra = {}) => router.dispatch({ method, path: route, body, user,
+  const fixtureCall = historicalDemoCall(w, request => router.dispatch(request), options.agentRuns !== null && options.enabled !== false && options.agentsEnabled !== false);
+  const call = (user, method, route, body = {}, extra = {}) => fixtureCall({ method, path: route, body, user,
     headers: extra.headers ?? {}, query: {}, sudo: extra.sudo, verified: extra.verified });
   return { router, call };
 }
@@ -67,7 +69,7 @@ test('a timed-out submit is a human decision that gates the profile until someon
   assert.deepEqual(done.reconciliation.items.map(i => [i.subject, i.kind, i.reason, i.open, i.gates]),
     [[`step:${submit.ordinal}`, 'write', 'timeout', true, true]]);
   assert.equal(done.controls.resume.enabled, false);
-  assert.match(done.controls.resume.reason, /Decide the uncertain sign-in/);
+  assert.match(done.controls.resume.reason, /retired/);
   // The profile is gated, with the run named.
   const list = (await call(w.users.operator, 'GET', `/${w.p.id}/agent-runs`)).body;
   assert.equal(list.profiles[0].ready, false);
@@ -142,7 +144,7 @@ test('a help request with nothing uncertain is acknowledged; resume starts a new
   const done = await runTo(w, call, w.users.operator);
   assert.equal(done.result.result_class, 'challenge_required');
   assert.deepEqual(done.reconciliation.items.map(i => [i.subject, i.kind]), [['run', 'run']]);
-  assert.equal(done.controls.resume.enabled, true);
+  assert.equal(done.controls.resume.enabled, false);
   // A run that did not need a person cannot be resumed.
   w.supervisor.scenario.outcome = 'rejected';
   const other = await runTo(w, call, w.users.operator);

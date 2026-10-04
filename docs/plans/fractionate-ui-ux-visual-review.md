@@ -1,3 +1,19 @@
+# Current original-reference comparison — 2026-10-04
+
+Actual original Library PNGs were inspected in cloud. This candidate uses real permitted states instead of the sample content. Independent final source68c8c18a/tree351a2e98 review approved with no UI/source blocker; owner-deployed acceptance remains required.
+
+| Original | Candidate treatment | Remaining difference / acceptance boundary |
+| --- | --- | --- |
+| Projects-mockup.png |210px product-first navigation; about40/60 project/detail; two tall cards and Access across bottom | Real guide/version/evidence/manual records replace training examples. No unsupported training toggle or fabricated counts. Details edit/archive/restore remain. |
+| Projects-setup.png | Four numbered steps, plain-language fields, optional connection plans, narrow assignment summary, compact disclosures | Project/detail remains40/60 versus reference about37/63; saved plan is not an assigned credential. Optional interpretation retains its capability-specific flow. |
+| Projects-add-connection.png |600px centered dialog,128px label column, segmented types, light overlay, advanced fields/footer; phones full-screen | Browser sign-in/OAuth plans are inert metadata. No token/password field, credential enrollment, assignment or OAuth authorization. |
+| agent-flightdeck.png | Full post-global-navigation work area;64/36 columns;32px title; review above tabs; Task and Recent activity under browser; fullscreen | Live-video success is still unverified; bounded transient-image fallback remains. Guide/direct-instruction/training concepts are omitted when unsupported. No production acceptance implied by scripted transport. |
+| agent;s-mockup.png | Two-column real-session cards, scoped loaded-result counts, status and explicit Review/Start task navigation | No fabricated thumbnails, percentage progress, concurrent fleet or sample sessions. Runtime remains singleton. |
+
+Source fixture screenshots test360/375/390/768/1280/1920 widths, keyboard, focus, guard-disabled overflow and accessibility. Independent integrated exact-tree review found no remaining material source/UI defect after the recorded fixes. Older screenshot comparison below is retained as historical evidence and does not describe the current candidate.
+
+## Historical comparison
+
 # Fractionate rendered UI review
 
 Frozen product source: `00b5c68d0816cb0921a2caee71a11adcf8d71ec7`, composed with independently verified main `35c2e9d4eb657f92e1499d8d56035217b04f7ae6`. Actual final pixels were inspected on Duo by root and surface reviewers. These are disposable local fixtures, not production/live-provider proof. [PNG hashes/canvases](evidence/ui-ux-20261002/screenshots.json) and [report provenance](evidence/ui-ux-20261002/verification-manifest.json) identify retained bytes.

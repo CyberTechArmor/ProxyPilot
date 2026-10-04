@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowRight, Bot, CheckCircle2, FileText, KeyRound, Settings2, Users } from 'lucide-react';
+import { FileText, Settings2 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { operationsApi as api } from '@/lib/api';
+import { ProjectOverview } from '@/components/operational-projects/ProjectOverview';
 import { Action, Panel, Field, Choice, GuideText, roleNames } from '@/components/operational-projects/shared';
 
 import { Demonstrations, EvidenceSet, evidenceDisclaimer } from '@/components/operational-projects/Evidence';
 import { BrokerAgents } from '@/components/operational-projects/BrokerAgents';
-import { ConnectionCatalogue } from '@/components/operational-projects/Connections';
+import { BrowserConnections } from '@/components/operational-projects/BrowserConnections';
 import { AgentConfiguration } from '@/components/operational-projects/Agents';
 import { BrowserConfigurations } from '@/components/operational-projects/BrowserConfigurations';
 import { BrowserAgents } from '@/components/operational-projects/BrowserAgents';
@@ -37,13 +38,18 @@ function Operation({id}) {
   const [params,setParams]=useSearchParams(),openRun=params.get('run');
   const sectionNav=useRef(null);
   useEffect(()=>{
-    const nav=sectionNav.current,selected=nav?.querySelector('[aria-pressed="true"]');
-    if(!selected)return;
-    const box=nav.getBoundingClientRect(),item=selected.getBoundingClientRect();
-    if(item.left<box.left)nav.scrollLeft-=box.left-item.left;
-    else if(item.right>box.right)nav.scrollLeft+=item.right-box.right;
+    const nav=sectionNav.current;
+    if(!nav)return;
+    const reveal=()=>{
+      const selected=nav.querySelector('[aria-pressed="true"]');if(!selected)return;
+      const box=nav.getBoundingClientRect(),item=selected.getBoundingClientRect();
+      if(item.left<box.left)nav.scrollLeft-=box.left-item.left;
+      else if(item.right>box.right)nav.scrollLeft+=item.right-box.right;
+    };
+    reveal();const observer=new ResizeObserver(reveal);observer.observe(nav);
+    return()=>observer.disconnect();
   },[section,!!data]);
-  const [projectList,setProjectList]=useState([]),[brokerSetupActive,setBrokerSetupActive]=useState(false);
+  const [projectList,setProjectList]=useState([]),[browserDeckActive,setBrowserDeckActive]=useState(false),[retainedOpen,setRetainedOpen]=useState(false);
   useEffect(()=>{const c=new AbortController();api.get('',c.signal).then(r=>{if(!c.signal.aborted)setProjectList(r.projects);}).catch(()=>setProjectList([]));return()=>c.abort();},[user?.id]);
   useEffect(()=>{const target=params.get('section');if(['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Details'].includes(target))setSection(target);},[params]);
   const openSection=tab=>{setSection(tab);setError('');setParams({section:tab},{replace:true});};
@@ -87,7 +93,6 @@ function Operation({id}) {
   const {p,d,v,r,e,a}=data,owner=p.own_role==='owner',editable=['owner','editor'].includes(p.own_role),reviewer=['owner','reviewer'].includes(p.own_role);
   const active=!p.archived_at,canRun=p.own_role!=='viewer',pending=d.pending_submission;
   const dirty=draft&&(draft.title!==d.title||draft.instructions!==d.instructions||draft.revision!==d.revision);
-  const peopleCount=1+(a?.members.filter(member=>member.active).length||0);
   const actorName=accountId=>accountId===user?.id?user.username:accountId===p.owner_user_id?p.owner_name:a?.members.find(member=>member.user_id===accountId)?.username||'Project member';
   async function record(event) {
     event.preventDefault();
@@ -107,49 +112,23 @@ function Operation({id}) {
     <nav aria-label="Breadcrumb" className="hidden lg:block"><ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
       <li><Link className="hover:text-foreground hover:underline" to="/operational-projects">Operations</Link></li><li aria-hidden="true">›</li>
       <li className="min-w-0 [overflow-wrap:anywhere]"><Link className="hover:text-foreground hover:underline" to={`/operational-projects/${id}`} onClick={()=>setSection('Overview')}>{p.name}</Link></li><li aria-hidden="true">›</li>
-      <li><Link className="hover:text-foreground hover:underline" to={operationSectionUrl(id,'Agent runs')}>Demo sign-in runs</Link></li>
+      <li><Link className="hover:text-foreground hover:underline" to={operationSectionUrl(id,'Agent runs')}>Historical runs</Link></li>
       {websiteCapability&&<li className="ml-auto"><Link className="underline underline-offset-4 hover:text-foreground" to={operationSectionUrl(id,'Website reviews')}>Website reviews: public HTML/text</Link></li>}</ol></nav>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {runsPanel}
   </div>;
+  const deckActive=section==='Agents'&&browserDeckActive;
   return <div className="operations-ui operations-shell w-full max-w-screen-2xl mx-auto gap-4 min-w-0">
-    <ProjectPageHeader><NewProjectButton/></ProjectPageHeader>
-    <div className="grid grid-cols-1 grid-rows-[auto_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)] gap-4 min-w-0 min-h-0 flex-1 overflow-hidden" data-project-workspace>
-    <ProjectBrowser projects={projectList.some(item=>item.id===p.id)?projectList.map(item=>item.id===p.id?p:item):[p,...projectList]} selectedId={id} section={section} collapsible/>
-    <div className="operations-card space-y-4 min-w-0 min-h-0 overflow-y-auto overscroll-contain rounded-md border bg-card p-4 sm:p-6" data-selected-project>
-    <header className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
+    <div hidden={deckActive}><ProjectPageHeader><NewProjectButton/></ProjectPageHeader></div>
+    {deckActive&&<nav aria-label="Breadcrumb" className="shrink-0 text-sm text-muted-foreground"><Link className="inline-flex min-h-11 items-center underline" to="/operational-projects">Projects</Link><span aria-hidden="true" className="mx-2">/</span><span className="break-words">{p.name}</span></nav>}
+    <div className={`grid grid-cols-1 ${deckActive?'grid-rows-[minmax(0,1fr)]':'grid-rows-[auto_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]'} gap-4 min-w-0 min-h-0 flex-1 overflow-hidden`} data-project-workspace data-active-browser-deck={deckActive}>
+    <div hidden={deckActive} style={deckActive?{display:'none'}:undefined} className="min-w-0 min-h-0 flex flex-col"><ProjectBrowser projects={projectList.some(item=>item.id===p.id)?projectList.map(item=>item.id===p.id?p:item):[p,...projectList]} selectedId={id} section={section} collapsible/></div>
+    <div className={`space-y-4 min-w-0 min-h-0 overflow-y-auto overscroll-contain ${deckActive?'':'operations-card rounded-md border bg-card p-4 sm:p-6'}`} data-selected-project>
+    <header hidden={deckActive} className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}
-    <nav ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{operationSectionLabel(tab)}</Action>)}</nav>
-    {section==='Overview'&&<>
-      <p className="whitespace-pre-wrap break-words text-muted-foreground">{p.description||'Add a purpose in Details to explain the work this project supports.'}</p>
-      {p.archived_at&&<p className="rounded-md border bg-muted p-3 text-sm break-words">Archived: {p.archive_reason}</p>}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4" data-overview-summary>
-        <Panel title="Guide & material" icon={FileText} className="!space-y-2 sm:!p-4">
-          <div className="flex items-start gap-3"><FileText className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div className="min-w-0"><p className="font-medium break-words">{p.current_version?.title||d.title||'No guide yet'}</p><p className="text-sm text-muted-foreground mt-1">{p.current_version?'Approved procedure · v'+p.current_version.version_number:pending?'Saved snapshot ready to approve':'Write instructions, then save an approved version.'}</p></div></div>
-          <p className="text-xs text-muted-foreground">Saving a guide starts no run.{capability?' Evidence is in Guide.':''}</p>
-          <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Guide')}>{editable?'Open guide':'Read guide'}<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
-        </Panel>
-        <Panel title="Version & readiness" icon={CheckCircle2} className="!space-y-2 sm:!p-4">
-          <ul className="space-y-2 text-sm"><li className="flex items-start gap-2"><span className={'mt-1 h-2 w-2 shrink-0 rounded-full '+(p.current_version?'bg-primary':'bg-muted-foreground')} aria-hidden="true"/><span>{p.current_version?'Approved guide v'+p.current_version.version_number:'Save a guide to create an approved version'}</span></li><li className="flex items-start gap-2"><span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true"/><span>{pending?'Pending snapshot requires Save and approve':d.status==='draft'?'Draft changes are separate from the current version':'Guide history is preserved'}</span></li><li className="text-muted-foreground">{r.runs.length} manual work record{r.runs.length===1?'':'s'}{r.next_cursor?' on this page':''}</li></ul>
-          <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Versions')}>View versions<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
-        </Panel>
-        {agentCapability&&<Panel title="Agents" icon={Bot} className="!space-y-2 sm:!p-4">
-          <p className="text-sm text-muted-foreground">Runs need an approved guide, permitted connections and operator authority.</p>
-          <p className="text-xs text-muted-foreground">Synthetic pilot: demo.fractionate.ai only.{runsCapability&&!execution.available?' Runtime unavailable.':''}</p>
-          <details><summary className="min-h-11 cursor-pointer py-3 text-sm">Execution requirements</summary><div className="space-y-2 pb-2"><p className="text-sm text-muted-foreground">A configured task describes intended work. Execution needs a supported workflow and runtime, permitted connections and limits. Check readiness in Agents before starting work.</p>{runsCapability&&!execution.available&&execution.message&&<p className="text-sm text-muted-foreground">{execution.message}</p>}</div></details>
-          <Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Agents')}>Open agents<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>
-        </Panel>}
-        <Panel title="Recent activity" icon={Activity} className="!space-y-2 sm:!p-4">
-          {e.events.length?<ul className="divide-y">{e.events.slice(0,3).map(row=><li key={row.id} className="py-2 first:pt-0 last:pb-0 text-sm break-words"><p className="font-medium">{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>:<p className="text-sm text-muted-foreground">No activity recorded yet.</p>}
-          <div className="flex flex-wrap gap-2"><Action variant="ghost" className="px-0 text-primary gap-2" onClick={()=>openSection('Runs')}>View work records<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action></div>
-          {(e.events.length>3||e.next_cursor)&&<details className="border-t pt-2"><summary className="cursor-pointer min-h-11 py-3 text-sm">View activity history</summary><ul className="divide-y">{e.events.map(row=><li key={row.id} className="py-2 text-sm break-words"><p>{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>{e.next_cursor&&<Action disabled={busy} variant="outline" onClick={()=>loadMore('e')}>Load older activity</Action>}</details>}
-        </Panel>
-      </div>
-      <div data-overview-access><Panel title="Access & connections" icon={KeyRound} className="!space-y-2 sm:!p-4" actions={<Action variant="ghost" className="text-primary gap-2" onClick={()=>openSection('Access')}>Manage access<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action>}>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"><div className="flex items-start gap-3"><Users className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">People</p><p className="text-sm text-muted-foreground">{a?`${peopleCount} ${peopleCount===1?'person':'people'} with project access`:'Your role: '+p.own_role}</p></div></div><div className="flex items-start gap-3"><KeyRound className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><div><p className="font-medium">Connection permissions</p><p className="text-sm text-muted-foreground">Granted separately from project membership.</p></div></div></div>
-      </Panel></div>
-    </>}
+    <nav hidden={deckActive} style={deckActive?{display:'none'}:undefined} ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-primary font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{tab==='Agent runs'?'Historical runs':operationSectionLabel(tab)}</Action>)}</nav>
+    {section==='Overview'&&<ProjectOverview project={p} draft={d} records={r} activity={e} access={a} editable={editable} agentCapability={agentCapability} browserRuntimeCapability={browserRuntimeCapability} openSection={openSection} loadMore={loadMore} busy={busy} onUnavailable={()=>{clearPrivate();setError('Project access is unavailable.');}}/> }
     {section==='Details'&&<Panel title="Project details" icon={Settings2}>
       <p className="text-sm text-muted-foreground">Owner: {p.owner_name}. {p.archived_at?'Archived':'Active'} project.</p>
       {editable&&active&&meta?<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('',{name:meta.name,description:meta.description},meta.revision,'PATCH'),'Details saved.','meta');}}>
@@ -213,9 +192,9 @@ function Operation({id}) {
       </>:<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await write(`/members/${user.id}`,{},p.revision,'DELETE');navigate('/operational-projects');},'You left the operation.')}>Leave operation</Action>}
       {p.ownership_offer&&active&&<div className="space-y-3 border rounded-md p-3"><p>Ownership offer expires {p.ownership_offer.expires_at}.</p><div className="flex flex-wrap gap-2">{(owner?['cancel']:['accept','decline']).map(decision=><Action key={decision} disabled={busy} variant={decision==='accept'?'default':'outline'} onClick={()=>perform(()=>write(`/ownership-offers/${p.ownership_offer.id}/decision`,{decision},p.revision),`Ownership offer ${decision} completed.`)}>{decision==='accept'?'Accept ownership':decision==='decline'?'Decline ownership':'Cancel ownership offer'}</Action>)}</div></div>}
     </Panel>}
-    {section==='Access'&&<Panel title="Access · Connections"><ConnectionCatalogue projectId={id}/></Panel>}
+    {section==='Access'&&<Panel title="Access · Connections"><BrowserConnections base={base} project={p} disabled={busy} onChanged={()=>refresh(false)}/></Panel>}
     {section==='Website reviews'&&(websiteCapability?<WebsiteReviews base={base} project={p} onChanged={()=>refresh(false)}/>:<Panel title="Website reviews"><p>Public website reviews are unavailable on this installation. This workflow requires the reviewed website review runtime.</p></Panel>)}
-    {section==='Agents'&&agentCapability&&<>{!brokerSetupActive&&<div className="rounded-md border bg-muted/20 p-4 space-y-2"><h3 className="font-semibold">Execution capability</h3><p className="text-sm text-muted-foreground">Use Public browser to open a public website and view it without an approved guide or model consent. Check browser readiness if opening is unavailable.</p><p className="text-sm text-muted-foreground">Configured agent tasks and website reviews have their own guide, consent, connection and runtime requirements. Browser configurations prepare selected-site tasks. Demo profiles below test sign-in separately.</p></div>}{websiteCapability&&!brokerSetupActive&&<Panel title="Review a public website"><p className="text-sm">Use the separate public HTML/text workflow with your approved guide. It requires no website credential and does not use synthetic sign-in.</p><Action variant="outline" onClick={()=>{setSection('Website reviews');setParams({section:'Website reviews'},{replace:true});}}>Open website reviews</Action></Panel>}{browserRuntimeCapability?<BrowserAgents key={base} base={base} project={p} onChanged={()=>refresh(false)}/>:browserDraftCapability&&<BrowserConfigurations key={base} base={base} project={p} onChanged={()=>refresh(false)}/>}<BrokerAgents project={p} onEditingChange={setBrokerSetupActive}/><details open={!browserRuntimeCapability&&!brokerSetupActive} className="rounded-lg border bg-muted/30 p-4"><summary className="min-h-11 cursor-pointer font-semibold">Demo sign-in profiles</summary><p className="text-sm text-muted-foreground mb-4">Demo sign-in at demo.fractionate.ai. Profiles and supervised runs remain available here.</p><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} websiteAvailable={websiteCapability} onChanged={()=>refresh(false)}/></details></>}
+    {section==='Agents'&&agentCapability&&<><div hidden={deckActive}>{websiteCapability&&<p className="text-sm text-muted-foreground">For a guide-based public HTML/text report, <button className="min-h-11 text-primary underline" onClick={()=>openSection('Website reviews')}>open website reviews</button>.</p>}</div>{browserRuntimeCapability?<BrowserAgents key={base} base={base} project={p} onChanged={()=>refresh(false)} onDeckChange={setBrowserDeckActive} browserRunId={params.get('browser_run')}/>:browserDraftCapability&&<BrowserConfigurations key={base} base={base} project={p} onChanged={()=>refresh(false)}/>}<div hidden={deckActive}><details onToggle={event=>setRetainedOpen(event.currentTarget.open)} className="rounded-md border p-3"><summary className="min-h-11 cursor-pointer py-3 font-medium">Retained configurations and history</summary>{retainedOpen&&<><BrokerAgents project={p}/><h3 className="font-medium mt-4">Historical sign-in profiles</h3><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} websiteAvailable={websiteCapability} onChanged={()=>refresh(false)}/></>}</details></div></>}
     {section==='Agent runs'&&runsCapability&&runsPanel}
   </div></div></div>;
 }

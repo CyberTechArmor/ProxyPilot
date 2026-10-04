@@ -183,7 +183,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.get('/:id/agent-profiles/:profileId/rules', agentRunsOnly,
     agentHandle((r,a)=>agentRuns.rules(a,r.params.id,r.params.profileId),200,'profile_rules_read'));
   router.get('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.list(a,r.params.id,r.query),200,'agent_runs_read'));
-  router.post('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.start(a,r.params.id,r.body),201,'agent_run_start'));
+  router.post('/:id/agent-runs', agentRunsOnly, agentHandle((r,a)=>agentRuns.rejectNewDemoRun(a,r.params.id),201,'agent_run_start'));
   router.get('/:id/agent-runs/:runId', agentRunsOnly, agentHandle(async (r,a)=>{
     const data = await agentRuns.statusWithRecords(a,r.params.id,r.params.runId);
     if (!runsEnabled()) throw new OperationsError(404, 'Not found');
@@ -194,7 +194,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
   router.get('/:id/agent-runs/:runId/view', agentRunsOnly, agentHandle((r,a)=>agentRuns.view(a,r.params.id,r.params.runId),200,'agent_run_view'));
   // A7: resume (a new linked run with the same pins) and reconciliation (a
   // person's typed decision; needs the session's agent-control verification).
-  router.post('/:id/agent-runs/:runId/resume', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.resume(a,r.params.id,r.params.runId);},
+  router.post('/:id/agent-runs/:runId/resume', agentRunsOnly, agentHandle((r,a)=>{empty(r);return agentRuns.rejectNewDemoRun(a,r.params.id,r.params.runId);},
     201,'agent_run_resume'));
   router.post('/:id/agent-runs/:runId/reconcile', agentRunsOnly, agentHandle((r,a)=>agentRuns.reconcile(a,r.params.id,r.params.runId,r.body,
     { verified: controlVerified(r) === true }),200,'agent_run_reconcile'));

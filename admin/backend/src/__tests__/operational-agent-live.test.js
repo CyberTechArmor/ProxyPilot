@@ -1,3 +1,4 @@
+import { historicalDemoCall } from './helpers/historical-demo-call.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -27,7 +28,8 @@ const sudo = (req, res, next) => req.sudo === true ? next() : res.status(401).js
 function routed(w) {
   const router = createOperationsRouter({ Router: fixtureRouter, store: w.f.store, enabled: true, agentsEnabled: true,
     lookupLimiter: (_r, _s, n) => n(), agentRuns: w.service, requireSudo: sudo, controlVerified: req => req.verified === true });
-  const call = (user, method, route, body = {}, extra = {}) => router.dispatch({ method, path: route, body, user,
+  const fixtureCall = historicalDemoCall(w, request => router.dispatch(request));
+  const call = (user, method, route, body = {}, extra = {}) => fixtureCall({ method, path: route, body, user,
     headers: {}, query: {}, sudo: extra.sudo, verified: extra.verified });
   return { call };
 }
@@ -210,7 +212,7 @@ test('takeover: session verification, the caller\'s own view, one controller, th
   assert.equal(w.supervisor.calls.filter(c => c.method === 'renew').length, renewsAfter);
   assert.equal((await call(op, 'POST', `${url}/end`)).body.code, 'TAKEOVER_NONE');
   // Resumable, as any needs-a-person run (a new linked run, decision 2).
-  assert.equal(done.controls.resume.enabled, true);
+  assert.equal(done.controls.resume.enabled, false);
 });
 
 test('takeover: the holder leaving (even after losing access) ends it; a refused hand-over stops the run', async () => {

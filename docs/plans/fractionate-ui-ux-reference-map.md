@@ -1,6 +1,6 @@
 # UI/UX reference and acceptance map
 
-All references were materialized and inspected on Duo on 2026-10-02. Materialized images and original setup assets remain in their local Duo evidence directories; absolute host paths are omitted from this public review. Library identity and version metadata remain associated with each local image.
+The five owner-listed originals were materialized again through Library and inspected in cloud on 2026-10-04; original hashes match this map. Earlier Duo materialization was on2026-10-02. Materialized images and original setup assets remain in their local Duo evidence directories; absolute host paths are omitted from this public review. Library identity and version metadata remain associated with each local image.
 
 ## Approved references
 
@@ -8,9 +8,9 @@ All references were materialized and inspected on Duo on 2026-10-02. Materialize
 | --- | --- | --- |
 | Projects-mockup.png · libfile_c96a3e6010988191af809a8b06756ce0 | 1586×992 | /operational-projects and /operational-projects/:id?section=Overview: left search/filter/project rows, right selected detail/tabs, training/guide/readiness/recent runs/access cards. Status must describe actual API state; no invented project/agent toggle. |
 | Projects-setup.png · libfile_d07dc7835d7081918672153ebcca5d1e | 1536×1024 | /operational-projects/:id?section=Agents: Work/Connections/Controls/Review. Connections has bounded provider/application cards and narrow assignment summary; controls stay compact. |
-| Projects-add-connection.png · libfile_96dd9056bb9c8191a6c69d4028158f1c | 1536×1024 | Add dialog within setup and /connections catalogue: centered ~600px desktop dialog, title/description, aligned label/control rows, availability, assignment intent, advanced disclosure, footer. Trusted external credential intake replaces the concept token field; no secret accepted in dashboard. |
-| agent-flightdeck.png · libfile_4091199d337881918624245b334e8f36 | 1585×992 | /operational-projects/:id?section=Agent%20runs&run=:runId: dominant browser panel with compact title/status toolbar; right review/activity/guide/details rail. Direct-agent message and arbitrary browser work are concepts without implemented contracts. |
-| agent;s-mockup.png · libfile_c23e5715ae1c8191b6d1c54bec3bb554 | 1586×992 | Agent run/inbox cards: clear state, purpose, progress and review entry. Current API has typed counts/history; live thumbnails only when actually available. No fabricated active sessions or screenshots. |
+| Projects-add-connection.png · libfile_96dd9056bb9c8191a6c69d4028158f1c | 1536×1024 | Add dialog within setup and /connections catalogue: centered ~600px desktop dialog, title/description, aligned label/control rows, availability, assignment intent, advanced disclosure, footer. Contributor-private inert browser/OAuth plans replace concept credentials; enrollment and assignment unavailable; no secret accepted in dashboard. |
+| agent-flightdeck.png · libfile_4091199d337881918624245b334e8f36 | 1585×992 | /operational-projects/:id?section=Agents&browser_run=:runId: general selected browser panel (historical sign-in records keep their original Agent runs route) with compact title/status toolbar; right review/activity/guide/details rail. Direct-agent message and arbitrary browser work are concepts without implemented contracts. |
+| agent;s-mockup.png · libfile_c23e5715ae1c8191b6d1c54bec3bb554 | 1586×992 | /agents general browser-session cards: clear state, purpose, progress and review entry. Current API has typed counts/history; live thumbnails only when actually available. No fabricated active sessions or screenshots. |
 | image(2).png · libfile_09c0ea2658888191aa268c788d0fe14a | 2048×1145 | Palette reference only: Midnight/Latte/Office remain color-only; typography/layout identical. No Nodus name/logo. |
 | agent-connections.png (original local) | 1536×1024 | Same screen family as setup, directly inspected; original local JSON preserves source title/thread id. |
 | add-connection.png (original local) | 1536×1024 | Same modal screen family, directly inspected. |

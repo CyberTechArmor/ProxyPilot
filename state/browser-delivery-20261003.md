@@ -1,3 +1,60 @@
+# Current delivery checkpoint — 2026-10-04 01:37 UTC
+
+This checkpoint supersedes the older statuses below and preserves their failures.
+Public browsing acceptance remains incomplete. No new deployment or runtime
+installation was started after the last successful application update.
+
+| Item | Status | Evidence / deployment | What I should see or be able to do |
+|---|---|---|---|
+| Public URL, Open, activity and image viewing | Verified | Dashboard/agent/source b1e387efc648eccd7feebcd2ef19620b32574854; actual Python homepage visible in runs33c66c5f and242947d1 | Operations → Public browser verification — 2026-10-03 → Agents → Public browser |
+| Stop, physical cleanup and another visible launch | Verified | Both homepage runs have all four signed closure flags true; no pending/inflight/effects/uncertainties; repeat run242947d1 visibly rendered | Stop removes images and closes the isolated attempt; Open launches a new browser |
+| Public wording, viewer status and safe errors | Merged | PR741 merge78142fcd5fe85887014da653a1a1b9f761e2cea3; independent review and workflows37167296480/37167296488 green | Public mode explains no guide/model consent; browser state and unavailable video/images are distinct |
+| Frame backoff and active-run readiness guards | Merged | PR741; real Chromium checks at five widths, Stop disposes30sec retry, server performs no idle probe while active/cleanup-unverified | Clear safe failure reason; bounded polling; readiness disabled during execution |
+| Latest application deployment | Blocked | PR741 deployment call returned non-JSON refusal and started no operation; exact refusal reason was lost by response parsing; latest operation remainsacea49e5 | Running site is still PR740/b1e387ef; no claim that merged UI fixes are deployed |
+| Per-request public denial without freezing all viewing | In progress | PR742 head09408cffa375ad4c5876433e29a2444dfd55e09d independently approved;34worker and17gateway/navigation tests pass; CI backend111335836219 failed existing private continuation case, under independent assessment | Denied writes/protected resources stay blocked while later allowed requests and ticketed viewing continue |
+| Actual redirected-page compatibility | In progress | Real Python downloads run593799c0 retained frame500/429 failure; new worker not installed; fixture redirects are not production acceptance | Visible supported redirected page with resources beyond the initial origin still needs real proof |
+| Continuous live video | Blocked | Real video connection remains failed; transient public images work on the homepage and relaunch | Image viewing currently available; continuous video not proven |
+| Ordinary update with installed expanded runner | Verified | Updateacea49e5 succeeded00:54:02Z; flags empty; runtime preserved; real visible launches followed | Normal application update preserves runtime and resumes healthy browsing |
+| Installed/loaded capabilities and protected inventory | Verified | Last measured eight prerequisites verified; seven helpers match b1e387ef source; protected inventory SHA207436e8d78da2912e0f5482e8c723643886bd6c332c451abeb07484ece2e75e | Inspect actual helper/VM/fence/Chromium/gateway/viewing/protection evidence |
+| Dedicated new runtime Install and Recover proof | Blocked | Post-update fixed Install stopped at fresh-auth wall before request; previous cancelled authentication respected; no new operation ID | Profile → Application settings → Browser runtime fixed Install/Recover requires fresh authenticated access |
+| Broader design/model/private-login/files/internal capabilities | Not started | Separate follow-up scope; no fabricated guide/consent or reusable credentials | Optional unavailable capabilities remain distinct from public browsing |
+
+Repeat successful visible launch:
+- URL https://www.python.org/; run242947d1-fceb-41cd-a2ee-81a22dcfd53f;
+  attempt6562e497-9d68-48c5-9d57-abed9c8bfa1b.
+- Started01:12:39.727Z, stopped01:13:51.962Z;33requests/592460bytes;
+  zero model calls/tokens/usd/artifact bytes.
+- Actual Python logo, styled navigation and Compound Data Types carousel seen.
+  Frame capture timestamps01:13:21.854Z,01:13:32.326Z,01:13:48.096Z.
+- CANCELLED_BY_PERSON; all four signed closure flags true; absent cgroup,
+  inactive/not-found unit, empty process/member/mount lists;
+  zero pending/inflight/effects/uncertain ordinals.
+- Cleanup ledger2f2317dce50e80e585ce95fcd5e552a04bca983725e964a1a9ecca34c740111d.
+- Private screenshots and signed raw receipts saved as private user artifacts;
+  unrelated project labels and owner/host identifiers are not GitHub attachments.
+
+PR742 changes only the selected worker and associated tests/record:
+- Expected new worker SHA25677ef98510dc68f51135abbadf1096acaf9a470784f45c1eee9f2f98652903da0.
+- Installed/loaded worker remainsb72eac75173d83187d58273dcc2752c83fbf8a057b233a9f0e00d76c078ca717.
+- Other six helper bytes unchanged. Ordinary updates deliberately preserve the
+  installed generation; only the fixed dedicated Install can commit the new worker.
+- Source mismatch between per-request public gateway/supervisor denial and
+  worker freezing is established. It is not claimed as the diagnosed cause of
+  the observed downloads failure.
+- Unknown/malformed/private/fatal budget/ledger/pause denials still stop;
+  denied requests receive no continuation, ticket, replay or upstream contact.
+- CI failure at existing private actualBrowserContinuation line169 is retained;
+  the configured-boundary dashboard's same Chromium step passed. No retry or
+  acceptance is inferred without assessment.
+
+No Incus upgrade, unrelated application update, temporary SSH key or owner-local
+computer was used. All public attempts are stopped; active-run idle checks were
+not performed.
+
+---
+
+## Earlier checkpoints (preserved)
+
 # Current delivery checkpoint — 2026-10-04 01:04 UTC
 
 This checkpoint supersedes the older statuses below and preserves their failures.

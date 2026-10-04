@@ -29,6 +29,15 @@ absent; CI installs its real browser. New frontend journey checks fallback image
 rendering at360/375/768/1280/1920 and disposal of a late frame after Stop. Actual
 Chromium public composition also checks the selected view returns real PNG bytes.
 
+Initial CI frontend failure (run37165050401): the new fixture held the second
+frame even when React development double-mount had aborted the first. Reproduced
+locally, then corrected the fixture to hold only after a decoded image is shown.
+The corrected journey passed with discovered /tmp/chromium at all five widths,
+including a late in-flight response and no new polling for5.1s after Stop.
+The earlier /usr/bin/chromium absence and initial CI failure remain recorded.
+No production assertions were removed or weakened.
+Independent reviewer reran the corrected Chromium integration and approved it.
+
 CI/merge/deployment and actual frame/page compatibility proof remain pending.
 No fabricated acceptance, Incus upgrade, other application update, local access,
 SSH key, legacy demo generalization or broad host shell was used.

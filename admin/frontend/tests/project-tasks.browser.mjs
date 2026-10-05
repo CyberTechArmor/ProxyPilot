@@ -70,6 +70,13 @@ try {
   await page.reload();await page.getByText('Schedule · Active',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Pause',exact:true}).click();await page.getByText('Schedule · Paused',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Accept & resume',exact:true}).click();await page.getByText('Schedule · Active',{exact:true}).waitFor();
+  // Changing an existing daily schedule to weekly keeps a valid default day.
+  await page.getByRole('button',{name:'Edit schedule',exact:true}).click();
+  await dialog.getByLabel('Repeat').selectOption('daily');
+  await dialog.getByRole('button',{name:'Accept & save schedule',exact:true}).click();await page.getByText('Schedule · Active',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Edit schedule',exact:true}).click();
+  await dialog.getByLabel('Repeat').selectOption('weekly');assert.equal(await dialog.getByLabel('Weekday').inputValue(),'1');
+  await dialog.getByRole('button',{name:'Accept & save schedule',exact:true}).click();await page.getByText('Schedule · Active',{exact:true}).waitFor();
   // A background refresh must not replace the revision captured by an open
   // schedule form and silently overwrite another tab's newly saved timing.
   await page.getByRole('button',{name:'Edit schedule',exact:true}).click();

@@ -28,7 +28,7 @@ export function ProjectTaskOverview({project,taskData,onChanged,onOpenRun,openSe
   }
   const snapshot=()=>({task_revision:task.revision,project_revision:project.revision,configuration_revision:task.configuration?.revision??null});
   function edit(){setError('');setForm({...snapshot(),name:project.name,goal:project.description,website:config?.destinations.entry_urls[0]||'',limits:{...budgets}});setModal('edit');}
-  function scheduling(){setError('');setForm(schedule?{...snapshot(),schedule_revision:schedule.revision,...schedule.timing}:{...snapshot(),schedule_revision:null,frequency:'daily',time:'09:00',weekday:1,date:new Date().toLocaleDateString('en-CA'),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'America/Detroit'});setModal('schedule');}
+  function scheduling(){setError('');setForm(schedule?{weekday:1,date:new Date().toLocaleDateString('en-CA'),...snapshot(),schedule_revision:schedule.revision,...schedule.timing}:{...snapshot(),schedule_revision:null,frequency:'daily',time:'09:00',weekday:1,date:new Date().toLocaleDateString('en-CA'),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'America/Detroit'});setModal('schedule');}
   return <div className="space-y-4" data-project-task>
     <div className="flex flex-wrap gap-2">
       <Action disabled={busy||!canRun||task.needs_website} className="gap-2" onClick={()=>perform(async()=>{

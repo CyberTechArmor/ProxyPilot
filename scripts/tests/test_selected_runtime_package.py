@@ -544,6 +544,42 @@ class PackageTests(unittest.TestCase):
         self.assertRaises(ValueError,host.unit_check)
         self.assertEqual(set(host.unit_inventory(True)),set(p.UNITS))
 
+    def test_production_failed_renewal_exception_requires_idle_owned_oneshot(self):
+        host=p.Host.__new__(p.Host)
+        changed={}
+        def execute(argv):
+            unit=p.UNIT_ROOT+argv[2];prop=argv[3].split('=',1)[1]
+            value=changed.get((unit,prop),{
+                'FragmentPath':unit,'DropInPaths':'','NeedDaemonReload':'no',
+                'ActiveState':'failed' if unit==p.RENEW_SERVICE else 'active',
+                'UnitFileState':'static' if unit==p.RENEW_SERVICE else 'enabled',
+                'SubState':'failed','MainPID':'0','ControlPID':'0','Job':'',
+            }[prop])
+            if isinstance(value,list):value=value.pop(0)
+            return value.encode()+b'\n'
+        host.execute=execute
+        with self.assertRaises(ValueError):host.unit_check()
+        for job in ('','0'):
+            changed[(p.RENEW_SERVICE,'Job')]=job
+            result=host.unit_check(allow_failed_renewal=True)
+            self.assertEqual(result[p.RENEW_SERVICE]['active'],'failed')
+        changed.clear()
+        for unit,prop,value in (
+                (p.RENEW_SERVICE,'SubState','start'), (p.RENEW_SERVICE,'MainPID','4'),
+                (p.RENEW_SERVICE,'ControlPID','7'), (p.RENEW_SERVICE,'MainPID',''),
+                (p.RENEW_SERVICE,'Job','17'), (p.RENEW_SERVICE,'Job','unknown'),
+                (p.RENEW_SERVICE,'FragmentPath','/tmp/foreign'),
+                (p.RENEW_SERVICE,'DropInPaths','/etc/systemd/system/foreign.conf'),
+                (p.RENEW_SERVICE,'NeedDaemonReload','yes'),
+                (p.SUP_UNIT,'ActiveState','failed'), (p.RENEW_TIMER,'ActiveState','failed'),
+                (p.RENEW_SERVICE,'ActiveState','active'),
+                (p.RENEW_SERVICE,'ActiveState','deactivating'),
+                (p.RENEW_SERVICE,'ActiveState',['failed','activating'])):
+            with self.subTest(unit=unit,prop=prop,value=value):
+                changed[(unit,prop)]=value
+                with self.assertRaises(ValueError):host.unit_check(allow_failed_renewal=True)
+                changed.clear()
+
     def test_new_directory_links_and_empty_gateway_removal_are_durable_before_service_effects(self):
         events=[];original_fsync=p.os.fsync;original_stop=self.host.stop;original_replace=p.os.replace
         def synced(fd):

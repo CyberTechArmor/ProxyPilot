@@ -575,7 +575,7 @@ class Host:
                     nft_sha256=sha(encoded(normalized(nft))), managed_policy_sha256=policy, key_id=key,
                     proxy_spki_sha256=sha(certificate_der))
 
-    def unit_inventory(self, recovery=False):
+    def unit_inventory(self, recovery=False, allow_failed_renewal=False):
         result = {}
         for path in UNITS:
             name = Path(path).name
@@ -584,16 +584,27 @@ class Host:
             if show('FragmentPath') != path or show('DropInPaths') or reload not in ({'no','yes'} if recovery else {'no'}):
                 refuse('Loaded fixed unit identity changed')
             state = show('ActiveState')
-            if state not in {'active','inactive'} or path==RENEW_SERVICE and state!='inactive':
-                refuse('Fixed service transition or renewal remains active')
+            idle_renewal = path == RENEW_SERVICE and allow_failed_renewal and state in {'inactive', 'failed'}
+            if idle_renewal:
+                # Ordinary dashboard preservation may retain a latched oneshot
+                # failure. Never reset it, launch it, or mistake a queued/running
+                # job for an idle service. Certificate and serving health are
+                # checked separately by the preservation caller.
+                if (show('SubState') != ('failed' if state == 'failed' else 'dead') or
+                        show('MainPID') != '0' or show('ControlPID') != '0' or
+                        show('Job') not in {'', '0'} or show('ActiveState') != state):
+                    refuse('Fixed certificate renewal is not idle: ' + name)
+            elif state not in {'active','inactive'} or path==RENEW_SERVICE and state!='inactive':
+                refuse('Fixed service is not idle/healthy: ' + name + ' (' + state + ')')
             result[path] = {'active': state, 'enabled': show('UnitFileState')}
         return result
 
-    def unit_check(self, active=True):
-        result=self.unit_inventory()
+    def unit_check(self, active=True, allow_failed_renewal=False):
+        result=self.unit_inventory(allow_failed_renewal=allow_failed_renewal)
         for path,item in result.items():
             wanted = 'inactive' if path == RENEW_SERVICE or not active else 'active'
-            if item['active'] != wanted:
+            retained_failure = active and allow_failed_renewal and path == RENEW_SERVICE and item['active'] == 'failed'
+            if item['active'] != wanted and not retained_failure:
                 refuse('Fixed service boundary is not idle/healthy')
         return result
 
@@ -628,9 +639,9 @@ class Host:
             refuse('Runtime health refused')
         return reply['result']
 
-    def health(self, pins, key_id, selected, allow_work=False):
+    def health(self, pins, key_id, selected, allow_work=False, allow_failed_renewal=False):
         self.wiring(require_socket=True)
-        self.unit_check()
+        self.unit_check(allow_failed_renewal=allow_failed_renewal)
         def wait(path,method,gateway=False):
             deadline=time.monotonic()+30
             while True:

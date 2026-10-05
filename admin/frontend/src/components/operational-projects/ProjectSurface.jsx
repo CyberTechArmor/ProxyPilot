@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ChevronRight, FolderOpen, Lock, Plus, Search } from 'lucide-react';
 import { operationsApi as api } from '@/lib/api';
@@ -9,31 +9,31 @@ import { Action, Field } from './shared';
 export function NewProjectButton() {
   const navigate=useNavigate();
   const [open,setOpen]=useState(false),[name,setName]=useState(''),[description,setDescription]=useState('');
-  const [busy,setBusy]=useState(false),[error,setError]=useState('');
+  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[defaults,setDefaults]=useState(null),[loaded,setLoaded]=useState(false),saveKey=useRef(null);
+  useEffect(()=>{if(!open)return;const c=new AbortController();setLoaded(false);api.get('/capabilities',c.signal).then(async caps=>{const value=caps.streamlined_project_setup?(await api.get('/project-defaults',c.signal)).defaults:null;if(!c.signal.aborted){setDefaults(value);setLoaded(true);}}).catch(e=>{if(!c.signal.aborted)setError(e.message);});return()=>c.abort();},[open]);
   async function create(event) {
     event.preventDefault();if(busy)return;setBusy(true);setError('');
     try {
       // No precreate account directory is exposed. Named, owner-authorized
       // account lookup and membership grants are available after creation.
-      const result=await api.write('',{name,description,members:[]});
+      saveKey.current??=crypto.randomUUID();
+      const result=defaults?await api.write('/project-tasks',{name,goal:description,accepted_defaults:defaults.version,idempotency_key:saveKey.current}):await api.write('',{name,description,members:[]});
+      saveKey.current=null;
       setOpen(false);setName('');setDescription('');
       navigate(`/operational-projects/${result.project.id}`);
     } catch(e) {setError(e.message);} finally {setBusy(false);}
   }
-  function close() {setOpen(false);setName('');setDescription('');setError('');}
+  function close() {setOpen(false);setName('');setDescription('');setError('');saveKey.current=null;}
   return <Dialog open={open} onOpenChange={value=>{if(!busy){if(value){setOpen(true);setError('');}else close();}}}>
     <DialogTrigger asChild><Button className="min-h-11 gap-2 rounded-md px-4"><Plus className="h-4 w-4" aria-hidden="true"/>New project</Button></DialogTrigger>
     <DialogContent className="operations-dialog max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-md flex flex-col p-6 [&>button]:h-11 [&>button]:w-11 [&>button]:flex [&>button]:items-center [&>button]:justify-center">
-      <DialogHeader className="pr-8"><DialogTitle className="operations-heading">New project</DialogTitle><DialogDescription>Give the work a name. Add guides and agents when you are ready.</DialogDescription></DialogHeader>
-      <form onSubmit={create} className="space-y-4">
+      <DialogHeader className="pr-8"><DialogTitle className="operations-heading">New project</DialogTitle><DialogDescription>Name the project and describe your goal. Accept once to save the complete setup.</DialogDescription></DialogHeader>
+      <form onSubmit={create} className="space-y-4 min-h-0 overflow-y-auto">
         {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
         <Field label="Name" required maxLength={200} autoFocus value={name} onChange={e=>setName(e.target.value)}/>
-        <Field label="Purpose (optional)" textarea rows={3} maxLength={20000} value={description} onChange={e=>setDescription(e.target.value)}/>
-        <fieldset className="rounded-md border bg-muted/30 p-4 space-y-2"><legend className="text-sm font-semibold px-1">People / access</legend>
-          <p className="flex items-center gap-2 font-medium"><Lock className="h-4 w-4 shrink-0" aria-hidden="true"/>Private to you</p>
-          <p className="text-sm text-muted-foreground">Find existing people by username in Access after creation. Project roles and connection permissions are separate.</p>
-        </fieldset>
-        <div className="flex flex-col sm:flex-row sm:justify-end gap-2"><Action type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Action><Action type="submit" disabled={busy||!name.trim()}>{busy?'Creating…':'Create project'}</Action></div>
+        <Field label={defaults?"Goal":"Purpose (optional)"} required={!!defaults} textarea rows={4} maxLength={20000} value={description} onChange={e=>setDescription(e.target.value)}/>
+        {defaults&&<><p className="text-sm text-muted-foreground">Describe the task in your own words. Include the website address if the work uses a website.</p><fieldset className="rounded-md border bg-muted/30 p-4 space-y-2"><legend className="text-sm font-semibold px-1">Included defaults</legend><p>Browser agent · {defaults.model}</p><p className="text-sm text-muted-foreground">{defaults.budgets.cpu} CPU · {defaults.budgets.memory_mib} MB memory · {defaults.budgets.temporary_disk_mib} MB temporary storage</p><p className="text-sm text-muted-foreground">Up to {defaults.budgets.max_seconds/60} minutes, {defaults.budgets.max_actions} actions and ${defaults.budgets.max_usd} per run.</p><p className="flex items-center gap-2 text-sm"><Lock className="h-4 w-4 shrink-0" aria-hidden="true"/>Private to you · Recording {defaults.record_video?'on':'off'}</p></fieldset><p className="text-sm text-muted-foreground">By accepting, you approve the goal as the guide and allow the agent to send that guide and bounded website content to the model provider. Changes to websites still require approval. Saving does not start a run.</p></>}
+        <div className="flex flex-col sm:flex-row sm:justify-end gap-2"><Action type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Action><Action type="submit" disabled={busy||!loaded||!name.trim()||(!!defaults&&!description.trim())}>{busy?'Saving…':!loaded?'Loading defaults…':defaults?'Accept & save':'Create project'}</Action></div>
       </form>
     </DialogContent>
   </Dialog>;

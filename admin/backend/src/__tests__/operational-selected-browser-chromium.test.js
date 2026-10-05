@@ -1,3 +1,4 @@
+import { operationalProjectTasksMigration1126 } from '../lib/operational-project-tasks-schema.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -77,7 +78,7 @@ async function actualBrowserContinuation(t, slowSetup = false) {
   try {
     const bootstrap = await client.request('fixture_bootstrap');
     for (const migrate of [operationalSelectedBrowserMigration1118, operationalBrowserArtifactsMigration1119,
-      operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122, operationalPublicNavigationMigration1123]) migrate(f.adapter);
+      operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122, operationalPublicNavigationMigration1123, operationalProjectTasksMigration1126]) migrate(f.adapter);
     f.db.exec('ALTER TABLE sessions ADD COLUMN sudo_until TEXT');
     const owner = f.addUser(), p = f.store.create(owner,{name:'Cross-language browser proof'});
     const guide = f.store.saveDraft(owner,p.id,1,{title:'Selected local pages',instructions:'Read selected pages with explicit destination approval.'}).version;

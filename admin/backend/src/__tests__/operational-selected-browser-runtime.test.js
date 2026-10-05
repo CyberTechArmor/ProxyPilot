@@ -1,3 +1,5 @@
+import { operationalProjectTasksMigration1126 } from '../lib/operational-project-tasks-schema.js';
+import { PROJECT_DEFAULTS_VERSION } from '../lib/operational-project-tasks.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
@@ -61,7 +63,7 @@ function world({ hostChange = () => {}, configured = true, privateStorage = conf
   const f = operationsFixture();
   for (const migrate of [operationalSelectedBrowserMigration1118, operationalBrowserArtifactsMigration1119,
     operationalBrowserConversionMigration1120, operationalSelectedBrowserRuntimeMigration1121, operationalSelectedBrowserAuthMigration1122, operationalPublicNavigationMigration1123,
-    operationalBrowserRunCommentsMigration1125]) migrate(f.adapter);
+    operationalBrowserRunCommentsMigration1125, operationalProjectTasksMigration1126]) migrate(f.adapter);
   f.db.exec('ALTER TABLE sessions ADD COLUMN sudo_until TEXT');
   const owner = f.addUser(), p = f.store.create(owner, { name: 'Selected runtime test' });
   const guide = f.store.saveDraft(owner, p.id, 1, { title: 'Current guide', instructions: 'Read selected pages and report sources.' }).version;
@@ -1323,4 +1325,48 @@ for(const [name,change] of [
   w.session();w.setOperation({kind:'navigate',destination_id:'public-entry',url:'https://selected.example/'});
   const {run}=await openPublic(w);await assert.rejects(()=>w.runtime.runs.publicFrame(w.owner,w.p.id,run.id,{attempt_id:run.attempt_id,fence:run.fence}),e=>e.code==='PUBLIC_VIEW_INVALID');
  }finally{await w.close();}
+});
+
+const simpleProject=w=>w.runtime.projects.create(w.owner,{name:'Pricing task',goal:'Read https://example.com/pricing and summarize the plans.',accepted_defaults:PROJECT_DEFAULTS_VERSION,idempotency_key:randomUUID()});
+test('one-save project immediately starts through the real signed runtime and preserves model consent',async()=>{
+  const w=world();try{
+    const saved=simpleProject(w),pid=saved.project.id;
+    assert.equal(w.calls.filter(c=>c.method==='selected_browser_launch').length,0);
+    const result=await w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()});
+    assert.equal(result.run.state,'running');assert.equal(w.launched.project_id,pid);
+    assert.equal(JSON.parse(w.launched.configuration_json).work.instructions,saved.project.description);
+    assert.equal(w.launched.project_limits.memory_mib,1024);
+    await w.runtime.runs.cancel(w.owner,pid,result.run.id,result.run.revision);
+  }finally{await w.close();}
+});
+test('accepted schedule starts after the owner logs out, advances one occurrence, and stops when paused',async()=>{
+  const w=world();try{
+    const saved=simpleProject(w),pid=saved.project.id,due=new Date(Math.floor(w.now/60000)*60000+120000);
+    const schedule=w.runtime.projects.saveSchedule(w.owner,pid,{timing:{frequency:'once',date:due.toISOString().slice(0,10),time:due.toISOString().slice(11,16),timezone:'UTC'},authorize_unattended:true,task_revision:saved.task.revision,project_revision:saved.project.revision,configuration_revision:saved.task.configuration.revision}).schedules[0];
+    w.f.db.prepare('UPDATE sessions SET revoked_at=? WHERE id=?').run(new Date(w.now).toISOString(),w.owner.jti);
+    w.advanceTo(Date.parse(schedule.next_run_at));
+    await w.runtime.projects.tick();await w.runtime.projects.tick();
+    const occurrence=w.runtime.projects.get({id:w.owner.id,human:true},pid).schedules[0].last_occurrence;
+    assert.equal(occurrence.state,'started');assert(occurrence.run_id);
+    const row=w.f.db.prepare('SELECT * FROM ops_selected_browser_runs WHERE id=?').get(occurrence.run_id);
+    assert.equal(row.starter_session_id,null);assert(row.schedule_occurrence_id);assert.equal(row.state,'running');
+    assert.equal(w.calls.filter(c=>c.method==='selected_browser_launch').length,1);
+    await w.runtime.runs.sweep();assert.equal(w.runtime.runs.get({id:w.owner.id},pid,row.id).run.state,'running');
+    w.runtime.projects.scheduleState({id:w.owner.id,human:true},pid,schedule.id,schedule.revision,{state:'paused'});
+    await w.runtime.runs.sweep();
+    const stopped=w.runtime.runs.get({id:w.owner.id},pid,row.id).run;
+    assert.equal(stopped.state,'failed');assert.equal(stopped.result_code,'SCHEDULE_AUTHORIZATION_REVOKED');
+  }finally{await w.close();}
+});
+test('schedule claims skip overlap with a current human run and never take over that run',async()=>{
+  const w=world();try{
+    const saved=simpleProject(w),pid=saved.project.id,due=new Date(Math.floor(w.now/60000)*60000+120000);
+    w.runtime.projects.saveSchedule(w.owner,pid,{timing:{frequency:'daily',time:due.toISOString().slice(11,16),timezone:'UTC'},authorize_unattended:true,task_revision:saved.task.revision,project_revision:saved.project.revision,configuration_revision:saved.task.configuration.revision});
+    const started=await w.runtime.projects.start(w.owner,pid,{task_revision:1,idempotency_key:randomUUID()});
+    w.advanceTo(due.getTime());await w.runtime.projects.tick();
+    assert.equal(w.runtime.projects.get(w.owner,pid).schedules[0].last_occurrence.state,'overlap');
+    assert.equal(w.calls.filter(c=>c.method==='selected_browser_launch').length,1);
+    assert.equal(w.runtime.runs.get(w.owner,pid,started.run.id).run.state,'running');
+    await w.runtime.runs.cancel(w.owner,pid,started.run.id,started.run.revision);
+  }finally{await w.close();}
 });

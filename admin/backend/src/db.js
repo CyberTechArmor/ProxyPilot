@@ -1,3 +1,4 @@
+import { operationalProjectTasksMigration1126 } from './lib/operational-project-tasks-schema.js';
 import { websiteReviewMigration1116 } from './lib/operational-website-review.js';
 import { operationalBrowserDraftMigration1117 } from './lib/operational-browser-agent-configurations.js';
 import { operationalPublicNavigationMigration1123, operationalSelectedBrowserMigration1118 } from './lib/operational-selected-browser-schema.js';
@@ -2074,6 +2075,7 @@ export function initDatabase() {
   runMigration(db, 1123, 'selected_browser_public_navigation', operationalPublicNavigationMigration1123, {disableFks:true});
   runMigration(db, 1124, 'browser_connection_metadata', operationalBrowserConnectionsMigration1124);
   runMigration(db, 1125, 'browser_run_comments', operationalBrowserRunCommentsMigration1125);
+  runMigration(db, 1126, 'streamlined_project_tasks_and_schedules', operationalProjectTasksMigration1126);
 
   // Manual (pasted) TLS certificates (block 800). The private key is stored
   // ENCRYPTED (key_pem_enc, AES-256-GCM via lib/secrets) — never plaintext;

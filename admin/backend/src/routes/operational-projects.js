@@ -32,6 +32,7 @@ export function createOperationsRouter({ Router, store, enabled = false, agentsE
         agent_execution_message: agentRuns.execution.message } : {}),
       ...(websiteReviews ? { website_review_enabled: agentsOn() && on(agentRunsEnabled),
         website_review_contract: 'website-review.v1', website_review_strategy: 'http_extract_v1' } : {}),
+      streamlined_project_setup: agentsOn() && !!browserRuntime?.projects,
       browser_draft_configuration_available: agentsOn(), browser_draft_contract: 'browser-agent-draft.v1',
       // Configuration is not installed execution proof. Each exact draft's
       // readiness verifies the host's current signed acceptance independently.

@@ -166,6 +166,14 @@ incomplete transactions still require verified package recovery. This restores
 the management interface, reports the runtime failure, and grants no browser
 readiness. An already running dashboard is health-checked without another start.
 
+An ordinary application update can replace the dashboard container while an
+older runtime recovery record remains pending. A fresh authenticated recovery
+request may bind that already running, inspected Compose replacement only after
+the committed package bytes, retained generation, current identity/certificate
+and serving health pass. The record retains the prior container ID. Automatic
+boot cleanup, reused requests, stopped replacements and incomplete or unverified
+packages still refuse a changed container ID before any stop/start operation.
+
 A certificate renewal between completed updates is recognized only when the
 proxy journal's certificate/key pair changes: other journal metadata must match
 the retained committed generation. Current certificate/key equality, lifetime,

@@ -139,6 +139,18 @@ readiness API remains authoritative; preservation never claims browser
 availability or writes acceptance. Absent, expired or otherwise unaccepted
 proof cannot be converted into acceptance by an ordinary update.
 
+Ordinary selected-runtime preservation may retain an idle, failed A3 certificate
+renewal oneshot. Its fixed loaded unit identity must match, its substate must be
+`failed`, both main and control PIDs must be zero, and it must have no queued
+systemd job. Inactive renewal is checked for the same idle boundary. Current
+certificate/key validity and serving health still pass independently; failed
+serving services, failed timers, active renewal and unknown transitions refuse.
+Apply/completion output reports the retained renewal failure for investigation;
+no failure is cleared and no renewal or runtime restart is requested. Only the
+renewal's independently verified `inactive`/`failed` terminal result may change
+during the dashboard build; its enablement and every other unit remain pinned.
+Dedicated package operations retain their original strict healthy-unit checks.
+
 A certificate renewal between completed updates is recognized only when the
 proxy journal's certificate/key pair changes: other journal metadata must match
 the retained committed generation. Current certificate/key equality, lifetime,

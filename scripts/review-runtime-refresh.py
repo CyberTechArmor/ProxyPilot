@@ -836,8 +836,8 @@ class SelectedRefresh:
         if any(identity.get(k) != transaction['identity'].get(k) for k in stable):
             raise ValueError('Selected enrollment identity/policy changed')
         protected = self.package.protected()
-        units = self.h.unit_check()
-        self.h.health(pins, identity['key_id'], True, allow_work=allow_work)
+        units = self.h.unit_check(allow_failed_renewal=True)
+        self.h.health(pins, identity['key_id'], True, allow_work=allow_work, allow_failed_renewal=True)
         ledgers = None
         if not allow_work:
             self.host.preservation_db_idle()
@@ -852,12 +852,14 @@ class SelectedRefresh:
             raise ValueError('Incomplete selected preservation requires rollback before Update')
         return self.snapshot()
 
-    @staticmethod
-    def result(**extra):
+    def result(self, snapshot, **extra):
         # Runtime acceptance/readiness is evaluated by the real runtime API.
         # Installation preservation must not invent availability or proof.
-        return dict(preserved=True, runtime_changed=False, mode='preserve_selected',
-                    acceptance_created=False, readiness_recheck_required=True, **extra)
+        result = dict(preserved=True, runtime_changed=False, mode='preserve_selected',
+                      acceptance_created=False, readiness_recheck_required=True, **extra)
+        if snapshot['units'][self.module.RENEW_SERVICE]['active'] == 'failed':
+            result['warnings'] = ['Certificate renewal has a retained failure; the job is idle and current certificate/serving health passed. Renewal still requires operator investigation.']
+        return result
 
     def apply(self):
         self.preflight()
@@ -867,13 +869,20 @@ class SelectedRefresh:
         self.save(data)
         if self.snapshot() != snapshot:
             raise ValueError('Selected runtime/source changed during preservation')
-        return self.result(awaiting_dashboard_health=True)
+        return self.result(snapshot, awaiting_dashboard_health=True)
 
     def completion_comparison(self, snapshot, expected, operation):
         # snapshot() already checked current certificate/key equality, lifetime,
         # custody, all serving bytes, and the complete retained journal metadata.
         # The separately owned timer may renew while the dashboard rebuilds.
         value = json.loads(json.dumps(snapshot))
+        # Both terminal oneshot states were independently verified idle by
+        # snapshot(). A timer attempt during the build may change its latched
+        # result; preserve that diagnostic without weakening any other unit or
+        # the timer's enabled/active checks.
+        renewal = value['units'][self.module.RENEW_SERVICE]
+        if renewal['active'] in {'inactive', 'failed'}:
+            renewal['active'] = 'inactive'
         value['identity'].pop('proxy_spki_sha256')
         if operation == 'rollback':
             # Recovery across reboot is read-only and still checks the exact
@@ -931,7 +940,7 @@ class SelectedRefresh:
         if operation == 'commit':
             data['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         self.save(data)
-        return self.result(**{data['phase']: True})
+        return self.result(current, **{data['phase']: True})
 
     def commit(self):
         return self.finish('commit')

@@ -16,11 +16,27 @@ spec.loader.exec_module(r)
 
 
 class PackageHost(FixtureHost):
+    def execute(self, argv):
+        unit = p.UNIT_ROOT + argv[2]
+        state = self.unit_states[unit]
+        prop = argv[3].split('=', 1)[1]
+        return str(state.get(prop, {
+            'FragmentPath':unit, 'DropInPaths':'', 'NeedDaemonReload':'no',
+            'ActiveState':state['active'], 'UnitFileState':state['enabled'],
+            'SubState':'failed' if state['active'] == 'failed' else 'dead',
+            'MainPID':'0', 'ControlPID':'0', 'Job':'',
+        }[prop])).encode() + b'\n'
+
+    unit_inventory = p.Host.unit_inventory
+    unit_check = p.Host.unit_check
+
     def identity(self, allow_work=False):
         return dict(super().identity(), proxy_spki_sha256=p.sha(self.tree.read(p.ROOT + "/proxy-cert.pem")))
 
-    def health(self, pins, key_id, selected, allow_work=False):
-        return super().health(pins, key_id, selected)
+    def health(self, pins, key_id, selected, allow_work=False, allow_failed_renewal=False):
+        units = self.unit_check(allow_failed_renewal=allow_failed_renewal)
+        with patch.object(self, 'unit_check', return_value=units):
+            return super().health(pins, key_id, selected)
 
 
 class UpdaterHost:
@@ -72,6 +88,64 @@ class SelectedPreservationTests(unittest.TestCase):
         self.assertEqual(self.host.events, [])
         self.assertFalse(result['acceptance_created'])
         self.assertNotIn('selected_browser_available', result)
+
+    def test_idle_failed_renewal_is_preserved_without_runtime_effects(self):
+        self.host.unit_states[p.RENEW_SERVICE]['active'] = 'failed'
+        before = self.runtime_bytes()
+        for operation in ('commit', 'rollback'):
+            self.refresh.preflight()
+            self.assertIn('retained failure', self.refresh.apply()['warnings'][0])
+            result = getattr(self.refresh, operation)()
+            self.assertTrue(result[{'commit':'committed', 'rollback':'rolled_back'}[operation]])
+            self.assertIn('warnings', result)
+            self.assertEqual(self.host.unit_states[p.RENEW_SERVICE]['active'], 'failed')
+            self.assertEqual(self.runtime_bytes(), before)
+        self.assertEqual(self.host.events, [])
+        # Installing/upgrading a runtime still requires the original healthy
+        # boundary and separately reviewed service changes.
+        with self.assertRaises(ValueError):
+            self.package.plan('update')
+
+    def test_renewal_terminal_result_can_change_during_dashboard_build(self):
+        for before, after in (('inactive', 'failed'), ('failed', 'inactive')):
+            for operation in ('commit', 'rollback'):
+                with self.subTest(before=before, after=after, operation=operation):
+                    self.host.unit_states[p.RENEW_SERVICE]['active'] = before
+                    self.refresh.apply()
+                    self.host.unit_states[p.RENEW_SERVICE]['active'] = after
+                    result = getattr(self.refresh, operation)()
+                    self.assertEqual('warnings' in result, after == 'failed')
+                    self.assertEqual(self.host.unit_states[p.RENEW_SERVICE]['active'], after)
+        self.assertEqual(self.host.events, [])
+
+    def test_failed_renewal_never_bypasses_identity_health_or_idle_checks(self):
+        self.host.unit_states[p.RENEW_SERVICE]['active'] = 'failed'
+        for method in ('identity', 'health'):
+            with self.subTest(method=method), patch.object(self.host, method, side_effect=ValueError('fixture unhealthy')):
+                with self.assertRaisesRegex(ValueError, 'fixture unhealthy'):
+                    self.refresh.preflight()
+        for unit, prop, value in ((p.RENEW_SERVICE, 'MainPID', '100'),
+                                  (p.RENEW_SERVICE, 'ControlPID', '100'),
+                                  (p.RENEW_SERVICE, 'Job', '24'),
+                                  (p.RENEW_SERVICE, 'active', 'activating'),
+                                  (p.SUP_UNIT, 'active', 'failed'),
+                                  (p.RENEW_TIMER, 'active', 'failed')):
+            state = copy.deepcopy(self.host.unit_states[unit])
+            with self.subTest(unit=unit, prop=prop):
+                self.host.unit_states[unit][prop] = value
+                with self.assertRaises(ValueError):
+                    self.refresh.preflight()
+            self.host.unit_states[unit] = state
+        self.assertEqual(self.host.events, [])
+
+    def test_renewal_unit_enablement_drift_still_blocks_completion(self):
+        self.host.unit_states[p.RENEW_SERVICE]['active'] = 'failed'
+        self.refresh.apply()
+        self.host.unit_states[p.RENEW_SERVICE]['enabled'] = 'disabled'
+        with self.assertRaisesRegex(ValueError, 'drift'):
+            self.refresh.commit()
+        self.assertEqual(self.refresh.read()['phase'], 'applied')
+        self.assertEqual(self.host.events, [])
 
     def test_new_runtime_delivery_preserves_installed_generation_until_package_update(self):
         before = self.runtime_bytes()
@@ -347,17 +421,18 @@ class ServingHealthTests(unittest.TestCase):
             'a3-origin-proxy.py':pins[paths[5]]['sha256']})
         def rpc(path, method, gateway_request=False):
             return gateway if gateway_request else broker if 'a4' in path else supervisor
-        with patch.object(host, 'wiring'), patch.object(host, 'unit_check'), patch.object(host, 'rpc', side_effect=rpc):
+        with patch.object(host, 'wiring'), patch.object(host, 'unit_check') as unit_check, patch.object(host, 'rpc', side_effect=rpc):
             with self.assertRaises(ValueError):
                 host.health(pins, 'key', True)
-            host.health(pins, 'key', True, allow_work=True)
+            host.health(pins, 'key', True, allow_work=True, allow_failed_renewal=True)
+            unit_check.assert_called_with(allow_failed_renewal=True)
             supervisor['supervisor']['key_id'] = 'foreign'
             with self.assertRaises(ValueError):
-                host.health(pins, 'key', True, allow_work=True)
+                host.health(pins, 'key', True, allow_work=True, allow_failed_renewal=True)
             supervisor['supervisor']['key_id'] = 'key'
             gateway['files']['selected_browser_gateway.py'] = 'foreign'
             with self.assertRaises(ValueError):
-                host.health(pins, 'key', True, allow_work=True)
+                host.health(pins, 'key', True, allow_work=True, allow_failed_renewal=True)
 
 
 if __name__ == '__main__':

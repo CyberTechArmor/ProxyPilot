@@ -143,6 +143,13 @@ jobs:
           node tests/browser-connections.browser.mjs
           node tests/global-browser-connections.browser.mjs
           node tests/source-memory-setup.browser.mjs
+          node tests/project-tasks.browser.mjs
+      - name: Streamlined project screenshots and viewport checks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: streamlined-project-interface
+          path: admin/frontend/.artifacts/project-tasks
   agent:
     runs-on: ubuntu-latest
     timeout-minutes: 15

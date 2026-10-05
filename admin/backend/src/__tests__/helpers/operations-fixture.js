@@ -22,11 +22,13 @@ export function operationsFixture({path=':memory:'}={}) {
     INSERT INTO mock2_projects VALUES(1,'Existing Dev Studio');
     CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT);
     INSERT INTO app_settings VALUES('branding_name','Existing custom name');`);
+  let savepoint=0;
   const transaction = fn => {
     const execute = () => {
-      db.exec('BEGIN IMMEDIATE');
-      try { const value = fn(); db.exec('COMMIT'); return value; }
-      catch (e) { db.exec('ROLLBACK'); throw e; }
+      const nested=db.isTransaction,point=`operations_fixture_${++savepoint}`;
+      db.exec(nested?`SAVEPOINT ${point}`:'BEGIN IMMEDIATE');
+      try { const value = fn(); db.exec(nested?`RELEASE ${point}`:'COMMIT'); return value; }
+      catch (e) { db.exec(nested?`ROLLBACK TO ${point}`:'ROLLBACK');if(nested)db.exec(`RELEASE ${point}`);throw e; }
     };
     execute.immediate = execute;
     return execute;

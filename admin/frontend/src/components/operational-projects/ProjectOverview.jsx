@@ -1,3 +1,4 @@
+import { ProjectTaskOverview } from './ProjectTaskOverview';
 import { ArrowRight, Bot, CheckCircle2, FileText, KeyRound, Users } from 'lucide-react';
 import { Action } from './shared';
 import { BrowserRunSummary, BrowserRunHelp, RecentBrowserRuns } from './BrowserRunSummary';
@@ -5,11 +6,12 @@ import { BrowserRunSummary, BrowserRunHelp, RecentBrowserRuns } from './BrowserR
 // All counts and labels come from this permitted project's current response.
 // The reference's example training videos and running tasks are never seeded.
 export function ProjectOverview({ project:p, draft:d, records:r, activity:e, access:a,
-  editable, agentCapability, browserRuntimeCapability, openSection, loadMore, busy, onUnavailable }) {
+  editable, agentCapability, browserRuntimeCapability, openSection, loadMore, busy, onUnavailable, taskData, onChanged, onOpenRun }) {
   const pending=d.pending_submission;
   const people=1+(a?.members?.filter(member=>member.active).length||0);
   const materialCount=d.evidence?.references?.length||0;
   const content=<div className="space-y-4" data-project-overview>
+    {taskData?.task?<ProjectTaskOverview project={p} executionEnabled={browserRuntimeCapability} taskData={taskData} onChanged={onChanged} onOpenRun={onOpenRun} openSection={openSection}/>:<>
     <p className="whitespace-pre-wrap break-words text-muted-foreground">{p.description||'Add a purpose in Details to explain the work this project supports.'}</p>
     {p.archived_at&&<p className="rounded-md border bg-muted p-3 text-sm break-words">Archived: {p.archive_reason}</p>}
     {browserRuntimeCapability&&<BrowserRunHelp/>}
@@ -30,6 +32,7 @@ export function ProjectOverview({ project:p, draft:d, records:r, activity:e, acc
         <details className="border-t pt-2"><summary className="min-h-11 cursor-pointer py-2 font-medium">Recent activity</summary><ul className="divide-y">{e.events.map(row=><li key={row.id} className="py-2 text-sm break-words"><p>{row.action.replaceAll('_',' ')}</p><time className="text-xs text-muted-foreground">{row.created_at}</time></li>)}</ul>{!e.events.length&&<p className="text-sm text-muted-foreground">No activity recorded yet.</p>}{e.next_cursor&&<Action disabled={busy} variant="outline" onClick={()=>loadMore('e')}>Load older activity</Action>}</details>
       </section>
     </div>
+    </>}
     <section className="operations-card rounded-md border bg-card p-4 min-w-0 space-y-3" data-overview-access aria-labelledby="overview-access">
       <h3 id="overview-access" className="text-lg font-semibold">Access &amp; connections</h3>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div className="space-y-3 text-sm"><p className="flex items-start gap-3"><Users className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><span>People: {a?`${people} ${people===1?'person':'people'} with project access`:'Your role: '+p.own_role}</span></p><p className="flex items-start gap-3"><KeyRound className="h-5 w-5 shrink-0 text-muted-foreground" aria-hidden="true"/><span>Connection permissions are granted separately.</span></p></div><Action variant="ghost" className="text-primary gap-2 shrink-0 self-start" onClick={()=>openSection('Access')}>Manage access<ArrowRight className="h-4 w-4" aria-hidden="true"/></Action></div>

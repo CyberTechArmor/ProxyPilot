@@ -3,6 +3,7 @@ import {publicNavigationInput} from '../lib/operational-public-navigation.js';
 import { OperationsError, assertRevision, fail, parse, revision } from '../lib/operational-projects-logic.js';
 import { selectedConsentSchema, selectedStartSchema } from '../lib/operational-selected-browser-contract.js';
 import { selectedAuthConfirmationInputSchema } from '../lib/operational-selected-browser-auth-contract.js';
+import { projectDefaults } from '../lib/operational-project-tasks.js';
 
 const denied = (_req,res) => res.status(404).json({error:'Not found'});
 const noSudo = (_req,res) => res.status(401).json({error:'sudo_required',sudo_required:true,message:'This action requires sudo re-authentication.'});
@@ -108,11 +109,25 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
       const known=err instanceof OperationsError;
       if(known&&[401,403,404].includes(err.status))try{store?.auditDenied?.(req.operationsActor,req.params?.id,action,err.status);}catch{/* preserve refusal */}
       return res.status(known?err.status:500).json({error:known?err.message:'Unable to complete browser request',
+        ...(err.code==='AGENT_CONTROL_VERIFICATION_REQUIRED'?{control_verification_required:true}:{}),
         ...(known&&typeof err.code==='string'&&/^[A-Za-z0-9_]{1,128}$/.test(err.code)?{code:err.code}:{})});
     }finally{req.browserAssetIntakeRelease?.();}
   };
   const agent=(fn,opts={})=>handle(fn,opts),run=(fn,opts={})=>handle(fn,{...opts,runGate:true});
   const base='/:id/browser-agent-configurations',runs='/:id/browser-agent-runs',assets='/:id/browser-assets';
+
+  // One acceptance publishes the guide, bounded defaults and exact model
+  // consent. Saving never launches. Scheduled authority has no HTTP start path.
+  router.get('/project-defaults',agentsOnly,agent((r,a)=>({defaults:projectDefaults(),authorization:method(available(r,'projects'),'authorization')(a)})));
+  router.post('/project-tasks',agentsOnly,elevated,agent((r,a)=>method(available(r,'projects'),'create')(a,r.body),{status:201,action:'project_setup_accept'}));
+  router.get('/:id/task',agentsOnly,agent((r,a)=>{query(r);return method(available(r,'projects'),'get')(a,r.params.id);}));
+  router.patch('/:id/task',agentsOnly,elevated,agent((r,a)=>method(available(r,'projects'),'edit')(a,r.params.id,expected(r),r.body),{action:'project_setup_accept'}));
+  router.post('/:id/task/start',agentsOnly,runsOnly,elevated,run((r,a)=>method(available(r,'projects'),'start')(a,r.params.id,r.body),{status:202,action:'project_task_start'}));
+  router.put('/:id/task/schedule',agentsOnly,runsOnly,elevated,run((r,a)=>{
+    if(!controlVerified(r))throw Object.assign(new OperationsError(403,'Verify agent control to authorize scheduled runs'),{code:'AGENT_CONTROL_VERIFICATION_REQUIRED'});
+    return method(available(r,'projects'),'saveSchedule')(a,r.params.id,r.body,r.get('If-Match')?expected(r):null);
+  },{action:'project_schedule_accept'}));
+  router.patch('/:id/task/schedule/:scheduleId',agentsOnly,agent((r,a)=>method(available(r,'projects'),'scheduleState')(a,r.params.id,r.params.scheduleId,expected(r),r.body),{action:'project_schedule_update'}));
 
   router.get('/:id/public-browser',agentsOnly,runsOnly,run(async(r,a)=>{const input=parse(z.object({url:z.string().min(8).max(2048)}).strict(),r.query);return {readiness:await method(available(r,'runs'),'publicReadiness')(a,r.params.id,input.url)};}));
   router.post('/:id/public-browser',agentsOnly,runsOnly,run((r,a)=>method(available(r,'runs'),'openPublic')(a,r.params.id,parse(publicNavigationInput,r.body)),{status:202,action:'public_browser_open'}));

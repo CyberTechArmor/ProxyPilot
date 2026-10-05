@@ -1,3 +1,4 @@
+import { createProjectTasks } from './operational-project-tasks.js';
 import {isPublicNavigation} from './operational-public-navigation.js';
 import {z} from 'zod';
 import { readFileSync } from 'node:fs';
@@ -108,6 +109,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
     client=injectedClient||createSupervisorClient(config.execution.socket);
     model=createBrowserModelBridge({client:{request:(method,params,options)=>request(method,params,options)},publicKeyPem,clock});reason=null;
   }catch{client=null;attest=null;model=null;reason='invalid_configuration';}
+  let projects;
   let runs,artifacts=null,files=null,closed=false,timer=null,busy=false,artifactCursor=null;
   const stagedUploads=new Set();
   const authenticationInventories=new Map();
@@ -376,7 +378,8 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
     renew:ref=>request('selected_browser_renew',identity(ref)),
     async stop(ref){try{return await request('selected_browser_stop',{...identity(ref),reason:ref.reason==='CANCELLED_BY_PERSON'?'cancelled':ref.reason==='REQUESTED_RESULT_REPORTED'?'completed':'failed'});}finally{for(const pin of stagedUploads)if(pin.startsWith(ref.attempt_id+':'))stagedUploads.delete(pin);for(const pin of authenticationInventories.keys())if(pin.startsWith(ref.attempt_id+':'))authenticationInventories.delete(pin);}},
   }:null;
-  runs=createSelectedBrowserService({db,runner,model,artifacts:artifacts?.service,clock:()=>new Date(clock()),verifyControl,verifyElevation,verifyReceipt});
+  runs=createSelectedBrowserService({db,runner,model,artifacts:artifacts?.service,clock:()=>new Date(clock()),verifyControl,verifyElevation,verifyReceipt,verifyScheduledAuthority:(actor,pid,cid)=>projects?.verifyScheduledAuthority(actor,pid,cid)===true});
+  projects=createProjectTasks({db,store,runs,clock,isEnabled,verifyControl,verifyElevation});
   const conversion=createBrowserConversionService({db,store,model,resolveAsset:artifacts?.service.resolveSourceAsset.bind(artifacts.service),verifyAsset:artifacts?.service.verifySourceAsset.bind(artifacts.service),sourceCapabilities:()=>artifacts?.service.sourceCapabilities()||{mime_types:[]},clock,isEnabled});
   const viewers=new Map();
   const viewerEnded=v=>{if(!v||[...viewers.values()].some(other=>other.run_id===v.run_id&&other.user_id===v.user_id&&other.session_id===v.session_id))return;
@@ -407,6 +410,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
           if(current.state==='running'&&current.execution_mode!=='public_navigation')void runs.pump(r.id).catch(e=>log({code:e?.code||'BROWSER_PUMP_REFUSED'}));
         }catch(e){log({code:e?.code||'BROWSER_MAINTENANCE_REFUSED'});}
       }
+      await projects.tick();
     }finally{
       // Cleanup stays active when browser runs are disabled or run maintenance
       // fails. Scan one bounded page, including retained rows, then wrap so a
@@ -419,7 +423,7 @@ export function createSelectedBrowserRuntime(config,{db,store,readFile=readFileS
       }finally{busy=false;}
     }
   };
-  return {runs,conversion,artifacts,comments,live,execution:{configured:!!runner,reason},
-    async startMaintenance(){await runs.recover();if(!closed&&!timer){timer=scheduleInterval(()=>tick().catch(()=>log({code:'BROWSER_MAINTENANCE_REFUSED'})),5000);timer.unref?.();}},
+  return {runs,projects,conversion,artifacts,comments,live,execution:{configured:!!runner,reason},
+    async startMaintenance(){await runs.recover();projects.recover();if(!closed&&!timer){timer=scheduleInterval(()=>tick().catch(()=>log({code:'BROWSER_MAINTENANCE_REFUSED'})),5000);timer.unref?.();}},
     async close(){closed=true;cancelInterval(timer);for(const id of viewers.keys())live.closeLive(id);await conversion.close();files?.close();}};
 }

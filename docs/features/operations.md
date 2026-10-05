@@ -462,3 +462,70 @@ to the fixed grace, holds and authorized maintenance. Holds grant no access.
 No scheduler or live maintenance is supplied by the UI. Both false-default gates,
 D2 runtime checks, older-writer Operations shutdown and all SEC/INF deployment
 prerequisites continue to apply.
+
+## Streamlined browser projects
+
+New project setup is **Name → Goal → Accept & save**. The authenticated owner
+accepts `project-defaults.v1` once. One immediate transaction creates the private
+project, publishes the exact goal as an immutable approved guide, sets finite
+project limits, saves the browser configuration and records owner model consent
+for its exact configuration and guide hashes. Saving starts no run. An
+idempotency key makes a repeated identical save return the same project;
+changed content with the same key is refused. Audit failure rolls back all of it.
+Legacy projects, grants, connections, credentials and run histories are retained.
+
+The default model is the existing `gpt-6-luna` route. Resources are 1 CPU,
+1024 MiB memory and 512 MiB temporary disk. Each run is bounded by 15 minutes,
+60 actions, 20 model calls, 50,000 tokens, $1, 500 requests, 50 MiB response
+bytes and 32 MiB private artifacts. Video recording is off and result retention
+is 14 days. External changes retain per-action approval, off-list destinations
+pause before contact and sign-in uses manual takeover. No credentials, account
+or connection are invented. A website URL in the goal supplies the initial
+explicit destination. A goal without one saves successfully and asks the owner
+to add it with **Edit goal & settings** before running.
+
+The overview keeps the existing Projects list/detail layout and exposes
+**Run now**, **Schedule** and **Edit goal & settings**. Run now uses the current
+accepted configuration and the existing signed runtime readiness, cleanup,
+model, source-memory, budget, access and control checks. One settings acceptance
+publishes a new guide, revises the configuration and consent, adjusts limits and
+pauses its schedule. An active run must be stopped first. Advanced agent/model,
+source, destination and connection editors remain accessible under Agents.
+Re-authentication and agent-control proof are requested only when required.
+
+Schedules support Once, Daily or Weekly in an explicit IANA timezone. The owner
+accepts unattended execution of the exact current configuration, guide, consent
+and limits. The backend persists timing, next run and occurrence history; the
+browser need not stay open. A schedule is revocable and cannot grant permission
+to make consequential changes. Current ownership, access, account eligibility,
+feature switches, accepted hashes, limits and installed execution readiness are
+checked again before launch and throughout each run. Session expiry does not
+cancel this explicit schedule mandate. Live human control still requires a
+current session. Pausing, deleting or editing the schedule revokes its mandate
+for an active scheduled run; ordinary human runs retain their session checks.
+
+A durable unique local-time occurrence and run idempotency key prevent replay.
+The scheduler skips overlaps, skips occurrences over five minutes late, and
+never catches up multiple missed runs. Startup marks incomplete claims
+interrupted; the existing runtime fences previous attempts without replay.
+Spring daylight-saving gaps skip that occurrence; a repeated fall time runs
+once. Goal/settings changes pause schedules until **Accept & resume** or an
+explicit schedule save. Each recurrence has the displayed per-run bounds;
+recurring authorization continues until paused or deleted. Blocked, missed,
+overlap and interrupted occurrences are visible beside the next run.
+
+Routes (in addition to existing advanced browser APIs):
+
+- `GET /project-defaults`: defaults and current session proof status.
+- `POST /project-tasks`: owner acceptance; requires current elevation.
+- `GET /:id/task`, `PATCH /:id/task` with task `If-Match`: read/update setup.
+- `POST /:id/task/start`: explicit Run now, never a save side effect.
+- `PUT /:id/task/schedule`: accept timing/mandate with schedule `If-Match` on edits.
+- `PATCH /:id/task/schedule/:scheduleId`: pause/delete; resuming uses explicit PUT acceptance.
+
+There is no HTTP or MCP scheduled-start endpoint. Scheduled starts are admitted
+only by the internal maintenance worker against a durable claimed occurrence.
+Migration 1126 is additive. No host installation or activation is part of this
+source update. Evidence: `operational-project-tasks.test.js`, the signed runtime
+journeys in `operational-selected-browser-runtime.test.js`, and the real-page
+responsive/accessibility/CSRF journey in `project-tasks.browser.mjs`.

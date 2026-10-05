@@ -25,9 +25,12 @@ await context.addCookies([{name:'pp_harness_user',value:'owner',url:h.origin},{n
 const page=await context.newPage(),errors=[],layouts=[];page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));
 const proof=async path=>{const response=await context.request.post(h.origin+path,{headers:{'X-CSRF-Token':'project-task-fixture'},data:{password:SUDO_PASSWORD,totpCode:SUDO_TOTP}});assert.equal(response.status(),200);};
 async function audit(surface) {
+  // Audit the settled dialog, not an intermediate opacity animation frame.
+  if(await page.getByRole('dialog').count())await page.getByRole('dialog').evaluate(el=>Promise.all(el.getAnimations({subtree:true}).filter(a=>a.effect?.getComputedTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{}))));
   await page.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
   const layout=await page.evaluate(()=>({width:innerWidth,scrollWidth:document.documentElement.scrollWidth}));assert(layout.scrollWidth<=layout.width+1,`${surface} overflows at ${layout.width}`);layouts.push({surface,...layout});
   await page.addScriptTag({content:axe});const result=await page.evaluate(()=>axe.run(document.querySelector('[role="dialog"]')||document.querySelector('[data-selected-project]')||document.body,{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}}));
+  if(result.violations.length)writeFileSync(`${artifacts}/accessibility-failure.json`,JSON.stringify({surface,width:layout.width,violations:result.violations},null,2));
   assert.deepEqual(result.violations.map(v=>({id:v.id,impact:v.impact})),[],`${surface} accessibility`);
 }
 try {
@@ -48,13 +51,28 @@ try {
   await page.getByRole('button',{name:'Run now',exact:true}).waitFor();await page.getByRole('button',{name:'Schedule',exact:true}).waitFor();
   for(const width of [360,375,768,1280,1920]){await page.setViewportSize({width,height:900});await audit('overview');}
   await page.setViewportSize({width:1280,height:900});await page.screenshot({path:`${artifacts}/project-overview.png`});
-  await page.getByRole('button',{name:'Schedule',exact:true}).click();await dialog.getByLabel('Repeat').selectOption('weekly');await dialog.getByLabel('Weekday').selectOption('1');await dialog.getByLabel('Time').fill('09:00');assert.equal(await dialog.getByLabel('Timezone').inputValue(),'America/Detroit');
+  await page.getByRole('button',{name:'Schedule',exact:true}).click();await dialog.getByLabel('Repeat').selectOption('weekly');await dialog.getByLabel('Weekday').selectOption('1');await dialog.getByLabel('Time',{exact:true}).fill('09:00');assert.equal(await dialog.getByLabel('Timezone').inputValue(),'America/Detroit');
   for(const width of [360,375,768,1280,1920]){await page.setViewportSize({width,height:900});await audit('schedule');}
   await page.setViewportSize({width:1280,height:900});await page.screenshot({path:`${artifacts}/schedule.png`});
   await dialog.getByRole('button',{name:'Accept & save schedule',exact:true}).click();await page.getByText('Schedule · Active',{exact:true}).waitFor();
   await page.reload();await page.getByText('Schedule · Active',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Pause',exact:true}).click();await page.getByText('Schedule · Paused',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Accept & resume',exact:true}).click();await page.getByText('Schedule · Active',{exact:true}).waitFor();
+  // A background refresh must not replace the revision captured by an open
+  // schedule form and silently overwrite another tab's newly saved timing.
+  await page.getByRole('button',{name:'Edit schedule',exact:true}).click();
+  const current=(await (await context.request.get(h.origin+`/api/operational-projects/${pid}/task`)).json());
+  const project=h.world.f.store.get(h.world.users.owner,pid),schedule=current.schedules[0];
+  const concurrent=await context.request.put(h.origin+`/api/operational-projects/${pid}/task/schedule`,{headers:{'X-CSRF-Token':'project-task-fixture','If-Match':`"${schedule.revision}"`},data:{timing:{...schedule.timing,time:'10:00'},authorize_unattended:true,task_revision:current.task.revision,project_revision:project.revision,configuration_revision:current.task.configuration.revision}});
+  assert.equal(concurrent.status(),200);
+  const refreshed=page.waitForResponse(r=>r.url().endsWith(`/${pid}/task`)&&r.request().method()==='GET');
+  await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await refreshed;
+  await dialog.getByLabel('Time',{exact:true}).fill('11:00');
+  await dialog.getByRole('button',{name:'Accept & save schedule',exact:true}).click();
+  await dialog.getByRole('alert').filter({hasText:'This project changed.'}).waitFor();
+  assert.equal(await dialog.getByLabel('Time',{exact:true}).inputValue(),'11:00');
+  assert.equal((await (await context.request.get(h.origin+`/api/operational-projects/${pid}/task`)).json()).schedules[0].timing.time,'10:00');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.getByRole('button',{name:'Edit goal & settings',exact:true}).click();await dialog.getByLabel('Goal').fill('Read https://example.com/pricing and compare only annual plans.');
   for(const width of [360,375,768,1280,1920]){await page.setViewportSize({width,height:900});await audit('edit-settings');}
   await dialog.getByRole('button',{name:'Accept & save',exact:true}).click();await page.getByText('Schedule · Paused',{exact:true}).waitFor();

@@ -70,7 +70,7 @@ test('the Operations router reads the toggles on every request', async () => {
   const call = (who, method, path, body = {}) => router.dispatch({ method, path, body, user: who });
   const caps = async who => (await call(who, 'GET', '/capabilities')).body;
   assert.deepEqual(await caps(user), { enabled: false, stage: 'human-workflow', ui_available: false, evidence_enabled: false,
-    agents_metadata_enabled: false, agent_runs_enabled: false, browser_draft_configuration_available: false,
+    agents_metadata_enabled: false, agent_runs_enabled: false, streamlined_project_setup: false, browser_draft_configuration_available: false,
     browser_draft_contract: 'browser-agent-draft.v1', selected_browser_execution_available: false, can_manage_settings: false });
   assert.equal((await caps(admin)).can_manage_settings, true);
   assert.equal((await call(user, 'GET', '/')).statusCode, 404);

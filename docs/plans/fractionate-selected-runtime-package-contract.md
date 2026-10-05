@@ -149,7 +149,22 @@ Apply/completion output reports the retained renewal failure for investigation;
 no failure is cleared and no renewal or runtime restart is requested. Only the
 renewal's independently verified `inactive`/`failed` terminal result may change
 during the dashboard build; its enablement and every other unit remain pinned.
-Dedicated package operations retain their original strict healthy-unit checks.
+Reviewed package install/update and recovery may also measure this exact idle
+failure. Their existing owned stop/start sequence retains the renewal oneshot's
+terminal diagnostic and restarts its timer; post-start serving and commit checks
+still require current certificate/key validity and independently verified idle
+renewal. The recorded review keeps the original state; only verified inactive/
+failed renewal results are equivalent, with unchanged enablement/other units. No
+standalone failure reset, forced certificate renewal or acceptance is added.
+
+The authenticated runtime operation checks service admission before stopping
+the dashboard. On failure, it compares the full owned byte pins and package
+transaction with its pre-operation snapshot. An unchanged terminal package can
+restore the same inspected dashboard without rolling back an older generation,
+even when a read-only runtime health check refused. Newly changed bytes and
+incomplete transactions still require verified package recovery. This restores
+the management interface, reports the runtime failure, and grants no browser
+readiness. An already running dashboard is health-checked without another start.
 
 A certificate renewal between completed updates is recognized only when the
 proxy journal's certificate/key pair changes: other journal metadata must match

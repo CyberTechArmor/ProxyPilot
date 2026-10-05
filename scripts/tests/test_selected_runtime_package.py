@@ -92,17 +92,18 @@ class FixtureHost:
     def stopped_backend(self):
         if self.backend_active:p.refuse('Dashboard active fixture')
 
-    def unit_check(self,active=True):
+    def unit_check(self,active=True,allow_failed_renewal=False):
         expected='active' if active else 'inactive'
         for u,s in self.unit_states.items():
-            if s['active']!=('inactive' if u==p.RENEW_SERVICE else expected):p.refuse('Mock unit boundary failed')
+            retained_failure=allow_failed_renewal and u==p.RENEW_SERVICE and s['active']=='failed'
+            if s['active']!=('inactive' if u==p.RENEW_SERVICE else expected) and not retained_failure:p.refuse('Mock unit boundary failed')
         return copy.deepcopy(self.unit_states)
 
-    def unit_inventory(self,recovery=False):
+    def unit_inventory(self,recovery=False,allow_failed_renewal=False):
         return copy.deepcopy(self.unit_states)
 
-    def health(self,pins,key_id,selected):
-        self.unit_check()
+    def health(self,pins,key_id,selected,allow_failed_renewal=False):
+        self.unit_check(allow_failed_renewal=allow_failed_renewal)
         if key_id!=self.key_id:p.refuse('Mock receipt identity changed')
         for f,pin in pins.items():
             if self.tree.pin(f,missing=True)!=pin:p.refuse('Mock serving package drift')
@@ -114,12 +115,14 @@ class FixtureHost:
 
     def stop(self):
         self.events.append('stop')
-        for u in self.unit_states:self.unit_states[u]['active']='inactive'
-        self.unit_check(False)
+        for u in self.unit_states:
+            if u!=p.RENEW_SERVICE or self.unit_states[u]['active']!='failed':self.unit_states[u]['active']='inactive'
+        self.unit_check(False,allow_failed_renewal=True)
 
     def start(self):
         self.events.append('start')
-        for u in self.unit_states:self.unit_states[u]['active']='inactive' if u==p.RENEW_SERVICE else 'active'
+        for u in self.unit_states:
+            if u!=p.RENEW_SERVICE or self.unit_states[u]['active']!='failed':self.unit_states[u]['active']='inactive' if u==p.RENEW_SERVICE else 'active'
         # Like the real daemons, update only the serving digest, never replay.
         for path,field,target in ((p.LEDGERS[0],'supervisor_sha256',p.SUPERVISOR+'/a3-worker-supervisor.py'),(p.LEDGERS[1],'broker_sha256',p.BROKER)):
             value=p.strict(self.tree.read(path));value[field]=self.tree.pin(target)['sha256']
@@ -133,6 +136,20 @@ class PackageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.host=FixtureHost(Path(self.temp.name))
         self.package=p.Package(self.host,lambda:self.host.now)
+
+    def test_idle_failed_renewal_is_measured_then_stopped_by_reviewed_package(self):
+        self.host.unit_states[p.RENEW_SERVICE]['active']='failed'
+        with self.assertRaises(ValueError):self.host.unit_check()
+        token=self.authorize('install')
+        plan=self.package.plan('install')['plan']
+        self.assertEqual(plan['units'][p.RENEW_SERVICE]['active'],'failed')
+        self.package.apply(token)
+        self.assertEqual(self.host.unit_states[p.RENEW_SERVICE]['active'],'failed')
+        self.package.commit(self.authorize('commit'))
+        self.package.restore('rollback',self.authorize('rollback'))
+        self.assertEqual(self.package.tx()['phase'],'rolled_back')
+        self.assertEqual(self.host.unit_states[p.RENEW_SERVICE]['active'],'failed')
+        self.assertEqual(self.host.events,['stop','start','stop','start'])
 
     def test_public_inventory_dns_rotation_cannot_change_reviewed_package_plan(self):
         # Exercise production cache against trusted temporary inventory inputs.
@@ -579,6 +596,30 @@ class PackageTests(unittest.TestCase):
                 changed[(unit,prop)]=value
                 with self.assertRaises(ValueError):host.unit_check(allow_failed_renewal=True)
                 changed.clear()
+
+    def test_production_stop_retains_failed_oneshot_without_resetting_it(self):
+        host=p.Host.__new__(p.Host);commands=[]
+        states={unit:'failed' if unit==p.RENEW_SERVICE else 'active' for unit in p.UNITS}
+        main_pid='0'
+        def execute(argv,**kwargs):
+            commands.append(argv)
+            unit=p.UNIT_ROOT+argv[2]
+            if argv[:2]==['systemctl','stop']:
+                # systemd unit_stop treats failed units as already stopped.
+                if states[unit]!='failed':states[unit]='inactive'
+                return b''
+            self.assertEqual(argv[:2],['systemctl','show'])
+            prop=argv[3].split('=',1)[1]
+            return {'FragmentPath':unit,'DropInPaths':'','NeedDaemonReload':'no',
+                    'ActiveState':states[unit],'UnitFileState':'enabled',
+                    'SubState':'failed' if states[unit]=='failed' else 'dead',
+                    'MainPID':main_pid,'ControlPID':'0','Job':''}[prop].encode()+b'\n'
+        host.execute=execute
+        host.stop()
+        self.assertEqual(states[p.RENEW_SERVICE],'failed')
+        self.assertTrue(all(argv[1] in {'stop','show'} for argv in commands))
+        main_pid='8'
+        with self.assertRaisesRegex(ValueError,'not idle'):host.stop()
 
     def test_new_directory_links_and_empty_gateway_removal_are_durable_before_service_effects(self):
         events=[];original_fsync=p.os.fsync;original_stop=self.host.stop;original_replace=p.os.replace

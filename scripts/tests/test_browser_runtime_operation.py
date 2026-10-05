@@ -110,6 +110,79 @@ class OperationTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.op.run('install')
         self.assertTrue(self.h.backend_active)
         self.assertEqual(self.h.docker, [])
+    def test_failed_serving_unit_refuses_before_dashboard_stop(self):
+        self.h.unit_states[p.SUP_UNIT]['active'] = 'failed'
+        with self.assertRaises(ValueError):self.op.run('install')
+        self.assertTrue(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'failed_recovered')
+        self.assertFalse(any(v[1] in {'start', 'stop'} for v in self.h.docker))
+        self.assertEqual(self.h.events, [])
+    def test_idle_failed_renewal_is_handled_by_the_owned_package_stop(self):
+        self.h.unit_states[p.RENEW_SERVICE]['active'] = 'failed'
+        self.op.run('install')
+        self.assertEqual(self.op.transaction()['units'][p.RENEW_SERVICE]['active'], 'failed')
+        self.assertEqual(self.h.unit_states[p.RENEW_SERVICE]['active'], 'failed')
+        self.assertEqual(self.op.transaction()['phase'], 'committed')
+        self.assertTrue(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'completed')
+        self.assertIsNone(self.h.tree.read(p.ROOT + '/selected-browser-acceptance.json', missing=True))
+        self.h.backend_active = False
+        self.op.save('dashboard_stopped')
+        m.Operation(p, self.h).run('recover')
+        self.assertTrue(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'completed')
+        self.assertEqual(self.h.unit_states[p.RENEW_SERVICE]['active'], 'failed')
+    def test_committed_readonly_recovery_failure_restores_ui_without_rollback(self):
+        self.op.run('install')
+        before = self.op.owned_pins()
+        transaction = self.op.transaction()
+        self.h.events.clear()
+        self.h.backend_active = False
+        self.op.save('dashboard_stopped')
+        recovery = m.Operation(p, self.h)
+        with patch.object(self.h, 'health', side_effect=ValueError('runtime unhealthy')), \
+                patch.object(recovery.pkg, 'restore', side_effect=AssertionError('prior package must stay installed')) as restore:
+            with self.assertRaisesRegex(ValueError, 'runtime unhealthy'):recovery.run('recover')
+        restore.assert_not_called()
+        self.assertEqual(before, recovery.owned_pins())
+        self.assertEqual(transaction, recovery.transaction())
+        self.assertEqual(self.h.events, [])
+        self.assertTrue(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'failed_recovered')
+    def test_partial_recovery_failure_keeps_runtime_unclaimed(self):
+        self.h.backend_active = False
+        self.h.tree.mkdir(m.OPERATION_ROOT, 0o700)
+        self.op.record = {'operation':'install', 'container_id':self.h.cid}
+        self.op.pkg.apply(self.op.authorize('install'))
+        self.op.save('package_install')
+        recovery = m.Operation(p, self.h)
+        with patch.object(recovery.pkg, 'restore', side_effect=ValueError('cannot restore')):
+            with self.assertRaisesRegex(ValueError, 'cannot restore'):recovery.run('recover')
+        self.assertFalse(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'recovery_required')
+    def test_new_owned_drift_after_planning_refusal_does_not_restart_dashboard(self):
+        def refused(_):
+            self.h.put(p.PROXY_UNIT, b'foreign unit', 0o644)
+            raise ValueError('changed during planning')
+        with patch.object(self.op.pkg, 'plan', side_effect=refused):
+            with self.assertRaisesRegex(ValueError, 'changed during planning'):self.op.run('install')
+        self.assertFalse(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'recovery_required')
+    def test_failed_dashboard_start_can_be_recovered_without_reinstalling(self):
+        execute = self.h.execute
+        def failed_start(args, **kwargs):
+            if args[:2] == ['docker', 'start']:raise OSError('start failed')
+            return execute(args, **kwargs)
+        with patch.object(self.h, 'execute', side_effect=failed_start):
+            with self.assertRaises(OSError):self.op.run('install')
+        self.assertEqual(self.state()['phase'], 'restarting_dashboard')
+        transaction = self.op.transaction()
+        self.h.events.clear()
+        m.Operation(p, self.h).run('recover')
+        self.assertEqual(self.op.transaction(), transaction)
+        self.assertEqual(self.h.events, [])
+        self.assertTrue(self.h.backend_active)
+        self.assertEqual(self.state()['phase'], 'completed')
     def test_unknown_operation_never_contacts_docker(self):
         with self.assertRaises(ValueError): self.op.run('shell')
         self.assertEqual(self.h.docker, [])

@@ -36,7 +36,7 @@ class PackageHost(FixtureHost):
     def health(self, pins, key_id, selected, allow_work=False, allow_failed_renewal=False):
         units = self.unit_check(allow_failed_renewal=allow_failed_renewal)
         with patch.object(self, 'unit_check', return_value=units):
-            return super().health(pins, key_id, selected)
+            return super().health(pins, key_id, selected, allow_failed_renewal=allow_failed_renewal)
 
 
 class UpdaterHost:
@@ -101,10 +101,11 @@ class SelectedPreservationTests(unittest.TestCase):
             self.assertEqual(self.host.unit_states[p.RENEW_SERVICE]['active'], 'failed')
             self.assertEqual(self.runtime_bytes(), before)
         self.assertEqual(self.host.events, [])
-        # Installing/upgrading a runtime still requires the original healthy
-        # boundary and separately reviewed service changes.
+        # The default serving boundary stays strict. A reviewed package update
+        # may measure the idle failure for its owned stop/start operation.
         with self.assertRaises(ValueError):
-            self.package.plan('update')
+            self.host.unit_check()
+        self.assertEqual(self.package.plan('update')['plan']['units'][p.RENEW_SERVICE]['active'], 'failed')
 
     def test_renewal_terminal_result_can_change_during_dashboard_build(self):
         for before, after in (('inactive', 'failed'), ('failed', 'inactive')):

@@ -586,10 +586,10 @@ class Host:
             state = show('ActiveState')
             idle_renewal = path == RENEW_SERVICE and allow_failed_renewal and state in {'inactive', 'failed'}
             if idle_renewal:
-                # Ordinary dashboard preservation may retain a latched oneshot
+                # A reviewed caller may retain a latched oneshot
                 # failure. Never reset it, launch it, or mistake a queued/running
                 # job for an idle service. Certificate and serving health are
-                # checked separately by the preservation caller.
+                # checked separately by the caller.
                 if (show('SubState') != ('failed' if state == 'failed' else 'dead') or
                         show('MainPID') != '0' or show('ControlPID') != '0' or
                         show('Job') not in {'', '0'} or show('ActiveState') != state):
@@ -603,7 +603,7 @@ class Host:
         result=self.unit_inventory(allow_failed_renewal=allow_failed_renewal)
         for path,item in result.items():
             wanted = 'inactive' if path == RENEW_SERVICE or not active else 'active'
-            retained_failure = active and allow_failed_renewal and path == RENEW_SERVICE and item['active'] == 'failed'
+            retained_failure = allow_failed_renewal and path == RENEW_SERVICE and item['active'] == 'failed'
             if item['active'] != wanted and not retained_failure:
                 refuse('Fixed service boundary is not idle/healthy')
         return result
@@ -698,8 +698,8 @@ class Host:
     def stop(self):
         for path in (RENEW_TIMER, RENEW_SERVICE, SUP_UNIT, PROXY_UNIT, BROKER_UNIT):
             self.execute(['systemctl', 'stop', Path(path).name], timeout=90)
-        result=self.unit_inventory(recovery=True)
-        if any(s['active']!='inactive' for s in result.values()):
+        result=self.unit_inventory(recovery=True, allow_failed_renewal=True)
+        if any(s['active']!='inactive' and not (u == RENEW_SERVICE and s['active']=='failed') for u,s in result.items()):
             refuse('Fixed paired services did not stop')
 
     def start(self):
@@ -809,8 +809,11 @@ class Package:
             new = {p:dict(sha256=sha(b), bytes=len(b), mode=0o600 if p in JOURNALS else 0o644) for p,b in files.items()}
             if self.t.read(TRANSACTION + '/transaction.json', missing=True) is not None and self.tx()['phase'] not in {'committed','rolled_back'}:
                 refuse('Incomplete package transaction requires separately reviewed recovery')
-            self.h.health(pins, identity['key_id'], operation == 'update')
-            units = self.h.unit_check()
+            # A latched, independently verified idle renewal failure can be
+            # handled by the reviewed package's existing stop/start boundary.
+            # Serving health and current certificate/key validity still pass.
+            self.h.health(pins, identity['key_id'], operation == 'update', allow_failed_renewal=True)
+            units = self.h.unit_check(allow_failed_renewal=True)
             plan = dict(schema=VERSION, operation=operation, source_revision=revision, source_checkout=checkout,
                         source_files={n:sha(b) for n,b in sources.items()}, identity=identity, protected=protected,
                         ledgers=ledgers, units=units, files={p:dict(old=pins[p],new=new[p]) for p in OWNED})
@@ -830,7 +833,7 @@ class Package:
         current = self.verify_transaction(data, require_new=operation == 'commit')
         revision,sources,checkout=self.h.sources()
         candidate_files(sources)
-        units=self.h.unit_inventory(recovery=True)
+        units=self.h.unit_inventory(recovery=True, allow_failed_renewal=True)
         if {u:s['enabled'] for u,s in units.items()}!={u:s['enabled'] for u,s in data['units'].items()}:
             refuse('Fixed unit enablement changed before recovery')
         return dict(schema=VERSION, operation=operation, transaction_id=data['id'], transaction_sha256=sha(encoded(data)),
@@ -906,6 +909,16 @@ class Package:
             refuse('Immutable identity/state changed during package transaction')
         self.h.stopped_backend()
 
+    @staticmethod
+    def terminal_units(current):
+        # Only independently verified idle renewal terminal states are
+        # equivalent. systemctl stop retains a failed oneshot's diagnostic;
+        # the timer may later finish an attempt. Never reset or replay it.
+        units = copy.deepcopy(current)
+        if units[RENEW_SERVICE]['active'] == 'failed':
+            units[RENEW_SERVICE]['active'] = 'inactive'
+        return units
+
     def apply(self, expected):
         receipt = strict(self.t.read(TRANSACTION + '/review.json'))
         operation = receipt.get('operation')
@@ -939,8 +952,8 @@ class Package:
         self.verify_transaction(data,require_new=True)
         self.preserved(data)
         self.h.start()
-        self.h.health({p:r['new'] for p,r in data['files'].items()},data['identity']['key_id'],True)
-        if self.h.unit_check() != data['units']:
+        self.h.health({p:r['new'] for p,r in data['files'].items()},data['identity']['key_id'],True,allow_failed_renewal=True)
+        if self.terminal_units(self.h.unit_check(allow_failed_renewal=True)) != self.terminal_units(data['units']):
             refuse('Service enablement/identity changed')
         self.preserved(data)
         data['phase']='applied'; self.save('transaction.json',data)
@@ -971,8 +984,8 @@ class Package:
                 refuse('Paired restore readback mismatch')
         self.preserved(data)
         self.h.start()
-        self.h.health({p:r['old'] for p,r in data['files'].items()},data['identity']['key_id'],data['operation']=='update')
-        if self.h.unit_check() != data['units']:
+        self.h.health({p:r['old'] for p,r in data['files'].items()},data['identity']['key_id'],data['operation']=='update',allow_failed_renewal=True)
+        if self.terminal_units(self.h.unit_check(allow_failed_renewal=True)) != self.terminal_units(data['units']):
             refuse('Restored service enablement changed')
         self.preserved(data)
         data['phase']='rolled_back';self.save('transaction.json',data)
@@ -981,7 +994,7 @@ class Package:
     def commit(self, expected):
         self.reviewed('commit',expected)
         data=self.tx()
-        self.h.health({p:r['new'] for p,r in data['files'].items()},data['identity']['key_id'],True)
+        self.h.health({p:r['new'] for p,r in data['files'].items()},data['identity']['key_id'],True,allow_failed_renewal=True)
         self.preserved(data)
         data['phase']='committed';self.save('transaction.json',data)
         self.t.remove(TRANSACTION + '/review.json')

@@ -40,11 +40,12 @@ class Operation:
         return cid, value.get('State', {}).get('Running') is True
 
     def restart(self):
-        cid, _ = self.dashboard()
+        cid, running = self.dashboard()
         if cid != self.record['container_id']:
             self.p.refuse('Dashboard identity changed during operation')
         self.save('restarting_dashboard')
-        self.h.execute(['docker', 'start', cid], timeout=60)
+        if not running:
+            self.h.execute(['docker', 'start', cid], timeout=60)
         deadline = self.clock() + 90
         while self.clock() < deadline:
             try:
@@ -66,6 +67,16 @@ class Operation:
     def transaction(self):
         return self.pkg.tx() if self.t.read(self.p.TRANSACTION + '/transaction.json', missing=True) is not None else None
 
+    def owned_pins(self):
+        return {path:self.t.pin(path, missing=True) for path in self.p.OWNED}
+
+    def unchanged_package(self, before, pins):
+        # A failed health check is not authority to roll back an older healthy
+        # generation. Bring the dashboard back when this operation changed no
+        # package bytes or transaction and the prior transaction was terminal.
+        return ((before is None or before['phase'] in {'committed', 'rolled_back'}) and
+                self.transaction() == before and self.owned_pins() == pins)
+
     def restore(self, tx):
         action = 'rollback' if tx['phase'] in {'applied', 'committed'} else 'recover'
         self.pkg.restore(action, self.authorize(action))
@@ -83,7 +94,8 @@ class Operation:
                 or set(plan['files']) != set(self.p.OWNED)):
             self.p.refuse('Unrecognized pre-transaction preparation')
         self.pkg.current_identity(plan['identity'])
-        if self.pkg.protected() != plan['protected'] or self.h.unit_check() != plan['units']:
+        if (self.pkg.protected() != plan['protected'] or
+                self.pkg.terminal_units(self.h.unit_check(allow_failed_renewal=True)) != self.pkg.terminal_units(plan['units'])):
             self.p.refuse('Pre-transaction runtime state changed')
         for name, pins in plan['files'].items():
             if self.t.pin(name, missing=True) != pins['old']:
@@ -113,13 +125,21 @@ class Operation:
             self.p.refuse('Dashboard is already stopped without an owned recovery record')
         before = self.transaction()
         before_id = before['id'] if before else None
+        before_pins = self.owned_pins()
         self.t.mkdir(OPERATION_ROOT, 0o700)
         self.record = dict(schema='browser-runtime-operation.v1', operation=operation,
             container_id=cid, request_id=self.request_id, started_at=self.clock(), authority='authenticated-host-runner')
         self.save('prepared')
         safe_to_start = False
+        stop_requested = False
         try:
+            if operation == 'install':
+                # Refuse active/unknown runtime boundaries before disconnecting
+                # the dashboard. The complete plan is measured after writers
+                # stop; only the known idle renewal failure is admissible.
+                self.h.unit_check(allow_failed_renewal=True)
             self.save('stopping_dashboard')
+            stop_requested = True
             self.h.execute(['docker', 'stop', '--time', '30', cid], timeout=45)
             if self.dashboard() != (cid, False):
                 self.p.refuse('Dashboard stop did not complete')
@@ -130,7 +150,9 @@ class Operation:
                     self.restore(tx)
                 elif tx and tx['phase'] == 'committed':
                     self.pkg.verify_transaction(tx, require_new=True)
-                    self.h.health({p: r['new'] for p, r in tx['files'].items()}, tx['identity']['key_id'], True)
+                    self.pkg.current_identity(tx['identity'])
+                    self.h.health({p: r['new'] for p, r in tx['files'].items()}, tx['identity']['key_id'], True,
+                                  allow_failed_renewal=True)
                 if tx is None:
                     self.archive_preparation()
                 safe_to_start = True
@@ -146,23 +168,31 @@ class Operation:
                 self.pkg.apply(self.authorize(action))
                 self.pkg.commit(self.authorize('commit'))
                 safe_to_start = True
-            self.save('package_complete', acceptance_created=False, runtime_accepted=False)
+            units = self.h.unit_check(allow_failed_renewal=True)
+            self.save('package_complete', acceptance_created=False, runtime_accepted=False,
+                      renewal_failure_retained=units[self.p.RENEW_SERVICE]['active'] == 'failed')
         except Exception as error:
+            recovery_complete = False
             try:
                 tx = self.transaction()
-                # Planning failure must not roll back an older healthy package.
-                if tx and tx['phase'] != 'rolled_back' and (tx['id'] != before_id or operation in {'recover', 'rollback'}):
+                # An early refusal or a read-only recovery check must not undo
+                # the prior committed package merely to restore dashboard UI.
+                if not stop_requested or self.unchanged_package(before, before_pins):
+                    safe_to_start = True
+                elif tx and tx['phase'] != 'rolled_back' and (tx['id'] != before_id or before['phase'] not in {'committed', 'rolled_back'} or operation == 'rollback'):
                     self.restore(tx)
-                elif tx and tx['phase'] not in {'committed', 'rolled_back'}:
-                    raise ValueError('Incomplete package retained')
+                else:
+                    raise ValueError('Package changed without verified recovery')
                 if tx is None:
                     self.archive_preparation()
                 safe_to_start = True
+                recovery_complete = True
             except Exception:
                 self.save('recovery_required', error_type=type(error).__name__)
             if safe_to_start:
                 self.restart()
-                self.save('failed_recovered', error_type=type(error).__name__)
+                self.save('failed_recovered' if recovery_complete else 'recovery_required',
+                          error_type=type(error).__name__, dashboard_restored=True)
             raise
         if safe_to_start:
             self.restart()

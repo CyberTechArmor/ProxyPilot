@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { operationsFixture, fixtureRouter } from './helpers/operations-fixture.js';
 import { operationalSelectedBrowserMigration1118 } from '../lib/operational-selected-browser-schema.js';
 import { operationalProjectTasksMigration1126 } from '../lib/operational-project-tasks-schema.js';
@@ -24,6 +25,42 @@ const count=(w,t)=>w.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
 const editInput=(w,pid,value)=>({...value,project_revision:w.store.get(w.owner,pid).revision,configuration_revision:w.projects.get(w.owner,pid).task.configuration?.revision??null});
 const scheduleInput=(w,pid,value)=>({...value,task_revision:w.projects.get(w.owner,pid).task.revision,project_revision:w.store.get(w.owner,pid).revision,configuration_revision:w.projects.get(w.owner,pid).task.configuration.revision});
 const timing={frequency:'daily',time:'12:01',timezone:'UTC'};
+
+test('accepted browsing defaults are reads in the native authority; writes, unknown queries and API traffic stay gated',withWorld(w=>{
+  const result=w.projects.create(w.owner,{...input(),websites:'example.com/pricing?q=annual, shop.example.com/plans',goal:'Compare the plans.'});
+  const configuration=result.task.configuration.configuration;
+  assert.equal(configuration.destinations.request_rules.length,4);
+  const code=`import sys,json,importlib.util
+spec=importlib.util.spec_from_file_location('fixtures','scripts/tests/test_selected_browser_gateway.py')
+f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
+c=json.load(sys.stdin);pol=f.policy(c)
+checks=[('/pricing?q=annual','GET','document',0,'read'),('/','HEAD','document',0,'read'),('/style.css?ver=2','GET','stylesheet',0,'read'),('/pricing?secret=a','GET','document',0,'unclassified'),('/save','POST','document',0,'unclassified'),('/api','GET','fetch',0,'unclassified'),('/','GET','document',1,'unclassified')]
+for path,method,resource,body,expected in checks:
+ u=f.p.url_parts('https://example.com'+path);d=pol.destination(u,'navigation' if resource=='document' else 'resource')
+ assert pol.classify(u,d,method,resource,body)==expected,(path,method,resource)
+try:pol.destination(f.p.url_parts('https://other.example/'),'navigation')
+except f.p.Denied:pass
+else:raise AssertionError('Off-list origin allowed')
+print('bounded compiled defaults accepted')`;
+  const proof=spawnSync('python3',['-c',code],{cwd:new URL('../../../../',import.meta.url),input:JSON.stringify(configuration),encoding:'utf8'});
+  assert.equal(proof.status,0,proof.stderr);assert.match(proof.stdout,/compiled defaults accepted/);
+}));
+
+test('existing empty policies remain unchanged until an owner accepts current page-loading defaults',withWorld(w=>{
+  const saved=w.projects.create(w.owner,input()),pid=saved.project.id,c=saved.task.configuration;
+  const configuration=structuredClone(c.configuration);configuration.destinations.request_rules=[];
+  w.store.updateBrowserConfiguration(w.owner,pid,c.id,c.revision,{configuration});
+  const current=w.projects.get(w.owner,pid);
+  assert.equal(current.task.needs_browsing_acceptance,true);
+  assert.deepEqual(current.task.configuration.configuration.destinations.request_rules,[]);
+  const edited=w.projects.edit(w.owner,pid,current.task.revision,editInput(w,pid,{name:saved.project.name,goal:saved.project.description,accepted_defaults:PROJECT_DEFAULTS_VERSION}));
+  assert.equal(edited.task.needs_browsing_acceptance,false);
+  assert.equal(edited.task.configuration.configuration.destinations.request_rules.length,2);
+  assert.equal(edited.project.current_version.version_number,2);
+  const consent=w.db.prepare('SELECT * FROM ops_selected_browser_consents WHERE configuration_id=?').get(c.id);
+  assert.equal(consent.configuration_sha256,edited.task.configuration.configuration_sha256);
+  assert.equal(count(w,'ops_selected_browser_runs'),0);
+}));
 
 test('one accept atomically saves project, exact guide, finite defaults, browser configuration and consent; it does not run',withWorld(w=>{
   const v=input(),result=w.projects.create(w.owner,v),c=result.task.configuration;
@@ -63,6 +100,7 @@ test('one settings save revises guide and consent, preserves history and pauses 
 
 test('setup and schedules require owner, current human proof and explicit acceptance',withWorld(w=>{
   refused(400,()=>w.projects.create(w.owner,{...input(),accepted_defaults:undefined}));
+  refused(400,()=>w.projects.create(w.owner,{...input(),accepted_defaults:'project-defaults.v1'}));
   refused(403,()=>w.projects.create({...w.owner,mcp:true},input()));
   const p=w.projects.create(w.owner,input()).project,other=w.addUser();
   w.store.grant(w.owner,p.id,other.id,w.store.get(w.owner,p.id).revision,{role:'editor'});

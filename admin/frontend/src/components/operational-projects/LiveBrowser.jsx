@@ -132,7 +132,7 @@ export function LiveBrowser({ base, runId, endpoint, expanded = false, onState, 
   return <div className={expanded ? 'flex min-h-0 flex-1 flex-col gap-2' : 'space-y-2'}>
     <div ref={box} tabIndex={control.mine ? 0 : -1} {...handlers}
       aria-label={control.mine ? LIVE_TEXT.controlArea : LIVE_TEXT.videoArea} role={control.mine ? 'application' : undefined}
-      className={`relative w-full ${expanded ? 'min-h-0 flex-1' : 'aspect-[16/10] shrink-0'} overflow-hidden rounded-md bg-zinc-950 touch-none focus-visible:outline-none ${control.mine ? 'ring-2 ring-emerald-500 cursor-default' : ''}`}
+      className={`relative w-full ${expanded ? 'min-h-0 flex-1' : 'aspect-[16/10] shrink-0'} overflow-hidden rounded-md bg-zinc-950 focus-visible:outline-none ${control.mine ? 'touch-none ring-2 ring-emerald-500 cursor-default' : 'touch-pan-y'}`}
       data-testid="live-browser" data-live-state={state} data-control={control.mine ? 'mine' : control.hasHost ? 'held' : 'none'}>
       <video ref={video} onPlaying={() => videoReady.current?.()} muted playsInline autoPlay aria-label={LIVE_TEXT.videoLabel}
         className="absolute inset-0 h-full w-full object-contain pointer-events-none"/>

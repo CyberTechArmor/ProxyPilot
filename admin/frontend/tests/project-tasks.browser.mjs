@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { operationalSelectedBrowserMigration1118, operationalPublicNavigationMigration1123 } from '../../backend/src/lib/operational-selected-browser-schema.js';
 import { operationalProjectTasksMigration1126 } from '../../backend/src/lib/operational-project-tasks-schema.js';
@@ -19,10 +20,10 @@ h=await startHarness({execution:false,selectedBrowserFixture:world=>{
   const runs=createSelectedBrowserService({db:world.f.adapter,verifyElevation,verifyControl});
   return {execution:{configured:false},runs,projects:createProjectTasks({db:world.f.adapter,store:world.f.store,runs,isEnabled:()=>true,verifyElevation,verifyControl})};
 }});
-const browser=await chromium.launch({executablePath:process.env.BROWSER_EXE||chromium.executablePath(),headless:true});
+const browser=await chromium.launch({executablePath:process.env.BROWSER_EXE||chromium.executablePath(),headless:true,args:process.env.LIGHTHOUSE_DIR?['--remote-debugging-port=9265']:[]});
 const context=await browser.newContext({viewport:{width:1280,height:900},timezoneId:'America/Detroit'});
 await context.addCookies([{name:'pp_harness_user',value:'owner',url:h.origin},{name:'pp_csrf',value:'project-task-fixture',url:h.origin}]);
-const page=await context.newPage(),errors=[],layouts=[];page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));
+const page=await context.newPage(),errors=[],layouts=[],lighthouseScores=[];page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));
 const proof=async path=>{const response=await context.request.post(h.origin+path,{headers:{'X-CSRF-Token':'project-task-fixture'},data:{password:SUDO_PASSWORD,totpCode:SUDO_TOTP}});assert.equal(response.status(),200);};
 async function audit(surface) {
   // Audit the settled dialog, not an intermediate opacity animation frame.
@@ -32,6 +33,17 @@ async function audit(surface) {
   await page.addScriptTag({content:axe});const result=await page.evaluate(()=>axe.run(document.querySelector('[role="dialog"]')||document.querySelector('[data-selected-project]')||document.body,{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}}));
   if(result.violations.length)writeFileSync(`${artifacts}/accessibility-failure.json`,JSON.stringify({surface,width:layout.width,violations:result.violations},null,2));
   assert.deepEqual(result.violations.map(v=>({id:v.id,impact:v.impact})),[],`${surface} accessibility`);
+  if(layout.width===375&&process.env.LIGHTHOUSE_DIR) {
+    const directory=process.env.LIGHTHOUSE_DIR,{startFlow}=await import(pathToFileURL(`${directory}/node_modules/lighthouse/core/index.js`)),
+      {default:puppeteer}=await import(pathToFileURL(`${directory}/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js`));
+    const connection=await puppeteer.connect({browserURL:'http://127.0.0.1:9265'});
+    try {
+      const tab=(await connection.pages()).find(tab=>tab.url()===page.url());
+      const flow=await startFlow(tab,{name:surface,config:{extends:'lighthouse:default',settings:{onlyCategories:['accessibility'],formFactor:'mobile',screenEmulation:{disabled:true}}}});
+      await flow.snapshot({name:surface});const lhr=(await flow.createFlowResult()).steps.at(-1).lhr,score=Math.round(lhr.categories.accessibility.score*100);
+      assert(score>=90,`${surface} Lighthouse accessibility`);lighthouseScores.push({surface,score});writeFileSync(`${artifacts}/${surface}.lhr.json`,JSON.stringify(lhr,null,2));
+    }finally{connection.disconnect();}
+  }
 }
 try {
   await proof('/api/auth/sudo');await proof('/api/auth/agent-control');
@@ -83,5 +95,5 @@ try {
   assert(h.requests.some(r=>r.method==='POST'&&r.path===`/api/operational-projects/${pid}/task/start`));
   assert.equal(h.world.f.db.prepare('SELECT COUNT(*) AS n FROM ops_selected_browser_runs').get().n,0,'no installed host means no launch');
   assert.deepEqual(errors,[]);
-  writeFileSync(`${artifacts}/results.json`,JSON.stringify({passed:true,layouts,page_errors:errors},null,2));console.log(JSON.stringify({passed:true,layouts:layouts.length}));
+  writeFileSync(`${artifacts}/results.json`,JSON.stringify({passed:true,layouts,lighthouse:lighthouseScores,page_errors:errors},null,2));console.log(JSON.stringify({passed:true,layouts:layouts.length,lighthouse:lighthouseScores}));
 }finally{await context.close();await browser.close();await h.close();}

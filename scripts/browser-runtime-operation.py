@@ -67,6 +67,12 @@ class Operation:
     def transaction(self):
         return self.pkg.tx() if self.t.read(self.p.TRANSACTION + '/transaction.json', missing=True) is not None else None
 
+    def verify_committed(self, tx):
+        self.pkg.verify_transaction(tx, require_new=True)
+        self.pkg.current_identity(tx['identity'])
+        self.h.health({p:r['new'] for p,r in tx['files'].items()}, tx['identity']['key_id'], True,
+                      allow_failed_renewal=True)
+
     def owned_pins(self):
         return {path:self.t.pin(path, missing=True) for path in self.p.OWNED}
 
@@ -116,19 +122,31 @@ class Operation:
         cid, running = self.dashboard()
         previous_bytes = self.t.read(STATE, missing=True)
         previous = self.p.strict(previous_bytes) if previous_bytes else None
+        before = self.transaction()
         unfinished = previous and previous.get('phase') not in {'completed', 'failed_recovered'}
         if unfinished and operation != 'recover':
             self.p.refuse('Previous runtime operation needs recovery')
-        if unfinished and previous.get('container_id') != cid:
-            self.p.refuse('Recovery dashboard identity differs from retained operation')
+        rebound = unfinished and previous.get('container_id') != cid
+        if rebound:
+            # Ordinary Update replaces the Compose container. Only a new,
+            # authenticated request from its running replacement may continue
+            # recovery of a fully verified committed package. Boot cleanup and
+            # stopped/partial replacements retain the exact-ID refusal.
+            fresh_request = (isinstance(self.request_id, str) and
+                             re.fullmatch('[a-f0-9-]{36}', self.request_id) and
+                             self.request_id != previous.get('request_id'))
+            if not (running and fresh_request and before and before['phase'] == 'committed'):
+                self.p.refuse('Recovery dashboard identity differs from retained operation')
+            self.verify_committed(before)
         if not running and not (operation == 'recover' and unfinished):
             self.p.refuse('Dashboard is already stopped without an owned recovery record')
-        before = self.transaction()
         before_id = before['id'] if before else None
         before_pins = self.owned_pins()
         self.t.mkdir(OPERATION_ROOT, 0o700)
         self.record = dict(schema='browser-runtime-operation.v1', operation=operation,
             container_id=cid, request_id=self.request_id, started_at=self.clock(), authority='authenticated-host-runner')
+        if rebound:
+            self.record['rebound_from_container_id'] = previous['container_id']
         self.save('prepared')
         safe_to_start = False
         stop_requested = False
@@ -149,10 +167,7 @@ class Operation:
                 if tx and tx['phase'] not in {'committed', 'rolled_back'}:
                     self.restore(tx)
                 elif tx and tx['phase'] == 'committed':
-                    self.pkg.verify_transaction(tx, require_new=True)
-                    self.pkg.current_identity(tx['identity'])
-                    self.h.health({p: r['new'] for p, r in tx['files'].items()}, tx['identity']['key_id'], True,
-                                  allow_failed_renewal=True)
+                    self.verify_committed(tx)
                 if tx is None:
                     self.archive_preparation()
                 safe_to_start = True

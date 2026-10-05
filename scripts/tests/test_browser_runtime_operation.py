@@ -82,6 +82,52 @@ class OperationTests(unittest.TestCase):
         self.h.tree.write(m.STATE, p.encoded({'phase':'dashboard_stopped', 'container_id':'b'*64}), 0o600)
         with self.assertRaisesRegex(ValueError, 'identity differs'): self.op.run('recover')
         self.assertFalse(any(v[1] in {'start', 'stop'} for v in self.h.docker))
+    def replacement(self):
+        self.op.run('install')
+        self.op.record['request_id'] = '11111111-1111-1111-1111-111111111111'
+        self.op.save('recovery_required')
+        previous = self.h.cid
+        self.h.cid = 'b' * 64
+        self.h.docker.clear()
+        self.h.events.clear()
+        return previous
+    def test_fresh_recovery_after_update_rebinds_only_verified_running_dashboard(self):
+        old = self.replacement()
+        before = self.op.owned_pins()
+        transaction = self.op.transaction()
+        recovery = m.Operation(p, self.h, request_id='22222222-2222-2222-2222-222222222222')
+        recovery.run('recover')
+        self.assertEqual(self.state()['container_id'], self.h.cid)
+        self.assertEqual(self.state()['rebound_from_container_id'], old)
+        self.assertEqual(self.state()['phase'], 'completed')
+        self.assertEqual(recovery.owned_pins(), before)
+        self.assertEqual(recovery.transaction(), transaction)
+        self.assertEqual(self.h.events, [])
+        self.assertTrue(self.h.backend_active)
+    def test_automatic_cleanup_and_stopped_replacement_cannot_rebind(self):
+        self.replacement()
+        for running, request in ((True, None), (True, '11111111-1111-1111-1111-111111111111'),
+                                 (False, '22222222-2222-2222-2222-222222222222')):
+            self.h.backend_active = running
+            with self.subTest(running=running, request=request):
+                recovery = m.Operation(p, self.h, request_id=request)
+                with self.assertRaisesRegex(ValueError, 'identity differs'):recovery.run('recover')
+        self.assertFalse(any(v[1] in {'start', 'stop'} for v in self.h.docker))
+    def test_replacement_recovery_verifies_package_identity_and_health_before_stop(self):
+        self.replacement()
+        for method in ('verify_transaction', 'current_identity'):
+            recovery = m.Operation(p, self.h, request_id='22222222-2222-2222-2222-222222222222')
+            with self.subTest(method=method), patch.object(recovery.pkg, method, side_effect=ValueError('unverified')):
+                with self.assertRaisesRegex(ValueError, 'unverified'):recovery.run('recover')
+        recovery = m.Operation(p, self.h, request_id='22222222-2222-2222-2222-222222222222')
+        with patch.object(self.h, 'health', side_effect=ValueError('unhealthy')):
+            with self.assertRaisesRegex(ValueError, 'unhealthy'):recovery.run('recover')
+        tx = self.op.transaction()
+        tx['phase'] = 'applied'
+        self.op.pkg.save('transaction.json', tx)
+        with self.assertRaisesRegex(ValueError, 'identity differs'):recovery.run('recover')
+        self.assertTrue(self.h.backend_active)
+        self.assertFalse(any(v[1] in {'start', 'stop'} for v in self.h.docker))
     def test_authorized_pretransaction_failure_retains_staging_outside_package(self):
         with patch.object(self.op.pkg, 'apply', side_effect=ValueError('pre-staging drift')):
             with self.assertRaises(ValueError): self.op.run('install')

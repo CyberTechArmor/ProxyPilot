@@ -143,7 +143,7 @@ try {
   assert.equal(new URL(page.url()).searchParams.get('browser_run'),blockedId);assert.equal(new URL(page.url()).searchParams.get('browser_panel'),'review');
   await page.getByRole('button',{name:'I verified no effect occurred',exact:true}).waitFor();assert.equal(starts.length,2,'opening review cannot replay');
   await page.setViewportSize({width:390,height:844});
-  assert.equal(await page.getByRole('button',{name:'Back to project',exact:true}).isVisible(),true,'review provides a mobile return path');
+  assert.equal(await page.getByRole('dialog',{name:'Review 1 item'}).isVisible(),true,'review deep link opens the mobile decision modal');
   await page.getByRole('button',{name:'Verify session for review',exact:true}).click();
   const controlDialog=page.getByRole('dialog',{name:'Confirm it is you'});await controlDialog.waitFor();
   await controlDialog.getByLabel('Password',{exact:true}).fill(SUDO_PASSWORD);await controlDialog.getByLabel('Authenticator code',{exact:true}).fill(SUDO_TOTP);await controlDialog.getByRole('button',{name:'Confirm',exact:true}).click();

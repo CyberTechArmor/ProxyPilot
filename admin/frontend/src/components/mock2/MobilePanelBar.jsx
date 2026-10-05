@@ -47,7 +47,7 @@ export default function MobilePanelBar({
         <button
           key={p.key} type="button" onClick={() => onSelect(p.key)}
           aria-pressed={current === p.key}
-          aria-label={p.badge ? `${p.label}, ${p.badge} items need review` : p.label}
+          aria-label={p.badge && typeof p.label === 'string' ? `${p.label}, ${p.badge} items need review` : undefined}
           className={itemCls(current === p.key)}
         >
           <span className="relative"><p.icon className="h-4 w-4" aria-hidden="true" />{p.badge > 0 && <span className="absolute -right-3 -top-2 rounded-full bg-amber-400 px-1 text-[10px] font-semibold text-black" aria-hidden="true">{p.badge}</span>}</span>{p.label}

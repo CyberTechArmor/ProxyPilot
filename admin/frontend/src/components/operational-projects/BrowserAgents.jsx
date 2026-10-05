@@ -64,7 +64,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{},onDeckChange,b
   const deckActive=!!run&&!lost&&(!TERMINAL.includes(run.run.state)||(run.uncertainties||[]).some(item=>item.state==='unresolved'));
   const returnToProject=()=>{setRun(null);onReturnToProject?.();};
   useEffect(()=>{onDeckChange?.(deckActive);return()=>onDeckChange?.(false);},[deckActive,onDeckChange]);
-  return <div className="min-w-0 space-y-4" data-browser-agent-workspace>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}{(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}{run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun key={run.run.id} base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform} initialReview={initialReview} onReturnToProject={returnToProject}/>}
+  return <div className="min-w-0 space-y-4" data-browser-agent-workspace>{error&&<p role="alert" className="text-destructive break-words">{error}</p>}{run&&(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}{run?.run?.execution_mode==='public_navigation'&&<PublicBrowserRun key={run.run.id} base={base} paths={paths} data={run} busy={busy} operator={operator} setData={setRun} perform={perform} initialReview={initialReview} onReturnToProject={returnToProject}/>}
     {run&&run.run.execution_mode!=='public_navigation'&&<BrowserRun key={run.run.id} base={base} paths={paths} data={run} project={project} busy={busy} setData={setRun} perform={perform} initialReview={initialReview} onReturnToProject={returnToProject}/>}
     <div hidden={deckActive}><Panel title="Public browser" description="Open a public website in the isolated browser and watch it live.">
     <Field label="Website" type="url" placeholder="https://example.com" value={publicUrl} disabled={busy||lost} onChange={e=>{setPublicUrl(e.target.value);setPublicReady(null);publicStartKey.current=null;}}/>
@@ -75,6 +75,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{},onDeckChange,b
     <Action variant="outline" disabled={!operator||busy||loading||lost||!publicUrl.trim()||runs.some(item=>!TERMINAL.includes(item.state))} onClick={()=>perform(async signal=>setPublicReady((await api.get(`${base}/public-browser?url=${encodeURIComponent(publicUrl.trim())}`,signal)).readiness),'Browser readiness measured.',{refresh:false})}>Check browser readiness</Action>
     {publicReady&&<><Readiness value={publicReady}/><details><summary className="cursor-pointer min-h-11 py-3 text-sm">Measured browser capabilities</summary><pre className="text-xs whitespace-pre-wrap break-all">{pretty(publicReady)}</pre></details></>}
     <p className="text-sm text-muted-foreground">Model tasks, private sign-in, files and internal websites are unavailable in this mode.</p>
+    {!run&&(busy||message)&&<p role="status" className="text-sm">{busy?'Working…':message}</p>}
   </Panel></div><div hidden={deckActive}><details className="rounded-md border p-3" open={!run}><summary className="min-h-11 cursor-pointer py-3 font-medium">Browser task setup and history</summary><BrowserConfigurations base={base} project={project} onChanged={onChanged} client={api} externalBusy={busy}
     privateUnavailable={lost} onPrivateClear={clearPrivate}
     renderPreparation={draft=>draft.editable&&<div className="space-y-4">
@@ -85,7 +86,7 @@ export function BrowserAgents({base,project,onChanged=async()=>{},onDeckChange,b
     renderRuntime={draft=><section aria-label="Selected browser runtime" className="border-t pt-4 space-y-4 min-w-0">
       <h3 className="font-semibold">Selected browser runtime</h3>
       <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-sm"><p>Exact public, authenticated or internal destinations require verified runner reachability and security policy before a run.</p><p>Every consequential external change needs its own approval. Off-list contact pauses for an exact destination and purpose. Conversion, consent and Start are separate explicit actions.</p></div>
-      <p role="status" aria-live="polite" className="text-sm">{draft.busy?'Working…':loading?'Loading browser runs…':''}</p>
+      <p role="status" aria-live="polite" className="text-sm">{draft.busy?'Working…':loading?'Loading browser runs…':run?'':message}</p>
       <div className="flex flex-wrap gap-2"><Action variant="outline" disabled={draft.busy||loading} onClick={()=>perform(signal=>load(signal),'Browser runs refreshed.',{refresh:false})}>Refresh browser runs</Action>
         {operator&&<Action variant="outline" disabled={draft.busy} onClick={()=>perform(async()=>{await requestAgentControl();await requestSudo();},'Run authority verified. Submit the intended action explicitly.',{refresh:false})}>Verify run authority</Action>}</div>
       {draft.saved&&<BrowserExecution key={draft.saved.id} paths={paths} project={project} draft={draft} owner={owner} operator={operator} perform={perform} setRun={setRun}/>}

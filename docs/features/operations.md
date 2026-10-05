@@ -465,9 +465,10 @@ prerequisites continue to apply.
 
 ## Streamlined browser projects
 
-New project setup is **Name → Goal → Accept & save**. The authenticated owner
+New project setup is **Name → Websites → Goal → Accept & save**. The authenticated owner
 accepts `project-defaults.v1` once. One immediate transaction creates the private
-project, publishes the exact goal as an immutable approved guide, sets finite
+project, compiles the plain-language objective and website list into an immutable
+approved guide with Objective, Websites, Procedure and Completion sections, sets finite
 project limits, saves the browser configuration and records owner model consent
 for its exact configuration and guide hashes. Saving starts no run. An
 idempotency key makes a repeated identical save return the same project;
@@ -480,12 +481,27 @@ The default model is the existing `gpt-6-luna` route. Resources are 1 CPU,
 bytes and 32 MiB private artifacts. Video recording is off and result retention
 is 14 days. External changes retain per-action approval, off-list destinations
 pause before contact and sign-in uses manual takeover. No credentials, account
-or connection are invented. A website URL in the goal supplies the initial
-explicit destination. A goal without one saves successfully and asks the owner
-to add it with **Edit goal & settings** before running.
+or connection are invented. Websites accepts up to 32 domains or full HTTP/HTTPS
+URLs, separated by newlines or commas. Bare domains use HTTPS. URLs are
+normalized and deduplicated; multiple paths share one explicit origin.
+Credentials and wildcard domains are refused. URLs mentioned in the goal do
+not add destinations when Websites is supplied. The original goal remains
+editable as plain language; no model call or spending occurs during conversion.
+Legacy API callers without Websites retain URL inference and can save a goal
+without a destination. They must add Websites before running. The required
+Name, Websites and Goal fields remain visible in the new and edit forms;
+advanced limits are optional and keep the accepted defaults. An unchanged
+website list preserves advanced destination policies on a goal edit.
 
 The overview keeps the existing Projects list/detail layout and exposes
-**Run now**, **Schedule** and **Edit goal & settings**. Run now uses the current
+**Run now** / **Run again**, **Schedule** and **Edit goal & settings**. A visible
+Run status section checks readiness without launching or calling the model. It
+shows actionable blockers, the last run state and an **Open active run** button.
+Readiness refreshes every ten seconds, on focus and on request. Run is disabled
+until ready and while any run in this project is active, including paused,
+approval and takeover states. After a terminal run, Run again uses a new
+idempotency key to start a fresh attempt; histories remain intact. An atomic
+backend admission check prevents simultaneous project starts. Run now uses the current
 accepted configuration and the existing signed runtime readiness, cleanup,
 model, source-memory, budget, access and control checks. One settings acceptance
 publishes a new guide, revises the configuration and consent, adjusts limits and
@@ -519,7 +535,8 @@ Routes (in addition to existing advanced browser APIs):
 - `GET /project-defaults`: defaults and current session proof status.
 - `POST /project-tasks`: owner acceptance; requires current elevation.
 - `GET /:id/task`, `PATCH /:id/task` with task `If-Match`: read/update setup.
-- `POST /:id/task/start`: explicit Run now, never a save side effect.
+- `GET /:id/task/readiness`: read-only execution checks and active/latest run metadata; requires run permission.
+- `POST /:id/task/start`: explicit Run now / Run again, never a save side effect.
 - `PUT /:id/task/schedule`: accept timing/mandate with schedule `If-Match` on edits.
 - `PATCH /:id/task/schedule/:scheduleId`: pause/delete; resuming uses explicit PUT acceptance.
 

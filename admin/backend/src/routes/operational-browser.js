@@ -121,6 +121,7 @@ export function registerBrowserRoutes(router,{runtime=null,store,agentsOnly=deni
   router.get('/project-defaults',agentsOnly,agent((r,a)=>({defaults:projectDefaults(),authorization:method(available(r,'projects'),'authorization')(a)})));
   router.post('/project-tasks',agentsOnly,elevated,agent((r,a)=>method(available(r,'projects'),'create')(a,r.body),{status:201,action:'project_setup_accept'}));
   router.get('/:id/task',agentsOnly,agent((r,a)=>{query(r);return method(available(r,'projects'),'get')(a,r.params.id);}));
+  router.get('/:id/task/readiness',agentsOnly,runsOnly,run((r,a)=>{query(r);return method(available(r,'projects'),'readiness')(a,r.params.id);}));
   router.patch('/:id/task',agentsOnly,elevated,agent((r,a)=>method(available(r,'projects'),'edit')(a,r.params.id,expected(r),r.body),{action:'project_setup_accept'}));
   router.post('/:id/task/start',agentsOnly,runsOnly,elevated,run((r,a)=>method(available(r,'projects'),'start')(a,r.params.id,r.body),{status:202,action:'project_task_start'}));
   router.put('/:id/task/schedule',agentsOnly,runsOnly,elevated,run((r,a)=>{

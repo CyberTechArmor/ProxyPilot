@@ -29,6 +29,9 @@ async function audit(surface) {
   // Audit the settled dialog, not an intermediate opacity animation frame.
   if(await page.getByRole('dialog').count())await page.getByRole('dialog').evaluate(el=>Promise.all(el.getAnimations({subtree:true}).filter(a=>a.effect?.getComputedTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{}))));
   await page.evaluate(()=>{document.documentElement.style.overflowX='visible';document.body.style.overflowX='visible';});
+  if(await page.getByRole('dialog').count()){
+    const save=page.getByRole('dialog').getByRole('button',{name:/^Accept & save/});const box=await save.boundingBox();assert(box&&box.y>=0&&box.y+box.height<=page.viewportSize().height,`${surface} save stays visible`);
+  }
   const layout=await page.evaluate(()=>({width:innerWidth,scrollWidth:document.documentElement.scrollWidth}));assert(layout.scrollWidth<=layout.width+1,`${surface} overflows at ${layout.width}`);layouts.push({surface,...layout});
   await page.addScriptTag({content:axe});const result=await page.evaluate(()=>axe.run(document.querySelector('[role="dialog"]')||document.querySelector('[data-selected-project]')||document.body,{runOnly:{type:'tag',values:['wcag2a','wcag2aa','wcag21aa']}}));
   if(result.violations.length)writeFileSync(`${artifacts}/accessibility-failure.json`,JSON.stringify({surface,width:layout.width,violations:result.violations},null,2));
@@ -49,9 +52,9 @@ try {
   await proof('/api/auth/sudo');await proof('/api/auth/agent-control');
   await page.goto(h.origin+'/operational-projects');await page.getByRole('button',{name:'New project',exact:true}).click();
   const dialog=page.getByRole('dialog');await dialog.getByRole('button',{name:'Accept & save',exact:true}).waitFor();
-  assert.equal(await dialog.locator('input[required],textarea[required]').count(),2);
+  assert.equal(await dialog.locator('input[required],textarea[required]').count(),3);
   assert.equal(await dialog.getByRole('button',{name:'Accept & save',exact:true}).isDisabled(),true);
-  await dialog.getByLabel('Name',{exact:true}).fill('Pricing comparison');await dialog.getByLabel('Goal',{exact:true}).fill('Read https://example.com/pricing and summarize the plans for a small team.');
+  await dialog.getByLabel('Name',{exact:true}).fill('Pricing comparison');await dialog.getByLabel('Websites',{exact:true}).fill('example.com/pricing, shop.example.com/plans');await dialog.getByLabel('Goal',{exact:true}).fill('Compare prices and summarize the plans for a small team.');
   for(const width of [360,375,768,1280,1920]){await page.setViewportSize({width,height:900});await audit('new-project');}
   await page.setViewportSize({width:1280,height:900});await page.screenshot({path:`${artifacts}/new-project.png`});
   await dialog.getByRole('button',{name:'Accept & save',exact:true}).click();
@@ -92,15 +95,29 @@ try {
   assert.equal(await dialog.getByLabel('Time',{exact:true}).inputValue(),'11:00');
   assert.equal((await (await context.request.get(h.origin+`/api/operational-projects/${pid}/task`)).json()).schedules[0].timing.time,'10:00');
   await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
-  await page.getByRole('button',{name:'Edit goal & settings',exact:true}).click();await dialog.getByLabel('Goal').fill('Read https://example.com/pricing and compare only annual plans.');
+  await page.getByRole('button',{name:'Edit goal & settings',exact:true}).click();await dialog.getByLabel('Goal').fill('Compare only annual plans.');assert.equal(await dialog.getByLabel('Websites').isVisible(),true);assert.equal(await dialog.getByLabel('Websites').inputValue(),'https://example.com/pricing\nhttps://shop.example.com/plans');
   for(const width of [360,375,768,1280,1920]){await page.setViewportSize({width,height:900});await audit('edit-settings');}
   await dialog.getByRole('button',{name:'Accept & save',exact:true}).click();await page.getByText('Schedule · Paused',{exact:true}).waitFor();
   assert.equal(h.world.f.store.get(h.world.users.owner,pid).current_version.version_number,2);
   await page.getByRole('button',{name:'Delete',exact:true}).click();await page.getByRole('button',{name:'Schedule',exact:true}).waitFor();
-  await page.getByRole('button',{name:'Run now',exact:true}).click();await page.getByRole('alert').filter({hasText:'INSTALLED_SELECTED_BROWSER_PROOF_REQUIRED'}).waitFor();
+  await page.getByText('The browser runtime is unavailable. Check browser runtime readiness in Agents.',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Run now',exact:true}).isDisabled(),true);
   assert.equal(await page.getByRole('dialog').count(),0,'accepted session proofs must not ask again');
-  assert(h.requests.some(r=>r.method==='POST'&&r.path===`/api/operational-projects/${pid}/task/start`));
+  assert(!h.requests.some(r=>r.method==='POST'&&r.path===`/api/operational-projects/${pid}/task/start`));
   assert.equal(h.world.f.db.prepare('SELECT COUNT(*) AS n FROM ops_selected_browser_runs').get().n,0,'no installed host means no launch');
+  // Scripted lifecycle responses isolate button behavior; signed launch and
+  // stop/re-run are exercised with the real backend in runtime tests.
+  const starts=[],ready={can_start:true,state:'ready',active_run:null,latest_run:null,checks:[]};
+  await page.route(`**/api/operational-projects/${pid}/task/readiness`,route=>route.fulfill({json:ready}));
+  await page.route(`**/api/operational-projects/${pid}/task/start`,async route=>{starts.push(route.request().postDataJSON());await route.fulfill({status:202,json:{run:{id:crypto.randomUUID(),state:'running'}}});});
+  await page.getByRole('button',{name:'Check readiness',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('[data-project-task] button').disabled);
+  const firstStart=page.waitForResponse(r=>r.url().endsWith(`/${pid}/task/start`)&&r.request().method()==='POST');await page.getByRole('button',{name:'Run now',exact:true}).click();await firstStart;assert.equal(starts.length,1);
+  await page.goto(h.origin+`/operational-projects/${pid}`);
+  ready.can_start=false;ready.state='active';ready.active_run={id:crypto.randomUUID(),state:'awaiting_approval'};ready.latest_run=ready.active_run;
+  await page.getByRole('button',{name:'Check readiness',exact:true}).click();await page.getByRole('button',{name:'Open active run',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Run again',exact:true}).isDisabled(),true);
+  ready.can_start=true;ready.state='ready';ready.active_run=null;ready.latest_run={id:crypto.randomUUID(),state:'cancelled'};
+  await page.getByRole('button',{name:'Check readiness',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('[data-project-task] button').disabled);
+  const secondStart=page.waitForResponse(r=>r.url().endsWith(`/${pid}/task/start`)&&r.request().method()==='POST');await page.getByRole('button',{name:'Run again',exact:true}).click();await secondStart;assert.equal(starts.length,2);assert.notEqual(starts[0].idempotency_key,starts[1].idempotency_key);
   assert.deepEqual(errors,[]);
   writeFileSync(`${artifacts}/results.json`,JSON.stringify({passed:true,layouts,lighthouse:lighthouseScores,page_errors:errors},null,2));console.log(JSON.stringify({passed:true,layouts:layouts.length,lighthouse:lighthouseScores}));
 }finally{await context.close();await browser.close();await h.close();}

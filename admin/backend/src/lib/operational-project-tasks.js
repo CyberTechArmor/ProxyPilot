@@ -7,8 +7,9 @@ import { SELECTED_BROWSER_CONSENT } from './operational-selected-browser-contrac
 import { scheduleTiming, nextSchedule, occurrenceKey } from './operational-project-schedule-time.js';
 
 const template=JSON.parse(readFileSync(new URL('./operational-project-defaults.json',import.meta.url),'utf8'));
-export const PROJECT_DEFAULTS_VERSION='project-defaults.v1';
+export const PROJECT_DEFAULTS_VERSION='project-defaults.v2';
 export const projectDefaults=()=>({version:PROJECT_DEFAULTS_VERSION,model:template.model.name,budgets:{...template.budgets},
+  browsing:'Body-free GET/HEAD page loads and standard assets on listed websites are allowed. Unexpected query parameters, API calls and other requests pause for approval.',
   record_video:template.artifacts.record_video,retention_days:template.artifacts.retention_days,disclosure:SELECTED_BROWSER_CONSENT});
 const fields={name:z.string().trim().min(1).max(200),goal:z.string().trim().min(1).max(20000),
   websites:z.union([z.string().max(66000),z.array(z.string().max(2048)).max(32)]).optional(),
@@ -19,6 +20,18 @@ const scheduleSchema=z.object({timing:z.unknown(),authorize_unattended:z.literal
 const stateSchema=z.object({state:z.enum(['paused','deleted'])}).strict();
 const active="('preparing','running','paused','awaiting_approval','human_control','stopping')";
 const limitFields=['cpu','memory_mib','temporary_disk_mib','max_seconds','max_actions','max_tokens','max_usd'];
+
+// The owner accepts these bounded read policies with the exact guide/configuration.
+// XHR/fetch, uploads, writes, unknown query keys and off-list origins stay gated.
+export function projectBrowsingRules(destinations) {
+  return destinations.allowed_origins.filter(d=>d.roles.includes('navigation')).flatMap((d,i)=>{
+    const queries=[...new Set(destinations.entry_urls.filter(value=>new URL(value).origin===d.origin).flatMap(value=>[...new URL(value).searchParams.keys()]))];
+    if(queries.length>32)fail(400,'Use no more than 32 distinct query parameter names per website');
+    const rule={destination_id:d.id,path_prefix:'/',methods:['GET','HEAD'],effect:'read',max_request_bytes:0};
+    return [{...rule,id:`read-pages-${i+1}`,query_keys:queries,resource_types:['document']},
+      {...rule,id:`read-assets-${i+1}`,query_keys:[...new Set([...queries,'v','ver','version'])].slice(0,32),resource_types:['stylesheet','script','image','font','media']}];
+  });
+}
 
 export function createProjectTasks({db,store,runs,clock=()=>Date.now(),uuid=randomUUID,isEnabled=()=>false,
   verifyControl=()=>false,verifyElevation=()=>false}={}) {
@@ -66,6 +79,7 @@ export function createProjectTasks({db,store,runs,clock=()=>Date.now(),uuid=rand
       config.destinations.allowed_origins=[...new Map(sites.map(u=>[u.origin,u])).values()].map((u,i)=>({id:`site-${i+1}`,origin:u.origin,roles:['navigation','resource'],session_headers:u.protocol==='https:'?'this_origin_session':'omit'}));
       config.destinations.entry_urls=sites.map(u=>u.href);config.destinations.network_policy_ref=null;config.destinations.request_rules=[];
     }
+    if(!config.destinations.request_rules.length&&!config.destinations.network_policy_ref)config.destinations.request_rules=projectBrowsingRules(config.destinations);
     if(v.limits)Object.assign(config.budgets,v.limits);
     if(config.budgets.memory_mib<1024||config.budgets.temporary_disk_mib<64)fail(400,'Browser runs need at least 1024 MB memory and 64 MB temporary storage');
     const limits=Object.fromEntries(limitFields.map(k=>[k,config.budgets[k]]));
@@ -90,7 +104,7 @@ export function createProjectTasks({db,store,runs,clock=()=>Date.now(),uuid=rand
     const schedules=all("SELECT * FROM ops_project_schedules WHERE project_id=? AND state!='deleted'",pid).map(s=>({id:s.id,revision:s.revision,state:s.state,timing:JSON.parse(s.timing_json),next_run_at:s.next_run_at,
       last_occurrence:one('SELECT state,due_at,run_id,result_code FROM ops_project_schedule_occurrences WHERE schedule_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',s.id)??null}));
     return {task:{revision:t.revision,configuration_id:t.configuration_id,defaults:projectDefaults(),
-      configuration:c,needs_website:!c,can_edit:p.own_role==='owner'&&!p.archived_at},schedules};
+      configuration:c,needs_website:!c,needs_browsing_acceptance:!!c&&!c.configuration.destinations.request_rules.length&&!c.configuration.destinations.network_policy_ref,can_edit:p.own_role==='owner'&&!p.archived_at},schedules};
   }
   function create(actor,input) {
     const v=parse(createSchema,input);store.assertActor(actor);elevated(actor);
@@ -118,10 +132,11 @@ export function createProjectTasks({db,store,runs,clock=()=>Date.now(),uuid=rand
     access(actor,pid,'run');const t=task(pid);
     const activeRun=one(`SELECT id,state FROM ops_selected_browser_runs WHERE project_id=? AND state IN${active} ORDER BY started_at DESC,id DESC LIMIT 1`,pid)??null;
     const latestRun=one('SELECT id,state FROM ops_selected_browser_runs WHERE project_id=? ORDER BY started_at DESC,id DESC LIMIT 1',pid)??null;
-    if(activeRun)return {can_start:false,state:'active',active_run:{...activeRun},latest_run:{...latestRun},checks:[]};
-    if(!isEnabled()||!t.configuration_id)return {can_start:false,state:'blocked',active_run:null,latest_run:latestRun?{...latestRun}:null,checks:[{kind:'setup',state:'blocked',code:!isEnabled()?'BROWSER_EXECUTION_DISABLED':'WEBSITES_REQUIRED'}]};
+    const reviewRuns=all("SELECT r.id,r.state,COUNT(u.id) AS unresolved_count FROM ops_selected_browser_runs r JOIN ops_selected_browser_uncertainties u ON u.run_id=r.id AND u.state='unresolved' WHERE r.project_id=? GROUP BY r.id ORDER BY r.started_at DESC,r.rowid DESC",pid).map(r=>({...r}));
+    if(activeRun)return {review_runs:reviewRuns,can_start:false,state:'active',active_run:{...activeRun},latest_run:{...latestRun},checks:[]};
+    if(!isEnabled()||!t.configuration_id)return {review_runs:reviewRuns,can_start:false,state:'blocked',active_run:null,latest_run:latestRun?{...latestRun}:null,checks:[{kind:'setup',state:'blocked',code:!isEnabled()?'BROWSER_EXECUTION_DISABLED':'WEBSITES_REQUIRED'}]};
     const result=await runs.readiness(actor,pid,t.configuration_id);
-    return {...result,active_run:null,latest_run:latestRun?{...latestRun}:null};
+    return {...result,review_runs:reviewRuns,active_run:null,latest_run:latestRun?{...latestRun}:null};
   }
   async function start(actor,pid,input) {
     parse(z.object({idempotency_key:z.string().uuid(),task_revision:z.number().int().positive()}).strict(),input);

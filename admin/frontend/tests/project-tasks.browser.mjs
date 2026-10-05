@@ -104,6 +104,17 @@ try {
   assert.equal(await page.getByRole('dialog').count(),0,'accepted session proofs must not ask again');
   assert(!h.requests.some(r=>r.method==='POST'&&r.path===`/api/operational-projects/${pid}/task/start`));
   assert.equal(h.world.f.db.prepare('SELECT COUNT(*) AS n FROM ops_selected_browser_runs').get().n,0,'no installed host means no launch');
+  // Legacy saved settings are never silently expanded. The visible owner
+  // acceptance saves a new pinned policy/guide and matching disclosure consent.
+  const old=(await (await context.request.get(h.origin+`/api/operational-projects/${pid}/task`)).json()).task.configuration;
+  const oldPolicy=structuredClone(old.configuration);oldPolicy.destinations.request_rules=[];
+  h.world.f.store.updateBrowserConfiguration(h.world.users.owner,pid,old.id,old.revision,{configuration:oldPolicy});
+  await page.reload();await page.getByRole('button',{name:'Accept page-loading defaults',exact:true}).click();
+  await page.getByText('Page-loading defaults accepted. Review any blocked run, then Run again.',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'Accept page-loading defaults',exact:true}).count(),0);
+  const accepted=(await (await context.request.get(h.origin+`/api/operational-projects/${pid}/task`)).json());
+  assert.equal(accepted.task.configuration.configuration.destinations.request_rules.length,4);
+  assert.equal(h.world.f.store.get(h.world.users.owner,pid).current_version.version_number,3);
   // Scripted lifecycle responses isolate button behavior; signed launch and
   // stop/re-run are exercised with the real backend in runtime tests.
   const starts=[],ready={can_start:true,state:'ready',active_run:null,latest_run:null,checks:[]};
@@ -118,6 +129,32 @@ try {
   ready.can_start=true;ready.state='ready';ready.active_run=null;ready.latest_run={id:crypto.randomUUID(),state:'cancelled'};
   await page.getByRole('button',{name:'Check readiness',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('[data-project-task] button').disabled);
   const secondStart=page.waitForResponse(r=>r.url().endsWith(`/${pid}/task/start`)&&r.request().method()==='POST');await page.getByRole('button',{name:'Run again',exact:true}).click();await secondStart;assert.equal(starts.length,2);assert.notEqual(starts[0].idempotency_key,starts[1].idempotency_key);
+  await page.goto(h.origin+`/operational-projects/${pid}`);
+  const blockedId=crypto.randomUUID(),uncertaintyId=crypto.randomUUID(),decisions=[];
+  let unresolved=true;const blockedAttempt=crypto.randomUUID();h.controlGrants.clear();h.sudoUntil.clear();
+  const blockedData=()=>({run:{id:blockedId,state:'uncertain',revision:8,attempt_id:blockedAttempt,fence:1,configuration_name:'Blocked browser task'},authorization:{elevated:(h.sudoUntil.get(h.world.users.owner.id)||0)>Date.now(),control_verified:h.controlGrants.size>0},controls:{},pending_approvals:[],receipts:[],uncertainties:unresolved?[{id:uncertaintyId,kind:'EXTERNAL_EFFECT_UNVERIFIED',state:'unresolved'}]:[]});
+  ready.can_start=false;ready.state='blocked';ready.active_run=null;ready.latest_run={id:blockedId,state:'uncertain'};ready.review_runs=[{id:blockedId,state:'uncertain',unresolved_count:1}];ready.checks=[{kind:'uncertainty',state:'blocked',code:'UNRESOLVED_EFFECT'}];
+  await page.route(`**/api/operational-projects/${pid}/browser-agent-runs/${blockedId}`,route=>route.fulfill({json:blockedData()}));
+  await page.route(`**/api/operational-projects/${pid}/browser-agent-runs/${blockedId}/uncertainties/${uncertaintyId}/reconcile`,async route=>{
+    decisions.push(route.request().postDataJSON());assert.equal(route.request().headers()['if-match'],'"8"');unresolved=false;
+    ready.can_start=true;ready.state='ready';ready.review_runs=[];ready.checks=[];await route.fulfill({json:blockedData()});
+  });
+  await page.getByRole('button',{name:'Check readiness',exact:true}).click();await page.getByRole('button',{name:'Review blocked run',exact:true}).click();
+  assert.equal(new URL(page.url()).searchParams.get('browser_run'),blockedId);assert.equal(new URL(page.url()).searchParams.get('browser_panel'),'review');
+  await page.getByRole('button',{name:'I verified no effect occurred',exact:true}).waitFor();assert.equal(starts.length,2,'opening review cannot replay');
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.getByRole('button',{name:'Back to project',exact:true}).isVisible(),true,'review provides a mobile return path');
+  await page.getByRole('button',{name:'Verify session for review',exact:true}).click();
+  const controlDialog=page.getByRole('dialog',{name:'Confirm it is you'});await controlDialog.waitFor();
+  await controlDialog.getByLabel('Password',{exact:true}).fill(SUDO_PASSWORD);await controlDialog.getByLabel('Authenticator code',{exact:true}).fill(SUDO_TOTP);await controlDialog.getByRole('button',{name:'Confirm',exact:true}).click();
+  const sudoDialog=page.getByRole('dialog',{name:'Confirm with password + TOTP'});await sudoDialog.getByLabel('Password',{exact:true}).fill(SUDO_PASSWORD);await sudoDialog.getByLabel('Authenticator Code',{exact:true}).fill(SUDO_TOTP);await sudoDialog.getByRole('button',{name:'Confirm',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'Session verified. Select the intended decision below.'}).waitFor();assert.equal(decisions.length,0,'verification cannot submit or replay a decision');assert.equal(starts.length,2);
+  await page.getByRole('button',{name:'I verified no effect occurred',exact:true}).click();await page.getByRole('status').filter({hasText:'Outcome recorded. Use Back to project, then Run again.'}).waitFor();
+  assert.deepEqual(decisions,[{decision:'verified_no_effect'}]);assert.equal(starts.length,2,'recording outcome cannot replay');
+  await page.getByRole('button',{name:'Back to project',exact:true}).click();
+  await page.getByRole('button',{name:'Run again',exact:true}).waitFor();await page.waitForFunction(()=>!document.querySelector('[data-project-task] button').disabled);
+  const recoveredStart=page.waitForResponse(r=>r.url().endsWith(`/${pid}/task/start`)&&r.request().method()==='POST');await page.getByRole('button',{name:'Run again',exact:true}).click();await recoveredStart;
+  assert.equal(starts.length,3);assert.equal(new Set(starts.map(v=>v.idempotency_key)).size,3);
   assert.deepEqual(errors,[]);
   writeFileSync(`${artifacts}/results.json`,JSON.stringify({passed:true,layouts,lighthouse:lighthouseScores,page_errors:errors},null,2));console.log(JSON.stringify({passed:true,layouts:layouts.length,lighthouse:lighthouseScores}));
 }finally{await context.close();await browser.close();await h.close();}

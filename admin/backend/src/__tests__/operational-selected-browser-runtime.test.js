@@ -1328,6 +1328,31 @@ for(const [name,change] of [
 });
 
 const simpleProject=w=>w.runtime.projects.create(w.owner,{name:'Pricing task',goal:'Read https://example.com/pricing and summarize the plans.',accepted_defaults:PROJECT_DEFAULTS_VERSION,idempotency_key:randomUUID()});
+test('readiness identifies the blocked run and an exact human outcome unlocks a fresh signed attempt',async()=>{
+  const w=world();try{
+    const saved=simpleProject(w),pid=saved.project.id;
+    const first=await w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()});
+    w.setEffectsSent(1);await w.runtime.runs.refresh(w.owner,pid,first.run.id);
+    const held=w.runtime.runs.get(w.owner,pid,first.run.id),u=held.uncertainties.find(u=>u.kind==='EXTERNAL_EFFECT_UNVERIFIED');
+    assert.equal(held.run.state,'uncertain');assert(u);
+    assert.deepEqual(held.authorization,{elevated:true,control_verified:true});
+    w.f.db.prepare('UPDATE sessions SET sudo_until=? WHERE id=?').run(new Date(w.now-1000).toISOString(),w.owner.jti);
+    w.f.db.prepare('DELETE FROM ops_agent_control_grants WHERE session_id=?').run(w.owner.jti);
+    assert.deepEqual(w.runtime.runs.get(w.owner,pid,first.run.id).authorization,{elevated:false,control_verified:false});
+    assert.throws(()=>w.runtime.runs.reconcile(w.owner,pid,first.run.id,u.id,held.run.revision,{decision:'verified_no_effect'}),e=>e.status===403);
+    w.session();
+    const blocked=await w.runtime.projects.readiness(w.owner,pid);
+    assert.equal(blocked.can_start,false);assert.deepEqual(blocked.review_runs,[{id:first.run.id,state:'uncertain',unresolved_count:1}]);
+    assert.throws(()=>w.runtime.runs.reconcile(w.owner,pid,first.run.id,u.id,held.run.revision-1,{decision:'verified_no_effect'}),e=>e.status===412);
+    w.runtime.runs.reconcile(w.owner,pid,first.run.id,u.id,held.run.revision,{decision:'verified_no_effect'});
+    const ready=await w.runtime.projects.readiness(w.owner,pid);assert.equal(ready.can_start,true);assert.deepEqual(ready.review_runs,[]);
+    assert.equal(w.calls.filter(c=>c.method==='selected_browser_launch').length,1,'reconciliation never launches or replays');
+    w.setEffectsSent(0);
+    const again=await w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()});
+    assert.notEqual(again.run.id,first.run.id);assert.equal(again.run.state,'running');
+    await w.runtime.runs.cancel(w.owner,pid,again.run.id,again.run.revision);
+  }finally{await w.close();}
+});
 test('one-save project immediately starts through the real signed runtime and preserves model consent',async()=>{
   const w=world();try{
     const saved=simpleProject(w),pid=saved.project.id;

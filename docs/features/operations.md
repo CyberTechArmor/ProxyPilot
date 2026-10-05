@@ -466,7 +466,7 @@ prerequisites continue to apply.
 ## Streamlined browser projects
 
 New project setup is **Name → Websites → Goal → Accept & save**. The authenticated owner
-accepts `project-defaults.v1` once. One immediate transaction creates the private
+accepts `project-defaults.v2` once. One immediate transaction creates the private
 project, compiles the plain-language objective and website list into an immutable
 approved guide with Objective, Websites, Procedure and Completion sections, sets finite
 project limits, saves the browser configuration and records owner model consent
@@ -493,6 +493,28 @@ Name, Websites and Goal fields remain visible in the new and edit forms;
 advanced limits are optional and keep the accepted defaults. An unchanged
 website list preserves advanced destination policies on a goal edit.
 
+Accepted page-loading defaults add body-free GET/HEAD document reads on the
+listed navigation origins, plus stylesheet/script/image/font/media reads. Only
+query parameter names present in the entry URLs (and asset `v`, `ver`, `version`)
+match these rules. Unknown query names, XHR/fetch, requests with bodies, other
+methods and off-list origins remain gated. Existing custom rules and referenced
+network policies are preserved. Previously saved empty policies stay unchanged
+until the owner selects **Accept page-loading defaults**; this creates a new
+guide/configuration/consent and pauses schedules. Reading or starting a project
+does not silently change its policy.
+
+Live streaming connects automatically when an available active run opens. It
+does not require video recording. The Browser pane is the default; approval
+content also appears below it on mobile. A decoded video frame, rather than a
+connected peer alone, establishes viewing readiness. A missing frame produces
+a visible connection error and **Reconnect browser stream** after the bounded
+deadline. A held navigation request explains why a connected browser may still
+show a blank page. Reconnecting only remounts transport; it starts no run and
+grants no control. Vertical swipes over a watched video scroll the workspace;
+remote input captures touches only while this viewer owns browser control.
+Mobile information panels use the workspace's scroll area rather than an inner
+capped scroll container.
+
 The overview keeps the existing Projects list/detail layout and exposes
 **Run now** / **Run again**, **Schedule** and **Edit goal & settings**. A visible
 Run status section checks readiness without launching or calling the model. It
@@ -508,6 +530,16 @@ publishes a new guide, revises the configuration and consent, adjusts limits and
 pauses its schedule. An active run must be stopped first. Advanced agent/model,
 source, destination and connection editors remain accessible under Agents.
 Re-authentication and agent-control proof are requested only when required.
+
+Readiness returns exact `review_runs` with unresolved uncertainty counts. Each
+**Review blocked run** button deep-links to its Review pane. Pending request
+destination, purpose, request facts and approval/denial buttons precede collapsed
+technical hashes. **Verify session for review** obtains missing elevation/control
+proof explicitly and never replays the intended decision. For a terminal
+uncertain effect, the person records the observed outcome or leaves without
+repeating; cleanup still requires a fresh signed supervisor receipt. **Back to
+project** remains visible from every pane. Recording an outcome does not restart
+work; after all blockers clear, **Run again** starts a fresh attempt explicitly.
 
 Schedules support Once, Daily or Weekly in an explicit IANA timezone. The owner
 accepts unattended execution of the exact current configuration, guide, consent

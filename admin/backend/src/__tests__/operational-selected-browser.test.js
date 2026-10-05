@@ -39,6 +39,14 @@ const check=(status,fn,code)=>assert.throws(fn,e=>e.status===status&&(!code||e.c
 const rejected=(status,fn,code)=>assert.rejects(fn,e=>e.status===status&&(!code||e.code===code));
 const waitFor=async fn=>{for(let i=0;i<1000;i++){if(fn())return;await new Promise(resolve=>setImmediate(resolve));}assert.fail('Expected asynchronous boundary was not reached');};
 const withWorld=(fn,options)=>async()=>{const w=world(options);try{await fn(w);}finally{w.f.close();}};
+test('activity cards expose bounded authorized event metadata without private payloads',withWorld(async w=>{
+  w.consent();const started=await w.start(),run=started.run;
+  for(let i=0;i<105;i++)w.f.db.prepare('INSERT INTO ops_selected_browser_events(project_id,run_id,attempt_id,actor_id,kind,metadata_json,created_at) VALUES(?,?,?,?,?,?,?)').run(w.p.id,run.id,run.attempt_id,w.owner.id,'PAGE_REVIEWED',JSON.stringify({private_text:'private form content',destination:'https://private.example/path'}),w.now());
+  const cards=w.service.get(w.viewer,w.p.id,run.id).activity;
+  assert.equal(cards.length,100);assert(cards.every(card=>Object.keys(card).sort().join(',')==='created_at,id,kind'));
+  assert(cards.every((card,i)=>i===0||card.id>cards[i-1].id));assert(!JSON.stringify(cards).includes('private form content'));
+  check(404,()=>w.service.get(w.outsider,w.p.id,run.id));
+}));
 async function authFlow(w,{requests=1,businessWrites=0}={}){
   const session=randomUUID();w.f.db.prepare('INSERT INTO sessions(id,user_id,expires_at) VALUES(?,?,?)').run(session,w.owner.id,new Date(Date.parse(w.now())+3600000).toISOString());w.owner.jti=session;
   let sent=0,acknowledged=0,mode='human',held=[];w.runner.assertAuthenticationController=()=>true;

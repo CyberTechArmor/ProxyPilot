@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { FileText, Settings2 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { operationsApi as api } from '@/lib/api';
+import { ProjectWorkspace } from '@/components/operational-projects/ProjectWorkspace';
 import { ProjectOverview } from '@/components/operational-projects/ProjectOverview';
 import { Action, Panel, Field, Choice, GuideText, roleNames } from '@/components/operational-projects/shared';
 
@@ -52,7 +53,7 @@ function Operation({id}) {
   const [projectList,setProjectList]=useState([]),[browserDeckActive,setBrowserDeckActive]=useState(false),[retainedOpen,setRetainedOpen]=useState(false);
   useEffect(()=>{const c=new AbortController();api.get('',c.signal).then(r=>{if(!c.signal.aborted)setProjectList(r.projects);}).catch(()=>setProjectList([]));return()=>c.abort();},[user?.id]);
   useEffect(()=>{const target=params.get('section');if(['Overview','Guide','Versions','Runs','Access','Agents','Agent runs','Website reviews','Details'].includes(target))setSection(target);},[params]);
-  const openSection=tab=>{setSection(tab);setError('');setParams({section:tab},{replace:true});};
+  const openSection=tab=>{setSection(tab);setError('');setParams(old=>{const next=data?.task?.task?new URLSearchParams(old):new URLSearchParams();next.set('section',tab);next.delete('panel');next.delete('browser_panel');if(['Guide','Versions','Runs','Agent runs'].includes(tab))next.set('resource',tab==='Guide'?'guide':'history');return next;},{replace:true});};
   const requests=useRef(null),generation=useRef(0);
   const retry=useRef(null),alive=useRef(true),errorRef=useRef(null);
   const clearPrivate=()=>{setData(null);setDraft(null);setMeta(null);setRunForm(blankRun);setRunVersion(null);setCorrecting(null);setRelatedRun(null);setSelectedVersion(null);setCandidate(null);setReason('');setIdentifier('');retry.current=null;};
@@ -119,27 +120,15 @@ function Operation({id}) {
     {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
     {runsPanel}
   </div>;
-  const deckActive=section==='Agents'&&browserDeckActive;
-  return <div className="operations-ui operations-shell w-full max-w-screen-2xl mx-auto gap-4 min-w-0">
-    <div hidden={deckActive}><ProjectPageHeader><NewProjectButton/></ProjectPageHeader></div>
-    {deckActive&&<nav aria-label="Breadcrumb" className="shrink-0 text-sm text-muted-foreground"><Link className="inline-flex min-h-11 items-center underline" to="/operational-projects">Projects</Link><span aria-hidden="true" className="mx-2">/</span><span className="break-words">{p.name}</span></nav>}
-    <div className={`grid grid-cols-1 ${deckActive?'grid-rows-[minmax(0,1fr)]':'grid-rows-[auto_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]'} gap-4 min-w-0 min-h-0 flex-1 overflow-hidden`} data-project-workspace data-active-browser-deck={deckActive}>
-    <div hidden={deckActive} style={deckActive?{display:'none'}:undefined} className="min-w-0 min-h-0 flex flex-col"><ProjectBrowser projects={projectList.some(item=>item.id===p.id)?projectList.map(item=>item.id===p.id?p:item):[p,...projectList]} selectedId={id} section={section} collapsible/></div>
-    <div className={`space-y-4 min-w-0 min-h-0 overflow-y-auto overscroll-contain ${deckActive?'':'operations-card rounded-md border bg-card p-4 sm:p-6'}`} data-selected-project>
-    <header hidden={deckActive} className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
-    {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
-    {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}
-    <nav hidden={deckActive} style={deckActive?{display:'none'}:undefined} ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-foreground font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{tab==='Agent runs'?'Historical runs':operationSectionLabel(tab)}</Action>)}</nav>
-    {section==='Overview'&&<ProjectOverview taskData={data.task} onChanged={()=>refresh(false)} onOpenRun={(runId,options)=>{setSection('Agents');setParams({section:'Agents',browser_run:runId,...(options?.review?{browser_panel:'review'}:{})});}} project={p} draft={d} records={r} activity={e} access={a} editable={editable} agentCapability={agentCapability} browserRuntimeCapability={browserRuntimeCapability} openSection={openSection} loadMore={loadMore} busy={busy} onUnavailable={()=>{clearPrivate();setError('Project access is unavailable.');}}/> }
-    {section==='Details'&&<Panel title="Project details" icon={Settings2}>
+  const detailsPanel=<Panel title="Project details" icon={Settings2}>
       <p className="text-sm text-muted-foreground">Owner: {p.owner_name}. {p.archived_at?'Archived':'Active'} project.</p>
-      {editable&&active&&meta?<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('',{name:meta.name,description:meta.description},meta.revision,'PATCH'),'Details saved.','meta');}}>
+      {editable&&active&&meta&&!data.task?.task?<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('',{name:meta.name,description:meta.description},meta.revision,'PATCH'),'Details saved.','meta');}}>
         <Field label="Name" required maxLength={200} value={meta.name} onChange={ev=>setMeta({...meta,name:ev.target.value})}/><Field label="Purpose (optional)" textarea rows={3} maxLength={20000} value={meta.description} onChange={ev=>setMeta({...meta,description:ev.target.value})}/>
         <div className="flex flex-wrap gap-2"><Action disabled={busy} type="submit">Save details</Action><Action type="button" variant="outline" disabled={busy} onClick={()=>setMeta({name:p.name,description:p.description,revision:p.revision})}>Discard local detail edits</Action></div>
       </form>:<p className="whitespace-pre-wrap break-words">{p.description||'No purpose added.'}</p>}
       {owner&&<div className="border-t pt-4 space-y-3"><h3 className="font-semibold">{active?'Archive project':'Restore project'}</h3>{active?<form className="space-y-3" onSubmit={ev=>{ev.preventDefault();perform(()=>write('/archive',{reason},p.revision),'Project archived.');}}><Field label="Archive reason" required maxLength={2000} value={reason} onChange={ev=>setReason(ev.target.value)}/><Action variant="outline" disabled={busy}>Archive project</Action></form>:<><p className="text-sm break-words">{p.archive_reason}</p><Action disabled={busy} onClick={()=>perform(()=>write('/restore',{},p.revision),'Project restored.')}>Restore project</Action></>}</div>}
-    </Panel>}
-    {section==='Guide'&&<Panel title="Guide" icon={FileText}>
+    </Panel>;
+  const guidePanel=<Panel title="Guide" icon={FileText}>
       <p className="text-sm text-muted-foreground">{d.status==='draft'?'Draft changes are ready to save as an approved version.':d.status==='pending'?'This saved snapshot needs an explicit Save and approve.':'Saved and approved. Start a revision to edit.'}</p>
       {d.latest_submission?.reason&&<p className="whitespace-pre-wrap break-words text-sm">Latest note: {d.latest_submission.reason}</p>}
       {editable&&active&&d.status==='draft'&&draft?<form className="space-y-4" onSubmit={ev=>{ev.preventDefault();perform(()=>write('/draft',{title:draft.title,instructions:draft.instructions},draft.revision,'PATCH'),'Guide saved and approved.','draft');}}>
@@ -154,8 +143,8 @@ function Operation({id}) {
       {pending&&<div className="space-y-4 border-t pt-4"><h3 className="font-semibold">Saved snapshot awaiting approval</h3><GuideText version={pending}/><EvidenceSet base={base} evidence={pending.evidence} enabled={capability} refreshKey={evidenceTick}/><p className="text-xs text-muted-foreground break-words">Saved by {pending.submitted_by_name||actorName(pending.submitted_by)} · {pending.submitted_at}</p>
         {active&&editable&&<><Action disabled={busy} onClick={()=>perform(()=>write('/submissions/'+pending.id+'/approve',{},pending.revision),'Guide saved and approved.','draft')}>Save and approve</Action><p className="text-sm text-muted-foreground">Approves this exact saved snapshot and preserves its content, author and version history.</p><details><summary className="min-h-11 cursor-pointer py-3 text-sm">Cancel this pending snapshot</summary><div className="space-y-3"><Field label="Cancellation reason" textarea rows={2} maxLength={2000} value={reason} onChange={ev=>setReason(ev.target.value)}/><Action variant="outline" disabled={busy||!reason.trim()} onClick={()=>perform(()=>write('/submissions/'+pending.id+'/cancel',{reason},pending.revision),'Pending snapshot cancelled.','draft')}>Cancel pending snapshot</Action></div></details></>}
       </div>}
-    </Panel>}
-    {section==='Versions'&&<Panel title="Approved versions">
+    </Panel>;
+  const versionsPanel=<Panel title="Approved versions">
       {!v.versions.length&&<p>No approved versions yet.</p>}
       <ul className="space-y-3">{v.versions.map(version=><li key={version.id} className="rounded-md border p-3 space-y-2"><h3 className="font-medium">Version {version.version_number} · {version.withdrawn_at?'Withdrawn':version.id===p.current_version?.id?'Current':'Superseded'}</h3><p className="text-sm break-words">{version.title}</p><Action variant="outline" disabled={busy} onClick={()=>perform(async()=>setSelectedVersion((await api.get(`${base}/versions/${version.id}`)).version),'Exact version loaded.')}>Read version {version.version_number}</Action></li>)}</ul>
       {v.next_cursor&&<Action variant="outline" disabled={busy} onClick={()=>loadMore('v')}>Load more versions</Action>}
@@ -164,8 +153,8 @@ function Operation({id}) {
         {editable&&active&&!pending&&<div className="space-y-3"><label className="flex min-h-11 items-center gap-3"><input type="checkbox" checked={discard} onChange={ev=>setDiscard(ev.target.checked)}/><span>Replace the current draft and local draft edits with this version. This clears evidence references for the new iteration.</span></label><Action disabled={busy||!discard} onClick={()=>perform(async()=>{await write('/draft/start-revision',{version_id:selectedVersion.id,discard_draft:true},d.revision);setDiscard(false);openSection('Guide');},'Revision started.','draft')}>Start revision from this version</Action></div>}
         {reviewer&&active&&!selectedVersion.withdrawn_at&&<form className="space-y-3" onSubmit={ev=>{ev.preventDefault();perform(async()=>{await write(`/versions/${selectedVersion.id}/withdraw`,{reason},p.revision);setSelectedVersion((await api.get(`${base}/versions/${selectedVersion.id}`)).version);},'Version withdrawn.');}}><Field label="Withdrawal reason" required maxLength={2000} value={reason} onChange={ev=>setReason(ev.target.value)}/><Action variant="outline" disabled={busy}>Withdraw version</Action></form>}
       </div>}
-    </Panel>}
-    {section==='Runs'&&<Panel title="Manual work records">
+    </Panel>;
+  const runsPanelManual=<Panel title="Manual work records">
       <p className="text-sm text-muted-foreground">Record work you performed. Each record preserves the exact guide version used.</p>
       {canRun&&active&&p.current_version&&<Action disabled={busy} onClick={()=>chooseRun(p.current_version)}>Record manual run</Action>}
       {!p.current_version&&<p>No current approved guide. New records require an approved, non-withdrawn version.</p>}
@@ -180,12 +169,12 @@ function Operation({id}) {
         {active&&canRun&&row.recorder_id===user?.id&&!row.corrected_by&&<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>chooseRun((await api.get(`${base}/versions/${row.version_id}`)).version,row),'Correction form opened.')}>Correct this record</Action>}
         {(row.corrects_run_id||row.corrected_by)&&<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{const related=(await api.get(`${base}/runs/${row.corrected_by||row.corrects_run_id}`)).run;setRelatedRun(related);},'Related record loaded.')}>Follow correction chain</Action>}</div>
       </li>)}</ul>{!r.runs.length&&<p>No manual work recorded yet.</p>}{r.next_cursor&&<Action variant="outline" disabled={busy} onClick={()=>loadMore('r')}>Load more records</Action>}
-    </Panel>}
-    {section==='Access'&&<Panel title="Access">
+    </Panel>;
+  const accessPanel=<Panel title="Access">
       <p>Your role: {p.own_role}. Platform administration grants no automatic access.</p>{capability&&<p className="text-sm">Evidence archive, restriction, deletion requests and owner retention holds are in Guide → Demonstrations. A hold grants no private access. {evidenceDisclaimer}</p>}
       {agentCapability&&owner&&<AccessPolicy base={base} project={p} onChanged={()=>refresh(false)}/>}
       {owner&&a?<>
-        <p className="text-sm break-words">Owner: {a.owner.username}</p>
+        <p className="text-sm break-words">Owner: {a.owner?.username||p.owner_name}</p>
         <ul className="space-y-3">{a.members.map(member=><Member key={member.user_id} member={member} busy={busy} active={active} save={role=>perform(()=>write(`/members/${member.user_id}`,{role},p.revision,'PUT'),'Member role updated.')} remove={()=>perform(()=>write(`/members/${member.user_id}`,{},p.revision,'DELETE'),'Access revoked.')}/>)}</ul>
         {active&&<><form className="space-y-3" onSubmit={ev=>{ev.preventDefault();perform(async()=>setCandidate(await api.get(`${base}/access/candidate?identifier=${encodeURIComponent(identifier)}`)),'Account found.');}}><Field label="Existing username" required value={identifier} onChange={ev=>{setIdentifier(ev.target.value);setCandidate(null);}}/><Action disabled={busy}>Find account</Action></form>
           {candidate&&<div className="space-y-3 border rounded-md p-3"><p className="break-words">{candidate.username}</p><Choice label="Member role" value={grantRole} onChange={ev=>setGrantRole(ev.target.value)}>{roleNames.map(role=><option key={role}>{role}</option>)}</Choice><Action disabled={busy} onClick={()=>perform(async()=>{await write(`/members/${candidate.user_id}`,{role:grantRole},p.revision,'PUT');setCandidate(null);setIdentifier('');},'Access granted.')}>Add member</Action></div>}
@@ -193,7 +182,26 @@ function Operation({id}) {
         </>}
       </>:<Action variant="outline" disabled={busy} onClick={()=>perform(async()=>{await write(`/members/${user.id}`,{},p.revision,'DELETE');navigate('/operational-projects');},'You left the operation.')}>Leave operation</Action>}
       {p.ownership_offer&&active&&<div className="space-y-3 border rounded-md p-3"><p>Ownership offer expires {p.ownership_offer.expires_at}.</p><div className="flex flex-wrap gap-2">{(owner?['cancel']:['accept','decline']).map(decision=><Action key={decision} disabled={busy} variant={decision==='accept'?'default':'outline'} onClick={()=>perform(()=>write(`/ownership-offers/${p.ownership_offer.id}/decision`,{decision},p.revision),`Ownership offer ${decision} completed.`)}>{decision==='accept'?'Accept ownership':decision==='decline'?'Decline ownership':'Cancel ownership offer'}</Action>)}</div></div>}
-    </Panel>}
+    </Panel>;
+  if(browserRuntimeCapability&&data.task?.task)return <ProjectWorkspace project={p} base={base} taskData={data.task} section={section} params={params} setParams={setParams} onChanged={()=>refresh(false)} openSection={openSection} projects={projectList} events={e} loadMore={()=>loadMore('e')} busy={busy} error={error} message={message}
+    guide={guidePanel} versions={versionsPanel} records={runsPanel} manualRecords={runsPanelManual} access={<>{accessPanel}<Panel title="Connections"><BrowserConnections base={base} project={p} disabled={busy} onChanged={()=>refresh(false)}/></Panel></>} metadata={detailsPanel} websiteReviews={websiteCapability?<WebsiteReviews base={base} project={p} onChanged={()=>refresh(false)}/>:null} onUnavailable={()=>{clearPrivate();setError('Project access is unavailable.');}}/>;
+  const deckActive=section==='Agents'&&browserDeckActive;
+  return <div className="operations-ui operations-shell w-full max-w-screen-2xl mx-auto gap-4 min-w-0">
+    <div hidden={deckActive}><ProjectPageHeader><NewProjectButton/></ProjectPageHeader></div>
+    {deckActive&&<nav aria-label="Breadcrumb" className="shrink-0 text-sm text-muted-foreground"><Link className="inline-flex min-h-11 items-center underline" to="/operational-projects">Projects</Link><span aria-hidden="true" className="mx-2">/</span><span className="break-words">{p.name}</span></nav>}
+    <div className={`grid grid-cols-1 ${deckActive?'grid-rows-[minmax(0,1fr)]':'grid-rows-[auto_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]'} gap-4 min-w-0 min-h-0 flex-1 overflow-hidden`} data-project-workspace data-active-browser-deck={deckActive}>
+    <div hidden={deckActive} style={deckActive?{display:'none'}:undefined} className="min-w-0 min-h-0 flex flex-col"><ProjectBrowser projects={projectList.some(item=>item.id===p.id)?projectList.map(item=>item.id===p.id?p:item):[p,...projectList]} selectedId={id} section={section} collapsible/></div>
+    <div className={`space-y-4 min-w-0 min-h-0 overflow-y-auto overscroll-contain ${deckActive?'':'operations-card rounded-md border bg-card p-4 sm:p-6'}`} data-selected-project>
+    <header hidden={deckActive} className="space-y-3"><div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground mb-2">Project</p><div className="flex flex-wrap items-center gap-3"><h2 className="operations-heading break-words [overflow-wrap:anywhere]">{p.name}</h2><ProjectStatus project={p}/></div><p className="text-sm text-muted-foreground mt-2 break-words">Owner: {p.owner_name} · {p.current_version?'Approved guide v'+p.current_version.version_number:'No saved guide'}</p></div><Action variant="ghost" disabled={busy} onClick={()=>perform(()=>Promise.resolve(),'Server state refreshed; unsaved forms retained.')}>Refresh</Action></div></header>
+    {error&&<div ref={errorRef} tabIndex={-1} role="alert" className="border border-destructive rounded-md p-3 text-destructive break-words">{error}</div>}
+    {(busy||message)&&<p role="status" aria-live="polite" className="text-sm">{busy?'Working…':message}</p>}
+    <nav hidden={deckActive} style={deckActive?{display:'none'}:undefined} ref={sectionNav} aria-label="Operation sections" className="operations-tabs">{['Overview','Guide','Versions','Runs',...(agentCapability?['Agents']:[]),...(runsCapability?['Agent runs']:[]),...(websiteCapability?['Website reviews']:[]),'Access','Details'].map(tab=><Action key={tab} aria-pressed={section===tab} variant="ghost" className={'shrink-0 rounded-none px-2 text-sm border-b-2 '+(section===tab?'border-primary text-foreground font-semibold':'border-transparent text-muted-foreground')} onClick={()=>openSection(tab)}>{tab==='Agent runs'?'Historical runs':operationSectionLabel(tab)}</Action>)}</nav>
+    {section==='Overview'&&<ProjectOverview taskData={data.task} onChanged={()=>refresh(false)} onOpenRun={(runId,options)=>{setSection('Agents');setParams({section:'Agents',browser_run:runId,...(options?.review?{browser_panel:'review'}:{})});}} project={p} draft={d} records={r} activity={e} access={a} editable={editable} agentCapability={agentCapability} browserRuntimeCapability={browserRuntimeCapability} openSection={openSection} loadMore={loadMore} busy={busy} onUnavailable={()=>{clearPrivate();setError('Project access is unavailable.');}}/> }
+    {section==='Details'&&detailsPanel}
+    {section==='Guide'&&guidePanel}
+    {section==='Versions'&&versionsPanel}
+    {section==='Runs'&&runsPanelManual}
+    {section==='Access'&&accessPanel}
     {section==='Access'&&<Panel title="Access · Connections"><BrowserConnections base={base} project={p} disabled={busy} onChanged={()=>refresh(false)}/></Panel>}
     {section==='Website reviews'&&(websiteCapability?<WebsiteReviews base={base} project={p} onChanged={()=>refresh(false)}/>:<Panel title="Website reviews"><p>Public website reviews are unavailable on this installation. This workflow requires the reviewed website review runtime.</p></Panel>)}
     {section==='Agents'&&agentCapability&&<><div hidden={deckActive}>{websiteCapability&&<p className="text-sm text-muted-foreground">For a guide-based public HTML/text report, <button className="min-h-11 text-primary underline" onClick={()=>openSection('Website reviews')}>open website reviews</button>.</p>}</div>{browserRuntimeCapability?<BrowserAgents key={base} base={base} project={p} onChanged={()=>refresh(false)} onDeckChange={setBrowserDeckActive} browserRunId={params.get('browser_run')} initialReview={params.get('browser_panel')==='review'} onReturnToProject={()=>openSection('Overview')}/>:browserDraftCapability&&<BrowserConfigurations key={base} base={base} project={p} onChanged={()=>refresh(false)}/>}<div hidden={deckActive}><details onToggle={event=>setRetainedOpen(event.currentTarget.open)} className="rounded-md border p-3"><summary className="min-h-11 cursor-pointer py-3 font-medium">Retained configurations and history</summary>{retainedOpen&&<><BrokerAgents project={p}/><h3 className="font-medium mt-4">Historical sign-in profiles</h3><AgentConfiguration base={base} project={p} runsEnabled={runsCapability} websiteAvailable={websiteCapability} onChanged={()=>refresh(false)}/></>}</details></div></>}

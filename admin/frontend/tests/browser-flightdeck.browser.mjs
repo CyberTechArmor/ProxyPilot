@@ -56,7 +56,7 @@ try{
   const nav=deck.getByRole('navigation',{name:width<1024?'Browser panels':'Run information panels'});
   for(const label of ['Activity','Details','Review']){await nav.getByRole('button',{name:label==='Review'&&pending.length?'Review ('+pending.length+')':label,exact:true}).click();assert.equal(await nav.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');}
   if(width<1024)await nav.getByRole('button',{name:'Browser',exact:true}).click();
-  const full=deck.getByRole('button',{name:'Open fullscreen browser'});await full.click();await deck.getByRole('button',{name:'Exit fullscreen browser'}).waitFor();await page.keyboard.press('Escape');await full.waitFor();assert.equal(await full.evaluate(e=>e===document.activeElement),true,'Escape restores fullscreen opener');
+  const full=deck.getByRole('button',{name:'Open fullscreen browser'});await full.click();await deck.getByRole('button',{name:'Exit fullscreen browser'}).waitFor();await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.fullscreenElement);await full.waitFor();assert.equal(await full.evaluate(e=>e===document.activeElement),true,'Escape restores fullscreen opener');
   if(artifact)await page.screenshot({path:`${artifact}/flightdeck-${width}.png`,fullPage:true});
  }
  const axe=readFileSync(new URL('../../backend/node_modules/axe-core/axe.min.js',import.meta.url),'utf8');await page.evaluate(axe);

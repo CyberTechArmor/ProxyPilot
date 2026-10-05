@@ -85,7 +85,7 @@ export default function Layout() {
   // leaving the studio restores the full sidebar.
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
-    setCollapsed(/^\/projects\/\d+$/.test(location.pathname));
+    setCollapsed(/^\/projects\/\d+$/.test(location.pathname)||/^\/operational-projects\/[^/]+$/.test(location.pathname));
   }, [location.pathname]);
 
   // Close the mobile sidebar whenever the route changes

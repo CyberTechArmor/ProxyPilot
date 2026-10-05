@@ -137,3 +137,41 @@ test('HTTP surface retains feature and sudo gates and has no unattended-start en
   assert.equal((await request('POST','/project-tasks/start-scheduled',{})).statusCode,404);
   const caps=await request('GET','/capabilities');assert.equal(caps.body.streamlined_project_setup,true);
 }));
+
+test('explicit websites accept many domains, deduplicate origins, and automatically structure the exact plain-language objective',withWorld(w=>{
+  const v={...input(),goal:'Compare annual plans, then explain the best option. Mention https://unapproved.example only as context.',websites:'Example.COM/pricing, https://example.com/pricing\nexample.com/annual\nshop.example.com:8443/plans\nhttp://other.example/'},r=w.projects.create(w.owner,v),c=r.task.configuration.configuration;
+  assert.deepEqual(c.destinations.entry_urls,['https://example.com/pricing','https://example.com/annual','https://shop.example.com:8443/plans','http://other.example/']);
+  assert.deepEqual(c.destinations.allowed_origins.map(o=>o.origin),['https://example.com','https://shop.example.com:8443','http://other.example']);
+  assert.equal(c.destinations.allowed_origins.at(-1).session_headers,'omit');
+  assert.equal(r.project.description,v.goal);assert.equal(r.task.configuration.source_text,v.goal);
+  assert.equal(c.work.instructions,r.project.current_version.instructions);assert(c.work.instructions.includes(`## Objective\n${v.goal}`));assert(c.work.instructions.includes('## Websites'));assert(c.work.instructions.includes('## Completion'));
+  assert.equal(count(w,'ops_selected_browser_runs'),0);
+  const edited=w.projects.edit(w.owner,r.project.id,1,editInput(w,r.project.id,{name:v.name,goal:'Compare the new website.',websites:['new.example'],accepted_defaults:PROJECT_DEFAULTS_VERSION}));
+  assert.deepEqual(edited.task.configuration.configuration.destinations.entry_urls,['https://new.example/']);
+  assert.equal(edited.project.current_version.version_number,2);
+}));
+
+test('invalid explicit website lists roll back instead of silently falling back to a URL in the goal',withWorld(w=>{
+  for(const websites of ['',',\n','ftp://example.com','https://user:password@example.com','*.example.com','https://bad_domain.example','example.com some prose','https://example.com\\@other.example',Array.from({length:33},(_,i)=>`site${i}.example`)]){
+    refused(400,()=>w.projects.create(w.owner,{...input(),websites}));
+    assert.equal(count(w,'ops_projects'),0);
+  }
+}));
+
+test('goal-only edits preserve approved advanced destination rules',withWorld(w=>{
+  const saved=w.projects.create(w.owner,{...input(),websites:'example.com/pricing'}),pid=saved.project.id,c=saved.task.configuration;
+  const configuration=structuredClone(c.configuration);configuration.destinations.allowed_origins.push({id:'assets',origin:'https://assets.example.com',roles:['resource'],session_headers:'omit'});
+  w.store.updateBrowserConfiguration(w.owner,pid,c.id,c.revision,{configuration});
+  const edited=w.projects.edit(w.owner,pid,1,editInput(w,pid,{name:saved.project.name,goal:'Summarize the annual plans.',websites:'example.com/pricing',accepted_defaults:PROJECT_DEFAULTS_VERSION}));
+  assert.deepEqual(edited.task.configuration.configuration.destinations.allowed_origins,configuration.destinations.allowed_origins);
+}));
+
+test('readiness returns explicit blockers and is read-only with permission checks',withWorld(async w=>{
+  const saved=w.projects.create(w.owner,{...input(),websites:'example.com'}),pid=saved.project.id;
+  const result=await w.projects.readiness(w.owner,pid);
+  assert.equal(result.can_start,false);assert.equal(result.active_run,null);assert.equal(result.latest_run,null);
+  assert(result.checks.some(c=>c.code==='INSTALLED_SELECTED_BROWSER_PROOF_REQUIRED'));assert.equal(count(w,'ops_selected_browser_runs'),0);
+  const viewer=w.addUser();w.store.grant(w.owner,pid,viewer.id,w.store.get(w.owner,pid).revision,{role:'viewer'});
+  await assert.rejects(w.projects.readiness(viewer,pid),e=>e.status===403);
+  w.enable(false);assert.equal((await w.projects.readiness(w.owner,pid)).checks[0].code,'BROWSER_EXECUTION_DISABLED');
+}));

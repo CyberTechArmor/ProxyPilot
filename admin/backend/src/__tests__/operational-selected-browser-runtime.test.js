@@ -1339,6 +1339,29 @@ test('one-save project immediately starts through the real signed runtime and pr
     await w.runtime.runs.cancel(w.owner,pid,result.run.id,result.run.revision);
   }finally{await w.close();}
 });
+test('structured multi-website project exposes an active run and starts fresh after stop',async()=>{
+  const w=world();try{
+    const saved=w.runtime.projects.create(w.owner,{name:'Compare plans',websites:'example.com/pricing, shop.example.com/plans',goal:'Compare annual plans and explain the differences.',accepted_defaults:PROJECT_DEFAULTS_VERSION,idempotency_key:randomUUID()}),pid=saved.project.id;
+    assert.equal((await w.runtime.projects.readiness(w.owner,pid)).can_start,true);
+    const result=await w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()});
+    assert.equal(result.run.state,'running');assert.equal(JSON.parse(w.launched.configuration_json).work.instructions,saved.project.current_version.instructions);
+    assert.deepEqual((await w.runtime.projects.readiness(w.owner,pid)).active_run,{id:result.run.id,state:'running'});
+    await assert.rejects(()=>w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()}),e=>e.status===409);
+    await w.runtime.runs.cancel(w.owner,pid,result.run.id,result.run.revision);
+    const ready=await w.runtime.projects.readiness(w.owner,pid);assert.equal(ready.active_run,null);assert.equal(ready.latest_run.state,'cancelled');assert.equal(ready.can_start,true);
+    const again=await w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()});assert.equal(again.run.state,'running');assert.notEqual(again.run.id,result.run.id);
+    await w.runtime.runs.cancel(w.owner,pid,again.run.id,again.run.revision);
+  }finally{await w.close();}
+});
+test('simultaneous Run clicks admit one active project attempt',async()=>{
+  const w=world();try{
+    const saved=simpleProject(w),pid=saved.project.id;
+    const attempts=await Promise.allSettled([1,2].map(()=>w.runtime.projects.start(w.owner,pid,{task_revision:saved.task.revision,idempotency_key:randomUUID()})));
+    assert.equal(attempts.filter(r=>r.status==='fulfilled').length,1);const refused=attempts.find(r=>r.status==='rejected');assert.equal(refused.reason.status,409);
+    assert.equal(w.runtime.runs.list(w.owner,pid).runs.length,1);
+    const run=attempts.find(r=>r.status==='fulfilled').value.run;await w.runtime.runs.cancel(w.owner,pid,run.id,run.revision);
+  }finally{await w.close();}
+});
 test('accepted schedule starts after the owner logs out, advances one occurrence, and stops when paused',async()=>{
   const w=world();try{
     const saved=simpleProject(w),pid=saved.project.id,due=new Date(Math.floor(w.now/60000)*60000+120000);

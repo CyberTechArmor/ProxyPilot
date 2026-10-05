@@ -8,7 +8,7 @@ import { Action, Field } from './shared';
 
 export function NewProjectButton() {
   const navigate=useNavigate();
-  const [open,setOpen]=useState(false),[name,setName]=useState(''),[description,setDescription]=useState('');
+  const [open,setOpen]=useState(false),[name,setName]=useState(''),[description,setDescription]=useState(''),[websites,setWebsites]=useState('');
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[defaults,setDefaults]=useState(null),[loaded,setLoaded]=useState(false),saveKey=useRef(null);
   useEffect(()=>{if(!open)return;const c=new AbortController();setLoaded(false);api.get('/capabilities',c.signal).then(async caps=>{const value=caps.streamlined_project_setup?(await api.get('/project-defaults',c.signal)).defaults:null;if(!c.signal.aborted){setDefaults(value);setLoaded(true);}}).catch(e=>{if(!c.signal.aborted)setError(e.message);});return()=>c.abort();},[open]);
   async function create(event) {
@@ -17,23 +17,26 @@ export function NewProjectButton() {
       // No precreate account directory is exposed. Named, owner-authorized
       // account lookup and membership grants are available after creation.
       saveKey.current??=crypto.randomUUID();
-      const result=defaults?await api.write('/project-tasks',{name,goal:description,accepted_defaults:defaults.version,idempotency_key:saveKey.current}):await api.write('',{name,description,members:[]});
+      const result=defaults?await api.write('/project-tasks',{name,websites,goal:description,accepted_defaults:defaults.version,idempotency_key:saveKey.current}):await api.write('',{name,description,members:[]});
       saveKey.current=null;
-      setOpen(false);setName('');setDescription('');
+      setOpen(false);setName('');setDescription('');setWebsites('');
       navigate(`/operational-projects/${result.project.id}`);
     } catch(e) {setError(e.message);} finally {setBusy(false);}
   }
-  function close() {setOpen(false);setName('');setDescription('');setError('');saveKey.current=null;}
+  function close() {setOpen(false);setName('');setDescription('');setWebsites('');setError('');saveKey.current=null;}
   return <Dialog open={open} onOpenChange={value=>{if(!busy){if(value){setOpen(true);setError('');}else close();}}}>
     <DialogTrigger asChild><Button className="min-h-11 gap-2 rounded-md px-4"><Plus className="h-4 w-4" aria-hidden="true"/>New project</Button></DialogTrigger>
     <DialogContent className="operations-dialog max-w-full h-full rounded-none sm:max-w-lg sm:h-auto sm:rounded-md flex flex-col p-6 [&>button]:h-11 [&>button]:w-11 [&>button]:flex [&>button]:items-center [&>button]:justify-center">
-      <DialogHeader className="pr-8"><DialogTitle className="operations-heading">New project</DialogTitle><DialogDescription>Name the project and describe your goal. Accept once to save the complete setup.</DialogDescription></DialogHeader>
-      <form onSubmit={create} className="space-y-4 min-h-0 overflow-y-auto">
+      <DialogHeader className="pr-8"><DialogTitle className="operations-heading">New project</DialogTitle><DialogDescription>Add a name, one or more websites, and your goal in plain language. We create the structured guide and agent setup when you save.</DialogDescription></DialogHeader>
+      <form onSubmit={create} className="flex flex-col flex-1 gap-4 min-h-0">
+        <div className="space-y-4 min-h-0 overflow-y-auto pr-1">
         {error&&<p role="alert" className="text-destructive break-words">{error}</p>}
         <Field label="Name" required maxLength={200} autoFocus value={name} onChange={e=>setName(e.target.value)}/>
+        {defaults&&<div className="space-y-1"><Field label="Websites" required textarea rows={2} maxLength={66000} value={websites} onChange={e=>setWebsites(e.target.value)}/><p className="text-sm text-muted-foreground">One or more domains or full URLs, one per line or separated by commas. Example: example.com, shop.example.com/pricing. Domains use HTTPS.</p></div>}
         <Field label={defaults?"Goal":"Purpose (optional)"} required={!!defaults} textarea rows={4} maxLength={20000} value={description} onChange={e=>setDescription(e.target.value)}/>
-        {defaults&&<><p className="text-sm text-muted-foreground">Describe the task in your own words. Include the website address if the work uses a website.</p><fieldset className="rounded-md border bg-muted/30 p-4 space-y-2"><legend className="text-sm font-semibold px-1">Included defaults</legend><p>Browser agent · {defaults.model}</p><p className="text-sm text-muted-foreground">{defaults.budgets.cpu} CPU · {defaults.budgets.memory_mib} MB memory · {defaults.budgets.temporary_disk_mib} MB temporary storage</p><p className="text-sm text-muted-foreground">Up to {defaults.budgets.max_seconds/60} minutes, {defaults.budgets.max_actions} actions and ${defaults.budgets.max_usd} per run.</p><p className="flex items-center gap-2 text-sm"><Lock className="h-4 w-4 shrink-0" aria-hidden="true"/>Private to you · Recording {defaults.record_video?'on':'off'}</p></fieldset><p className="text-sm text-muted-foreground">By accepting, you approve the goal as the guide and allow the agent to send that guide and bounded website content to the model provider. Changes to websites still require approval. Saving does not start a run.</p></>}
-        <div className="flex flex-col sm:flex-row sm:justify-end gap-2"><Action type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Action><Action type="submit" disabled={busy||!loaded||!name.trim()||(!!defaults&&!description.trim())}>{busy?'Saving…':!loaded?'Loading defaults…':defaults?'Accept & save':'Create project'}</Action></div>
+        {defaults&&<><p className="text-sm text-muted-foreground">Describe what the agent should do and what result you want. Your words become the objective in the structured guide; no extra settings are required.</p><fieldset className="rounded-md border bg-muted/30 p-4 space-y-2"><legend className="text-sm font-semibold px-1">Included defaults</legend><p>Browser agent · {defaults.model}</p><p className="text-sm text-muted-foreground">{defaults.budgets.cpu} CPU · {defaults.budgets.memory_mib} MB memory · {defaults.budgets.temporary_disk_mib} MB temporary storage</p><p className="text-sm text-muted-foreground">Up to {defaults.budgets.max_seconds/60} minutes, {defaults.budgets.max_actions} actions and ${defaults.budgets.max_usd} per run.</p><p className="flex items-center gap-2 text-sm"><Lock className="h-4 w-4 shrink-0" aria-hidden="true"/>Private to you · Recording {defaults.record_video?'on':'off'}</p></fieldset><p className="text-sm text-muted-foreground">By accepting, you approve the generated guide and allow the agent to send that guide and bounded website content to the model provider. Changes to websites still require approval. Saving does not start a run.</p></>}
+        </div>
+        <div className="flex shrink-0 flex-col sm:flex-row sm:justify-end gap-2"><Action type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Action><Action type="submit" disabled={busy||!loaded||!name.trim()||(!!defaults&&(!description.trim()||!websites.trim()))}>{busy?'Saving…':!loaded?'Loading defaults…':defaults?'Accept & save':'Create project'}</Action></div>
       </form>
     </DialogContent>
   </Dialog>;

@@ -14,12 +14,13 @@ export function BrowserProjectDeck({ workspace, browser, actions, activity, deta
     fullscreen.current = createBrowserFullscreen({ element: box.current, onChange: setExpanded });
     return () => fullscreen.current?.close();
   }, []);
+  useEffect(() => { if (workspace.dialogOpen || reviewOpen) void fullscreen.current?.exit(); }, [workspace.dialogOpen,reviewOpen]);
   useEffect(() => { if (workspace.initialReview) { select('activity'); setReviewOpen(true); } }, [workspace.initialReview]);
   useEffect(() => {
     if (reviewComplete > previousCompletion.current) { setReviewOpen(false); select('browser'); }
     previousCompletion.current = reviewComplete;
   }, [reviewComplete, select]);
-  const inspect = () => { select('activity'); setReviewOpen(true); };
+  const inspect = async () => { await fullscreen.current?.exit(); select('activity'); setReviewOpen(true); };
   const tabs = [{key:'activity',label:'Activity',icon:Activity,badge:reviewCount},{key:'browser',label:'Browser',icon:Globe},{key:'resources',label:'Resources',icon:BookOpen}];
   return <section ref={box} tabIndex={-1} aria-label="Browser Flightdeck" data-browser-flightdeck data-browser-fullscreen={expanded}
     className={`browser-project-deck flex min-h-0 min-w-0 flex-1 flex-col bg-background ${expanded ? 'fixed inset-0 z-[60] h-viewport p-3' : ''}`}>

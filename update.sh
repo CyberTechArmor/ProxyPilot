@@ -1421,7 +1421,7 @@ install_update_runner() {
         install -m 0755 "$runner_src" "${runner_dst}.tmp" && mv -f "${runner_dst}.tmp" "$runner_dst"
         log "Installed self-update runner: ${runner_dst}"
     fi
-    for unit in proxypilot-update.service proxypilot-update.path proxypilot-browser-recovery.service; do
+    for unit in proxypilot-update.service proxypilot-update.path proxypilot-browser-recovery.service proxypilot-browser-maintenance.service proxypilot-browser-maintenance.timer; do
         if [[ -f "${SCRIPT_DIR}/deploy/${unit}" ]] && ! cmp -s "${SCRIPT_DIR}/deploy/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null; then
             cp "${SCRIPT_DIR}/deploy/${unit}" "/etc/systemd/system/${unit}"
             chmod 0644 "/etc/systemd/system/${unit}"
@@ -1441,6 +1441,8 @@ install_update_runner() {
     # Re-arm the watcher (a tripped start limit or a changed unit). The
     # service is left alone: on a dashboard-started update it is running us.
     systemctl enable proxypilot-browser-recovery.service
+    # Passive timer: no runtime effect without a separately authenticated opt-in.
+    systemctl enable --now proxypilot-browser-maintenance.timer
     systemctl reset-failed proxypilot-update.path 2>/dev/null || true
     systemctl restart proxypilot-update.path 2>/dev/null || true
     log "${GREEN}Self-update runner ready (proxypilot-update.path enabled)${NC}"

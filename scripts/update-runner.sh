@@ -422,7 +422,7 @@ handle_request() {
     fi
     case "$action" in
         update|check) ;;
-        storage-install|browser-runtime-install|browser-runtime-recover|browser-runtime-rollback)
+        storage-install|browser-runtime-install|browser-runtime-recover|browser-runtime-rollback|browser-runtime-maintenance-enable|browser-runtime-maintenance-disable)
             # No caller-supplied arguments reach the installer. The script name
             # is fixed here, inside the checkout the runner already trusts.
             if [ -n "$flags" ]; then
@@ -494,7 +494,7 @@ handle_request() {
         storage-install)
             run_storage_install
             ;;
-        browser-runtime-install|browser-runtime-recover|browser-runtime-rollback)
+        browser-runtime-install|browser-runtime-recover|browser-runtime-rollback|browser-runtime-maintenance-enable|browser-runtime-maintenance-disable)
             run_browser_runtime "${action#browser-runtime-}"
             ;;
     esac

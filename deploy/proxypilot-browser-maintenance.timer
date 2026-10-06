@@ -1,0 +1,11 @@
+[Unit]
+Description=Check opted-in ProxyPilot browser runtime maintenance
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+Unit=proxypilot-browser-maintenance.service
+
+[Install]
+WantedBy=timers.target

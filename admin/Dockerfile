@@ -54,6 +54,8 @@ WORKDIR /app
 # through nsenter -t 1 — see runEngine() in routes/cves.js.
 #
 #   - python3 + py3-ruamel.yaml: engine runtime
+#   - py3-cryptography: signed Python/JavaScript browser-model receipts
+#   - poppler-utils: fixed-command PDF extraction (isolation still required)
 #   - util-linux: provides nsenter for the host pivot
 #   - git: source-git sync clones into /var/lib/proxypilot/cve-inbox-source
 #   - curl: healthcheck
@@ -66,7 +68,7 @@ WORKDIR /app
 #     /usr/bin/chromium(-browser) automatically; SMOKE_BROWSER_EXECUTABLE
 #     overrides.
 RUN for i in 1 2 3 4 5; do \
-        apk add --no-cache bash openssl coreutils curl python3 py3-ruamel.yaml util-linux git \
+        apk add --no-cache bash openssl coreutils curl python3 py3-ruamel.yaml py3-cryptography poppler-utils util-linux git \
             chromium nss freetype harfbuzz ca-certificates ttf-freefont \
             && break || { \
             echo "apk add attempt $i/5 failed, sleeping $((i*i*2))s"; \
@@ -77,6 +79,8 @@ RUN for i in 1 2 3 4 5; do \
          && command -v openssl >/dev/null \
          && base64 --version >/dev/null \
          && command -v python3 >/dev/null \
+         && python3 -c 'from cryptography.hazmat.primitives.serialization import load_pem_private_key' \
+         && /usr/bin/pdftotext -v >/dev/null 2>&1 \
          && command -v nsenter >/dev/null \
          && command -v git >/dev/null \
          && (command -v chromium >/dev/null || command -v chromium-browser >/dev/null)

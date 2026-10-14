@@ -8,6 +8,8 @@ import { ADMIN_TOOLS, SELF_EDIT_CATALOG } from './admin.js';
 import { BUILD_TOOLS, PROJECT_CONFIG_TOOLS } from './builds.js';
 import { STORAGE_TOOLS } from './storage.js';
 import { MIGRATION_TOOLS } from './migration.js';
+import { APPLICATION_RELEASE_TOOLS } from './application-releases.js';
+import { DISCOVERY_TOOLS } from './discovery.js';
 import { PLATFORM_TOOLS } from './platform.js';
 
 export const MCP_EXT_TOOL_GROUPS = Object.freeze({
@@ -21,6 +23,8 @@ export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   storage: STORAGE_TOOLS,
   migration: MIGRATION_TOOLS,
   platform: PLATFORM_TOOLS,
+  discovery: DISCOVERY_TOOLS,
+  application_releases: APPLICATION_RELEASE_TOOLS,
 });
 
 export const MCP_EXT_TOOLS = Object.freeze(Object.values(MCP_EXT_TOOL_GROUPS).flat());

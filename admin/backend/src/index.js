@@ -771,6 +771,22 @@ if (mock2Gate.enabled) {
     // the token never rides ambient cookies.
     app.use('/api/mock2/git', createMock2GitRouter());
     app.use('/api/mock2', authenticateToken, blockPendingRole, createMock2Router());
+    // Existing application repositories share Dev Studio's optional storage,
+    // while release jobs use the core setup database and its guest locks.
+    const [{ registerApplicationReleaseRoutes }, { getApplicationReleaseService }, applicationJobs] = await Promise.all([
+      import('./routes/application-releases.js'), import('./mock2/application-releases.js'), import('./lib/setup-engine/backend.js'),
+    ]);
+    const applicationService = await getApplicationReleaseService();
+    const applicationRouter = express.Router();
+    registerApplicationReleaseRoutes(applicationRouter, {
+      service: () => applicationService,
+      submitJob: args => applicationJobs.submitApplicationReleaseJob(getDb(), args),
+      listJobs: id => applicationJobs.listApplicationReleaseJobs(getDb(), id),
+      jobDetail: id => applicationJobs.jobDetail(getDb(), id),
+      requireAdmin, requireSudo,
+      audit: (req, action, id, detail) => logAudit(req.user?.id ?? null, action, 'application', String(id), detail, req.ip),
+    });
+    app.use('/api/application-releases', authenticateToken, blockPendingRole, applicationRouter);
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>

@@ -13,6 +13,7 @@
 import os from 'node:os';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveInstall, parseEnvFile } from '../recovery/install.js';
 import { assertEncryptionKey } from '../../../admin/backend/src/lib/secrets.js';
@@ -125,8 +126,18 @@ export async function setupRunnerCommand(action, opts = {}, globalOpts = {}, dep
       return o.code;
     }
     db = o.db;
+    let applicationServicePromise;
+    const applicationService = deps.applicationService || (() => {
+      // The backend may see DATABASE_PATH through a container mount. Resolve
+      // the existing sibling database from this runner's selected host path;
+      // never create a second application registry in the source checkout.
+      if (!applicationServicePromise) applicationServicePromise = import('../../../admin/backend/src/mock2/application-releases.js')
+        .then(m => m.getApplicationReleaseService({ dbPath: path.join(path.dirname(o.install.dbPath), 'mock2.db') }));
+      return applicationServicePromise;
+    });
     const runDeps = {
       db, owner: o.owner, exec: deps.exec, log: json ? () => {} : deps.log, nowMs: deps.nowMs,
+      applicationService,
       // A guest setup's init script is an input file next to the database
       // (setup-inputs.js), read by reference and verified by digest.
       inputsDir: deps.inputsDir || setupInputsDir(o.install.dbPath),

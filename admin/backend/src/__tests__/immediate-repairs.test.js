@@ -339,7 +339,7 @@ test('ratchet (A-17.8): the guest configuration verbs and their pre-mutation sna
   assert.match(executor, /db\.exec\('BEGIN IMMEDIATE'\);\n\s+let out;\n\s+try \{ const gone = renew\(\); if \(gone\) raise\(gone\);/, 'each write renews the claim and every lease inside its own transaction');
   assert.match(executor, /originWriteBegun: chain\.some\(/, 'the executor walks the whole retry chain');
 
-  assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS\]\)/);
+  assert.match(src('lib/setup-engine/logic.js'), /EXCLUSIVE_JOB_KINDS = Object\.freeze\(\['restore_db', 'restore_snapshot', \.\.\.LIFECYCLE_JOB_KINDS, \.\.\.SETUP_JOB_KINDS, \.\.\.CONFIG_JOB_KINDS, 'application_deploy', 'application_rollback'\]\)/);
   assert.match(executor, /keepAlive = setInterval\(\(\) => \{ try \{ const gone = renewAll\(\); if \(gone\) lost = gone; \}/, 'the claim, the guest\'s lease and every held shared lease are heart-beaten during a long command');
   assert.match(executor, /const jobFence = isConfig \? configFence : fence;/, 'and checked before every command');
 });

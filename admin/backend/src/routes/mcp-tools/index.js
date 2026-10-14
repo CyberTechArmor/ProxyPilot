@@ -11,6 +11,9 @@ import { createProjectConfigHandlers } from './project-config.js';
 import { createSelfEditHandlers } from './self-edit.js';
 import { createStorageHandlers } from './storage.js';
 import { createMigrationHandlers } from './migration.js';
+import { createApplicationReleaseHandlers } from './application-releases.js';
+import { createDiscoveryHandlers } from './discovery.js';
+import { createSelfGitHandlers } from './self-git.js';
 import { createPlatformHandlers } from './platform.js';
 
 export function createExtendedHandlers(ctx) {
@@ -26,6 +29,9 @@ export function createExtendedHandlers(ctx) {
     createStorageHandlers(kit),
     createMigrationHandlers(kit),
     createPlatformHandlers(kit),
+    createDiscoveryHandlers(kit),
+    createSelfGitHandlers(kit),
+    createApplicationReleaseHandlers(kit),
   ];
   const out = {};
   for (const fam of families) {

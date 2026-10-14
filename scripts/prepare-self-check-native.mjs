@@ -5,6 +5,8 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
+import { ensureSelfCheckRuntime } from './self-check-runtime.mjs';
 
 const candidate = resolve(process.cwd());
 const expected = resolve('/var/lib/proxypilot/self/candidate/admin/backend');
@@ -34,3 +36,14 @@ try {
   db.close();
 }
 console.log(`Candidate better-sqlite3 ${installed.version} native probe passed`);
+ensureSelfCheckRuntime();
+// Older live check policies run npm ci with NODE_ENV=production, omitting
+// Vite. Prepare the fixed candidate's build tools here so the bootstrap can
+// run all checks with skip_install:true. The new policy includes dev tools
+// explicitly for subsequent releases. This never installs into live source.
+const frontend = resolve(candidate, '../frontend');
+if (!existsSync(join(frontend, 'node_modules/vite/bin/vite.js'))) {
+  const buildTools = spawnSync('npm', ['ci', '--include=dev', '--no-audit', '--no-fund'],
+    { cwd: frontend, env: process.env, stdio: 'inherit', timeout: 15 * 60 * 1000 });
+  if (buildTools.status !== 0) throw new Error('SELF_CHECK_FRONTEND_DEPENDENCIES_FAILED');
+}

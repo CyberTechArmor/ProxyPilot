@@ -14,8 +14,9 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { getMock2Db } from './db.js';
+import { createApplicationGitTransport } from './application-transport.js';
 import { encryptSecret, decryptSecret } from '../lib/secrets.js';
-import { sh } from './host.js';
+import { sh, runHost } from './host.js';
 import { MOCK2_DATA_DIR } from './provision.js';
 import {
   publicGitConnectorShape,
@@ -236,6 +237,8 @@ export async function pushGitDir({ conn, gitDir, remoteRepo }) {
   if (result.code !== 0) return { ok: false, error: out || `git push exited ${result.code}` };
   return { ok: true };
 }
+
+export const applicationGitTransport = createApplicationGitTransport({host:runHost,decryptCredential:decryptGitCredential});
 
 // ---- make sure the remote repo exists (Gitea / GitHub, token connectors) ----
 //

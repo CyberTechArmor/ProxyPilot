@@ -2082,9 +2082,10 @@ test('the router neither enqueues a build nor triggers the paid summary pass', (
   assert.match(routeSrc, /cancelQueuedBuild/);
 });
 
-test('the server instructions state that no tool spends the API budget', () => {
-  assert.match(MCP_SERVER_INSTRUCTIONS, /NO TOOL HERE SPENDS THE PROJECT'S API BUDGET/);
-  assert.match(MCP_SERVER_INSTRUCTIONS, /cannot queue a build/);
+test('the server instructions distinguish free file edits from budgeted build tools', () => {
+  assert.match(MCP_SERVER_INSTRUCTIONS, /Project file tools do not spend model budget/);
+  assert.match(MCP_SERVER_INSTRUCTIONS, /start_project_build.*can spend it and are feature-gated/);
+  assert.doesNotMatch(MCP_SERVER_INSTRUCTIONS, /NO TOOL HERE SPENDS/);
 });
 
 // ---- create_project ----

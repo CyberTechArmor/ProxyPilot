@@ -199,7 +199,7 @@ test('real guest sealing detects changed generated artifact bytes, not merely a 
   const changed=run({action:'artifact',profile,release,...marker}); assert.equal(JSON.parse(changed.stdout).code,'RELEASE_ARTIFACTS_CHANGED');
 });
 
-test('non-root service can traverse private staging and run the actual named npm script', async t => {
+test('non-root service can build, then transfer the validated tree to root for sealing', async t => {
   assert.equal(process.getuid(),0,'this containment fixture requires the root test environment');
   execFileSync('id',['nobody']);
   const privilegeProbe=spawnSync('runuser',['-u','nobody','--','true'],{encoding:'utf8'});
@@ -216,6 +216,11 @@ test('non-root service can traverse private staging and run the actual named npm
   const staged=run({action:'stage',profile,stage,release,bundle,sha:exactSha,treeSha:exactTree,scripts:['check'],user:'nobody',group:''});assert.equal(staged.status,0,staged.stdout);
   const checked=run({action:'script',profile,stage,script:'check',user:'nobody',timeout:10000});assert.equal(checked.status,0,checked.stdout);
   assert.equal(await fs.readFile(path.join(stage,'built.txt'),'utf8'),'nonroot passed');assert.equal((await fs.stat(bundle)).mode&0o777,0o600);
+  assert.notEqual((await fs.stat(stage)).uid,0);
+  const marker={sha:exactSha,treeSha:exactTree,profileDigest,evidenceDigest:'d'.repeat(64)};
+  const sealed=run({action:'seal',profile,stage,release,sha:exactSha,treeSha:exactTree,marker});assert.equal(sealed.status,0,sealed.stdout);
+  assert.equal((await fs.stat(release)).uid,0);assert.equal((await fs.stat(path.join(release,'built.txt'))).mode&0o222,0);
+  const verified=run({action:'artifact',profile,release,...marker,artifactDigest:JSON.parse(sealed.stdout).artifactDigest});assert.equal(verified.status,0,verified.stdout);
 });
 
 test('real guest link program preserves absolute data paths, rejects tracked collision and nested symlink escape', async t => {

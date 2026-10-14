@@ -229,6 +229,11 @@
       "host_command: const r = spawnHostSync('incus', args, { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL' });": 1,
       "host_command: import { spawnHostSync } from '../host-exec.js';": 1
     },
+    "admin/backend/src/lib/setup-engine/application-deploy-op.js": {
+      "host_files: const root = profile.releaseRoot || `/var/lib/proxypilot/application-releases/${params.applicationId}`;": 1,
+      "host_files: export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {": 1,
+      "process_api: const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');": 1
+    },
     "admin/backend/src/lib/setup-engine/config-logic.js": {
       "host_files: disk_source_roots: Array.isArray(devicePolicy.disk_source_roots) && devicePolicy.disk_source_roots.length ? devicePolicy.disk_source_roots : ['/var/lib/proxypilot/shares'],": 1
     },
@@ -336,6 +341,9 @@
       "host_namespace: // inside the host namespace via nsenter.": 1,
       "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
       "process_api: import { exec } from 'child_process';": 1
+    },
+    "admin/backend/src/mock2/application-releases.js": {
+      "host_files: export function createApplicationReleaseService({db,host,transport,getConnector,git:injectedGit,repoRoot='/var/lib/proxypilot/application-repositories'}) {": 1
     },
     "admin/backend/src/mock2/caddy.js": {
       "host_files: // /etc/caddy/sites/*) nor the operator's /etc/caddy/custom/*. It writes its": 1,
@@ -590,6 +598,9 @@
       "host_files: //   candidate slot  /var/lib/proxypilot/self/candidate \u2014 a clone of the live": 1,
       "host_files: try { await access(CAND); } catch { return err(`${CAND} is not visible inside the dashboard container \u2014 the /var/lib/proxypilot bind mount is missing, so checks cannot run here.`); }": 1,
       "process_api: import { spawn } from 'node:child_process';": 1
+    },
+    "admin/backend/src/routes/mcp-tools/self-git.js": {
+      "host_command: const result = await ctx.runHostCapture('git', ['-c', `safe.directory=${dir}`, '-C', dir, ...argv], { timeoutMs: 300000 });": 1
     },
     "admin/backend/src/routes/mcp-tools/static-admin.js": {
       "host_files: // /var/lib/proxypilot/static-releases) with rollback, and aliases (extra": 1,

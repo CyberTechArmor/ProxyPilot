@@ -4548,6 +4548,7 @@ const extended = createExtendedHandlers({
   appendProjectChangeRecord: (project, auth, summary) => mock2Modules().then((m) => appendLifecycleChangeRecord(m, project, auth, summary)),
   selfUpdateInstalled, selfUpdateStart, selfUpdateStatus, SELF_UPDATE_POLICY,
   mintMcpToken, hashMcpToken, MCP_TOOL_NAMES: () => MCP_TOOLS.map((t) => t.name),
+  MCP_CATALOG: () => MCP_TOOLS,
   dbPath: databasePath(),
   listBackupsRunning: null,
   storage: storageService,

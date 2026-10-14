@@ -2,9 +2,12 @@
 // --ignore-scripts. The runtime image has no compiler; that npm command
 // removes native binaries. Refuse a version mismatch and prove the copied
 // binding opens an in-memory database before the complete test suite starts.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { ensureSelfCheckRuntime } from './self-check-runtime.mjs';
 
 const candidate = resolve(process.cwd());
 const expected = resolve('/var/lib/proxypilot/self/candidate/admin/backend');
@@ -34,3 +37,17 @@ try {
   db.close();
 }
 console.log(`Candidate better-sqlite3 ${installed.version} native probe passed`);
+ensureSelfCheckRuntime();
+// Older live check policies run npm ci with NODE_ENV=production, omitting
+// Vite. Prepare the fixed candidate's build tools here so the bootstrap can
+// run all checks with skip_install:true. The new policy includes dev tools
+// explicitly for subsequent releases. This never installs into live source.
+const frontend = resolve(candidate, '../frontend');
+const lockHash = createHash('sha256').update(readFileSync(join(frontend, 'package-lock.json'))).digest('hex');
+const stamp = join(frontend, 'node_modules/.pp-self-check-lock');
+if (!existsSync(join(frontend, 'node_modules/vite/bin/vite.js')) || !existsSync(stamp) || readFileSync(stamp,'utf8') !== lockHash) {
+  const buildTools = spawnSync('npm', ['ci', '--include=dev', '--no-audit', '--no-fund'],
+    { cwd: frontend, env: process.env, stdio: 'inherit', timeout: 15 * 60 * 1000 });
+  if (buildTools.status !== 0) throw new Error('SELF_CHECK_FRONTEND_DEPENDENCIES_FAILED');
+  writeFileSync(stamp,lockHash);
+}

@@ -15,6 +15,7 @@
 //     recorded condition, never silently queued behind a dead holder.
 
 import os from 'node:os';
+import { APPLICATION_JOB_KINDS, validateApplicationJob, applicationGuestName } from './application-deploy-logic.js';
 import crypto from 'node:crypto';
 import { ownerIdentity, reconcileDecision, recoveryJobFrom, verifyJobFrom, parseJson, runnerIsLive, RUNNER_LIVE_MS, validateRunnerJob, TERMINAL_STATUS, executorPolicy, RUNNER_JOB_KINDS } from './logic.js';
 import { setupOutcome } from './setup-logic.js';
@@ -43,7 +44,10 @@ export function sweepSetupEngineOnBoot(db, { owner = backendOwner(), nowMs = Dat
     const d = reconcileDecision({ job, lock, nowMs, canAct: false });
     if (d.action === 'resume') {
       requeueJob(db, { id: job.id, by: owner, reason: d.reason, nowMs });
-      if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      if (lock && lock.owner === job.owner) {
+        if (APPLICATION_JOB_KINDS.includes(job.kind) && parseJson(job.checkpoint_json)?.disruptive) markLockStale(db, { app: job.app, nowMs, recoveryJobId: job.id });
+        else releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      }
       summary.skipped.push(job.id); // requeued for the existing backend drain
     } else if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
@@ -208,6 +212,41 @@ export function submitDeployJob(db, { app, params, requestedBy = null, via = 'sy
   // verifies the older revision if this deploy failed before changing
   // anything (executor, verify_credential_use).
   return { job, created: true };
+}
+
+// The application service resolves and validates references, but never runs
+// application scripts in a request. The independent runner owns all work.
+export async function submitApplicationReleaseJob(db, { applicationId, appId, sha, operation, kind, requestedBy = null, via = 'ui', nowMs = Date.now(), service = null, expectedProfileRevision, expectedProfileDigest, expectedTreeSha }) {
+  const id = applicationId ?? appId;
+  const jobKind = kind || `application_${operation}`;
+  if (!APPLICATION_JOB_KINDS.includes(jobKind)) return { error: 'Unknown application release operation.', code: 'INVALID_OPERATION' };
+  if (!service) { const m = await import('../../mock2/application-releases.js'); service = await m.getApplicationReleaseService(); }
+  let prepared;
+  try { prepared = await (jobKind === 'application_deploy' ? service.prepareDeployment(id, { sha }) : service.prepareCandidate(id, { sha })); }
+  catch (e) { return { error: (e.applicationReleaseSafe || e.name === 'ApplicationReleaseError' || e.constructor?.name === 'ApplicationReleaseError') ? e.message : 'The saved application profile/candidate is not ready for this operation.', code: e.code || 'CANDIDATE_NOT_READY' }; }
+  if ((expectedProfileRevision !== undefined && prepared.profile.revision !== expectedProfileRevision) ||
+      (expectedProfileDigest !== undefined && prepared.profile.digest !== expectedProfileDigest) ||
+      (expectedTreeSha !== undefined && prepared.candidate.treeSha !== expectedTreeSha))
+    return { error: 'Application profile or candidate changed after confirmation; review the current release again.', code: 'STALE_CONFIRMATION' };
+  const p = { applicationId: Number(id), profileRevision: prepared.profile.revision, profileDigest: prepared.profile.digest, sha: prepared.candidate.sha, treeSha: prepared.candidate.treeSha };
+  const v = validateApplicationJob({ kind: jobKind }, p);
+  if (!v.ok) return { error: v.reason, code: 'INVALID_REFERENCE' };
+  const target = applicationGuestName(prepared.profile.targetId);
+  const open = db.prepare(`SELECT * FROM setup_jobs WHERE app = ? AND kind IN (?, ?, ?, ?) AND status IN ('queued','running','recovery_required') AND (outcome IS NULL OR outcome <> 'application_recovered') ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(target, ...APPLICATION_JOB_KINDS);
+  if (open) {
+    if (open.status === 'recovery_required' && jobKind === 'application_rollback' && open.outcome === 'application_recovery_required') {
+      const origin = parseJson(open.plan_json)?.params;
+      if (origin?.applicationId !== p.applicationId || origin.sha !== p.sha || origin.profileDigest !== p.profileDigest) return { error: 'Recover the exact interrupted candidate/profile before selecting another release.', code: 'RECOVERY_REQUIRED' };
+      p.recoveryOf = open.id;
+    } else if (open.kind === jobKind && (parseJson(open.plan_json)?.params?.sha === p.sha) && (parseJson(open.plan_json)?.params?.profileDigest === p.profileDigest)) return { job: open, created: false };
+    else return { error: `Application guest is busy with ${open.kind} (job ${open.id}).`, code: 'APPLICATION_BUSY' };
+  }
+  const job = createJob(db, { kind: jobKind, app: target, plan: { params: p }, configRefs: { applicationId: p.applicationId, profileRevision: p.profileRevision, profileDigest: p.profileDigest }, requestedBy, via, nowMs });
+  return { job, created: true };
+}
+
+export function listApplicationReleaseJobs(db, applicationId, { limit = 30 } = {}) {
+  return db.prepare(`SELECT * FROM setup_jobs WHERE kind IN (?, ?, ?, ?) AND json_extract(plan_json, '$.params.applicationId') = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(...APPLICATION_JOB_KINDS, Number(applicationId), Math.min(100, Math.max(1, Number(limit) || 30))).map(jobView);
 }
 
 // waitForJob(db, id, { pollMs, timeoutMs, onEvent, sleep }) → the terminal row,

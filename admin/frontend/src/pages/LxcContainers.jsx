@@ -32,6 +32,7 @@ import {
   X, Shield, Copy, Sparkles, Pencil, MoveRight
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
+import ApplicationReleases from '@/components/mock2/ApplicationReleases';
 import GitRemoteCard, { EMPTY_REMOTE_DRAFT } from '@/components/mock2/GitRemoteCard';
 import { useSnapshotExports } from '@/context/SnapshotExportContext';
 
@@ -2425,11 +2426,12 @@ export default function LxcContainers() {
               onValueChange={(v) => { setInfoDefaultTab(v); if (v === 'workspace') setWorkspaceVisited(true); }}
               className="w-full flex-1 flex flex-col min-h-0 overflow-hidden"
             >
-              {/* Three triggers fit one row even at 360px (MOBILE_FIRST rule 7). */}
-              <TabsList className="w-full grid grid-cols-3 shrink-0 h-auto">
+              {/* Wrap four tabs on phones; never squeeze their labels. */}
+              <TabsList className="w-full grid grid-cols-2 sm:grid-cols-4 shrink-0 h-auto">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="workspace">Workspace</TabsTrigger>
                 <TabsTrigger value="delegated">Sharing</TabsTrigger>
+                <TabsTrigger value="releases">Releases</TabsTrigger>
               </TabsList>
 
               {/* Details Tab */}
@@ -3535,6 +3537,10 @@ export default function LxcContainers() {
                   title="Git remote"
                   description="Optional. Snapshot a directory inside this container (default: the registered startup directory) into a repository on Gitea or GitHub — automatically after every change made through ProxyPilot, or only when you press Push now."
                 />
+              </TabsContent>
+
+              <TabsContent value="releases" className="flex-1 min-h-0 overflow-y-auto">
+                <ApplicationReleases containerName={selectedContainer.name} />
               </TabsContent>
 
               {/* Workspace Tab — the Flightdeck explorer/editor/preview/terminal

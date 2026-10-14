@@ -77,7 +77,7 @@ export function createConfirmationStore({ now = () => Date.now(), ttlMs = CONFIR
 /* ------------------------------ token scopes --------------------------- */
 
 export const SELF_EDIT_TOOLS = Object.freeze([
-  'get_self_status', 'read_self_file', 'apply_self_patch', 'run_self_checks', 'promote_self', 'rollback_self',
+  'adopt_self_git_commit', 'prepare_self_from_git', 'get_self_status', 'read_self_file', 'apply_self_patch', 'run_self_checks', 'promote_self', 'rollback_self',
 ]);
 
 // Tools a container-scoped or project-scoped key may always call: they carry
@@ -136,10 +136,10 @@ export function scopeRefusal(scope, toolName, args = {}, tool = null, {catalog=f
   if(s.invalid) return 'Malformed key scope; administrator review required';
   if(SELF_EDIT_TOOLS.includes(toolName) && !s.self_edit) return 'This key does not carry the self-editing scope';
   if(s.tools !== null && !s.tools.includes(toolName)) return `${toolName} is not on its allowlist`;
-  const common=['create_scoped_key','create_upload_ticket','append_upload_chunk','finish_upload'];
+  const common=['discover_capabilities','create_scoped_key','create_upload_ticket','append_upload_chunk','finish_upload'];
   const kindTarget=toolTakes(tool,'kind') && toolTakes(tool,'target');
   if(s.lxc_containers !== null) {
-    const neutral=common.includes(toolName) || toolName==='list_lxc_containers';
+    const neutral=common.includes(toolName) || toolName==='list_lxc_containers' || toolName==='list_applications';
     const keys=['container','source_container','target_container','destination_container','new_name'];
     const takes=keys.filter(k=>k!=='new_name').some(k=>tool ? toolTakes(tool,k) : Object.hasOwn(args,k)) || kindTarget;
     if(!neutral && !takes) return 'This key may only call container tools';

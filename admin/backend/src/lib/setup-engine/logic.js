@@ -31,6 +31,7 @@ import { keycloakJobSchema, KEYCLOAK_APP } from './keycloak-logic.js';
 import { validateLifecycleParams } from './lifecycle-logic.js';
 import { validateSetupParams } from './setup-logic.js';
 import { validateConfigParams } from './config-logic.js';
+import { APPLICATION_JOB_KINDS, validateApplicationJob } from './application-deploy-logic.js';
 
 export const HOLDER_KINDS = Object.freeze(['backend', 'runner', 'cli']);
 
@@ -76,17 +77,17 @@ export const SETUP_JOB_KINDS = Object.freeze(['guest_setup']);
 // address pin, port forwards, egress — are runner jobs too; their
 // parameters, fixed commands and read-backs live in config-logic.js.
 export const CONFIG_JOB_KINDS = Object.freeze(['config_set', 'device_add', 'device_remove', 'network_pin', 'forward_apply', 'forward_remove', 'egress_set']);
-export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'keycloak_setup', 'pomerium_apply', 'infisical_apply', 'openbao_apply', 'full_platform_apply', 'vaultwarden_apply', 'keycloak_ldap']);
+export const RUNNER_JOB_KINDS = Object.freeze(['deploy', 'recover_app', 'verify_app', 'probe', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'keycloak_setup', 'pomerium_apply', 'infisical_apply', 'openbao_apply', 'full_platform_apply', 'vaultwarden_apply', 'keycloak_ldap', ...APPLICATION_JOB_KINDS]);
 // The kinds that MUTATE a guest or its storage: one at a time per app, and an
 // exclusive kind is refused (never queued behind) while any of them is open.
-export const MUTATING_JOB_KINDS = Object.freeze(['vaultwarden_apply', 'configure_vaultwarden_route', 'remove_platform_routes', 'update_platform_networks', 'openbao_apply', 'full_platform_apply', 'openbao_operator', 'configure_openbao_route', 'infisical_apply', 'configure_infisical_route', 'pomerium_apply', 'configure_pomerium_routes', 'keycloak_setup', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route', 'deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
+export const MUTATING_JOB_KINDS = Object.freeze([...APPLICATION_JOB_KINDS, 'vaultwarden_apply', 'configure_vaultwarden_route', 'remove_platform_routes', 'update_platform_networks', 'openbao_apply', 'full_platform_apply', 'openbao_operator', 'configure_openbao_route', 'infisical_apply', 'configure_infisical_route', 'pomerium_apply', 'configure_pomerium_routes', 'keycloak_setup', 'configure_keycloak_route', 'verify_sso', 'configure_recovery_route', 'deploy', 'recover_app', 'restore_db', 'restore_snapshot', 'retry_secrets', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'configure_routes']);
 // A restore is destructive, and a lifecycle verb is an operator's immediate
 // action on a guest: neither waits for a held lease (it would run minutes
 // later under a state its operator never looked at) — refused, and refused
 // again rather than queued when no executor is available. A guest setup
 // submitted directly (a retry, an operator's request) is the same; queued as
 // a FOLLOW-UP of a create / start / restart it waits instead (executor).
-export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS]);
+export const EXCLUSIVE_JOB_KINDS = Object.freeze(['restore_db', 'restore_snapshot', ...LIFECYCLE_JOB_KINDS, ...SETUP_JOB_KINDS, ...CONFIG_JOB_KINDS, 'application_deploy', 'application_rollback']);
 // Job kinds the BACKEND records for the operations it still executes itself
 // (they hold the same lock; the runner recovers them when the backend dies).
 // The two restores and the retry mint moved to the runner (A-13…A-15);
@@ -195,6 +196,9 @@ export function leaseHold({ lock, recordingJob = null }) {
   if (j && SETUP_JOB_KINDS.includes(j.kind) && j.status === 'recovery_required' && j.outcome === 'init_uncertain') {
     return { hold: true, reason: `the init script of ${lock.app} has an unknown outcome (job ${j.id}); the lease is held until an operator establishes its writer has stopped and acknowledges that job (POST /api/setup/jobs/${j.id}/acknowledge with writerStopped: true)` };
   }
+  if (j && APPLICATION_JOB_KINDS.includes(j.kind) && ['queued','running','recovery_required'].includes(j.status) && parseJson(j.checkpoint_json)?.disruptive) {
+    return { hold: true, reason: `application release ${j.id} needs recorded recovery before another write` };
+  }
   return { hold: false };
 }
 
@@ -253,7 +257,7 @@ export function redact(value, depth = 0) {
     // object is a record about it (walked), a number or boolean a fact.
     if (typeof v === 'string' && SECRET_KEY_RE.test(k) && !/_(name|names|path|paths|ref|refs|present|count|set|key_names|keys|column|columns|table|tables|file|files|dir|kind|state|id|ids)$/i.test(k) && !/^(has_|is_|n_)/i.test(k)) {
       out[k] = REDACTED;
-    } else if (typeof v === 'string' && /^(sha256|sha512|digest|fingerprint|[a-z_]*_sha256|[a-z_]*_digest)$/i.test(k) && /^[0-9a-f]{32,128}$/i.test(v)) {
+    } else if (typeof v === 'string' && /^(sha256|sha512|digest|fingerprint|profileDigest|evidenceDigest|artifactDigest|previousArtifactDigest|[a-z_]*_sha256|[a-z_]*_digest)$/i.test(k) && /^[0-9a-f]{32,128}$/i.test(v)) {
       // A content hash under a key that SAYS it is one is an identity (a
       // protected copy's sha256, revalidated on retry), not a key value.
       out[k] = v;
@@ -379,6 +383,10 @@ export function reconcileDecision({ job, lock = null, nowMs, canAct = true, runn
   const lease = { lease_expires_at: job.lease_expires_at };
   if (!leaseExpired(lease, nowMs)) return { action: 'nothing', reason: 'lease is live' };
   const cp = parseJson(job.checkpoint_json) || {};
+  if (APPLICATION_JOB_KINDS.includes(job.kind)) {
+    if (cp.applicationRelease && cp.disruptive) return { action: 'resume', reason: 'Interrupted application promotion: recover the recorded previous target and verify; never replay deployment.' };
+    return { action: 'record_interrupted', reason: 'Application job interrupted before promotion; no live switch is replayed. Validate again after the prior writer is reaped.' };
+  }
   if (['verify_sso', 'configure_recovery_route'].includes(job.kind)) return { action: 'resume', reason: 'Revalidate the saved SSO reference and resume the idempotent guided step' };
   if (['vaultwarden_apply','configure_vaultwarden_route'].includes(job.kind)) return { action:'resume', reason:'Re-read saved Vaultwarden intent and owned state; never reset data or regenerate credentials.' };
   if (job.kind === 'keycloak_ldap') return { action: 'resume', reason: 'Resume the directory link request; it re-reads the recorded provider and fails if its one-time passwords expired or were already deleted.' };
@@ -489,6 +497,7 @@ export function validateRunnerJob(job) {
   if (!CONTAINER_NAME_RE.test(String(job.app || ''))) return { ok: false, reason: 'app must be an Incus guest name' };
   const plan = parseJson(job.plan_json) || job.plan || {};
   const p = plan.params || {};
+  if (APPLICATION_JOB_KINDS.includes(job.kind)) return Object.keys(plan).every(k => k === 'params') ? validateApplicationJob(job, p) : { ok: false, reason: 'Application jobs contain immutable references only.' };
   if (job.kind === 'vaultwarden_apply') return vaultwardenJobSchema.safeParse(p).success && job.app === VAULTWARDEN_APP && Object.keys(plan).every(k => k === 'params') ? {ok:true} : {ok:false,reason:'Vaultwarden jobs carry only a saved revision reference.'};
   if (job.kind === 'full_platform_apply') return job.app === 'pp-full-platform' && Number.isInteger(p?.revision) && p.revision > 0 && Object.keys(p).every(k => ['revision', 'operation'].includes(k)) && (p.operation === undefined || ['administrator', 'retire', 'lifecycle', 'reset', 'keycloak_recovery'].includes(p.operation)) && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Full Platform jobs carry only an approved revision reference.' };
   if (job.kind === 'keycloak_ldap') return job.app === 'pp-keycloak-ldap' && Number.isInteger(p?.revision) && p.revision > 0 && ['link', 'remove'].includes(p.operation) && Object.keys(p).every(k => ['revision', 'operation'].includes(k)) && Object.keys(plan).every(k => k === 'params') ? { ok: true } : { ok: false, reason: 'Directory link jobs carry only a saved revision reference and an operation.' };

@@ -40,7 +40,7 @@ verification pending.” Do not describe all eight audit findings as closed.
   legacy root-equivalent baseline secure.
 - CI records new/changed direct-host candidates through
   `scripts/host-boundary-inventory.py`. The checked-in
-  [candidate inventory](security-host-interfaces.json) covers 97 backend files
+  [candidate inventory](security-host-interfaces.json) covers 103 backend files
   matched by namespace, command, process-import and host-path patterns. It
   deliberately includes comments/imports. It is review evidence, not a claim
   that all matches execute or that nonmatching indirect access is safe.
@@ -417,3 +417,46 @@ fresh-sudo cancellation, no POST before verification, one exact setup POST,
 non-replay on refusal and honest pending/unavailable responses. Installed
 host storage verification, activation and any owner restart remain separate
 from this static inventory acceptance.
+
+## Existing application releases and exact-source self preparation
+
+The application release entry points reuse the existing privileged backend and
+setup runner; they do not close S6 or establish isolation from a compromised
+backend. `mock2/application-releases.js` constructs the existing host adapter
+and stores canonical repositories below the configured application repository
+root. Its Git helper imports guest bundles with fixed Incus/Git argv, preserves
+native refs, checks reachable-history hygiene and performs expected-parent
+updates. Repository operations use a durable owner identity and host flock;
+managed Git calls disable detached maintenance. Existing token connectors are
+used only by the host transport through a temporary askpass helper; no new
+credentials, guest credentials or access grants are created. Publication and
+independent remote readback remain separate evidence.
+
+`lib/setup-engine/application-deploy-op.js` runs through the existing setup job
+lease, heartbeat, fencing and durable checkpoints. Job inputs reference a saved
+profile revision and exact source/tree identity. Fixed guest programs stage a
+bundle, invoke reviewed named npm scripts as the existing service identity,
+seal artifacts, verify an already adopted protected symlink layout, switch it
+and restart the saved service. Recovery compares recorded previous/current
+identities before restoration. It does not install a service, convert a plain
+live directory, run a general installer or upgrade Incus. A reviewed npm script
+is executable application code; a root-running application retains root
+execution authority. Reference validation is not sandboxing. The host adapter
+and the guest root commands still need a separately authorized typed controller
+to reduce the existing S6 authority.
+
+`routes/mcp-tools/self-git.js` adds preparation from the configured HTTPS Git
+origin and exact-tree identity alignment. These retain self-edit scope and
+mutation auditing, preserve candidate/rollback refs and invalidate stale checks.
+Alignment requires identical complete source trees, checks on the exact remote
+commit, a fresh confirmation bound to both SHAs and a compare-and-swap of the
+live ref. It requests the existing pinned-build runner; it cannot update the
+protected updater contract through this path. This narrows ordinary operation
+inputs, but backend-held confirmations and Git access are not an independent
+host security boundary.
+
+Coverage: application release route/MCP authorization and profile races,
+repository checkpoint/maintenance/remote-readback tests, runner fencing and
+interrupted activation recovery, and exact-tree self-Git tests. These fixtures
+and source checks do not claim that Nodus has adopted the deployment layout or
+that every application has passed a production rollout.

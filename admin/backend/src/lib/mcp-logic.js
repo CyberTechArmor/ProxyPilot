@@ -39,7 +39,7 @@ export const MCP_SERVER_INFO = { name: 'proxypilot', version: '1.0.0' };
 // FIRST, which is why the working order is stated as an order and not as a
 // list of capabilities.
 export const MCP_SERVER_INSTRUCTIONS = [
-  'ProxyPilot infrastructure control.',
+  'ProxyPilot infrastructure control. Before assuming an operation is unavailable, call discover_capabilities with the task words. It returns workflows and the actual tools this key may call; runtime permissions still apply.',
   'WORKING ON PROJECT FILES — follow this order; it is the difference between six calls and sixty.',
   'Every tool call is a full round trip, so the count of calls is what costs you, not the bytes.',
   '(1) ORIENT with project_map — tracked files, line counts and each file\'s exported symbols in one call.',
@@ -63,8 +63,7 @@ export const MCP_SERVER_INSTRUCTIONS = [
   '{ path: sha } map on apply_project_patch) when something else may be editing the same file.',
   'To ADD to a large file use append_project_file or insert_project_file_at_line — neither moves the existing',
   'content, so neither can truncate it.',
-  'NO TOOL HERE SPENDS THE PROJECT\'S API BUDGET: this server cannot queue a build, so an app change is',
-  'yours to make with the file tools above. create_project and clone_project provision new projects',
+  'Project file tools do not spend model budget; start_project_build and checklist/design tools can spend it and are feature-gated. App changes can be made with the file tools above. create_project and clone_project provision new projects',
   'deterministically; interrupt_project_build and cancel_queued_build stop harness builds started from the UI.',
   'RECLAIMING HOST RESOURCES (archiving idle projects): get_host_usage first (per_project: true says what each',
   'guest holds), then list_projects({ lifecycle: "active", pinned: false }) for the candidates, then ONE',
@@ -78,12 +77,16 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'changing an app read its CLAUDE.md, state/rules.md, state/production-checklist.md and state/decisions.md',
   '(project_map lists them). Rule 0 applies to you too: never invent a gate, flag, allowlist or approval step',
   'the operator did not ask for; classify production-policy questions as a checklist item and keep building.',
-  'GIT REMOTES: projects, static sites and LXC containers can be submitted to Gitea/GitHub — list_git_connectors,',
-  'then set_git_remote (create_repo makes the repo) and push_git_remote; auto mode pushes after each change.',
-  'SELF-UPDATE: check_proxypilot_update says whether a newer ProxyPilot (GitHub) or newer Mock2 standards (the',
-  'site) exist and whether the host can update; run_proxypilot_update({ confirm: true }) runs update.sh on the',
-  'host — backup, pull, rebuild, ~1–2 min of API downtime — so ask the operator first, then poll',
-  'get_proxypilot_update_status through the restart. Never an automatic update: every run is one confirmed call.',
+  'GIT REMOTES: set_git_remote and push_git_remote publish directory snapshots for LXC/static targets, not native Git history.',
+  'For existing applications use discover_capabilities({query: "application git release"}), register_application, checkpoint_application or',
+  'commit_application_changes, validate_application_release, deploy_application_release, verify_application_release, then merge_application_release.',
+  'Candidate, validated artifact, independently verified remote and live process identity are separate evidence. get_git_remote and verify_git_remote inspect legacy snapshot publication.',
+  'SELF-UPDATE: for code-only deployment use get_self_status, prepare_self_from_git with a full reviewed origin SHA,',
+  'run_self_checks, then promote_self. Poll get_proxypilot_update_status through the restart. The promotion uses a',
+  'pinned build and does not request an Incus upgrade. If preparation reports identical source trees with divergent',
+  'commit identities, run_self_checks then adopt_self_git_commit aligns only that identical tree and rebuilds the exact remote commit.',
+  'check_proxypilot_update and run_proxypilot_update({ confirm: true }) are the separate general maintenance path, not the code-only release path.',
+  'Never an automatic update: ask the operator first unless this release is already authorized.',
   MCP_EXT_INSTRUCTIONS,
 ].join(' ');
 

@@ -209,6 +209,13 @@ function uploadZipWithProgress(endpoint, fields, file, onProgress) {
 }
 
 export const api = {
+  listApplications: (targetId) => request(`/application-releases${targetId ? `?targetId=${encodeURIComponent(targetId)}` : ''}`),
+  registerApplication: (profile) => request('/application-releases', { method: 'POST', body: JSON.stringify(profile) }),
+  getApplication: (id) => request(`/application-releases/${encodeURIComponent(id)}`),
+  updateApplicationProfile: (id, profile, expectedRevision) => request(`/application-releases/${encodeURIComponent(id)}/profile`, { method: 'PUT', body: JSON.stringify({ profile, expectedRevision }) }),
+  applicationReleaseAction: (id, action, body) => request(`/application-releases/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body: JSON.stringify(body) }),
+  listApplicationReleaseJobs: (id) => request(`/application-releases/${encodeURIComponent(id)}/jobs`),
+  getApplicationReleaseJob: (id, jobId) => request(`/application-releases/${encodeURIComponent(id)}/jobs/${encodeURIComponent(jobId)}`),
   getSsoSetup: () => request('/setup/platform/sso'),
   saveSsoSetup: (body) => request('/setup/platform/sso', { method: 'PUT', body: JSON.stringify(body) }),
   ssoSetupAction: (action, body) => request(`/setup/platform/sso/${action}`, { method: 'POST', body: JSON.stringify(body) }),

@@ -37,7 +37,7 @@ import { readKeycloak } from './keycloak-store.js';
 // check's outcome lands on both records.
 
 import {
-  claimNextJob, heartbeat, checkpoint, finishJob, recordJobOutcome, staleRunningJobs, readLock, takeoverLock, releaseLock,
+  claimNextJob, heartbeat, checkpoint, finishJob, recordJobOutcome, annotateTerminalOutcome, staleRunningJobs, readLock, takeoverLock, releaseLock,
   acquireLock, markLockStale, holdStaleLock, createJob, openRecoveryJobFor, appendEvent, getJob, renewLock, fenceJob, recordGenerated, recordProgress,
   runnerHeartbeat, requeueJob, recordVerificationRung, annotateJobProgress,
 } from './store.js';
@@ -46,6 +46,7 @@ import {
   FencedError, CancelledError, verificationState, CREDENTIAL_USE_OUTCOMES, adapterErrorDiagnostic,
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
+import { APPLICATION_JOB_KINDS, runApplicationReleaseOperation } from './application-deploy-op.js';
 import { runRestoreDbOperation } from './restore-db-op.js';
 import { runRestoreSnapshotOperation } from './restore-snapshot-op.js';
 import { runRetrySecretsOperation } from './retry-secrets-op.js';
@@ -83,7 +84,10 @@ export function reconcile({ db, owner, nowMs = Date.now(), log = () => {} } = {}
     const cp = parseJson(job.checkpoint_json) || {};
     if (d.action === 'resume') {
       requeueJob(db, { id: job.id, by: owner, reason: `${d.reason}; requeued by ${owner}`, nowMs });
-      if (lock && lock.owner === job.owner) releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      if (lock && lock.owner === job.owner) {
+        if (APPLICATION_JOB_KINDS.includes(job.kind) && cp.disruptive) markLockStale(db, { app: job.app, nowMs, recoveryJobId: job.id });
+        else releaseLock(db, { app: job.app, owner: lock.owner, epoch: lock.epoch });
+      }
       summary.requeued.push(job.id);
     } else if (d.action === 'record_interrupted') {
       recordJobOutcome(db, { id: job.id, status: 'failed', outcome: 'interrupted', reason: `${d.reason}; nothing was left changed`, by: owner, nowMs });
@@ -184,7 +188,7 @@ export function recordUncertainSetup(db, { job, lock, owner, reason, nowMs }) {
 const KEEPALIVE_MS = 10_000;
 const JOB_CLAIM = Symbol('job claim');
 
-export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {}, pomeriumDeps = {}, infisicalDeps = {}, openbaoDeps = {}, vaultwardenDeps = {}, fullPlatformDeps = {}, keycloakLdapDeps = {} }) {
+export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {}, pomeriumDeps = {}, infisicalDeps = {}, openbaoDeps = {}, vaultwardenDeps = {}, fullPlatformDeps = {}, keycloakLdapDeps = {}, applicationService = null }) {
   const epoch = Number(job.epoch);
   let keepLease = false;
   let keepAlive = null;
@@ -196,6 +200,11 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   if (!v.ok) return fin('refused', 'invalid', v.reason);
   const plan = parseJson(job.plan_json) || {};
   const p = plan.params || {};
+  if (APPLICATION_JOB_KINDS.includes(job.kind) && p.recoveryOf) {
+    const origin = getJob(db, p.recoveryOf);
+    const originParams = parseJson(origin?.plan_json)?.params;
+    if (!origin || origin.app !== job.app || origin.status !== 'recovery_required' || origin.outcome !== 'application_recovery_required' || !parseJson(origin.checkpoint_json)?.disruptive || originParams?.applicationId !== p.applicationId || originParams?.sha !== p.sha || originParams?.profileDigest !== p.profileDigest) return fin('refused', 'invalid_recovery_reference', 'The recovery reference does not identify this application and immutable candidate.');
+  }
   const container = String(p.container || job.app);
   const unit = String(p.unit || DEFAULT_UNIT);
   const webPort = Number(p.webPort) || 3000;
@@ -208,7 +217,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   // A follow-up (a verification or recovery queued for another job) is an
   // OBLIGATION: when the app is busy it goes back to the queue with a
   // not-before, never to a terminal 'deferred'.
-  const isFollowUp = !!p.origin?.jobId;
+  const isFollowUp = !!p.origin?.jobId || !!p.recoveryOf || (APPLICATION_JOB_KINDS.includes(job.kind) && parseJson(job.checkpoint_json)?.disruptive === true);
   const event = (kind, message, data = null, phase = null) => appendEvent(db, { jobId: job.id, kind, phase, message, data, nowMs: nowMs() });
   const busy = (holder, operation, { retryMs = FOLLOW_UP_RETRY_MS } = {}) => {
     if (isFollowUp) {
@@ -228,7 +237,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     const existing = readLock(db, job.app);
     if (existing && existing.stale_since && existing.recovery_job_id) {
       const hold = leaseHold({ lock: existing, recordingJob: getJob(db, existing.recovery_job_id) });
-      if (hold.hold) {
+      if (hold.hold && !(APPLICATION_JOB_KINDS.includes(job.kind) && ((p.recoveryOf === existing.recovery_job_id && job.kind === 'application_rollback') || job.id === existing.recovery_job_id))) {
         event('hold', hold.reason, { recording_job: existing.recovery_job_id }, 'lock');
         if (isFollowUp) return busy(existing.owner, `unresolved ${getJob(db, existing.recovery_job_id)?.kind || 'operation'}, see job ${existing.recovery_job_id}`, { retryMs: HOLD_RETRY_MS });
         if (EXCLUSIVE_JOB_KINDS.includes(job.kind)) return fin('refused', 'lock_stale', `a previous ${existing.operation || 'operation'} for ${job.app} did not finish (holder ${existing.owner}, recorded by job ${existing.recovery_job_id}); recovery or acknowledgement is required before ${job.kind} — nothing was done (${hold.reason})`);
@@ -254,7 +263,7 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
     // (a follow-up) or defers (anything else) until the acknowledgement.
     const stale = readLock(db, job.app);
     const hold = leaseHold({ lock: stale, recordingJob: stale?.recovery_job_id ? getJob(db, stale.recovery_job_id) : null });
-    if (hold.hold) {
+    if (hold.hold && !(APPLICATION_JOB_KINDS.includes(job.kind) && ((p.recoveryOf === stale.recovery_job_id && job.kind === 'application_rollback') || job.id === stale.recovery_job_id))) {
       event('hold', hold.reason, { recording_job: stale.recovery_job_id }, 'lock');
       return busy(stale.owner, `unresolved ${getJob(db, stale.recovery_job_id)?.kind || 'operation'}, see job ${stale.recovery_job_id}`, { retryMs: HOLD_RETRY_MS });
     }
@@ -311,6 +320,38 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
   };
 
   try {
+    if (APPLICATION_JOB_KINDS.includes(job.kind)) {
+      if (parseOwner(owner)?.kind !== 'runner' || typeof exec.host !== 'function') {
+        requeueJob(db, { id: job.id, by: owner, reason: 'Existing-application releases require the independent host runner.', notBeforeMs: nowMs() + 30000, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'runner_unavailable' };
+      }
+      let lost = false;
+      const renew = () => {
+        if (!(heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0) || !(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) lost = true;
+      };
+      const guard = (opts = {}) => { if (lost) throw new FencedError(job.id); renew(); if (lost) throw new FencedError(job.id); fence(opts); };
+      keepAlive = setInterval(() => { try { renew(); } catch { lost = true; } }, Math.max(20, keepAliveMs)); keepAlive.unref?.();
+      const handle = { id: job.id, app: job.app, epoch, fence: guard,
+        checkpoint: (phase, data) => { guard(); checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: data, message: phase, nowMs: nowMs() }); },
+        progress: data => { guard(); recordProgress(db, { id: job.id, owner, epoch, progress: data, nowMs: nowMs() }); },
+        event: (kind, message, data = null) => { guard(); event(kind, message, data); } };
+      try {
+        const result = await runApplicationReleaseOperation({ kind: job.kind, params: p, exec, job: handle, prior: parseJson(p.recoveryOf ? getJob(db, p.recoveryOf)?.checkpoint_json : job.checkpoint_json), service: applicationService, ...(sleep ? { sleep } : {}) });
+        guard();
+        if (p.recoveryOf && result.recovered) annotateTerminalOutcome(db, { id: p.recoveryOf, fromStatus: 'recovery_required', outcome: 'application_recovered', reason: `Recovered and verified by application release job ${job.id}.`, nowMs: nowMs() });
+        recordProgress(db, { id: job.id, owner, epoch, progress: { result }, nowMs: nowMs() });
+        return fin(result.ok ? 'succeeded' : 'failed', result.outcome, result.ok ? `Application release ${result.outcome}.` : 'Release failed; the previous application was recovered and verified.', result.verification);
+      } catch (e) {
+        if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e;
+        const cp = parseJson(getJob(db, job.id)?.checkpoint_json) || {};
+        if (cp.applicationRelease && cp.disruptive) {
+          keepLease = true;
+          markLockStale(db, { app: job.app, nowMs: nowMs(), recoveryJobId: job.id });
+          return fin('recovery_required', 'application_recovery_required', 'The release was interrupted during promotion or rollback. Its previous target is preserved in the checkpoint; verify and recover it before another write.', { state: 'recovery_required', previousTarget: cp.previousTarget, nextTarget: cp.nextTarget });
+        }
+        return fin('failed', e.applicationReleaseSafe ? e.code : 'application_operation_failed', e.applicationReleaseSafe ? e.message : 'The application release failed; raw command output is withheld.', { state: 'not_verified' });
+      }
+    }
     if (['keycloak_setup','pomerium_apply','infisical_apply','openbao_apply','vaultwarden_apply','full_platform_apply','keycloak_ldap'].includes(job.kind)) {
       // Managed files belong on the host, not the backend container. A narrower
       // runner-only adapter honors runner-required and never weakens either policy.

@@ -1,3 +1,5 @@
+import { APPLICATION_RELEASE_SCHEMA } from './application-profile.js';
+
 // Mock2 schema migrations — block 500, applied ONLY inside data/db/mock2.db
 // (ADR-001: the Mock2 state file, including model API keys, does not exist
 // on a disabled host). These reuse the main DB's runMigration() version
@@ -1894,5 +1896,10 @@ export const MOCK2_MIGRATIONS = [
         );
       `);
     },
+  },
+  {
+    version: 559,
+    name: 'mock2_existing_application_releases',
+    up: d => d.exec(APPLICATION_RELEASE_SCHEMA),
   },
 ];

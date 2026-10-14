@@ -76,6 +76,30 @@ def resolve(ref):
   p=subprocess.run(['git','--git-dir='+repo,'rev-parse','--verify',prefix+ref+'^{commit}'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
   if p.returncode==0:return p.stdout.decode().strip()
  raise ValueError('The exact branch does not exist in the canonical repository.')
+# Exact synthetic values reviewed in Nodus's credential-redaction tests.
+# Repository annotations cannot grant exceptions. Match each occurrence, not
+# the whole file: an additional or changed credential still blocks import.
+REVIEWED_FIXTURES={
+ '.mock2/features/relay/tests/history.test.ts':[
+  (b'://user:fake@',b'invalid.example'),
+  (b'://user:pass@',b'invalid.example')],
+ 'src/host/providers.test.ts':[
+  (b'sk-proj-abcdefghijklmnopqrstuvwxyz0123',None)],
+ 'src/services/screen-tasks.test.ts':[
+  (b'://name:pass@',b'example.org')]
+}
+CREDENTIAL_PATTERN=re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{20,}|\bgh[pousr]_[A-Za-z0-9]{30,}|://[^\s/:]+:[^\s@/]+@')
+def unreviewed_credentials(data,name):
+ findings=[]
+ for match in CREDENTIAL_PATTERN.finditer(data):
+  reviewed=False
+  for value,host in REVIEWED_FIXTURES.get(name,[]):
+   if match.group()!=value: continue
+   if host is not None and not re.match(re.escape(host)+rb"(?=$|[/\s'\"?#])",data[match.end():]): continue
+   reviewed=True
+   break
+  if not reviewed: findings.append(data[:match.start()].count(b'\n')+1)
+ return findings
 def hygiene(sha):
  lines=git('rev-list','--objects',sha).splitlines()
  if len(lines)>100000: raise ValueError('History hygiene scan exceeds the object limit; review and reduce scope explicitly.')
@@ -90,10 +114,10 @@ def hygiene(sha):
   size=int(git('cat-file','-s',oid));total+=size
   if size>16777216 or total>268435456: raise ValueError('History hygiene scan exceeds its byte limit; not cleared for publication.')
   data=run(['git','--git-dir='+repo,'cat-file','blob',oid])
-  if re.search(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{20,}|\bgh[pousr]_[A-Za-z0-9]{30,}|://[^\s/:]+:[^\s@/]+@',data):
+  if unreviewed_credentials(data,name):
    raise ValueError('Credential pattern detected in reachable history; not cleared for publication.')
   ids.append(oid)
- return {'passed':True,'objects':len(lines),'blobs':len(ids),'bytes':total,'digest':hashlib.sha256(('\n'.join(sorted(ids))).encode()).hexdigest(),'policy':'application-history-v1'}
+ return {'passed':True,'objects':len(lines),'blobs':len(ids),'bytes':total,'digest':hashlib.sha256(('\n'.join(sorted(ids))).encode()).hexdigest(),'policy':'application-history-v2-reviewed-fixtures'}
 try:
  if action=='import':
   sha=import_bundle();out={'sha':sha,'treeSha':git('rev-parse',sha+'^{tree}'),'hygiene':hygiene(sha)}

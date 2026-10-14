@@ -148,3 +148,49 @@ test('explicit absent remote branch can be initialized only after live validatio
  await assert.rejects(w.service.mergeCandidate(app.id,{sha:c.sha}),/explicit null/);
  const result=await w.service.mergeCandidate(app.id,{sha:c.sha,expectedRemoteSha:null});assert.equal(result.ok,true);assert.equal(await git(w.remote,'rev-parse','main'),c.sha);
 });
+
+
+
+test('history hygiene accepts only the reviewed synthetic credential values at their exact test paths',async t=>{
+ const w=await world(t);
+ const fixtures={
+  '.mock2/features/relay/tests/history.test.ts':"const a = 'https://user:fake@invalid.example/path'; const b = 'https://user:pass@invalid.example/events';\n",
+  'src/host/providers.test.ts':"const error = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123';\n",
+  'src/services/screen-tasks.test.ts':"const invalid = 'https://name:pass@example.org';\n",
+ };
+ for(const [path,content] of Object.entries(fixtures)){
+  await mkdir(join(w.source,path,'..'),{recursive:true});
+  await writeFile(join(w.source,path),content);
+ }
+ await git(w.source,'add','.');await git(w.source,'commit','-m','synthetic redaction fixtures');
+ const sha=await git(w.source,'rev-parse','HEAD'),app=await w.service.importApplication(profile(w.source));
+ assert.equal(app.candidates[0].sha,sha);
+ assert.equal(app.candidates[0].hygiene.policy,'application-history-v2-reviewed-fixtures');
+ // Deleting fixtures does not invalidate their reviewed presence in history.
+ for(const path of Object.keys(fixtures))await git(w.source,'rm',path);
+ await git(w.source,'commit','-m','remove fixtures');
+ assert.equal((await w.service.checkpoint(app.id,{ref:'main'})).candidate.hygiene.passed,true);
+});
+
+test('history hygiene still blocks unknown values, copied exceptions, deceptive domains and later removals',async t=>{
+ const fakeKey='sk-proj-'+'z'.repeat(28);
+ const cases=[
+  ['src/host/providers.test.ts',fakeKey],
+  ['src/host/providers.test.ts','sk-proj-abcdefghijklmnopqrstuvwxyz0123suffix'],
+  ['src/host/providers.test.ts','sk-proj-abcdefghijklmnopqrstuvwxyz0123\n'+fakeKey],
+  ['src/host/providers.ts','sk-proj-abcdefghijklmnopqrstuvwxyz0123'],
+  ['src/services/screen-tasks.test.ts','https://name:pass@example.org.evil.test'],
+  ['src/services/screen-tasks.test.ts','https://name:pass@example.org@evil.test'],
+  ['src/services/screen-tasks.test.ts','https://name:different@example.org'],
+  ['.mock2/features/relay/tests/history.test.ts','https://user:fake@real.example'],
+  ['src/host/providers.test.ts','// mock2:allow-secret\n'+fakeKey],
+  ['src/host/providers.test.ts','-----BEGIN PRIVATE KEY-----'],
+ ];
+ for(const [path,content] of cases){
+  const w=await world(t);
+  await mkdir(join(w.source,path,'..'),{recursive:true});await writeFile(join(w.source,path),content);
+  await git(w.source,'add','.');await git(w.source,'commit','-m','unreviewed fixture');
+  await git(w.source,'rm',path);await git(w.source,'commit','-m','remove still-reachable fixture');
+  await assert.rejects(w.service.importApplication(profile(w.source)),/Credential pattern detected/);
+ }
+});

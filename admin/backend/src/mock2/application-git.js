@@ -13,11 +13,35 @@ try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
 except BlockingIOError:
  print(json.dumps({'idle':False} if action=='probe' else {'error':'A host repository operation is still running.'}));sys.exit(0 if action=='probe' else 1)
 if action=='probe':print(json.dumps({'idle':True}));sys.exit(0)
+class CommandFailure(Exception):
+ def __init__(self,argv,code,stderr):
+  text=stderr.decode('utf-8','replace').lower()
+  command='process'
+  scope='guest' if argv[0]=='incus' else 'host'
+  for known in ('status','bundle','fetch','fsck','rev-parse','cat-file','update-ref','symbolic-ref','clone','checkout','apply','write-tree','commit','merge-base','show','ls-tree'):
+   if known in argv:command=known;break
+  category='command_failed'
+  for label,patterns in (
+   ('ref_lock',('cannot lock ref','unable to create','another git process','index.lock','packed-refs.lock')),
+   ('missing_ref',('not our ref','couldn\'t find remote ref','not a valid object','bad object','unknown revision')),
+   ('missing_object',('missing blob','missing tree','missing commit','invalid sha1 pointer','bad file')),
+   ('bundle_invalid',('unrecognized header','does not look like a v2 or v3 bundle','invalid bundle')),
+   ('resource_limit',('cannot fork','unable to fork','unable to create thread','cannot create thread','resource temporarily unavailable','out of memory','cannot allocate memory')),
+   ('permissions',('permission denied','dubious ownership','operation not permitted')),
+  ):
+   if any(pattern in text for pattern in patterns):category=label;break
+  self.diagnostic={'scope':scope,'command':command,'exitCode':code,'category':category}
+  super().__init__('Git or guest read failed ('+scope+' '+command+', exit '+str(code)+', '+category+').')
 def run(argv, **kwargs):
  p=subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=(lock.fileno(),),**kwargs)
- if p.returncode: raise ValueError('Git or guest read failed; verify repository, container and permissions.')
+ if p.returncode: raise CommandFailure(argv,p.returncode,p.stderr)
  return p.stdout
-def git(*args): return run(['git','--no-pager','--git-dir='+repo,*args]).decode().strip()
+def git(*args):
+ # This operation owns repository mutation and its kernel lock. A detached
+ # auto-gc launched by fetch would otherwise repack/prune while the very next
+ # command verifies pack indexes. Maintenance must be an explicit operation,
+ # never a child that outlives this locked checkpoint. Integrity checks remain.
+ return run(['git','--no-pager','-c','maintenance.auto=false','-c','gc.auto=0','--git-dir='+repo,*args]).decode().strip()
 def guest(*args): return run(['incus','exec',v['prefix']+v['targetId'],'--',*args]).decode().strip()
 def import_bundle():
  if guest('git','-C',v['sourceDir'],'rev-parse','--is-shallow-repository')!='false': raise ValueError('A complete, non-shallow guest repository is required.')
@@ -31,10 +55,12 @@ def import_bundle():
   if f.tell()>536870912: raise ValueError('Repository bundle exceeds the 512 MiB import limit.')
   if not pathlib.Path(repo).exists(): run(['git','init','--bare',repo])
   git('bundle','verify',f.name)
-  git('fetch','--no-tags',f.name,'+refs/*:refs/guest/*')
+  # Import every ref and the bundle's own HEAD in one pack transaction. A
+  # second fetch of the identical pack is unnecessary, and rereading guest
+  # HEAD here would race a commit made after the bundle snapshot was taken.
+  git('fetch','--no-tags',f.name,'+refs/*:refs/guest/*','+HEAD:refs/guest/source-head')
   # Keep the initial canonical main separate from future guest checkpoints.
-  head=guest('git','-C',v['sourceDir'],'rev-parse','--verify','HEAD')
-  git('fetch','--no-tags',f.name,head)
+  head=git('rev-parse','--verify','refs/guest/source-head^{commit}')
   git('cat-file','-e',head+'^{commit}')
   if not (pathlib.Path(repo)/'pp-imported').exists():
    result=subprocess.run(['incus','exec',v['prefix']+v['targetId'],'--','git','-C',v['sourceDir'],'symbolic-ref','--quiet','--short','HEAD'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -113,14 +139,14 @@ try:
  else: raise ValueError('Unsupported repository action.')
  print(json.dumps(out))
 except Exception as e:
- print(json.dumps({'error':str(e)}));sys.exit(1)
+ print(json.dumps({'error':str(e),**({'diagnostic':e.diagnostic} if isinstance(e,CommandFailure) else {})}));sys.exit(1)
 `;
 
 export function createApplicationGit({host,prefix=process.env.LXC_PREFIX||'pp-'}) {
   async function action(name, app, extra={}) {
     const result=await host('python3',['-c',SCRIPT],{input:JSON.stringify({action:name,repo:app.repositoryPath,targetId:app.targetId,sourceDir:app.profile.sourceDir,prefix,...extra}),timeoutMs:300000});
     let value;try{value=JSON.parse(result.stdout);}catch{throw new ApplicationReleaseError('REPOSITORY_READ_FAILED','Repository read did not return valid evidence.');}
-    if(result.code!==0||value.error) throw new ApplicationReleaseError('REPOSITORY_READ_FAILED',value.error||'Repository operation failed.');
+    if(result.code!==0||value.error) {const error=new ApplicationReleaseError('REPOSITORY_READ_FAILED',value.error||'Repository operation failed.');if(value.diagnostic)error.diagnostic=value.diagnostic;throw error;}
     return value;
   }
   return {import:app=>action('import',app),checkpoint:(app,ref)=>action('checkpoint',app,{ref}),inspect:(app,sha)=>action('inspect',app,{ref:sha}),source:(app,sha,path)=>action('source',app,{ref:sha,path}),commit:(app,input)=>action('commit',app,input),advance:(app,input)=>action('advance',app,input),probe:app=>action('probe',app)};

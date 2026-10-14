@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { APPLICATION_RELEASE_SCHEMA,normalizeApplicationProfile } from '../mock2/application-profile.js';
 import { createApplicationReleaseService } from '../mock2/application-releases.js';
 import { processStart } from '../mock2/application-store.js';
+import { createApplicationGit } from '../mock2/application-git.js';
 const exec=promisify(execFile),proof='b'.repeat(64);
 const git=async(cwd,...args)=>(await exec('git',['-C',cwd,...args])).stdout.trim();
 const profile=source=>({name:'Fixture',targetId:'fixture',sourceDir:source,serviceName:'fixture.service',healthUrl:'http://127.0.0.1:3000/health',validationScripts:['test'],preservePaths:['/var/lib/fixture'],envFiles:['/etc/fixture.env'],connectorId:1,remoteRepo:'team/fixture',releaseRoot:'/var/lib/fixture-releases'});
@@ -35,13 +36,24 @@ async function world(t,{secret=false}={}) {
  };
  const db=sqlite(join(root,'app.db'));t.after(()=>db.close());
  const service=createApplicationReleaseService({db,host:hostPipe,transport,getConnector:()=>({id:1}),repoRoot:join(root,'canonical')});
- return {root,source,remote,first,second,db,service,transport};
+ return {root,source,remote,first,second,db,service,transport,bin};
 }
 function validate(service,app,candidate){return service.recordValidation(app.id,candidate.sha,{profileDigest:app.profile.digest,treeSha:candidate.treeSha,passed:true,evidenceDigest:proof,artifactDigest:proof,jobId:'validate-1',releasePath:'/releases/'+candidate.sha});}
 
 test('profile accepts references only and rejects shell, traversal, URLs with credentials',()=>{
  const p=profile('/opt/fixture');assert.equal(normalizeApplicationProfile(p).remoteBranch,'main');
  for(const change of [{sourceDir:'/opt/../etc'},{healthUrl:'http://token@127.0.0.1/health'},{buildScript:'build;reboot'},{remoteRepo:'https://other/private'},{envFiles:['/']},{unknown:'value'}])assert.throws(()=>normalizeApplicationProfile({...p,...change}));
+});
+test('failed Git command diagnostics identify the primitive without exposing stderr secrets or paths',async t=>{
+ const root=await mkdtemp(join(tmpdir(),'pp-git-diagnostic-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ await writeFile(join(root,'git'),'#!/bin/sh\nprintf "%s\\n" "fatal: cannot lock ref /private/path https://secret-token@example.test" >&2\nexit 128\n',{mode:0o755});
+ const host=(cmd,args,options)=>new Promise(resolve=>{const p=execFile(cmd,args,{env:{...process.env,PATH:root+':'+process.env.PATH}},(e,stdout,stderr)=>resolve({code:e?.code||0,stdout,stderr}));p.stdin.end(options.input);});
+ const adapter=createApplicationGit({host});
+ await assert.rejects(adapter.inspect({repositoryPath:join(root,'repo.git'),profile:{sourceDir:'/source'},targetId:'fixture'},'a'.repeat(40)),e=>{
+  assert.equal(e.message,'Git or guest read failed (host rev-parse, exit 128, ref_lock).');
+  assert.deepEqual(e.diagnostic,{scope:'host',command:'rev-parse',exitCode:128,category:'ref_lock'});
+  assert.equal(JSON.stringify(e).includes('secret-token'),false);assert.equal(JSON.stringify(e).includes('/private/path'),false);return true;
+ });
 });
 test('imports real full history without flattening it and persists across SQLite reopen',async t=>{
  const w=await world(t),app=await w.service.importApplication(profile(w.source));assert.equal(app.candidates[0].sha,w.second);
@@ -52,6 +64,22 @@ test('imports real full history without flattening it and persists across SQLite
 test('checkpoint resolves newly committed guest branch to exact SHA without moving canonical main',async t=>{
  const w=await world(t),app=await w.service.importApplication(profile(w.source));await writeFile(join(w.source,'hello.txt'),'three\n');await git(w.source,'commit','-am','third');
  const next=await git(w.source,'rev-parse','HEAD'),result=await w.service.checkpoint(app.id,{ref:'main'});assert.equal(result.candidate.sha,next);assert.equal(await git(app.repositoryPath,'rev-parse','main'),w.second);
+});
+test('checkpoint uses bundle HEAD when guest commits after the snapshot',async t=>{
+ const w=await world(t),app=await w.service.importApplication(profile(w.source));
+ await writeFile(join(w.bin,'incus'),`#!/bin/sh\nshift\nshift\nshift\ncase "$*" in\n *"bundle create - --all"*)\n  "$@" || exit $?\n  printf 'racing\\n' > '${w.source}/hello.txt'\n  git -C '${w.source}' commit -am racing >&2\n  ;;\n *) exec "$@";;\nesac\n`,{mode:0o755});
+ const result=await w.service.checkpoint(app.id,{ref:'main'});
+ assert.equal(result.candidate.sha,w.second);
+ assert.notEqual(await git(w.source,'rev-parse','HEAD'),w.second);
+ assert.equal(await git(app.repositoryPath,'rev-parse','refs/guest/source-head'),w.second);
+});
+test('checkpoint does not launch automatic repository maintenance alongside its integrity checks',async t=>{
+ const w=await world(t),app=await w.service.importApplication(profile(w.source)),marker=join(w.root,'auto-gc-ran');
+ await git(app.repositoryPath,'config','gc.autoPackLimit','1');await git(app.repositoryPath,'config','gc.auto','1');
+ await writeFile(join(app.repositoryPath,'hooks/pre-auto-gc'),`#!/bin/sh\ntouch '${marker}'\nexit 1\n`,{mode:0o755});
+ await writeFile(join(w.source,'hello.txt'),'new checkpoint\n');await git(w.source,'commit','-am','new checkpoint');
+ await w.service.checkpoint(app.id,{ref:'main'});
+ await assert.rejects(readFile(marker),{code:'ENOENT'});
 });
 test('source inspection reads the canonical candidate rather than a changed live guest and rejects traversal',async t=>{
  const w=await world(t),app=await w.service.importApplication(profile(w.source));

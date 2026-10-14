@@ -10,7 +10,9 @@ with tempfile.TemporaryDirectory(prefix='pp-git-auth-') as temp:
   f.write('#!/usr/bin/env python3\nimport os,sys\nprint("x-access-token" if "username" in sys.argv[1].lower() else os.environ["PP_GIT_TOKEN"])\n')
  os.chmod(askpass,0o700)
  env={**os.environ,'GIT_ASKPASS':askpass,'GIT_TERMINAL_PROMPT':'0','PP_GIT_TOKEN':v['token']}
- args=['git','--git-dir='+v['gitDir']]
+ # Fetching ancestry must not leave detached maintenance mutating the same
+ # canonical repository after the service's operation lock is released.
+ args=['git','-c','maintenance.auto=false','-c','gc.auto=0','--git-dir='+v['gitDir']]
  if v['operation']=='promote':
   if v['expectedRemoteSha'] is None:
    current=subprocess.run(args+['ls-remote',v['url'],'refs/heads/'+v['branch']],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=120)

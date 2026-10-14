@@ -47,6 +47,9 @@ else if(a.action==='script'){
  out={ok:r.status===0,code:r.status===0?'SCRIPT_PASSED':'SCRIPT_FAILED'};if(!out.ok){process.stdout.write(JSON.stringify(out));process.exit(1)}
 }
 else if(a.action==='seal'){
+ // Builds run as the service user. Reclaim the tree before root-owned Git
+ // integrity checks; leave Git's repository ownership protection enabled.
+ freeze(a.stage);
  if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
  if(run('git',['-C',a.stage,'status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
  const artifactDigest=inventory(a.stage);const fd=fs.openSync(p.join(a.stage,'.proxypilot-release.json'),'wx',0o444);try{fs.writeFileSync(fd,JSON.stringify({...a.marker,artifactDigest}));fs.fsyncSync(fd)}finally{fs.closeSync(fd)}freeze(a.stage);const stageFd=fs.openSync(a.stage,'r');try{fs.fsyncSync(stageFd)}finally{fs.closeSync(stageFd)}fs.renameSync(a.stage,a.release);const parentFd=fs.openSync(p.dirname(a.release),'r');try{fs.fsyncSync(parentFd)}finally{fs.closeSync(parentFd)}out.artifactDigest=artifactDigest;

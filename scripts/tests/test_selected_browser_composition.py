@@ -901,6 +901,30 @@ os.execv('/usr/bin/chromium',['/usr/bin/chromium','--no-sandbox','--log-net-log=
         self.assertTrue(offlist['no_contact'])
         self.assertFalse(any(host == 'frame.example' for host, _ in self.upstream))
 
+    def test_attempt_profile_leaves_no_spellcheck_dictionary_to_download(self):
+        # Chromium 155 copies a fresh profile's legacy spellcheck.dictionary
+        # default into spellcheck.dictionaries and fetches that Hunspell file
+        # from redirector.gvt1.com about 0.3s after start, outside page Fetch.
+        # The wrapper only reads the product's own seed before exec; it never
+        # writes one, so a missing or changed seed fails the launch here.
+        wrapper = self.root / 'chromium'
+        wrapper.write_text(wrapper.read_text().replace("os.execv('/usr/bin/chromium'",
+            "profile=Path(next(a for a in sys.argv[1:] if a.startswith('--user-data-dir=')).split('=',1)[1])\n"
+            "assert json.loads((profile/'Default/Preferences').read_text())=={'browser':{'enable_spellchecking':False},"
+            "'spellcheck':{'dictionaries':[],'dictionary':''}}\n"
+            "os.execv('/usr/bin/chromium'"))
+        self.launch()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            self.assertEqual(self.host.registry.gateway.status()['state'], 'running', self.diagnostics())
+            time.sleep(.05)
+        self.assertEqual(self.browser_wire, [])
+        self.assertEqual(self.browser_service_requests(), [])
+        status = self.host.registry.gateway.status()
+        self.assertEqual(status['requests'], 0)
+        self.assertEqual(status['outstanding_requests'], 0)
+        self.assertEqual(self.upstream, [])
+
     def test_resource_escalation_grant_allows_fresh_read_without_replaying_page_load(self):
         self.launch('/resource')
         old, _ = self.action('navigate')

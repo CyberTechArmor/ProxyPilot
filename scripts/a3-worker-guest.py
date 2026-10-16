@@ -975,6 +975,10 @@ EGRESS_PROBE = '''(async () => {
   return out;
 })()'''
 
+# Selected browser only: the first Preferences of the attempt-private profile.
+SELECTED_PROFILE_PREFERENCES = {'browser': {'enable_spellchecking': False},
+                                'spellcheck': {'dictionaries': [], 'dictionary': ''}}
+
 
 class Browser:
     """One Chromium process tree and its single page, driven by fixed code."""
@@ -1027,6 +1031,16 @@ class Browser:
                              '--gcm-checkin-url=about:blank',
                              '--component-updater=url-source=about:blank',
                              '--gaia-config-contents={"urls":{"list_accounts_url":{"url":"about:blank"}}}']
+            # Chromium 155 copies a fresh profile's legacy spellcheck.dictionary
+            # default (en-US) into spellcheck.dictionaries at startup, then
+            # fetches that Hunspell file from redirector.gvt1.com outside Fetch.
+            # Disabling spellchecking alone still fetches it; an empty list and
+            # an empty legacy value leave no dictionary to download.
+            seeded = os.path.join(profile, 'Default')
+            os.makedirs(seeded, mode=0o700, exist_ok=True)
+            with open(os.open(os.path.join(seeded, 'Preferences'),
+                              os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), 'w') as stream:
+                json.dump(SELECTED_PROFILE_PREFERENCES, stream)
         argv = [CHROMIUM, *mode, '--remote-debugging-pipe',
                 '--user-data-dir=' + profile, '--no-first-run', '--no-default-browser-check',
                 '--disable-background-networking', '--disable-component-update',

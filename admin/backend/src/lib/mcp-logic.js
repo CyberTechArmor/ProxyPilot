@@ -80,6 +80,7 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'GIT REMOTES: set_git_remote and push_git_remote publish directory snapshots for LXC/static targets, not native Git history.',
   'For existing applications use discover_capabilities({query: "application git release"}), register_application, checkpoint_application or',
   'commit_application_changes, validate_application_release, deploy_application_release, verify_application_release, then merge_application_release.',
+  'A large application diff goes through create_upload_ticket and commit_application_changes({ticket}) as ONE commit, not many inline pieces.',
   'Candidate, validated artifact, independently verified remote and live process identity are separate evidence. get_git_remote and verify_git_remote inspect legacy snapshot publication.',
   'SELF-UPDATE: for code-only deployment use get_self_status, prepare_self_from_git with a full reviewed origin SHA,',
   'run_self_checks, then promote_self. Poll get_proxypilot_update_status through the restart. The promotion uses a',

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { parseTokenScope } from '../../lib/mcp-ext/logic.js';
 
 export function createApplicationReleaseHandlers(kit) {
@@ -59,9 +60,17 @@ export function createApplicationReleaseHandlers(kit) {
     }),
     commit_application_changes: write('commit_application_changes', async (args,auth,req,note)=>{
       const {s,app}=await appFor(args);note.subject_id=app.id;
-      const d=dry(args,{...next(app),parent_sha:args.parent_sha,branch:args.branch,message:args.message,patch_bytes:Buffer.byteLength(args.patch||'')});if(d)return d;
+      // The diff comes inline or, when it is too large to send in one call, from an upload ticket
+      // (create_upload_ticket + PUT, or append_upload_chunk + finish_upload). The ticket is single-use and is
+      // only taken once the commit is confirmed, so a preview or a missing confirmation leaves it usable.
+      const inline=typeof args.patch==='string'&&args.patch!=='',ticketed=typeof args.ticket==='string'&&args.ticket!=='';
+      if(inline===ticketed)return err('Provide exactly one of patch (a unified diff) or ticket (an upload ticket holding it).');
+      const d=dry(args,{...next(app),parent_sha:args.parent_sha,branch:args.branch,message:args.message,...(inline?{patch_bytes:Buffer.byteLength(args.patch)}:{patch_source:'ticket',ticket:'consumed on apply'})});if(d)return d;
       const gate=confirmFlag(args,note,'Create a real source commit on the exact parent and branch.');if(gate)return gate;
-      const result=await s.commitChanges(app.id,{parentSha:args.parent_sha,branch:args.branch,message:args.message,patch:args.patch});note.summary='committed application changes';return ok(result);
+      let patch=args.patch;
+      if(ticketed){try{const t=await ctx.takeUploadTicket(args.ticket);patch=t.buf.toString('utf8');await t.discard();}catch(e){note.refused=true;return err(e.message);}}
+      if(args.sha256&&createHash('sha256').update(patch,'utf8').digest('hex')!==String(args.sha256).toLowerCase()){note.refused=true;return err('sha256 does not match the diff that arrived; nothing was committed. Upload it again.');}
+      const result=await s.commitChanges(app.id,{parentSha:args.parent_sha,branch:args.branch,message:args.message,patch});note.summary='committed application changes';return ok(result);
     }),
     prepare_application_release: reader('prepare_application_release',async args=>{const {s,app}=await appFor(args);const p=await s.prepareCandidate(app.id,{sha:args.sha});return ok({application_id:app.id,sha:p.candidate.sha,tree_sha:p.candidate.treeSha,profile_revision:p.profile.revision,profile_digest:p.profile.digest,...next(app,args.sha)});}),
     get_application_job: reader('get_application_job', async args=>{

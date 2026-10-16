@@ -85,8 +85,13 @@ optional schemas; it never expands a key's permissions or enables a flag.
 2. `checkpoint_application` imports an already committed guest ref, or
    `inspect_application_source` reads the exact canonical candidate and
    `commit_application_changes` creates a real review-branch commit from a diff
-   with an exact parent. `update_application_profile` saves deliberate changes
-   with the expected revision.
+   with an exact parent. A diff too large for one call (up to 1 MiB) is
+   uploaded first with `create_upload_ticket` (then PUT, or
+   `append_upload_chunk` + `finish_upload`) and passed as `ticket`, optionally
+   with its `sha256`, so a whole change is one commit instead of many inline
+   pieces. The ticket is single-use and is taken only when the commit is
+   confirmed. `update_application_profile` saves deliberate changes with the
+   expected revision.
 3. `prepare_application_release`, then `validate_application_release` and poll
    `get_application_job`. Fix failed validation and create a new candidate.
 4. Optionally `publish_application_release` to an explicit review branch and

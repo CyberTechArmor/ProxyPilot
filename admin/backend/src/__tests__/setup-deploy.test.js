@@ -544,13 +544,25 @@ test('contention: a restore is refused while the runner deploys (no change), and
 // ── real processes ──────────────────────────────────────────────────────
 
 test('a guest script carrying the deploy marker is really killed by the reap and none survive (real child process)', { skip: !HAS_PKILL && 'pkill/pgrep not installed' }, async (t) => {
+  // This reap runs on the host that runs the suite (run_self_checks: the
+  // live ProxyPilot host, whose PID namespace shows the guests' real
+  // deploys), so it sweeps a per-run token. The production script is the
+  // same with DEPLOY_MARKER, and a process carrying that must survive.
+  const token = `pp_orphan_test_${process.pid}_${randomBytes(4).toString('hex')}`;
+  assert.match(reapOrphansScript(), new RegExp(`^pkill -9 -f ${DEPLOY_MARKER} `), 'production sweeps the deploy marker');
+  assert.equal(reapOrphansScript({ marker: token }), reapOrphansScript().replaceAll(DEPLOY_MARKER, token));
+  assert.throws(() => reapOrphansScript({ marker: '.*' }), /marker must be a plain identifier/);
   // A trailing builtin keeps ash from exec-optimizing the final sleep and
   // losing the marker before the reaper gets to inspect the fixture.
-  const child = spawn('sh', ['-c', `: ${DEPLOY_MARKER}_realtest; sleep 60; :`], { stdio: 'ignore', detached: true });
-  t.after(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } });
+  const child = spawn('sh', ['-c', `: ${token}_realtest; sleep 60; :`], { stdio: 'ignore', detached: true });
+  const unrelated = spawn('sh', ['-c', `: ${DEPLOY_MARKER} job=unrelated-release; sleep 60; :`], { stdio: 'ignore', detached: true });
+  t.after(() => { for (const c of [child, unrelated]) { try { process.kill(-c.pid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') throw e; } } });
+  // Alive means running, not a zombie (kill(pid, 0) answers yes for a corpse); without /proc, kill(pid, 0) is all there is.
+  const aliveNow = (pid) => { try { process.kill(pid, 0); } catch { return false; } try { return !/\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8')); } catch { return process.platform !== 'linux'; } };
   await new Promise((r) => setTimeout(r, 150));
   assert.doesNotThrow(() => process.kill(child.pid, 0), 'the stale writer is alive before the reap');
-  if (process.platform === 'linux') assert.match(readFileSync(`/proc/${child.pid}/cmdline`, 'utf8'), new RegExp(DEPLOY_MARKER), 'the live fixture still carries the marker');
+  assert.ok(aliveNow(unrelated.pid), 'the unrelated production-marker process is alive before the reap');
+  if (process.platform === 'linux') assert.match(readFileSync(`/proc/${child.pid}/cmdline`, 'utf8'), new RegExp(token), 'the live fixture still carries the marker');
   const localSh = { guest: (_c, script, { timeoutMs = 10_000 } = {}) => new Promise((resolve) => {
     const p = spawn('sh', [], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
@@ -559,14 +571,12 @@ test('a guest script carrying the deploy marker is really killed by the reap and
     p.on('close', (code) => { clearTimeout(t); resolve({ code, stdout, stderr }); });
     p.stdin.end(script);
   }) };
-  const r = await localSh.guest('local', reapOrphansScript());
+  const r = await localSh.guest('local', reapOrphansScript({ marker: token }));
   assert.equal(r.code, 0, r.stderr);
   assert.equal(parseOrphans(r.stdout), 0, `no survivors: ${r.stdout} ${r.stderr}`);
   await new Promise((r2) => setTimeout(r2, 100));
-  let alive = true;
-  try { process.kill(child.pid, 0); } catch { alive = false; }
-  if (alive) { try { const st = readFileSync(`/proc/${child.pid}/stat`, 'utf8'); alive = !/\) Z /.test(st); } catch { alive = false; } }
-  assert.equal(alive, false, 'the stale writer is dead');
+  assert.equal(aliveNow(child.pid), false, 'the stale writer is dead');
+  assert.ok(aliveNow(unrelated.pid), 'the unrelated production-marker process is neither killed nor counted');
   child.on('error', () => {});
 });
 

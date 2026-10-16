@@ -62,10 +62,11 @@ import { installBrowserScript } from '../../mock2/scaffold-e2e.js';
 import {
   activeKeyScript, credentialProbeScript, credentialVerdict, healthScript, parseHealth, verificationFromObservations, parseUnitStatus,
   containedScript, reapStaleWritersScript, parseStaleWriters, protectedCopiesScript, parseProtectedCopies, classifyMigrateScript, CONTAINMENT_RUN_DIR, CONTAINMENT_UNAVAILABLE_RC, parseContainment,
+  DEPLOY_MARKER, checkedMarker,
 } from './guest-probes.js';
 import { sanitizeReason } from './logic.js';
 
-export const DEPLOY_MARKER = 'mock2_deploy_marker';
+export { DEPLOY_MARKER };
 export const UNIT_NAME = 'mock2-dev.service';
 export const UNIT_PATH = `/etc/systemd/system/${UNIT_NAME}`;
 export const INSTALL_STAMP_PATH = 'node_modules/.mock2-install-stamp';
@@ -92,12 +93,14 @@ export class PreviousWriterAliveError extends Error {
 // reapOrphansScript() → kills every process carrying the marker, then reports
 // how many still carry it: `ORPHANS:<n>`. pkill never signals its own shell
 // (the marker rides in this script's own text too, which is why the count
-// excludes the reporting shell by pid).
-export function reapOrphansScript() {
+// excludes the reporting shell by pid). `marker` is what both match (see
+// DEPLOY_MARKER in guest-probes).
+export function reapOrphansScript({ marker = DEPLOY_MARKER } = {}) {
+  const mark = checkedMarker(marker);
   return [
-    `pkill -9 -f ${DEPLOY_MARKER} 2>/dev/null || true`,
+    `pkill -9 -f ${mark} 2>/dev/null || true`,
     'sleep 1',
-    `n=$(pgrep -f ${DEPLOY_MARKER} 2>/dev/null | grep -v "^$$\$" | wc -l | tr -d ' ')`,
+    `n=$(pgrep -f ${mark} 2>/dev/null | grep -v "^$$\$" | wc -l | tr -d ' ')`,
     'echo "ORPHANS:${n:-0}"',
     '',
   ].join('\n');

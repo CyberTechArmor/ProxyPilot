@@ -307,6 +307,18 @@ export function classifyMigrateScript(stdout, contractMigrate = null) {
 export const CONTAINMENT_RUN_DIR = '/run/mock2-deploy';
 export const CONTAINMENT_UNAVAILABLE_RC = 97;
 const JOB_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
+// The marker deploy scripts carry in their text, and the pattern the legacy
+// sweeps match with `pgrep -f` / `pkill -f`. A test that runs one of those
+// sweeps on a real host passes its own per-run token instead: the host's PID
+// namespace shows every guest's processes, so the production marker would
+// match (and kill) a real deploy running in a guest.
+export const DEPLOY_MARKER = 'mock2_deploy_marker';
+const MARKER_RE = /^[A-Za-z][A-Za-z0-9_]{7,63}$/;
+export function checkedMarker(marker) {
+  const m = String(marker);
+  if (!MARKER_RE.test(m)) throw new Error('marker must be a plain identifier of 8 to 64 letters, digits or underscores');
+  return m;
+}
 // The cgroup roots, in preference order; tests point these at a temp tree.
 export const CGROUP_ROOTS = Object.freeze({ v2: '/sys/fs/cgroup', v1pids: '/sys/fs/cgroup/pids' });
 
@@ -350,11 +362,13 @@ export function parseContainment(stderr) {
 // reapStaleWritersScript(currentJobId) → kills every group another job
 // recorded (scope units, cgroups), then the legacy marker scripts that carry
 // no job id or another one, waits, and reports live survivors as
-// `STALE_WRITERS:<n>`. Records whose groups are empty are removed.
-export function reapStaleWritersScript(currentJobId, { runDir = CONTAINMENT_RUN_DIR } = {}) {
+// `STALE_WRITERS:<n>`. Records whose groups are empty are removed. `marker`
+// is what the legacy sweep and its count match (see DEPLOY_MARKER).
+export function reapStaleWritersScript(currentJobId, { runDir = CONTAINMENT_RUN_DIR, marker = DEPLOY_MARKER } = {}) {
   const id = String(currentJobId || 'adhoc');
   if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
   if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
+  const mark = checkedMarker(marker);
   return [
     `RUN='${runDir}'; CUR='${id}'; me=$$`,
     // A killed process nobody has reaped yet is a zombie, not a writer.
@@ -366,13 +380,13 @@ export function reapStaleWritersScript(currentJobId, { runDir = CONTAINMENT_RUN_
     // 2) raw cgroups of other jobs: cgroup.kill where the kernel has it, a kill loop otherwise.
     'for f in $(others cgroups); do for g in $(cat "$f" 2>/dev/null); do [ -d "$g" ] || continue; if [ -f "$g/cgroup.kill" ]; then echo 1 > "$g/cgroup.kill" 2>/dev/null || true; else for p in $(cat "$g/cgroup.procs" 2>/dev/null); do [ "$p" = "$me" ] || kill -9 "$p" 2>/dev/null || true; done; fi; done; done',
     // 3) legacy marker scripts (pre-containment deploys) that are not ours.
-    `for p in $(pgrep -f mock2_deploy_marker 2>/dev/null); do [ "$p" = "$me" ] && continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) kill -9 "$p" 2>/dev/null || true;; esac; done`,
+    `for p in $(pgrep -f ${mark} 2>/dev/null); do [ "$p" = "$me" ] && continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) kill -9 "$p" 2>/dev/null || true;; esac; done`,
     'sleep 1',
     'n=0',
     // Count what is still alive in each group; drop the records of empty ones.
     'for f in $(others units); do left=0; for u in $(cat "$f" 2>/dev/null); do cg=$(systemctl show -p ControlGroup --value "$u" 2>/dev/null); if [ -n "$cg" ] && [ -f "/sys/fs/cgroup$cg/cgroup.procs" ]; then left=$((left + $(live_in "/sys/fs/cgroup$cg/cgroup.procs"))); elif systemctl is-active --quiet "$u" 2>/dev/null; then left=$((left + 1)); fi; done; n=$((n + left)); [ "$left" -eq 0 ] && rm -f "$f"; done',
     'for f in $(others cgroups); do left=0; for g in $(cat "$f" 2>/dev/null); do [ -d "$g" ] || continue; l=$(live_in "$g/cgroup.procs"); left=$((left + l)); [ "$l" -eq 0 ] && rmdir "$g" 2>/dev/null; done; n=$((n + left)); [ "$left" -eq 0 ] && rm -f "$f"; done',
-    `for p in $(pgrep -f mock2_deploy_marker 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" || continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) n=$((n + 1));; esac; done`,
+    `for p in $(pgrep -f ${mark} 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" || continue; c=$(tr '\\0' ' ' < /proc/$p/cmdline 2>/dev/null); case "$c" in *"job=$CUR"*) ;; *) n=$((n + 1));; esac; done`,
     'echo "STALE_WRITERS:$n"',
     '',
   ].join('\n');

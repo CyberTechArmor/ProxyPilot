@@ -32,12 +32,13 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, writeFileSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 
 import { ensureSetupEngineSchema, getJob, listEvents, readLock, acquireLock, releaseLock, claimNextJob, createJob } from '../lib/setup-engine/store.js';
 import { ownerIdentity, parseJson, CREDENTIAL_USE_OUTCOMES } from '../lib/setup-engine/logic.js';
 import { submitDeployJob } from '../lib/setup-engine/backend.js';
 import { runOnce } from '../lib/setup-engine/executor.js';
-import { containedScript, reapStaleWritersScript, parseStaleWriters, parseContainment, CONTAINMENT_UNAVAILABLE_RC } from '../lib/setup-engine/guest-probes.js';
+import { containedScript, reapStaleWritersScript, parseStaleWriters, parseContainment, CONTAINMENT_UNAVAILABLE_RC, DEPLOY_MARKER } from '../lib/setup-engine/guest-probes.js';
 import { scriptedGuest, noSecretIn, PARAMS, LOGIN } from './helpers/scripted-guest.js';
 
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -68,8 +69,18 @@ function availableMechanisms() {
 const MECHANISMS = availableMechanisms();
 const HAS_TOOLS = spawnSync('sh', ['-c', 'command -v setsid && command -v pgrep'], { encoding: 'utf8' }).status === 0;
 const NONE = '/nonexistent/cgroup-root-for-tests';
+// run_self_checks runs this suite on the live ProxyPilot host, whose PID
+// namespace shows the guests' real deploy scripts. Every real reap here
+// sweeps this per-run token, never DEPLOY_MARKER, so it can only count or
+// kill processes this file started.
+const TOKEN = `pp_reap_test_${process.pid}_${randomBytes(4).toString('hex')}`;
+const MARKER_SWEEP = new RegExp(`\\bp(?:grep|kill)\\b[^\\n]*\\b${DEPLOY_MARKER}\\b`);
+// A marked script that stays alive: the trailing builtin keeps sh from
+// exec-optimizing the sleep and losing the marker with it.
+const markedProcess = (text) => spawn('sh', ['-c', `: ${text}; sleep 60; :`], { stdio: 'ignore', detached: true });
 
 const localSh = (script, timeoutMs = 10_000) => new Promise((resolve) => {
+  assert.equal(MARKER_SWEEP.test(script), false, 'a real-process test never sweeps the production marker on this host');
   const p = spawn('sh', [], { stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = '';
   p.stdout.on('data', (x) => { stdout += x; }); p.stderr.on('data', (x) => { stderr += x; });
@@ -86,8 +97,12 @@ for (const mech of MECHANISMS) {
     const runDir = join(root, 'run');
     const out = join(root, 'out.txt');
     const opts = { runDir, cgroupV2Root: mech.kind === 'cgroup2' ? mech.root : NONE, cgroupV1Root: mech.kind === 'cgroup1' ? mech.root : NONE, allowSystemd: false };
+    // Per-run job ids: the cgroups live under the real root, so a concurrent
+    // run of this suite must not share them.
+    const tag = randomBytes(3).toString('hex');
+    const DEAD = `dead-job-${tag}`; const CUR = `current-job-${tag}`;
     const spawned = [];
-    let appService = null;
+    let appService = null; let unrelated = null;
     try {
       // The dead job's script: contained, spawns a child that makes its OWN
       // session (setsid), then exits. The child keeps writing.
@@ -96,12 +111,12 @@ for (const mech of MECHANISMS) {
         `setsid sh -c 'echo "CHILD_PID:$$"; while :; do echo x >> "${out}"; sleep 0.05; done' </dev/null >>"${root}/child.log" 2>&1 &`,
         'sleep 0.3; cat "' + root + '/child.log"; exit 0',
       ].join('\n');
-      const r0 = await localSh(containedScript('dead-job', body, opts));
+      const r0 = await localSh(containedScript(DEAD, body, opts));
       assert.equal(r0.code, 0, r0.stderr);
       const c = parseContainment(r0.stderr);
       assert.equal(c?.kind, mech.kind, `the wrapper reports the mechanism it used: ${r0.stderr}`);
-      assert.ok(c.ref.startsWith(join(mech.root, 'mock2-deploy', 'dead-job')), c.ref);
-      const recorded = readFileSync(join(runDir, 'dead-job.cgroups'), 'utf8').trim().split('\n');
+      assert.ok(c.ref.startsWith(join(mech.root, 'mock2-deploy', DEAD)), c.ref);
+      const recorded = readFileSync(join(runDir, `${DEAD}.cgroups`), 'utf8').trim().split('\n');
       assert.deepEqual(recorded, [c.ref], 'the cgroup is recorded under the job');
       const parentSid = Number((r0.stdout.match(/^PARENT_SID:(\d+)/m) || [])[1]);
       const childPid = Number((r0.stdout.match(/^CHILD_PID:(\d+)/m) || [])[1]);
@@ -121,30 +136,40 @@ for (const mech of MECHANISMS) {
       // (in the real guest it lives in its unit's cgroup under systemd).
       appService = spawn('sleep', ['30'], { stdio: 'ignore' });
       // A legitimate holder: the CURRENT job's own contained process.
-      const holder = await localSh(containedScript('current-job', `sleep 30 </dev/null >/dev/null 2>&1 & echo HOLDER:$!; exit 0\n`, opts));
+      const holder = await localSh(containedScript(CUR, `sleep 30 </dev/null >/dev/null 2>&1 & echo HOLDER:$!; exit 0\n`, opts));
       assert.equal(holder.code, 0, holder.stderr);
       const holderPid = Number((holder.stdout.match(/HOLDER:(\d+)/) || [])[1]);
       assert.ok(holderPid > 0); spawned.push(holderPid);
       assert.ok(alive(holderPid));
+      // An unrelated deploy running in a guest, as the host's PID namespace
+      // shows it: the PRODUCTION marker and another job's id. Not ours.
+      unrelated = markedProcess(`${DEPLOY_MARKER} job=unrelated-release`);
+      await sleep(150);
+      assert.ok(alive(unrelated.pid));
+      assert.match(readFileSync(`/proc/${unrelated.pid}/cmdline`, 'utf8'), new RegExp(DEPLOY_MARKER), 'the unrelated process carries the production marker');
 
       // Takeover: the current job reaps every OTHER job's group.
-      const reap = await localSh(reapStaleWritersScript('current-job', { runDir }));
+      const reap = await localSh(reapStaleWritersScript(CUR, { runDir, marker: TOKEN }));
       assert.equal(reap.code, 0, reap.stderr);
       assert.equal(parseStaleWriters(reap.stdout), 0, `no survivors: ${reap.stdout} ${reap.stderr}`);
       assert.equal(alive(childPid), false, 'the escaped child is stopped');
       const sizeAfter = statSync(out).size; await sleep(400);
       assert.equal(statSync(out).size, sizeAfter, 'and it writes no more');
       assert.equal(existsSync(c.ref), false, 'the dead job\'s empty cgroup was removed');
-      assert.equal(existsSync(join(runDir, 'dead-job.cgroups')), false, 'and its record');
-      assert.ok(existsSync(join(runDir, 'current-job.cgroups')), 'the current job\'s record stays');
+      assert.equal(existsSync(join(runDir, `${DEAD}.cgroups`)), false, 'and its record');
+      assert.ok(existsSync(join(runDir, `${CUR}.cgroups`)), 'the current job\'s record stays');
       assert.ok(alive(holderPid), 'the current job\'s holder is alive');
       assert.ok(alive(appService.pid), 'the application service is alive');
       assert.equal(appService.exitCode, null);
-      // The reap is idempotent and truthful when there is nothing to do.
-      assert.equal(parseStaleWriters((await localSh(reapStaleWritersScript('current-job', { runDir }))).stdout), 0);
+      assert.ok(alive(unrelated.pid), 'the unrelated production-marker process is not killed');
+      // The reap is idempotent and truthful when there is nothing to do,
+      // and the unrelated process, still alive, is not counted.
+      assert.equal(parseStaleWriters((await localSh(reapStaleWritersScript(CUR, { runDir, marker: TOKEN }))).stdout), 0);
+      assert.ok(alive(unrelated.pid), 'and still alive after the second reap');
     } finally {
       for (const pid of spawned) { try { process.kill(pid, 'SIGKILL'); } catch { /* */ } }
       try { appService?.kill('SIGKILL'); } catch { /* */ }
+      try { if (unrelated) process.kill(-unrelated.pid, 'SIGKILL'); } catch { /* */ }
       await sleep(100);
       for (const f of (existsSync(runDir) ? readdirSync(runDir) : [])) if (f.endsWith('.cgroups')) for (const g of readFileSync(join(runDir, f), 'utf8').split('\n').filter(Boolean)) { try { for (const pid of readFileSync(join(g, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean)) process.kill(Number(pid), 'SIGKILL'); } catch { /* */ } await sleep(50); try { rmdirSync(g); } catch { /* */ } }
       rmSync(root, { recursive: true, force: true });
@@ -154,6 +179,51 @@ for (const mech of MECHANISMS) {
 
 test('containment mechanisms are present on this host (the regression above ran on at least one), or this line says why not', { skip: MECHANISMS.length > 0 && 'ran' }, () => {
   assert.fail('no writable cgroup tree: the real-process containment regression could not run here; see docs/features/setup-engine.md § Containment for the host acceptance step');
+});
+
+test('legacy sweep (real processes): the reap stops a marked script with no job id or another job\'s, spares the current job\'s own, and matches only the marker it is given, so a process carrying the production marker is neither killed nor counted', { skip: !HAS_TOOLS && 'setsid/pgrep not installed' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pp-closeout-legacy-'));
+  const runDir = join(root, 'run');
+  const cur = `current-job-${randomBytes(3).toString('hex')}`;
+  const p = {
+    noJob: markedProcess(TOKEN),
+    otherJob: markedProcess(`${TOKEN} job=old-job`),
+    currentJob: markedProcess(`${TOKEN} job=${cur}`),
+    unrelated: markedProcess(`${DEPLOY_MARKER} job=unrelated-release`),
+  };
+  try {
+    await sleep(150);
+    for (const [k, c] of Object.entries(p)) assert.ok(alive(c.pid), `${k} is alive before the reap`);
+    const reap = await localSh(reapStaleWritersScript(cur, { runDir, marker: TOKEN }));
+    assert.equal(reap.code, 0, reap.stderr);
+    assert.equal(parseStaleWriters(reap.stdout), 0, `no survivors: ${reap.stdout} ${reap.stderr}`);
+    assert.equal(alive(p.noJob.pid), false, 'a marked script carrying no job id is stopped');
+    assert.equal(alive(p.otherJob.pid), false, 'another job\'s marked script is stopped');
+    assert.ok(alive(p.currentJob.pid), 'the current job\'s own marked script is spared');
+    assert.ok(alive(p.unrelated.pid), 'a process carrying the production marker is not killed by a reap given another marker');
+    // Idempotent; both survivors are alive and neither is counted.
+    assert.equal(parseStaleWriters((await localSh(reapStaleWritersScript(cur, { runDir, marker: TOKEN }))).stdout), 0);
+    assert.ok(alive(p.currentJob.pid) && alive(p.unrelated.pid));
+  } finally {
+    for (const c of Object.values(p)) { try { process.kill(-c.pid, 'SIGKILL'); } catch { /* gone */ } }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ratchet: by default the reap sweeps the production marker (as in guests); a marker only replaces that pattern and must be a plain identifier', () => {
+  const prod = reapStaleWritersScript('cur');
+  assert.equal(DEPLOY_MARKER, 'mock2_deploy_marker');
+  assert.equal(prod.match(new RegExp(`pgrep -f ${DEPLOY_MARKER} `, 'g'))?.length, 2, 'the legacy sweep and its count');
+  assert.match(prod, /kill -9 "\$p"/);
+  assert.equal(reapStaleWritersScript('cur', { marker: DEPLOY_MARKER }), prod);
+  const scoped = reapStaleWritersScript('cur', { marker: TOKEN });
+  assert.equal(scoped.includes(DEPLOY_MARKER), false, 'under a token nothing matches the production marker');
+  assert.equal(scoped, prod.replaceAll(DEPLOY_MARKER, TOKEN), 'and nothing else changes');
+  assert.equal(MARKER_SWEEP.test(prod), true, 'the guard on real-process runs in this file recognizes the production sweep');
+  assert.equal(MARKER_SWEEP.test(scoped), false);
+  for (const bad of ['', 'short', '.*', 'mock2 deploy', "x'; rm -rf / #", '-fmock2_deploy_marker', 'a'.repeat(65), null]) {
+    assert.throws(() => reapStaleWritersScript('cur', { marker: bad }), /marker must be a plain identifier/, String(bad));
+  }
 });
 
 // ── B. no silent fallback ─────────────────────────────────────────────────

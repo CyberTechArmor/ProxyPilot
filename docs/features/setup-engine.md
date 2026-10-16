@@ -281,6 +281,16 @@ every raw mechanism the host offers (in this sandbox: cgroup v2 at
 systemd scope form is the same cgroup with systemd as its manager and is
 host acceptance, not sandbox evidence.
 
+The legacy sweep matches its marker with `pgrep -f`, so on the ProxyPilot
+host (where `run_self_checks` runs this suite) the production marker
+`mock2_deploy_marker` would match every guest's real deploy scripts, which
+are visible from the host's PID namespace. The tests therefore pass the
+reap a per-run token (`reapStaleWritersScript(job, { marker })`, likewise
+`reapOrphansScript({ marker })`). They also keep a process carrying the
+production marker alive across the reaps and assert that it is neither
+killed nor counted. The default, used in guests, is still
+`mock2_deploy_marker`, and a ratchet in the same file asserts it.
+
 Limits: (1) the reap is a takeover-time action, not a supervisor — between
 two deploys a stale writer runs until the next one reaps it (the lease and
 the recorded condition are what stop the *engine* from racing it);

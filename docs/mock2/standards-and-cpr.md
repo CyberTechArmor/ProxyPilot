@@ -1,5 +1,5 @@
-> Current adoption (2026-10-03): the framework seed now includes hash-verified
-> Mock2 **1.14.0** guidance. See `framework-seed/README.md` and
+> Current adoption (2026-10-17): the framework seed now includes hash-verified
+> Mock2 **1.23.2** guidance (previously 1.14.0, 2026-10-03). See `framework-seed/README.md` and
 > `scripts/sync-mock2-guidance.mjs`. Framework integer, scaffold, CPR 1.1 and Relay
 > 1.2.1 are independent identities. Historical instructions below describe the
 > earlier 0.3.0 rendering. An available site release requires reviewed adoption;

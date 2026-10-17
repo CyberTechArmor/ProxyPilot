@@ -9,9 +9,9 @@ differs from the latest published version, `upgradeFrameworkFromSeed()` publishe
 disabled or production-pinned host nothing here is read, imported, or installed
 (ADR-001). The registry is append-only and content rows are immutable (ADR-003).
 
-## Current guidance adoption (2026-10-03)
+## Current guidance adoption (2026-10-17)
 
-The embedded Mock2 source release is **1.14.0**, family `mock2-core`, scope
+The embedded Mock2 source release is **1.23.2**, family `mock2-core`, scope
 `guidance`. `upstream-guidance.json` retains 30 canonical text files and their
 release hashes. The platform constitution includes the pinned current
 constitution after the retained platform contracts. New project seeds carry
@@ -22,7 +22,9 @@ framework version does not certify their local files or deployed application.
 Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`.
 Every required source file is checked against release.json before output.
 Source release.json SHA256 at adoption:
-`a62c6223783eeb74ed506f5049e6e6dafcf60e1a7106dfaf3ad8c61a138aced5`.
+`745cb748d94f4ae229b1c4731fc26f10d1e3ba28403f774399ecd6ea1512574d`
+(1.23.2, 2026-10-17; previous adoption 1.14.0 on 2026-10-03 was
+`a62c6223783eeb74ed506f5049e6e6dafcf60e1a7106dfaf3ad8c61a138aced5`).
 
 CPR remains specification **1.1**, framework registry integers and the base-app
 scaffold are separate version families. Relay reference **1.2.1** is described

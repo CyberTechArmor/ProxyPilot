@@ -521,7 +521,7 @@ that bind every project:
   rebuilding (CPR §15) — the release before this one, by commit and deploy stamp.
 
 <!-- BEGIN PINNED MOCK2 GUIDANCE -->
-# Governing Mock2 guidance: 1.14.0
+# Governing Mock2 guidance: 1.23.2
 
 The following pinned guidance supersedes historical general-workflow wording above.
 ProxyPilot's concrete identity, authorization, private-data and execution contracts remain binding.
@@ -553,9 +553,9 @@ used to refuse, restrict, disable or delay implementing or testing what the deve
 Three boundaries are real, and applying them is not inventing a gate. Each is scoped to the one
 action it concerns and to nothing else:
 
-1. **An explicit CPR requirement**, cited by section. Immutable released versions, expand →
+1. **An explicit PRO requirement**, cited by section. Immutable released versions, expand →
    migrate → contract for breaking changes, a snapshot before promotion, a release that verifies
-   its own hashes (CPR §8, §12, §13, A.4). Name the section when you apply one.
+   its own hashes (PRO §8, §12, §13, A.4). Name the section when you apply one.
 2. **A technically necessary condition of an external system** — a migration that must run before
    the query that reads the column, a credential the provider will not work without, a service that
    must be reachable for the call under test. State the condition and satisfy it; it constrains that
@@ -568,7 +568,7 @@ action it concerns and to nothing else:
 
 None of these is ever generalized. "There is a pending migration" does not disable the test suite.
 "This release is not promoted" does not stop you building the next change. A boundary that cannot
-be tied to a cited CPR section, a stated technical condition, or a named destructive effect is an
+be tied to a cited PRO section, a stated technical condition, or a named destructive effect is an
 invented gate, and inventing one is the error this rule exists to prevent.
 
 Project instructions cannot grant access that a tool or service withholds. If a credential, scope
@@ -614,8 +614,8 @@ repeat a decision they have already given.
 
 ## 2. The pipeline (a recommended order, not a set of locks)
 
-1. Concept — a disposable interactive HTML mockup, decided through the design workflow and within the design principles (§13). Output: design approval and `state/inventory.json`.
-2. Define — a plain-language interview in four categories (data, actions, permissions, edge cases). Output: `state/rules.md`, confirmed by the owner.
+1. Concept — a disposable interactive HTML mockup, decided through the design workflow and within the design principles (§13). A breadboard (places, controls, connections) in the page brief comes first; the mockup and `state/inventory.json` derive from it. Output: design approval and `state/inventory.json`.
+2. Define — a plain-language interview in four categories (data, actions, permissions, edge cases). Output: `state/rules.md` — each rule an EARS sentence with one Given/When/Then example, read back to the owner in plain words and confirmed by them.
 3. Build — targeted changes on a branch, derived from constitution + inventory + rules. Output: working code the developer has confirmed.
 4. Check — independent review and applicable checklist results in the change record; acceptance pending is explicit when review precedes acceptance.
 5. Run — promotion to production is an explicit human decision informed by the checklist. Never a side effect of a commit.
@@ -643,7 +643,7 @@ itself does not establish acceptance, and neither review nor record adds a confi
 
 ## 4. While writing code
 
-- Small, targeted changes on a branch. One concern per commit.
+- Small, targeted changes on a branch. One concern per commit, with a typed message (`feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `perf`, `build`; `!` for breaking); never enforced (`mock2-change-record.md`).
 - The repository's stack, directory layout, styling tokens and host conventions come from its
   **application profile**, not from this file — see §9. Do not introduce a second ORM, validator,
   test runner or component library without saying why, and do not change a repository's stack
@@ -745,8 +745,8 @@ Do not repeatedly load conflicting historical wording and re-derive settled reso
 The workflow above is general: scope control, requirement traceability, durable decisions,
 handoffs, verification provenance and independent review apply to any repository in any language.
 
-Technology choices live in a named profile. The **CPR application profile**
-(`.mock2/standards/profile-cpr.md`) is the intended default for new CPR applications: TypeScript,
+Technology choices live in a named profile. The **PRO application profile**
+(`.mock2/standards/profile-cpr.md`) is the intended default for new PRO applications: TypeScript,
 Express, Drizzle, Zod, Vitest, PostgreSQL on the server; React + TypeScript built by Vite,
 Tailwind and shadcn/ui primitives on the client; the prescribed directory layout, the `--t-*` theme
 tokens, and the Host SDK conventions.
@@ -762,20 +762,23 @@ Existing repositories retain their recorded release lines with maintenance patch
 developer asks to upgrade/migrate. AI data/retrieval follows `AI-Data-Standards.md` when applicable;
 model/index identity, permission filters and private object storage are host capabilities.
 
-## 10. CPR — Continuous Production Readiness v1.1
+## 10. PRO — Production Readiness Optimization v1.1
 
-Mock2 builds on the CPR standard (full text in `.mock2/standards/CPR-v1.1.md` with
+Mock2 builds on the PRO standard (formerly CPR; full text in `.mock2/standards/CPR-v1.1.md` with
 `CPR-v1.1-addendum-A.md` beside it, or `~/.mock2/standards/` on an installed machine; the rule
-`mock2-cpr.md` carries the binding parts). §0 above is CPR's development-first rule (§3.1, §11.3).
+`mock2-cpr.md` carries the binding parts). §0 above is PRO's development-first rule (§3.1, §11.3).
 In addition: features consume host capabilities through the Host SDK and never recreate auth,
 database access, jobs, secrets, configuration, realtime, theming or AI access (§5–§6, Addendum A.2);
 every feature declares a `feature.manifest.json` with namespaced permissions, owned migrations,
-jobs, outbound hosts and the fakes its tests ship (§7, Appendix B, A.6); released versions are
-immutable and breaking changes go expand → migrate → contract (CPR §8, §13); material architectural
+jobs, outbound hosts and the fakes its tests ship (§7, Appendix B, A.6); the application lists the
+Base Platform capabilities it uses, each with its fake, in `app.manifest.json`, and the host
+provisions from that declaration, never from inference (current §J.9); request and response types
+come from one schema through `contracts/` (current §K.7); released versions are
+immutable and breaking changes go expand → migrate → contract (PRO §8, §13); material architectural
 decisions are recorded in `state/decisions.md` and never silently superseded by new code (§17.2);
 commit is not release — promotion is an explicit human decision after review of the exact candidate,
 preceded by a snapshot and delivered by a release that verifies its own hashes (§12, A.4). The Host
-SDK conventions in that list belong to the CPR application profile (§9); the decision, review and
+SDK conventions in that list belong to the PRO application profile (§9); the decision, review and
 release rules are general.
 
 ## 11. Working style
@@ -806,7 +809,10 @@ a run boundary reached with green checks and nothing undecided is a checkpoint t
 and completing one run does not complete the authorized task. Size items in points (S 1, M 2, L 4; 4
 per run; XL decomposed first; decomposition stops when an item is independently executable and
 verifiable) and classify a multi-item request as FITS, SPLIT or CANNOT. A valid existing plan takes
-precedence over reclassification.
+precedence over reclassification. The Authorized scope record carries the developer's appetite and
+the known risks; time past the appetite is reported against the run ledger and the developer
+decides — never a stop. Open points are marked inline with the assumption the work proceeds on, and
+each leaf item carries a context block written once at planning.
 
 Every turn on a run produces at least one recorded verifiable outcome: an implementation cycle;
 a validation that completes a pending requirement or establishes materially new evidence — re-running
@@ -841,13 +847,13 @@ explicit departure from one is followed and recorded (§11).
   an inset, on first launch, reload and resume. Mockups and checks cover both modes; viewport-sized
   shells refresh their height and account for excluded space once, with device checks through the
   lifecycle rather than only the first look.
-  Pattern, the Android fallback and the checks: `mock2-mobile-web.md`; CPR current §O
+  Pattern, the Android fallback and the checks: `mock2-mobile-web.md`; PRO current §O
   (`CPR-v1.1-current.md`).
 
 ## 14. Relay work visibility
 
 For work-event capture and execution replay, load `rules/mock2-relay.md`. The check runner records
-actual outcomes; agents record their own meaningful checkpoints. CPR `Relay.md` defines the
+actual outcomes; agents record their own meaningful checkpoints. PRO `Relay.md` defines the
 portable feature and host integration; existing host auth and data boundaries remain authoritative.
 
 ## 14. Universal integration foundations

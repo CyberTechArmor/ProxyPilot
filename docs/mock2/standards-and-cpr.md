@@ -1,10 +1,16 @@
-> Current adoption (2026-10-17): the framework seed now includes hash-verified
+> Current adoption (2026-10-17): the framework seed includes hash-verified
 > Mock2 **1.23.2** guidance (previously 1.14.0, 2026-10-03). See `framework-seed/README.md` and
 > `scripts/sync-mock2-guidance.mjs`. Framework integer, scaffold, CPR 1.1 and Relay
 > 1.2.1 are independent identities. Historical instructions below describe the
-> earlier 0.3.0 rendering. An available site release requires reviewed adoption;
-> updating unchanged ProxyPilot code cannot install it. Guidance adoption alone
-> does not install Relay runtime/producers or migrate existing integrations.
+> earlier 0.3.0 rendering. Guidance adoption alone does not install Relay
+> runtime/producers or migrate existing integrations.
+>
+> **Live guidance (2026-10-18):** a newer Mock2 release on the pinned standards
+> site now reaches ProxyPilot at runtime — no code change, rebuild or PR — and the
+> vendored seed is the offline floor. See §4. Adopting a site release changes the
+> pinned guidance (`.mock2/standards/` and the constitution's pinned block) only;
+> a change to the platform's own constitution sections, skills or gates still
+> goes through the seed (§3).
 
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 
@@ -61,6 +67,10 @@ no-build rollback are CPR Base Platform responsibilities — see §5).
 
 ## 3. Updating the seed when the site changes
 
+Guidance-only releases no longer need this procedure: live guidance (§4) adopts
+them at runtime. Vendoring a release into the seed (`node
+scripts/sync-mock2-guidance.mjs <release-dir>`) still raises the offline floor.
+
 1. Read `manifest.json` on the site (version + changelog) and diff `core/` against
    the last version recorded in `framework-seed/README.md`.
 2. Fold the change into `constitution.md` / `skills.json` / `gates.json` (the
@@ -75,7 +85,8 @@ no-build rollback are CPR Base Platform responsibilities — see §5).
    adopt it (auto-adopt sweep, or a manual update cycle). Deployed hosts get there
    by updating ProxyPilot — Profile → Application Settings → Update now, or
    `run_proxypilot_update` over MCP (`docs/features/self-update.md`); the Update
-   block says "site X available — update ProxyPilot to pick it up" until they do.
+   block says the site release is adopted at the next live guidance check, or —
+   with live guidance off — that a ProxyPilot build must adopt it.
 
 Publishing site changes *from* ProxyPilot: edit the seed under `/opt/app/site` on
 the `mock2` guest (`write_lxc_file`), write `/opt/app/site/.publish` with the commit
@@ -83,40 +94,79 @@ message, then `rerun_startup` — `publish.sh` commits to `mock2/mock2-core` on
 `main`, the webhook syncs the checkout, and every developer picks it up at the
 next chat. Never edit `/var/www/mock2` directly; it is reset to `origin/main`.
 
-## 4. Could ProxyPilot link to the Gitea instance so projects always reference it?
+## 4. Live guidance: the site is read at runtime
 
-Yes. Nothing in the architecture prevents it; three pieces are missing, all
-modest:
+*2026-10-18.* ProxyPilot reads the Mock2 guidance from the standards site at
+runtime, pinned, hash-verified and cached, with the vendored seed as the floor.
 
-1. **A standards source setting** — `mock2.standards_url`
-   (`https://mock2.fractionate.ai/manifest.json`) and/or the Gitea repo
-   (`https://git.fractionate.ai/mock2/mock2-core`, raw file API
-   `/api/v1/repos/mock2/mock2-core/raw/<path>?ref=main`). Stored in
-   `mock2_settings` like the other settings in `settings.js`.
-2. **A sync step** — at boot and on a timer: fetch `manifest.json`; if `version`
-   differs from the `source_git_commit` / changelog marker of the latest framework
-   version, fetch the `core/` files, render them into the five content fields
-   (constitution = site `CLAUDE.md` + rules + the platform's hardened sections;
-   skills = the four prompt files; gates = the battery with `check:*` names) and
-   call `insertFrameworkVersion({ source: 'git', sourceGitCommit })`. The registry
-   already has the `source` and `source_git_commit` columns (migration 501) for
-   exactly this. Projects then adopt through the existing drift → update path.
-3. **Project remotes on Gitea by default** — done per object (2026-09-05, see
-   `docs/features/git-remotes.md`): the New project dialog, the static-site
-   wizard and the LXC create dialog all take an optional Gitea remote, with the
-   repository created on the remote when missing; existing objects get the same
-   card on their page. What is still missing is a `default_git_connector` setting
-   that pre-fills it for every new object.
+**Where it reads.** The pinned standards source is the manifest URL in the
+`mcp.standards_source_url` app setting (`set_standards_source`), else the seed's
+`standards-version.json` `manifest` (`https://mock2.fractionate.ai/manifest.json`).
+`release.json` is read from beside it and each file from `<site>/<src>`. Only the
+release entries the seed carries are downloaded (`core/claude/CLAUDE.md`,
+`core/claude/rules/*`, `core/cpr/*`, the CPR profile and the capacity template).
+Requests are https only, no redirects, 15 s each, 2 min in total, 4 MB per file.
 
-Constraints to keep: the site's rendering is *derived* content, so the sync must
-never overwrite the platform's hardened constitution sections silently — render
-the site's constitution into a marked block and keep the platform sections
-outside it; content rows stay immutable (a site change is a new version, never an
-edit); the Gitea token lives encrypted in `mock2.db` as the connectors' do and
-never enters a container. The vendored seed remains the offline fallback.
+**What it checks.** If `release.json`'s version is not newer than the active
+guidance, nothing else happens. Otherwise every selected file is downloaded and
+checked against `release.json` (sha256 **and** byte count) and the required
+documents must all be present — the same selection, checks and rendering the sync
+script runs, from one module (`admin/backend/src/mock2/guidance-release-logic.js`),
+so the vendored and the live guidance cannot drift.
 
-Until that lands, the seed is updated by hand as in §3, and every project already
-carries the pointer (`CLAUDE.md` in the scaffold, and the MCP instructions).
+**Integrity, stated plainly.** The hashes come from `release.json` on the same
+site. That proves the set is complete and arrived intact; it does not prove who
+wrote it. The site is the operator's own (published from `mock2/mock2-core` on
+git.fractionate.ai); whoever can publish there can publish guidance here. Pin the
+source to a host you control.
+
+**Where it lands.** Only after every file verified: written to a temp directory
+and renamed into `$MOCK2_DATA_DIR/guidance/<version>/` (`release.json` exactly as
+fetched + `upstream-guidance.json`), then `current.json` (version, site,
+release.json sha256, time) is replaced atomically. The last two versions are kept.
+Then a framework version is published through `upgradeFrameworkFromSeed` — the
+path a seed upgrade takes — with the constitution's pinned block rendered from the
+release, `source: 'git_sync'`, `source_git_commit: 'mock2-core@<version>'` and the
+site + release.json hash in the changelog. Projects adopt it exactly as they
+adopt a seed upgrade (auto-adopt sweep, or a manual update cycle). New projects
+are seeded with the active guidance; their `.mock2/standards/PROVENANCE.json`
+records `delivered_from` and `release_sha256` when it came from the site.
+
+**When it runs.** At boot the verified cache is loaded first (local only, re-checked
+against its own `release.json` and the recorded hash), so a restart republishes
+nothing; then the site is checked in the background (5 s after boot) and daily;
+and on demand with `refresh_standards_guidance` over MCP.
+
+**Failure.** Setting off, offline, timeout, HTTP error, oversize file, bad
+release identity, a hash or size mismatch, a missing file: nothing is written, the
+active guidance stays as it is, and the error is reported (`get_standards_version`
+→ `guidance`, `check_proxypilot_update` → `standards.guidance`, the dashboard
+card). Nothing is thrown at boot. A cache that fails re-verification is ignored.
+
+**The seed is the floor.** Live guidance is used only when it is newer than the
+vendored seed. When a ProxyPilot update ships a seed at or past the cached
+release, the seed wins and the cache is ignored.
+
+**Control.**
+
+| | |
+|---|---|
+| Setting | `live_guidance` in `mock2_settings`, `on` by default. Dashboard: Dev Studio → Framework versions → **Live guidance**. API: `GET/POST /api/mock2/settings/live-guidance` `{ setting: 'on'|'off' }` (admin; audited `MOCK2_SETTING_LIVE_GUIDANCE`). |
+| Source | `set_standards_source` (MCP), the app setting `mcp.standards_source_url`. |
+| Check now | MCP `refresh_standards_guidance`: `dry_run: true` reads `release.json` only and returns what would change (from/to versions, files with sha256 and bytes); `confirm: true` runs the refresh. Ledgered and audited like every extended-surface write. |
+| Status | `get_standards_version` → `guidance` (active origin seed/site, version, setting, last check time, result, error); `check_proxypilot_update` and the Update block → `standards.guidance`, and the site is compared with the active guidance, not only the seed. |
+
+Code: `mock2/guidance-release-logic.js` (pure, shared with the script),
+`mock2/live-guidance.js` (fetch → verify → cache → publish, dependencies
+injected), `mock2/active-guidance.js` + `mock2/guidance-status.js` (in memory),
+`mock2/live-guidance-instance.js` (the real boundaries), boot wiring in
+`index.js`. Tests: `__tests__/live-guidance.test.js`.
+
+What is not live: the platform's own constitution sections, `skills.json`,
+`gates.json` and the design system still change only with the seed (§3); the
+Gitea raw API is not used (the site serves the release files directly); a
+`default_git_connector` setting that pre-fills project remotes is still missing
+(`docs/features/git-remotes.md`).
 
 ## 5. Does an AI subscription using the MCP server get the Mock2 / CPR guidance?
 

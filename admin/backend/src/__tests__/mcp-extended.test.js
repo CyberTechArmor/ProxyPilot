@@ -87,7 +87,7 @@ const AUTH = { id: 7, created_by: 'admin-1', name: 'test key', scope_json: null 
 /* -------------------------------- catalog ------------------------------ */
 
 test('the extended catalog is well-formed, unique, and every family is represented', () => {
-  assert.equal(MCP_EXT_TOOLS.length, 226);
+  assert.equal(MCP_EXT_TOOLS.length, 227);
   assert.equal(new Set(MCP_EXT_TOOL_NAMES).size, MCP_EXT_TOOL_NAMES.length);
   for (const t of MCP_EXT_TOOLS) {
     assert.match(t.name, /^[a-z][a-z0-9_]+$/);
@@ -97,7 +97,7 @@ test('the extended catalog is well-formed, unique, and every family is represent
     for (const r of t.inputSchema.required || []) assert.ok(t.inputSchema.properties[r], `${t.name}: required ${r} is not a property`);
   }
   assert.deepEqual(Object.keys(MCP_EXT_TOOL_GROUPS), ['builds', 'project_config', 'lxc_admin', 'edge', 'static_admin', 'admin', 'self_edit', 'storage', 'migration', 'platform', 'discovery', 'application_releases']);
-  assert.equal(MCP_TOOLS.length, 72 + 226);
+  assert.equal(MCP_TOOLS.length, 72 + 227);
   assert.ok(Object.isFrozen(MCP_TOOLS));
   assert.match(MCP_SERVER_INSTRUCTIONS, /confirmation_token/);
   assert.match(MCP_SERVER_INSTRUCTIONS, /scope\.self_edit/);
@@ -164,6 +164,37 @@ test('dry_run previews and writes a dry_run ledger row; the real call flips the 
   const dns = await handlers.set_dns_record({ name: 'a.example.com', content: '1.2.3.4', confirm: true }, AUTH);
   assert.equal(dns.isError, true);
   assert.match(dns.content[0].text, /mcp\.dns is off/);
+});
+
+test('refresh_standards_guidance: dry_run previews through the live-guidance check; the real call needs confirm, ledgers and audits', async () => {
+  const calls = [];
+  const fake = { refresh: async (o) => { calls.push(o); return o.dryRun
+    ? { result: 'update_available', dry_run: true, site: 'https://s.test', site_version: '9.9.9', would: { from: { origin: 'seed', version: '1.0.0' }, to: { version: '9.9.9' }, files: [] } }
+    : { result: 'updated', site: 'https://s.test', site_version: '9.9.9', framework_version: 12, files: 30 }; } };
+  const { ctx, ledger, audit } = makeCtx({ mock2Modules: async () => ({}), liveGuidance: () => fake });
+  const { handlers } = createExtendedHandlers(ctx);
+  const d = parse(await handlers.refresh_standards_guidance({ dry_run: true }, AUTH));
+  assert.equal(d.dry_run, true);
+  assert.equal(d.would.result, 'update_available');
+  assert.equal(d.would.site_version, '9.9.9');
+  assert.deepEqual(calls, [{ dryRun: true, reason: 'mcp' }]);
+  assert.equal(ledger.at(-1)[8], 'dry_run');
+  const refused = await handlers.refresh_standards_guidance({}, AUTH);
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /confirm: true/);
+  assert.equal(calls.length, 1, 'nothing runs without confirm');
+  const r = parse(await handlers.refresh_standards_guidance({ confirm: true }, AUTH));
+  assert.deepEqual([r.result, r.framework_version], ['updated', 12]);
+  assert.equal(ledger.at(-1)[8], 'ok');
+  assert.equal(audit.at(-1)[1], 'MCP_REFRESH_STANDARDS_GUIDANCE');
+  // A failed check is a tool error naming the cause; the active guidance is untouched by contract.
+  fake.refresh = async () => ({ result: 'error', error: 'timed out' });
+  const e = await handlers.refresh_standards_guidance({ confirm: true }, AUTH);
+  assert.equal(e.isError, true);
+  assert.match(e.content[0].text, /active guidance is unchanged\): timed out/);
+  // Projects module off → refused like every standards tool.
+  const off = createExtendedHandlers(makeCtx({ liveGuidance: () => fake }).ctx).handlers;
+  assert.equal((await off.refresh_standards_guidance({ confirm: true }, AUTH)).isError, true);
 });
 
 test('confirmation tokens: first call issues one bound to the target, the second consumes it, a replay is refused', async () => {

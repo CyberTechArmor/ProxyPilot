@@ -323,7 +323,11 @@ export function buildVersionCheck({
   const latestVersion = codeVersion || releaseVersion || normalizeVersion(currentVersion);
   // Legacy seeds documented `version` as the source Mock2 release. New metadata
   // names that identity explicitly, independently of internal seed revisions.
-  const sourceVersion = standards.source_version ?? standards.seed_version;
+  // Live guidance: when a verified site release newer than the seed is active,
+  // that release is what this host runs, so it is what the site is compared with.
+  const guidance = standards.guidance || null;
+  const liveActive = guidance?.active_origin === 'site' && normalizeVersion(guidance.active_version) ? normalizeVersion(guidance.active_version) : null;
+  const sourceVersion = liveActive || (standards.source_version ?? standards.seed_version);
   const sameStandardsFamily = !standards.version_family || standards.version_family === 'mock2-core';
   const decision = decideUpdate({
     installed: { version: currentVersion, sha: inst.sha },
@@ -371,8 +375,19 @@ export function buildVersionCheck({
       update_available: decision.standards.available,
       status: !decision.standards.seed_version || !decision.standards.site_version ? 'unknown'
         : decision.standards.available ? 'adoption_required' : 'current',
-      next_action: decision.standards.available
-        ? 'Review and integrate the published standards, then deploy a ProxyPilot build containing that adoption.' : null,
+      next_action: !decision.standards.available ? null
+        : guidance?.enabled
+          ? 'Live guidance is on: ProxyPilot adopts this release at its next check (at boot and daily), or now with refresh_standards_guidance.'
+          : 'Review and integrate the published standards, then deploy a ProxyPilot build containing that adoption.',
+      guidance: guidance ? {
+        active_origin: guidance.active_origin || 'seed',
+        active_version: normalizeVersion(guidance.active_version) || null,
+        active_site: guidance.active_site || null,
+        live_enabled: guidance.enabled ?? null,
+        last_check_at: guidance.last_check_at || null,
+        last_result: guidance.last_result || null,
+        last_error: guidance.last_error || null,
+      } : null,
       site: standards.site || STANDARDS_SITE_URL,
       source: standards.source || null,
       synced: standards.synced || null,

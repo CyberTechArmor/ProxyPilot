@@ -14,7 +14,8 @@ import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { getMock2Db } from './db.js';
 import { getDb } from '../db.js';
-import { nextVersionNumber } from './framework-logic.js';
+import { nextVersionNumber, seedUpgradeProvenance } from './framework-logic.js';
+import { getActiveGuidance, effectiveConstitution } from './active-guidance.js';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const SEED_DIR = resolve(__dir, 'framework-seed');
@@ -128,10 +129,13 @@ export function seedFrameworkV1(createdBy = null) {
 }
 
 // Read the vendored seed's five content fields, or null if any is unreadable.
-function readSeedContent() {
+// The constitution's pinned Mock2 guidance block is the ACTIVE guidance's: the
+// seed's own, or a verified newer release from the standards site
+// (active-guidance.js / live-guidance.js), rendered the way the sync script does.
+function readSeedContent(active = getActiveGuidance()) {
   try {
     return {
-      constitution_md: readSeedFile('constitution.md'),
+      constitution_md: effectiveConstitution(readSeedFile('constitution.md'), active),
       skills_json: readSeedFile('skills.json'),
       gates_json: readSeedFile('gates.json'),
       design_system_md: readSeedFile('design-system.md'),
@@ -163,10 +167,15 @@ function resolveSeedAuthor(createdBy = null) {
 // ADR-003 amendment; framework_auto_adopt 'off' restores the manual
 // explicit-consent path). Idempotent: a no-op when the seed matches the latest
 // version. Called on boot after seedFrameworkV1.
-export function upgradeFrameworkFromSeed(createdBy = null) {
+//
+// Live guidance (mock2/live-guidance.js) publishes through this same function:
+// when the active guidance came from the standards site, the version records
+// source 'git_sync', the release (`mock2-core@<version>`) and the site in its
+// changelog; otherwise it is the in-app seed upgrade it always was.
+export function upgradeFrameworkFromSeed(createdBy = null, active = getActiveGuidance()) {
   const latest = getCurrentFrameworkVersion();
   if (!latest) return null; // nothing seeded yet — first boot goes through seedFrameworkV1
-  const content = readSeedContent();
+  const content = readSeedContent(active);
   if (!content) return null;
   const unchanged = latest.constitution_md === content.constitution_md
     && latest.skills_json === content.skills_json
@@ -174,12 +183,14 @@ export function upgradeFrameworkFromSeed(createdBy = null) {
     && latest.design_system_md === content.design_system_md
     && String(latest.project_template_ref || '') === content.project_template_ref;
   if (unchanged) return null;
+  const fromSite = active?.origin === 'site';
   const row = insertFrameworkVersion({
     ...content,
-    changelog: `Seed upgrade — vendored framework content changed since v${latest.version} (gate / skill / constitution fixes). Projects adopt it automatically (or via a manual update cycle).`,
-    source: 'in_app',
+    ...seedUpgradeProvenance(active, latest.version),
     createdBy: resolveSeedAuthor(createdBy),
   });
-  console.log(`[mock2] framework upgraded from seed → version ${row.version} (seed content changed since v${latest.version})`);
+  console.log(fromSite
+    ? `[mock2] framework upgraded from live guidance → version ${row.version} (Mock2 ${active.version} from ${active.site})`
+    : `[mock2] framework upgraded from seed → version ${row.version} (seed content changed since v${latest.version})`);
   return row;
 }

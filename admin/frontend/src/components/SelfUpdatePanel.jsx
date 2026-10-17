@@ -229,9 +229,12 @@ export default function SelfUpdatePanel({ updateInfo, checking, onRefresh }) {
             {standards ? (
               <>
                 {standards.adoption_scope === 'guidance' ? 'guidance ' : 'source '}{standards.source_version || standards.seed_version || '?'}
+                {standards.guidance?.active_origin === 'site' ? ' (from the standards site)' : ''}
                 {standards.site_version
                   ? <>, site {standards.site_version} — {standards.update_available
-                    ? <span className="text-primary">adoption required in a new ProxyPilot build</span>
+                    ? <span className="text-primary">{standards.guidance?.live_enabled
+                      ? 'adopted at the next live guidance check'
+                      : 'adoption required in a new ProxyPilot build'}</span>
                     : <span className="text-muted-foreground">{standards.status === 'unknown' ? 'adoption unknown' : 'current'}</span>}</>
                   : <span className="text-muted-foreground">, site unreachable</span>}
               </>

@@ -401,6 +401,26 @@ export function setFrameworkAutoAdopt(value, updatedBy = null) {
   return getFrameworkAutoAdopt();
 }
 
+// ---- Live Mock2 guidance (mock2/live-guidance.js) ----
+//
+// 'on' (DEFAULT): at boot, daily and on demand, read release.json from the pinned
+// standards source, and when its version is newer than the active guidance,
+// download and verify the guidance files, cache them in the data dir and publish
+// a framework version from them (projects adopt it like a seed upgrade). 'off':
+// nothing is fetched; the vendored seed (or the last verified cache) stays active.
+export const LIVE_GUIDANCE_KEY = 'live_guidance';
+
+export function getLiveGuidanceSetting() {
+  const raw = String(getMock2Setting(LIVE_GUIDANCE_KEY, 'on')).trim().toLowerCase();
+  return !(raw === 'off' || raw === '0' || raw === 'false');
+}
+
+export function setLiveGuidanceSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(LIVE_GUIDANCE_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
+  return getLiveGuidanceSetting();
+}
+
 // ---- Stall watchdog thresholds (stuck-build recovery timing) ----
 //
 // Two dashboard-tunable minute values:

@@ -198,16 +198,16 @@ per-file `--test-concurrency=1`), or drop the subprocess where a pure
 assertion would do. Until then, re-run a single failing file in isolation
 before believing it.
 
-## Mock2 standards are vendored, not linked
+## Mock2 standards: live guidance, operator-trusted site
 
-2026-09-05: the framework seed (`admin/backend/src/mock2/framework-seed/`) was
-brought up to the Mock2 standards site v0.2.0/0.3.0 and CPR v1.1 by hand. There is
-no sync from git.fractionate.ai/mock2/mock2-core; a site change reaches projects
-only when someone updates the seed and the backend boots. The design for a live
-link (settings key, boot/timer sync into `insertFrameworkVersion`) is in
-`docs/mock2/standards-and-cpr.md` §4. Pushing projects, static sites and LXC
-containers TO Gitea exists (`docs/features/git-remotes.md`); a default connector
-applied to every new object is the remaining piece.
+2026-10-18: the guidance part of the Mock2 standards is read from the pinned
+standards site at runtime (`docs/mock2/standards-and-cpr.md` §4); the vendored
+seed is the offline floor. Two limits remain. The hashes are checked against
+`release.json` from the same site, which proves completeness and transport
+integrity, not authorship — the site is the operator's own. And only the pinned
+guidance is live: the platform constitution sections, skills, gates and design
+system still change with the seed. A default Gitea connector applied to every new
+object is still missing (`docs/features/git-remotes.md`).
 
 ## Storage (ZFS): verified on loop devices in CI, not yet on real hardware
 

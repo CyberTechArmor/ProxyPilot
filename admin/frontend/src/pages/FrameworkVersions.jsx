@@ -48,6 +48,9 @@ export default function FrameworkVersions() {
   // Automatic adoption (ADR-003 amendment): '' until loaded, then 'on'/'off'.
   const [autoAdopt, setAutoAdopt] = useState('');
   const [autoAdoptBusy, setAutoAdoptBusy] = useState(false);
+  // Live Mock2 guidance: { setting: 'on'|'off', status } once loaded.
+  const [liveGuidance, setLiveGuidance] = useState(null);
+  const [liveGuidanceBusy, setLiveGuidanceBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -55,6 +58,7 @@ export default function FrameworkVersions() {
       setVersions(v.versions || []);
       setCurrent(c.version || null);
       api.mock2GetFrameworkAutoAdopt().then((r) => setAutoAdopt(r.setting || 'on')).catch(() => {});
+      api.mock2GetLiveGuidance().then((r) => setLiveGuidance(r)).catch(() => {});
     } catch (err) { if (!(err instanceof ApiError)) console.error('load framework failed:', err); }
   }, []);
 
@@ -72,6 +76,22 @@ export default function FrameworkVersions() {
       });
     } catch (err) { toast({ variant: 'destructive', title: 'Could not save', description: err.message }); }
     finally { setAutoAdoptBusy(false); }
+  };
+
+  const toggleLiveGuidance = async () => {
+    const next = liveGuidance?.setting === 'off' ? 'on' : 'off';
+    setLiveGuidanceBusy(true);
+    try {
+      const r = await api.mock2SetLiveGuidance(next);
+      setLiveGuidance(r);
+      toast({
+        title: `Live guidance ${r.setting}`,
+        description: r.setting === 'on'
+          ? 'Newer Mock2 releases on the standards site are verified and published at boot and daily.'
+          : 'Nothing is fetched; the guidance stays where it is until ProxyPilot is updated.',
+      });
+    } catch (err) { toast({ variant: 'destructive', title: 'Could not save', description: err.message }); }
+    finally { setLiveGuidanceBusy(false); }
   };
 
   useEffect(() => {
@@ -199,6 +219,36 @@ export default function FrameworkVersions() {
           >
             {autoAdoptBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             {autoAdopt === 'off' ? 'Off — turn on' : 'On — turn off'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Live Mock2 guidance (docs/mock2/standards-and-cpr.md §4): newer releases
+          from the pinned standards site reach the framework without a ProxyPilot
+          update; the vendored seed stays the floor. */}
+      <Card>
+        <CardContent className="flex flex-col gap-3 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="font-medium">Live guidance</p>
+            <p className="text-xs text-muted-foreground">
+              At boot and daily, a newer Mock2 release on the standards site is checked against its release.json and
+              published as a new version. Off keeps the guidance this ProxyPilot build carries.
+            </p>
+            {liveGuidance?.status && (
+              <p className="mt-1 break-words text-xs text-muted-foreground">
+                Active: Mock2 {liveGuidance.status.active_version || '?'} ({liveGuidance.status.active_origin === 'site' ? 'standards site' : 'built in'})
+                {liveGuidance.status.last_check_at ? ` · last check ${liveGuidance.status.last_check_at.slice(0, 16).replace('T', ' ')} ${liveGuidance.status.last_result || ''}` : ''}
+                {liveGuidance.status.last_error ? ` · ${liveGuidance.status.last_error}` : ''}
+              </p>
+            )}
+          </div>
+          <Button
+            variant="outline" className="min-h-[44px] shrink-0"
+            disabled={liveGuidanceBusy || !liveGuidance} onClick={toggleLiveGuidance}
+            role="switch" aria-checked={liveGuidance?.setting === 'on'}
+          >
+            {liveGuidanceBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {liveGuidance?.setting === 'off' ? 'Off — turn on' : 'On — turn off'}
           </Button>
         </CardContent>
       </Card>

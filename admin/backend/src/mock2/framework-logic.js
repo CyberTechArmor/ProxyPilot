@@ -125,3 +125,22 @@ export function parseFrameworkImport(doc) {
     || (fromVersion ? `Imported framework (exported from v${fromVersion})` : 'Imported framework');
   return { ok: true, data: { ...content, changelog, exported_from_version: fromVersion } };
 }
+
+// Provenance of a seed-upgrade publish (framework.js upgradeFrameworkFromSeed):
+// the vendored seed → source 'in_app'; a verified live-guidance release from the
+// standards site (mock2/live-guidance.js) → source 'git_sync' with the release
+// as source_git_commit and the site + release.json hash in the changelog.
+export function seedUpgradeProvenance(active, latestVersion) {
+  if (active?.origin === 'site') {
+    return {
+      changelog: `Live guidance — Mock2 ${active.version} from ${active.site} (release.json sha256 ${active.release_sha256}; every file verified against it), on the vendored seed since v${latestVersion}. Projects adopt it automatically (or via a manual update cycle).`,
+      source: 'git_sync',
+      sourceGitCommit: `mock2-core@${active.version}`,
+    };
+  }
+  return {
+    changelog: `Seed upgrade — vendored framework content changed since v${latestVersion} (gate / skill / constitution fixes). Projects adopt it automatically (or via a manual update cycle).`,
+    source: 'in_app',
+    sourceGitCommit: null,
+  };
+}

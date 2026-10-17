@@ -24,6 +24,7 @@ import { readFile, stat, open as fsOpen } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentCall, AgentError } from './agent.js';
 import { RUNNING_BUILD } from './build-identity.js';
+import { getGuidanceStatus } from '../mock2/guidance-status.js';
 import {
   CHECK_CACHE_MS,
   STANDARDS_MANIFEST_URL,
@@ -346,6 +347,9 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
       seed_version: net.seed.version,
       version_family: net.seed.family,
       source_version: net.seed.source_version,
+      // Live guidance (mock2/live-guidance.js): read fresh, never cached — the
+      // active guidance may be a verified site release newer than the seed.
+      guidance: getGuidanceStatus(),
       adoption_scope: net.seed.adoption_scope,
       site_version: net.manifest.site_version,
       changelog: net.manifest.changelog,

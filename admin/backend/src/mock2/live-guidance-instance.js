@@ -8,13 +8,15 @@ import { join } from 'node:path';
 import { getSetting } from '../db.js';
 import { readStandardsSeedVersion } from '../lib/self-update.js';
 import { STANDARDS_MANIFEST_URL } from '../lib/self-update-logic.js';
+import { MOCK2_DATA_DIR } from './provision.js';
 import { getLiveGuidanceSetting } from './settings.js';
 import { upgradeFrameworkFromSeed } from './framework.js';
 import { createLiveGuidance, LIVE_GUIDANCE_INTERVAL_MS } from './live-guidance.js';
 
 export const STANDARDS_SOURCE_KEY = 'mcp.standards_source_url';
-// Same default as provision.js / chat-images.js (not imported: provision.js pulls in the whole provisioner).
-export const LIVE_GUIDANCE_DIR = join(process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2', 'guidance');
+// Under the Projects module's own data root (provision.js is already loaded by the
+// mock2 router on every enabled host).
+export const LIVE_GUIDANCE_DIR = join(MOCK2_DATA_DIR, 'guidance');
 
 /** The pinned standards manifest URL: the operator's setting, else the seed default. */
 export function standardsSourceUrl() {

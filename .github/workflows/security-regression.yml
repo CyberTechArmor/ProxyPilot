@@ -131,6 +131,7 @@ jobs:
         run: |
           export BROWSER_EXE="$(node --input-type=module -e "import { chromium } from '../backend/node_modules/playwright-core/index.mjs'; console.log(chromium.executablePath())")"
           node tests/self-update-panel.browser.mjs
+          node tests/framework-live-guidance.browser.mjs
           node --test tests/agent-runs-cleanup.test.mjs
           node tests/agent-runs.browser.mjs
           node tests/agent-runs-a7.browser.mjs

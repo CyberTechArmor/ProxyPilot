@@ -247,7 +247,7 @@ export function createProjectConfigHandlers(kit) {
     const out = await lg.refresh({ reason: 'mcp' });
     note.summary = out.result === 'updated' ? `live guidance: Mock2 ${out.site_version} published as framework v${out.framework_version}` : `live guidance check: ${out.result}`;
     note.detail = { result: out.result, site: out.site || null, site_version: out.site_version || null, framework_version: out.framework_version ?? null, error: out.error || null };
-    if (out.result === 'error') return err(`Live guidance not refreshed (the active guidance is unchanged): ${out.error}`, { ...out, guidance: guidanceView() });
+    if (out.result === 'error') return err(`Live guidance not refreshed (the active guidance is unchanged): ${out.error}`, { result: out.result, site: out.site || null, site_version: out.site_version || null, checked_at: out.checked_at || null, guidance: guidanceView() });
     if (out.result === 'disabled') return ok({ ...out, guidance: guidanceView(), next: 'The live_guidance setting is off (Dev Studio → Framework versions → Live guidance, or POST /api/mock2/settings/live-guidance { setting: "on" }).' });
     return ok({ ...out, guidance: guidanceView() });
   });

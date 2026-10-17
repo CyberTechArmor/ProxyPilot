@@ -1,0 +1,14 @@
+[Unit]
+Description=Maintain the opted-in installed ProxyPilot browser runtime while idle
+After=docker.service proxypilot-browser-recovery.service proxypilot-a3-supervisor.service proxypilot-a4-broker.service
+Wants=docker.service
+ConditionPathExists=/var/lib/proxypilot/update/browser-runtime-maintenance.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock -n -E 0 /var/lock/proxypilot-update.lock /usr/bin/python3 /opt/proxypilot/scripts/browser-runtime-operation.py maintenance-tick
+ExecStopPost=/usr/bin/flock -w 30 /var/lock/proxypilot-update.lock /usr/bin/python3 /opt/proxypilot/scripts/browser-runtime-operation.py recover-if-needed
+TimeoutStartSec=1200
+TimeoutStopSec=360
+KillMode=control-group
+UMask=0077

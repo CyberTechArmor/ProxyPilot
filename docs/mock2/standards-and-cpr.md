@@ -5,12 +5,16 @@
 > earlier 0.3.0 rendering. Guidance adoption alone does not install Relay
 > runtime/producers or migrate existing integrations.
 >
-> **Live guidance (2026-10-18):** a newer Mock2 release on the pinned standards
-> site now reaches ProxyPilot at runtime — no code change, rebuild or PR — and the
-> vendored seed is the offline floor. See §4. Adopting a site release changes the
-> pinned guidance (`.mock2/standards/` and the constitution's pinned block) only;
-> a change to the platform's own constitution sections, skills or gates still
-> goes through the seed (§3).
+> **Adoption policy (2026-10-18).** An available site release is adopted
+> automatically while live guidance is on (§4): it becomes the guidance in every
+> project's build prompt, and with `live_guidance_auto_rebuild` on, idle projects
+> rebuild against it unattended. With live guidance off (frozen), an available
+> site release requires reviewed adoption into a ProxyPilot build (§3) — updating
+> unchanged ProxyPilot code cannot install it. Adopting a site release changes the
+> constitution's pinned block (the guidance in the build prompt) and the
+> `.mock2/standards/` files of NEW projects only; existing projects' files change
+> only through an explicit, hash-aware rollout. The platform's own constitution
+> sections, skills and gates still change only through the seed (§3).
 
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 
@@ -86,7 +90,7 @@ scripts/sync-mock2-guidance.mjs <release-dir>`) still raises the offline floor.
    by updating ProxyPilot — Profile → Application Settings → Update now, or
    `run_proxypilot_update` over MCP (`docs/features/self-update.md`); the Update
    block says the site release is adopted at the next live guidance check, or —
-   with live guidance off — that a ProxyPilot build must adopt it.
+   with live guidance off (frozen) — that a reviewed ProxyPilot build must adopt it.
 
 Publishing site changes *from* ProxyPilot: edit the seed under `/opt/app/site` on
 the `mock2` guest (`write_lxc_file`), write `/opt/app/site/.publish` with the commit
@@ -100,19 +104,29 @@ next chat. Never edit `/var/www/mock2` directly; it is reset to `origin/main`.
 runtime, pinned, hash-verified and cached, with the vendored seed as the floor.
 
 **Where it reads.** The pinned standards source is the manifest URL in the
-`mcp.standards_source_url` app setting (`set_standards_source`), else the seed's
+`mcp.standards_source_url` app setting (`set_standards_source` only — it is not in
+`set_setting`'s writable list, because it chooses build content), else the seed's
 `standards-version.json` `manifest` (`https://mock2.fractionate.ai/manifest.json`).
-`release.json` is read from beside it and each file from `<site>/<src>`. Only the
-release entries the seed carries are downloaded (`core/claude/CLAUDE.md`,
-`core/claude/rules/*`, `core/cpr/*`, the CPR profile and the capacity template).
-Requests are https only, no redirects, 15 s each, 2 min in total, 4 MB per file.
+`release.json` is read from beside it and each file from `<site>/<src>`.
+`check_proxypilot_update` and the Update block compare against the same pinned
+manifest. Only the release entries the seed carries are downloaded
+(`core/claude/CLAUDE.md`, `core/claude/rules/*`, `core/cpr/*`, the CPR profile and
+the capacity template).
+
+**Limits.** https only, no redirects; 15 s per request and 2 min per run; each
+body is streamed with a byte counter and cut off at 4 MB; an entry that declares
+more than 4 MB, or a release selecting more than 200 files, is refused before any
+download.
 
 **What it checks.** If `release.json`'s version is not newer than the active
-guidance, nothing else happens. Otherwise every selected file is downloaded and
-checked against `release.json` (sha256 **and** byte count) and the required
-documents must all be present — the same selection, checks and rendering the sync
-script runs, from one module (`admin/backend/src/mock2/guidance-release-logic.js`),
-so the vendored and the live guidance cannot drift.
+guidance, nothing else happens. If it is newer but every selected file has the
+same sha256 as the active guidance (a version-only release), it is recorded as
+checked (`content_matches_version`) and nothing is downloaded or published.
+Otherwise every selected file is downloaded and checked against `release.json`
+(sha256 **and** byte count), target paths must be unique and the required
+documents present — the same selection, checks and rendering the sync script runs,
+from one module (`admin/backend/src/mock2/guidance-release-logic.js`), so the
+vendored and the live guidance cannot drift.
 
 **Integrity, stated plainly.** The hashes come from `release.json` on the same
 site. That proves the set is complete and arrived intact; it does not prove who
@@ -120,45 +134,74 @@ wrote it. The site is the operator's own (published from `mock2/mock2-core` on
 git.fractionate.ai); whoever can publish there can publish guidance here. Pin the
 source to a host you control.
 
-**Where it lands.** Only after every file verified: written to a temp directory
-and renamed into `$MOCK2_DATA_DIR/guidance/<version>/` (`release.json` exactly as
-fetched + `upstream-guidance.json`), then `current.json` (version, site,
-release.json sha256, time) is replaced atomically. The last two versions are kept.
-Then a framework version is published through `upgradeFrameworkFromSeed` — the
-path a seed upgrade takes — with the constitution's pinned block rendered from the
+**What adoption changes.** A framework version is published through
+`upgradeFrameworkFromSeed` — the path a seed upgrade takes — with the
+constitution's pinned block (the guidance in every build prompt) rendered from the
 release, `source: 'git_sync'`, `source_git_commit: 'mock2-core@<version>'` and the
-site + release.json hash in the changelog. Projects adopt it exactly as they
-adopt a seed upgrade (auto-adopt sweep, or a manual update cycle). New projects
-are seeded with the active guidance; their `.mock2/standards/PROVENANCE.json`
-records `delivered_from` and `release_sha256` when it came from the site.
+site + release.json hash in the changelog. Projects adopt it like a seed upgrade:
+the auto-adopt sweep starts update builds on idle projects when
+`framework_auto_adopt` **and** `live_guidance_auto_rebuild` are on; otherwise the
+manual update cycle. Only NEW projects get the release's `.mock2/standards/`
+files (their `PROVENANCE.json` records `delivered_from` and `release_sha256`);
+existing projects keep their files.
 
-**When it runs.** At boot the verified cache is loaded first (local only, re-checked
-against its own `release.json` and the recorded hash), so a restart republishes
-nothing; then the site is checked in the background (5 s after boot) and daily;
-and on demand with `refresh_standards_guidance` over MCP.
+**Where it lands.** After every file verified, the release is written to a temp
+directory and renamed into `$MOCK2_DATA_DIR/guidance/<version>/` (`release.json`
+exactly as fetched + `upstream-guidance.json`). The pointer `current.json`
+(version, site, release.json sha256, time) is replaced atomically only once a
+framework version carries the release. The last two versions are kept.
 
-**Failure.** Setting off, offline, timeout, HTTP error, oversize file, bad
-release identity, a hash or size mismatch, a missing file: nothing is written, the
-active guidance stays as it is, and the error is reported (`get_standards_version`
-→ `guidance`, `check_proxypilot_update` → `standards.guidance`, the dashboard
-card). Nothing is thrown at boot. A cache that fails re-verification is ignored.
+**When it runs.** At boot the cache is loaded first (local only; re-checked
+against its own `release.json` and the recorded hash; ignored when it came from a
+different source than the one now pinned), so a restart republishes nothing; then
+the site is checked in the background (5 s after boot) and daily; and on demand
+with `refresh_standards_guidance` over MCP.
+
+**No downgrade on a lost cache.** If the cache is missing, damaged or ignored at
+boot while the latest framework version carries newer guidance than the seed,
+the boot seed upgrade keeps that version's pinned block and applies only platform
+changes (`mock2/framework-upgrade.js`); the live check then re-fetches the
+release. Until it does, new projects get the seed's `.mock2/standards/` files.
+Changing the pinned source never downgrades either: a lower release from the new
+source is reported as `blocked` until `reset_to_seed`.
+
+**Failure.** Offline, timeout, HTTP error, oversize body, bad release identity,
+a hash or size mismatch, a missing file: nothing is written, the active guidance
+stays as it is, and the error is reported (`get_standards_version` → `guidance`,
+`check_proxypilot_update` → `standards.guidance`, the dashboard card). A publish
+that throws puts the active guidance back, so the next check retries; a publish
+that changes nothing is reported as `already_published` (`published: false`).
+Nothing is thrown at boot.
 
 **The seed is the floor.** Live guidance is used only when it is newer than the
 vendored seed. When a ProxyPilot update ships a seed at or past the cached
 release, the seed wins and the cache is ignored.
 
+**Off means frozen.** With `live_guidance` off nothing is fetched and the active
+guidance stays exactly as it is — including a site release adopted earlier. Off
+does not roll back.
+
+**Rollback.** `refresh_standards_guidance` with `reset_to_seed: true` (and
+`confirm: true`; `dry_run: true` shows the plan) publishes a framework version
+with the seed's guidance through the normal publish path (the one deliberate
+guidance downgrade), deletes the cache, and turns `live_guidance` off so the same
+release is not adopted again at the next check. Ledgered and audited. This is how
+a bad or hostile release (say `99.0.0`) is undone without touching files; turn
+live guidance back on once the site is fixed.
+
 **Control.**
 
 | | |
 |---|---|
-| Setting | `live_guidance` in `mock2_settings`, `on` by default. Dashboard: Dev Studio → Framework versions → **Live guidance**. API: `GET/POST /api/mock2/settings/live-guidance` `{ setting: 'on'|'off' }` (admin; audited `MOCK2_SETTING_LIVE_GUIDANCE`). |
-| Source | `set_standards_source` (MCP), the app setting `mcp.standards_source_url`. |
-| Check now | MCP `refresh_standards_guidance`: `dry_run: true` reads `release.json` only and returns what would change (from/to versions, files with sha256 and bytes); `confirm: true` runs the refresh. Ledgered and audited like every extended-surface write. |
-| Status | `get_standards_version` → `guidance` (active origin seed/site, version, setting, last check time, result, error); `check_proxypilot_update` and the Update block → `standards.guidance`, and the site is compared with the active guidance, not only the seed. |
+| Settings | `live_guidance` in `mock2_settings`, `on` by default (off = frozen). `live_guidance_auto_rebuild`, default in ONE constant, `LIVE_GUIDANCE_AUTO_REBUILD_DEFAULT` in `mock2/settings.js` (currently `on` = rebuilds as for any version); off = auto-adopt skips site-sourced versions. Dashboard: Dev Studio → Framework versions → **Live guidance** (both switches). API: `GET/POST /api/mock2/settings/live-guidance` `{ setting?, auto_rebuild? }` (admin; audited `MOCK2_SETTING_LIVE_GUIDANCE`). |
+| Source | `set_standards_source` (MCP; its confirmation states the build consequence). |
+| Check now | MCP `refresh_standards_guidance`: `dry_run: true` reads `release.json` only and returns what would change; `confirm: true` runs the refresh; `reset_to_seed: true` is the rollback. Ledgered and audited like every extended-surface write. |
+| Status | `get_standards_version` → `guidance` (active origin seed/site, version, both settings, last check time, result, error, `content_matches_version`); `check_proxypilot_update` and the Update block → `standards.guidance`, comparing the pinned site with the active guidance. |
 
 Code: `mock2/guidance-release-logic.js` (pure, shared with the script),
-`mock2/live-guidance.js` (fetch → verify → cache → publish, dependencies
-injected), `mock2/active-guidance.js` + `mock2/guidance-status.js` (in memory),
+`mock2/live-guidance.js` (fetch → verify → cache → publish, reset; dependencies
+injected), `mock2/framework-upgrade.js` (the publish, with the guidance floor),
+`mock2/active-guidance.js` + `mock2/guidance-status.js` (in memory),
 `mock2/live-guidance-instance.js` (the real boundaries), boot wiring in
 `index.js`. Tests: `__tests__/live-guidance.test.js`.
 

@@ -209,6 +209,14 @@ guidance is live: the platform constitution sections, skills, gates and design
 system still change with the seed. A default Gitea connector applied to every new
 object is still missing (`docs/features/git-remotes.md`).
 
+## CI: `broker` job fails at step 8 on `main` (pre-existing)
+
+2026-10-17: the `Credential broker` workflow's `broker` job fails at step 8,
+"Paired runtime refresh and existing A3/A4/A7/A8 regressions"
+(`python3 -m unittest discover -s scripts/tests -p 'test_*.py'`), on `main`
+(`ce37c8e`) as on PRs that do not touch the broker. Treat that step's failure as
+pre-existing until it is fixed on `main`; it is not a regression of an unrelated PR.
+
 ## Storage (ZFS): verified on loop devices in CI, not yet on real hardware
 
 `docs/features/storage.md`. The unit tests and the loop-device integration

@@ -21,6 +21,11 @@ import { getGuidanceStatus, _resetGuidanceStatusForTests } from '../mock2/guidan
 import { createLiveGuidance } from '../mock2/live-guidance.js';
 import { mock2StandardsSeedFiles } from '../mock2/template.js';
 import { buildVersionCheck } from '../lib/self-update-logic.js';
+import { createSeedUpgrader, readSeedContent, readSeedFile } from '../mock2/framework-upgrade.js';
+import { seedGuidance } from '../mock2/active-guidance.js';
+import { pinnedGuidanceVersion, guidancePathFor, bundleConstitution } from '../mock2/guidance-release-logic.js';
+import { shouldAutoAdopt } from '../mock2/auto-adopt-logic.js';
+import { isLiveSourcedVersion } from '../mock2/framework-logic.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SEED_DIR = resolve(HERE, '../mock2/framework-seed');
@@ -33,11 +38,11 @@ const NEWER = bump(SEED_VERSION);
 
 // A release built from the vendored bundle: same files, a given version, plus one
 // entry ProxyPilot does not carry (proves the selection), optionally tampered.
-function makeRelease(version = NEWER, { tamper = null } = {}) {
+function makeRelease(version = NEWER, { tamper = null, unchanged = false } = {}) {
   const files = new Map();
   const entries = vendored.files.map((f) => {
     let content = f.content;
-    if (f.source === 'core/claude/CLAUDE.md' && version !== SEED_VERSION) content = content.replace(/\n$/, `\n<!-- release ${version} -->\n`);
+    if (f.source === 'core/claude/CLAUDE.md' && version !== SEED_VERSION && !unchanged) content = content.replace(/\n$/, `\n<!-- release ${version} -->\n`);
     const bytes = Buffer.from(content, 'utf8');
     files.set(f.source, bytes);
     return { src: f.source, dest: `~/.mock2/${f.path}`, mode: 'replace', exec: false, sha256: sha256Hex(bytes), bytes: bytes.length };
@@ -204,12 +209,29 @@ test('dry run reads release.json only and reports exactly what would change', as
   assert.equal(existsSync(join(dataDir, 'current.json')), false);
 });
 
-test('a publish failure is reported; the verified cache stays for the next boot', async () => {
-  const { lg, dataDir } = setup({ opts: { publish: () => { throw new Error('db locked'); } } });
+test('a publish failure puts the active guidance back and the next check retries', async () => {
+  let fail = true;
+  const published = [];
+  const { lg, dataDir } = setup({ opts: { publish: (a) => { if (fail) throw new Error('db locked'); published.push(a.version); return { version: 9 }; } } });
   const out = await lg.refresh();
   assert.equal(out.result, 'error');
-  assert.match(out.error, /publishing the framework version failed: db locked/);
+  assert.equal(out.published, false);
+  assert.match(out.error, /publishing the framework version failed .*: db locked/);
+  assert.deepEqual([getActiveGuidance().origin, getActiveGuidance().version], ['seed', SEED_VERSION], 'active guidance put back');
+  assert.equal(existsSync(join(dataDir, 'current.json')), false, 'no pointer to a release no framework version carries');
+  fail = false;
+  const again = await lg.refresh();
+  assert.deepEqual([again.result, again.published, again.framework_version], ['updated', true, 9]);
+  assert.deepEqual(published, [NEWER]);
   assert.ok(existsSync(join(dataDir, 'current.json')));
+});
+
+test('a publish that changes nothing reports published: false, not updated', async () => {
+  const { lg, dataDir } = setup({ opts: { publish: () => null } });
+  const out = await lg.refresh();
+  assert.deepEqual([out.result, out.published], ['already_published', false]);
+  assert.ok(existsSync(join(dataDir, 'current.json')));
+  assert.equal(getGuidanceStatus().last_result, 'already_published');
 });
 
 test('concurrent refreshes share one run', async () => {
@@ -349,4 +371,245 @@ test('a live-guidance publish records the site release as its provenance; a seed
   const seed = seedUpgradeProvenance({ origin: 'seed', version: SEED_VERSION }, 7);
   assert.deepEqual([seed.source, seed.sourceGitCommit], ['in_app', null]);
   assert.match(seed.changelog, /^Seed upgrade/);
+});
+
+/* ------------------------------ review fixes ------------------------------ */
+
+// An in-memory mock2_framework_versions: the REAL upgradeFrameworkFromSeed
+// (framework-upgrade.js, which framework.js binds to mock2.db) runs against it.
+function memoryRegistry({ platformExtra = () => '' } = {}) {
+  const rows = [];
+  const readFile = (name) => {
+    const text = readSeedFile(name);
+    if (name !== 'constitution.md' || !platformExtra()) return text;
+    const at = text.indexOf('<!-- BEGIN PINNED MOCK2 GUIDANCE -->');
+    return `${text.slice(0, at).trimEnd()}\n\n${platformExtra()}\n\n${text.slice(at)}`;
+  };
+  const insert = ({ createdBy, sourceGitCommit, ...fields }) => {
+    const row = { id: rows.length + 1, version: rows.length + 1, ...fields, source_git_commit: sourceGitCommit, created_by: createdBy };
+    rows.push(row);
+    return row;
+  };
+  const upgrade = createSeedUpgrader({ getCurrent: () => rows.at(-1), insert, readFile, log: { log() {}, error() {} } });
+  // version 1: the vendored seed, as seedFrameworkV1 inserts it
+  insert({ ...readSeedContent(seedGuidance(), { readFile }), changelog: 'Seed v1', source: 'in_app', sourceGitCommit: null, createdBy: 1 });
+  return { rows, upgrade, pinned: () => pinnedGuidanceVersion(rows.at(-1).constitution_md) };
+}
+
+function liveWith(reg, { rel = makeRelease(), dataDir, sourceUrl = () => MANIFEST, enabled = () => true, freeze = () => {} } = {}) {
+  const { fetchImpl, calls } = stubFetch(rel);
+  const lg = createLiveGuidance({
+    dataDir, fetchImpl, isEnabled: enabled, sourceUrl, freeze, log: { warn() {} },
+    publish: (active, opts) => reg.upgrade(null, active, opts),
+    currentPinnedVersion: reg.pinned,
+  });
+  return { lg, calls };
+}
+
+const freshDir = () => join(mkdtempSync(join(tmpdir(), 'pp-guidance-')), 'guidance');
+const resetAll = () => { _resetActiveGuidanceForTests(); _resetGuidanceStatusForTests(); _resetActiveGuidanceForTests(); };
+
+test('finding 1, end to end: a lost cache at boot never republishes older guidance; platform changes still land; the re-fetch publishes nothing new', async () => {
+  resetAll();
+  let extra = '';
+  const reg = memoryRegistry({ platformExtra: () => extra });
+  const dataDir = freshDir();
+  const { lg } = liveWith(reg, { dataDir });
+  assert.equal(reg.upgrade(null), null, 'boot on an unchanged seed publishes nothing');
+
+  const first = await lg.refresh();
+  assert.deepEqual([first.result, first.framework_version], ['updated', 2]);
+  assert.deepEqual([reg.rows[1].source, reg.rows[1].source_git_commit, reg.pinned()], ['git_sync', `mock2-core@${NEWER}`, NEWER]);
+
+  // Restart with the release directory gone (an interrupted write / a wiped disk):
+  // the pointer names a directory that does not exist.
+  rmSync(join(dataDir, NEWER), { recursive: true, force: true });
+  _resetActiveGuidanceForTests();
+  const boot = createLiveGuidance({ dataDir, sourceUrl: () => MANIFEST, log: { warn() {} } });
+  const loaded = boot.loadCache();
+  assert.equal(loaded.loaded, false);
+  assert.match(loaded.reason, /cached guidance ignored: .*(ENOENT|no such file)/);
+  assert.equal(getActiveGuidance().origin, 'seed');
+  assert.equal(reg.upgrade(null), null, 'no downgrade: the seed guidance is not republished');
+  assert.equal(reg.rows.length, 2);
+
+  // A ProxyPilot update changes a platform section while the cache is still gone.
+  extra = '## 99. A platform section added by a later ProxyPilot build';
+  const v3 = reg.upgrade(null);
+  assert.equal(v3.version, 3);
+  assert.equal(v3.source, 'in_app');
+  assert.ok(v3.constitution_md.includes(extra));
+  assert.equal(pinnedGuidanceVersion(v3.constitution_md), NEWER, 'the published guidance is kept');
+  assert.match(v3.changelog, new RegExp(`guidance ${NEWER.replace(/\./g, '\\.')} is kept`));
+
+  // The live check re-fetches the same release: the framework already carries it.
+  const refetch = await lg.refresh();
+  assert.deepEqual([refetch.result, refetch.published], ['already_published', false]);
+  assert.equal(reg.rows.length, 3, 'exactly two versions after v1, one adoption wave each');
+  assert.equal(getActiveGuidance().version, NEWER);
+  assert.equal(reg.upgrade(null), null, 'and the next boot publishes nothing');
+});
+
+test('reset_to_seed rolls a hostile 99.0.0 back through the normal publish path, clears the cache and freezes', async () => {
+  resetAll();
+  const reg = memoryRegistry();
+  const dataDir = freshDir();
+  const frozen = [];
+  const { lg } = liveWith(reg, { dataDir, rel: makeRelease('99.0.0'), freeze: (by) => frozen.push(by) });
+  assert.equal((await lg.refresh()).result, 'updated');
+  assert.equal(reg.pinned(), '99.0.0');
+
+  const plan = await lg.resetToSeed({ dryRun: true });
+  assert.equal(plan.result, 'reset_planned');
+  assert.deepEqual(plan.would.from, { origin: 'site', version: '99.0.0', framework_guidance: '99.0.0' });
+  assert.equal(reg.rows.length, 2, 'dry run changes nothing');
+
+  const out = await lg.resetToSeed({ by: 7 });
+  assert.deepEqual([out.result, out.published, out.framework_version, out.live_guidance], ['reset', true, 3, 'off']);
+  assert.deepEqual([reg.rows[2].source, reg.pinned()], ['in_app', SEED_VERSION]);
+  assert.match(reg.rows[2].changelog, /^Reset to the vendored seed guidance .* from live guidance 99\.0\.0/);
+  assert.deepEqual(frozen, [7]);
+  assert.equal(existsSync(join(dataDir, 'current.json')), false);
+  assert.deepEqual(versionDirs(dataDir), []);
+  assert.equal(getActiveGuidance().origin, 'seed');
+  _resetActiveGuidanceForTests();
+  assert.equal(reg.upgrade(null), null, 'the next boot keeps the seed');
+});
+
+test('a lower release from a newly pinned source does not replace newer published guidance: blocked until reset_to_seed', async () => {
+  resetAll();
+  const reg = memoryRegistry();
+  await liveWith(reg, { dataDir: freshDir(), rel: makeRelease('99.0.0') }).lg.refresh();
+  _resetActiveGuidanceForTests(); // the cache from the old source is ignored at boot
+  const out = await liveWith(reg, { dataDir: freshDir() }).lg.refresh();
+  assert.equal(out.result, 'blocked');
+  assert.equal(out.published, false);
+  assert.match(out.error, /carries Mock2 99\.0\.0, newer than/);
+  assert.equal(reg.rows.length, 2);
+  assert.equal(getActiveGuidance().origin, 'seed');
+});
+
+test('a version-only release (no selected file changed) is recorded as current and nothing is published', async () => {
+  const { lg, calls, published, dataDir } = setup({ rel: makeRelease(NEWER, { unchanged: true }) });
+  const out = await lg.refresh();
+  assert.deepEqual([out.result, out.content_unchanged, out.site_version], ['current', true, NEWER]);
+  assert.deepEqual(calls, [`${SITE}/release.json`], 'nothing downloaded beyond release.json');
+  assert.equal(published.length, 0);
+  assert.equal(existsSync(join(dataDir, 'current.json')), false);
+  const st = getGuidanceStatus();
+  assert.deepEqual([st.content_matches_version, st.active_version], [NEWER, SEED_VERSION]);
+  const check = buildVersionCheck({ standards: { seed_version: SEED_VERSION, source_version: SEED_VERSION, site_version: NEWER, guidance: st } }).standards;
+  assert.equal(check.status, 'current');
+});
+
+test('a cache from a different source than the one now pinned is ignored at boot', async () => {
+  const first = setup();
+  assert.equal((await first.lg.refresh()).result, 'updated');
+  _resetActiveGuidanceForTests();
+  const other = createLiveGuidance({ dataDir: first.dataDir, sourceUrl: () => 'https://other.test/manifest.json', log: { warn() {} } });
+  const r = other.loadCache();
+  assert.equal(r.loaded, false);
+  assert.match(r.reason, /came from https:\/\/standards\.test, not the pinned source https:\/\/other\.test/);
+  assert.equal(getActiveGuidance().origin, 'seed');
+});
+
+test('streaming cap: an endless body is cut off at 4 MB without reading it all', async () => {
+  resetAll();
+  let pulls = 0;
+  const endless = () => new ReadableStream({ pull(c) { pulls += 1; c.enqueue(new Uint8Array(64 * 1024)); } });
+  const lg = createLiveGuidance({ dataDir: freshDir(), sourceUrl: () => MANIFEST, log: { warn() {} }, fetchImpl: async () => new Response(endless(), { status: 200 }) });
+  const out = await lg.refresh();
+  assert.equal(out.result, 'error');
+  assert.match(out.error, /larger than 4194304 bytes/);
+  assert.ok(pulls < 80, `stopped near the cap (${pulls} chunks of 64 KB)`);
+});
+
+test('an entry declaring more than the cap, or too many entries, is refused before any file is fetched', async () => {
+  const big = makeRelease();
+  big.release.files.find((e) => e.src === 'core/cpr/Relay-Recording.md').bytes = 5 * 1024 * 1024;
+  big.raw = Buffer.from(JSON.stringify(big.release));
+  const a = setup({ rel: big });
+  const out = await a.lg.refresh();
+  assert.match(out.error, /declares 5242880 bytes \(limit 4194304\)/);
+  assert.deepEqual(a.calls, [`${SITE}/release.json`]);
+
+  const many = makeRelease();
+  for (let i = 0; i < 200; i++) many.release.files.push({ src: `core/claude/rules/extra-${i}.md`, sha256: 'a'.repeat(64), bytes: 1 });
+  many.raw = Buffer.from(JSON.stringify(many.release));
+  const b = setup({ rel: many });
+  const out2 = await b.lg.refresh();
+  assert.match(out2.error, /selects 230 guidance files \(limit 200\)/);
+  assert.deepEqual(b.calls, [`${SITE}/release.json`]);
+});
+
+test('redirects are refused', async () => {
+  resetAll();
+  const seen = [];
+  const fetchImpl = async (url, opts) => {
+    seen.push(opts.redirect);
+    if (opts.redirect === 'error') throw new TypeError('fetch failed: unexpected redirect');
+    return new Response('{}', { status: 200 });
+  };
+  const out = await createLiveGuidance({ dataDir: freshDir(), sourceUrl: () => MANIFEST, fetchImpl, log: { warn() {} } }).refresh();
+  assert.deepEqual(seen, ['error']);
+  assert.equal(out.result, 'error');
+  assert.match(out.error, /redirect/);
+});
+
+test('the 120 s total deadline stops the run after release.json (injected clock)', async () => {
+  resetAll();
+  let t = 1_000_000;
+  const rel = makeRelease();
+  const { fetchImpl, calls } = stubFetch(rel);
+  const lg = createLiveGuidance({
+    dataDir: freshDir(), sourceUrl: () => MANIFEST, log: { warn() {} }, clock: () => t,
+    fetchImpl: async (url, opts) => { const r = await fetchImpl(url, opts); if (url.endsWith('/release.json')) t += 120_001; return r; },
+    publish: () => { throw new Error('must not publish'); },
+  });
+  const out = await lg.refresh();
+  assert.equal(out.result, 'error');
+  assert.equal(out.error, 'timed out');
+  assert.deepEqual(calls, [`${SITE}/release.json`]);
+  assert.equal(getActiveGuidance().origin, 'seed');
+});
+
+test('bundle rules: unique target paths; the constitution is selected by its source', async () => {
+  const dup = makeRelease();
+  const e = dup.release.files.find((x) => x.src === 'core/claude/rules/mock2-change-record.md');
+  dup.release.files.push({ ...e, src: 'core/cpr/rules/mock2-change-record.md' }); // → .mock2/standards/rules/mock2-change-record.md
+  dup.files.set('core/cpr/rules/mock2-change-record.md', dup.files.get(e.src));
+  assert.equal(guidancePathFor('core/cpr/rules/mock2-change-record.md'), guidancePathFor(e.src));
+  await assert.rejects(buildGuidanceBundle(dup.release, (src) => dup.files.get(src)), /Duplicate guidance target: \.mock2\/standards\/rules\/mock2-change-record\.md/);
+  const ok = await buildGuidanceBundle(makeRelease().release, (src) => makeRelease().files.get(src));
+  assert.equal(bundleConstitution(ok), ok.files.find((f) => f.source === 'core/claude/CLAUDE.md').content);
+  assert.equal(bundleConstitution(vendored), vendored.files.find((f) => f.source === 'core/claude/CLAUDE.md').content);
+});
+
+test('auto-adopt skips live-sourced versions only when live_guidance_auto_rebuild is off', () => {
+  const facts = { enabled: true, currentFrameworkId: 5, project: { lifecycle: 'active', design_approved_at: 'x', last_built_framework_version_id: 4 } };
+  const live = { source: 'git_sync', source_git_commit: `mock2-core@${NEWER}` };
+  assert.equal(isLiveSourcedVersion(live), true);
+  assert.equal(isLiveSourcedVersion({ source: 'in_app', source_git_commit: null }), false);
+  assert.deepEqual(shouldAutoAdopt({ ...facts, liveSourced: true, liveAutoRebuild: false }), { adopt: false, reason: 'live guidance version; automatic rebuild off' });
+  assert.equal(shouldAutoAdopt({ ...facts, liveSourced: true, liveAutoRebuild: true }).adopt, true);
+  assert.equal(shouldAutoAdopt({ ...facts, liveSourced: false, liveAutoRebuild: false }).adopt, true, 'seed versions still adopt');
+  // The default lives in one constant (flip it there).
+  const src = readFileSync(resolve(HERE, '../mock2/settings.js'), 'utf8');
+  assert.equal((src.match(/LIVE_GUIDANCE_AUTO_REBUILD_DEFAULT = '(on|off)';/g) || []).length, 1);
+  assert.match(src, /getMock2Setting\(LIVE_GUIDANCE_AUTO_REBUILD_KEY, LIVE_GUIDANCE_AUTO_REBUILD_DEFAULT\)/);
+  const sweep = readFileSync(resolve(HERE, '../mock2/auto-adopt.js'), 'utf8');
+  assert.match(sweep, /isLiveSourcedVersion\(framework\) && !getLiveGuidanceAutoRebuild\(\)/);
+});
+
+test('off is a freeze: the boot cache still loads, nothing is fetched', async () => {
+  const first = setup();
+  await first.lg.refresh();
+  _resetActiveGuidanceForTests();
+  const calls = [];
+  const off = createLiveGuidance({ dataDir: first.dataDir, sourceUrl: () => MANIFEST, isEnabled: () => false, fetchImpl: async (u) => { calls.push(u); throw new Error('no'); }, log: { warn() {} } });
+  assert.equal(off.loadCache().loaded, true);
+  assert.deepEqual([getActiveGuidance().origin, getActiveGuidance().version], ['site', NEWER]);
+  assert.equal((await off.refresh()).result, 'disabled');
+  assert.deepEqual(calls, []);
+  assert.equal(getActiveGuidance().version, NEWER, 'frozen, not rolled back');
 });

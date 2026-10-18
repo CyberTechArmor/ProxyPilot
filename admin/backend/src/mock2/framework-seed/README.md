@@ -25,7 +25,9 @@ verifies every selected file against it (sha256 + bytes), caches the result in
 `$MOCK2_DATA_DIR/guidance/<version>/` and publishes a framework version from it —
 at boot, daily, and on demand (`refresh_standards_guidance`). It is used only when
 newer than this seed; any failure leaves the active guidance unchanged. The
-`live_guidance` setting (on by default) turns it off. See
+`live_guidance` setting (on by default) freezes it when off;
+`refresh_standards_guidance` `reset_to_seed: true` returns to this seed. Only new
+projects receive a newer release's `.mock2/standards/` files. See
 `docs/mock2/standards-and-cpr.md` §4.
 
 Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`

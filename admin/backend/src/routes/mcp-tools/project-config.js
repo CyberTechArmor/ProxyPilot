@@ -209,11 +209,11 @@ export function createProjectConfigHandlers(kit) {
     let probe = null;
     if (url) { probe = await fetchStandardsManifest({ url }); if (probe.error) return err(`That manifest is not reachable: ${probe.error}`); }
     const d = dry(args, { current, url, manifest: probe }); if (d) return d;
-    const gate = confirmFlag(args, note, `Pin the standards source to ${url || 'the seed default'} (currently ${current || 'seed default'}).`); if (gate) return gate;
+    const gate = confirmFlag(args, note, `Pin the standards source to ${url || 'the seed default'} (currently ${current || 'seed default'}). This chooses build content: with live guidance on, ProxyPilot adopts newer Mock2 guidance from this site as the guidance in every project's build prompt, and — with live_guidance_auto_rebuild on — starts unattended update builds on idle projects.`); if (gate) return gate;
     setSetting(STANDARDS_SOURCE_KEY, url || '');
     note.summary = `standards source ${url ? `pinned to ${url}` : 'reset to seed default'}`;
     note.detail = { previous: current, url };
-    return ok({ applied: true, previous: current, url, manifest: probe, note: 'get_standards_version and check_proxypilot_update compare against this manifest, and live guidance reads release.json and the guidance files from beside it (at boot, daily, or now with refresh_standards_guidance). The vendored seed stays the floor (docs/mock2/standards-and-cpr.md §4).' });
+    return ok({ applied: true, previous: current, url, manifest: probe, note: 'get_standards_version and check_proxypilot_update compare against this manifest, and live guidance reads release.json and the guidance files from beside it (at boot, daily, or now with refresh_standards_guidance). A cache from another source is ignored at the next boot; newer guidance already published is not replaced (reset_to_seed goes back first). The vendored seed stays the floor (docs/mock2/standards-and-cpr.md §4).' });
   });
 
   // Live guidance status for the standards tools: which guidance is active (the
@@ -224,8 +224,10 @@ export function createProjectConfigHandlers(kit) {
     return {
       active: { origin: g.active_origin, version: g.active_version, site: g.active_site, release_sha256: g.active_release_sha256, fetched_at: g.active_fetched_at },
       live_guidance: g.enabled == null ? null : (g.enabled ? 'on' : 'off'),
+      live_guidance_auto_rebuild: g.auto_rebuild == null ? null : (g.auto_rebuild ? 'on' : 'off'),
       last_check_at: g.last_check_at, last_result: g.last_result, last_error: g.last_error,
-      last_site_version: g.last_site_version, last_published_framework_version: g.last_published_framework_version,
+      last_site_version: g.last_site_version, content_matches_version: g.content_matches_version,
+      last_published_framework_version: g.last_published_framework_version,
     };
   }
 
@@ -235,19 +237,35 @@ export function createProjectConfigHandlers(kit) {
     return (await import('../../mock2/live-guidance-instance.js')).liveGuidance;
   }
 
-  const refresh_standards_guidance = mutation('refresh_standards_guidance', { subjectType: 'mock2_framework', keepArgs: ['dry_run', 'confirm'] }, async (args, auth, req, note) => {
+  const refresh_standards_guidance = mutation('refresh_standards_guidance', { subjectType: 'mock2_framework', keepArgs: ['dry_run', 'confirm', 'reset_to_seed'] }, async (args, auth, req, note) => {
     note.subject_id = 'live_guidance';
     const lg = await liveGuidanceInstance();
+    if (args.reset_to_seed === true) {
+      // Rollback: the seed guidance through the normal publish path, the cache
+      // cleared, live guidance turned off (frozen) so the same release is not
+      // adopted again at the next check.
+      if (args.dry_run === true) {
+        const plan = await lg.resetToSeed({ dryRun: true });
+        note.detail = { reset_to_seed: true, from: plan.would?.from || null };
+        return dry(args, { ...plan, guidance: guidanceView() });
+      }
+      const gate = confirmFlag(args, note, 'Reset the Mock2 guidance to the seed this ProxyPilot build carries: a new framework version is published with the seed guidance (projects adopt it like any framework version, so automatic adoption may start update builds), the live guidance cache is cleared, and live guidance is turned off until someone turns it back on.'); if (gate) return gate;
+      const out = await lg.resetToSeed({ by: auth?.created_by ?? null });
+      note.summary = out.result === 'reset' ? `live guidance reset to the seed${out.framework_version ? ` (framework v${out.framework_version})` : ''}; live guidance off` : `live guidance reset: ${out.result}`;
+      note.detail = { reset_to_seed: true, result: out.result, from: out.from || null, framework_version: out.framework_version ?? null, live_guidance: out.live_guidance || null, error: out.error || null };
+      if (out.result !== 'reset') return err(`Not reset (nothing changed): ${out.error}`, { result: out.result, guidance: guidanceView() });
+      return ok({ ...out, guidance: guidanceView(), next: 'Turn live guidance back on (Dev Studio → Framework versions → Live guidance) once the standards site is fixed.' });
+    }
     if (args.dry_run === true) {
       const check = await lg.refresh({ dryRun: true, reason: 'mcp' });
       note.detail = { result: check.result, site_version: check.site_version || null, error: check.error || null };
       return dry(args, { ...check, guidance: guidanceView() });
     }
-    const gate = confirmFlag(args, note, 'Check the pinned standards site now and, when its release is newer than the active guidance, download, verify and publish it as a new framework version (projects adopt it like a seed upgrade).'); if (gate) return gate;
+    const gate = confirmFlag(args, note, 'Check the pinned standards site now and, when its release is newer than the active guidance, download, verify and publish it as a new framework version. That changes the guidance in every project\'s build prompt, and with live_guidance_auto_rebuild on, idle projects start unattended update builds against it.'); if (gate) return gate;
     const out = await lg.refresh({ reason: 'mcp' });
     note.summary = out.result === 'updated' ? `live guidance: Mock2 ${out.site_version} published as framework v${out.framework_version}` : `live guidance check: ${out.result}`;
-    note.detail = { result: out.result, site: out.site || null, site_version: out.site_version || null, framework_version: out.framework_version ?? null, error: out.error || null };
-    if (out.result === 'error') return err(`Live guidance not refreshed (the active guidance is unchanged): ${out.error}`, { result: out.result, site: out.site || null, site_version: out.site_version || null, checked_at: out.checked_at || null, guidance: guidanceView() });
+    note.detail = { result: out.result, published: out.published ?? false, site: out.site || null, site_version: out.site_version || null, framework_version: out.framework_version ?? null, error: out.error || null };
+    if (out.result === 'error' || out.result === 'blocked') return err(`Live guidance not refreshed (the active guidance is unchanged): ${out.error}`, { result: out.result, published: out.published ?? false, site: out.site || null, site_version: out.site_version || null, checked_at: out.checked_at || null, guidance: guidanceView() });
     if (out.result === 'disabled') return ok({ ...out, guidance: guidanceView(), next: 'The live_guidance setting is off (Dev Studio → Framework versions → Live guidance, or POST /api/mock2/settings/live-guidance { setting: "on" }).' });
     return ok({ ...out, guidance: guidanceView() });
   });

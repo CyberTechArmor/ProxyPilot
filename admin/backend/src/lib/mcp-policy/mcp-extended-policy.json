@@ -111,9 +111,9 @@
     "reserved_listen_ports": [80, 443, 3001, 51820]
   },
   "settings": {
-    "$comment": "get_settings / set_setting: the app_settings keys an MCP client may read and write. Secret-bearing keys are readable as '[set]' / '[unset]' only and never writable here. exports.compression (zstd | gzip | none, default zstd) is the compressor every guest export, prepared download and S3 snapshot push uses; it falls back to gzip on a host without the zstd binary.",
-    "writable": ["github_repo", "tls_mode", "dns01_domains", "branding_name", "passkey_origin_allowlist", "update_dismissed", "dismissed_version", "mcp.standards_source_url", "exports.compression"],
-    "readable_extra": ["installed_version", "admin_domain", "last_update_id", "caddy_site_render_contract", "branding_logo", "branding_favicon"],
+    "$comment": "get_settings / set_setting: the app_settings keys an MCP client may read and write. Secret-bearing keys are readable as '[set]' / '[unset]' only and never writable here. exports.compression (zstd | gzip | none, default zstd) is the compressor every guest export, prepared download and S3 snapshot push uses; it falls back to gzip on a host without the zstd binary. mcp.standards_source_url is deliberately NOT here: it chooses Mock2 guidance for every project's builds, so only set_standards_source (with its consequence stated) changes it.",
+    "writable": ["github_repo", "tls_mode", "dns01_domains", "branding_name", "passkey_origin_allowlist", "update_dismissed", "dismissed_version", "exports.compression"],
+    "readable_extra": ["mcp.standards_source_url", "installed_version", "admin_domain", "last_update_id", "caddy_site_render_contract", "branding_logo", "branding_favicon"],
     "secret": ["cloudflare_global_token"]
   },
   "route_options": {

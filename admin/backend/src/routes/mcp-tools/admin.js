@@ -279,7 +279,6 @@ export function createAdminHandlers(kit) {
     if (key === 'tls_mode' && !['acme', 'manual'].includes(value)) return err("tls_mode must be 'acme' or 'manual'");
     if (key === 'github_repo' && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) return err('github_repo must be owner/name');
     if (key === 'dns01_domains') { try { if (!Array.isArray(JSON.parse(value))) throw new Error(); } catch { return err('dns01_domains must be a JSON array of domains'); } }
-    if (key === 'mcp.standards_source_url' && !/^https:\/\/[^\s]+$/.test(value)) return err('mcp.standards_source_url must be an https URL');
     if (key === COMPRESSION_SETTING && !normalizeCompression(value)) return err(`${COMPRESSION_SETTING} must be one of ${COMPRESSIONS.join(', ')} (default ${DEFAULT_COMPRESSION}; a host without the zstd binary falls back to gzip on its own)`);
     const current = getSetting(key);
     const d = dry(args, { key, current, value }); if (d) return d;

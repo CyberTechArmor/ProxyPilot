@@ -195,6 +195,42 @@ test('refresh_standards_guidance: dry_run previews through the live-guidance che
   // Projects module off → refused like every standards tool.
   const off = createExtendedHandlers(makeCtx({ liveGuidance: () => fake }).ctx).handlers;
   assert.equal((await off.refresh_standards_guidance({ confirm: true }, AUTH)).isError, true);
+  // The confirm text and the catalog state the build consequence.
+  assert.match(refused.content[0].text, /every project's build prompt/);
+  assert.match(byName.get('refresh_standards_guidance').description, /unattended update builds/);
+  assert.match(byName.get('set_standards_source').description, /chooses build content/);
+});
+
+test('refresh_standards_guidance reset_to_seed: dry run shows the plan, confirm resets and freezes, ledgered and audited', async () => {
+  const calls = [];
+  const fake = { refresh: async () => { throw new Error('not this path'); }, resetToSeed: async (o) => { calls.push(o); return o.dryRun
+    ? { result: 'reset_planned', dry_run: true, would: { from: { origin: 'site', version: '99.0.0' }, to: { origin: 'seed', version: '1.23.2' } } }
+    : { result: 'reset', published: true, framework_version: 14, from: { origin: 'site', version: '99.0.0' }, to: { origin: 'seed', version: '1.23.2' }, live_guidance: 'off' }; } };
+  const { ctx, ledger, audit } = makeCtx({ mock2Modules: async () => ({}), liveGuidance: () => fake });
+  const { handlers } = createExtendedHandlers(ctx);
+  const d = parse(await handlers.refresh_standards_guidance({ reset_to_seed: true, dry_run: true }, AUTH));
+  assert.equal(d.would.result, 'reset_planned');
+  assert.equal(ledger.at(-1)[8], 'dry_run');
+  const refused = await handlers.refresh_standards_guidance({ reset_to_seed: true }, AUTH);
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /live guidance is turned off/);
+  assert.equal(calls.length, 1);
+  const r = parse(await handlers.refresh_standards_guidance({ reset_to_seed: true, confirm: true }, AUTH));
+  assert.deepEqual([r.result, r.framework_version, r.live_guidance], ['reset', 14, 'off']);
+  assert.deepEqual(calls.at(-1), { by: AUTH.created_by });
+  assert.equal(ledger.at(-1)[8], 'ok');
+  assert.equal(audit.at(-1)[1], 'MCP_REFRESH_STANDARDS_GUIDANCE');
+  assert.equal(audit.at(-1)[4].reset_to_seed, true);
+});
+
+test('set_setting cannot change the standards source (it chooses build content); it stays readable', async () => {
+  const { ctx } = makeCtx();
+  const { handlers } = createExtendedHandlers(ctx);
+  assert.ok(!POLICY.settings.writable.includes('mcp.standards_source_url'));
+  assert.ok(POLICY.settings.readable_extra.includes('mcp.standards_source_url'));
+  const r = await handlers.set_setting({ key: 'mcp.standards_source_url', value: 'https://evil.test/manifest.json', confirm: true }, AUTH);
+  assert.equal(r.isError, true);
+  assert.match(r.content[0].text, /not writable over MCP/);
 });
 
 test('confirmation tokens: first call issues one bound to the target, the second consumes it, a replay is refused', async () => {

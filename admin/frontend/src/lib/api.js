@@ -2018,11 +2018,13 @@ export const api = {
   mock2GetFrameworkAutoAdopt: () => request('/mock2/settings/framework-auto-adopt'),
   mock2SetFrameworkAutoAdopt: (setting) =>
     request('/mock2/settings/framework-auto-adopt', { method: 'POST', body: JSON.stringify({ setting }) }),
-  // Admin: live Mock2 guidance — 'on' (default) adopts newer releases from the
-  // pinned standards site (verified against release.json); 'off' fetches nothing.
+  // Admin: live Mock2 guidance — setting 'on' (default) adopts newer releases from
+  // the pinned standards site (verified against release.json); 'off' freezes.
+  // auto_rebuild: whether a site-sourced version starts automatic update cycles.
   mock2GetLiveGuidance: () => request('/mock2/settings/live-guidance'),
-  mock2SetLiveGuidance: (setting) =>
-    request('/mock2/settings/live-guidance', { method: 'POST', body: JSON.stringify({ setting }) }),
+  // body: { setting?: 'on'|'off', auto_rebuild?: 'on'|'off' }
+  mock2SetLiveGuidance: (body) =>
+    request('/mock2/settings/live-guidance', { method: 'POST', body: JSON.stringify(body) }),
   // New elements — what a build designed that the approved design does not have,
   // and the operator's accept. Promotion is how the design system grows past
   // the mockup it was frozen at.

@@ -78,18 +78,28 @@ export default function FrameworkVersions() {
     finally { setAutoAdoptBusy(false); }
   };
 
-  const toggleLiveGuidance = async () => {
-    const next = liveGuidance?.setting === 'off' ? 'on' : 'off';
-    setLiveGuidanceBusy(true);
+  // field: 'setting' (live guidance on/off) or 'auto_rebuild' (whether a
+  // site-sourced version starts the automatic update cycle).
+  const toggleLiveGuidance = async (field) => {
+    const current = field === 'auto_rebuild' ? liveGuidance?.auto_rebuild : liveGuidance?.setting;
+    const next = current === 'off' ? 'on' : 'off';
+    setLiveGuidanceBusy(field);
     try {
-      const r = await api.mock2SetLiveGuidance(next);
+      const r = await api.mock2SetLiveGuidance({ [field]: next });
       setLiveGuidance(r);
-      toast({
-        title: `Live guidance ${r.setting}`,
-        description: r.setting === 'on'
-          ? 'Newer Mock2 releases on the standards site are verified and published at boot and daily.'
-          : 'Nothing is fetched; the guidance stays where it is until ProxyPilot is updated.',
-      });
+      toast(field === 'auto_rebuild'
+        ? {
+          title: `Automatic rebuilds for live guidance ${r.auto_rebuild}`,
+          description: r.auto_rebuild === 'on'
+            ? 'A version from the standards site starts the update cycle on idle projects like any other version.'
+            : 'A version from the standards site waits for the manual "Update now" on each project.',
+        }
+        : {
+          title: `Live guidance ${r.setting}`,
+          description: r.setting === 'on'
+            ? 'Newer Mock2 releases on the standards site are verified and published at boot and daily.'
+            : 'Frozen: nothing is fetched and the active guidance stays as it is.',
+        });
     } catch (err) { toast({ variant: 'destructive', title: 'Could not save', description: err.message }); }
     finally { setLiveGuidanceBusy(false); }
   };
@@ -232,7 +242,8 @@ export default function FrameworkVersions() {
             <p className="font-medium">Live guidance</p>
             <p className="text-xs text-muted-foreground">
               At boot and daily, a newer Mock2 release on the standards site is checked against its release.json and
-              published as a new version. Off keeps the guidance this ProxyPilot build carries.
+              published as a new version. Off freezes: nothing is fetched and the active guidance stays as it is
+              (going back to the built-in guidance is the reset_to_seed rollback).
             </p>
             {liveGuidance?.status && (
               <p className="mt-1 break-words text-xs text-muted-foreground">
@@ -244,11 +255,28 @@ export default function FrameworkVersions() {
           </div>
           <Button
             variant="outline" className="min-h-[44px] shrink-0"
-            disabled={liveGuidanceBusy || !liveGuidance} onClick={toggleLiveGuidance}
-            role="switch" aria-checked={liveGuidance?.setting === 'on'}
+            disabled={!!liveGuidanceBusy || !liveGuidance} onClick={() => toggleLiveGuidance('setting')}
+            role="switch" aria-checked={liveGuidance?.setting === 'on'} aria-label="Live guidance"
           >
-            {liveGuidanceBusy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {liveGuidanceBusy === 'setting' ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             {liveGuidance?.setting === 'off' ? 'Off — turn on' : 'On — turn off'}
+          </Button>
+        </CardContent>
+        <CardContent className="flex flex-col gap-3 border-t p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="font-medium">Automatic rebuilds for live guidance</p>
+            <p className="text-xs text-muted-foreground">
+              On: a version from the standards site starts the update cycle on idle projects like any other version.
+              Off: projects pick it up only through their manual &quot;Update now&quot;.
+            </p>
+          </div>
+          <Button
+            variant="outline" className="min-h-[44px] shrink-0"
+            disabled={!!liveGuidanceBusy || !liveGuidance} onClick={() => toggleLiveGuidance('auto_rebuild')}
+            role="switch" aria-checked={liveGuidance?.auto_rebuild === 'on'} aria-label="Automatic rebuilds for live guidance"
+          >
+            {liveGuidanceBusy === 'auto_rebuild' ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {liveGuidance?.auto_rebuild === 'off' ? 'Off — turn on' : 'On — turn off'}
           </Button>
         </CardContent>
       </Card>

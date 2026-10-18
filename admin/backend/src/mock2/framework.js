@@ -9,16 +9,10 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
-import { readFileSync } from 'fs';
-import { dirname, resolve } from 'path';
-import { fileURLToPath } from 'url';
 import { getMock2Db } from './db.js';
 import { getDb } from '../db.js';
-import { nextVersionNumber, seedUpgradeProvenance } from './framework-logic.js';
-import { getActiveGuidance, effectiveConstitution } from './active-guidance.js';
-
-const __dir = dirname(fileURLToPath(import.meta.url));
-const SEED_DIR = resolve(__dir, 'framework-seed');
+import { nextVersionNumber } from './framework-logic.js';
+import { createSeedUpgrader, readSeedContent } from './framework-upgrade.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -100,10 +94,6 @@ export function insertFrameworkVersion({
 
 // ---- first-boot seed (ADR-003 / risk R8) ----
 
-function readSeedFile(name) {
-  return readFileSync(resolve(SEED_DIR, name), 'utf8');
-}
-
 // Insert framework version 1 from the vendored placeholder seed IF AND ONLY IF
 // the versions table is empty. Idempotent — a second call is a no-op once any
 // version exists (never re-inserts, never edits). Called from index.js boot on
@@ -128,25 +118,6 @@ export function seedFrameworkV1(createdBy = null) {
   return row;
 }
 
-// Read the vendored seed's five content fields, or null if any is unreadable.
-// The constitution's pinned Mock2 guidance block is the ACTIVE guidance's: the
-// seed's own, or a verified newer release from the standards site
-// (active-guidance.js / live-guidance.js), rendered the way the sync script does.
-function readSeedContent(active = getActiveGuidance()) {
-  try {
-    return {
-      constitution_md: effectiveConstitution(readSeedFile('constitution.md'), active),
-      skills_json: readSeedFile('skills.json'),
-      gates_json: readSeedFile('gates.json'),
-      design_system_md: readSeedFile('design-system.md'),
-      project_template_ref: readSeedFile('project-template.ref').trim(),
-    };
-  } catch (err) {
-    console.error('[mock2] framework seed: could not read vendored seed:', err?.message);
-    return null;
-  }
-}
-
 // Resolve a non-null author id (created_by is NOT NULL) — the caller's id, else
 // the platform's first admin, else 1.
 function resolveSeedAuthor(createdBy = null) {
@@ -168,29 +139,11 @@ function resolveSeedAuthor(createdBy = null) {
 // explicit-consent path). Idempotent: a no-op when the seed matches the latest
 // version. Called on boot after seedFrameworkV1.
 //
-// Live guidance (mock2/live-guidance.js) publishes through this same function:
-// when the active guidance came from the standards site, the version records
-// source 'git_sync', the release (`mock2-core@<version>`) and the site in its
-// changelog; otherwise it is the in-app seed upgrade it always was.
-export function upgradeFrameworkFromSeed(createdBy = null, active = getActiveGuidance()) {
-  const latest = getCurrentFrameworkVersion();
-  if (!latest) return null; // nothing seeded yet — first boot goes through seedFrameworkV1
-  const content = readSeedContent(active);
-  if (!content) return null;
-  const unchanged = latest.constitution_md === content.constitution_md
-    && latest.skills_json === content.skills_json
-    && latest.gates_json === content.gates_json
-    && latest.design_system_md === content.design_system_md
-    && String(latest.project_template_ref || '') === content.project_template_ref;
-  if (unchanged) return null;
-  const fromSite = active?.origin === 'site';
-  const row = insertFrameworkVersion({
-    ...content,
-    ...seedUpgradeProvenance(active, latest.version),
-    createdBy: resolveSeedAuthor(createdBy),
-  });
-  console.log(fromSite
-    ? `[mock2] framework upgraded from live guidance → version ${row.version} (Mock2 ${active.version} from ${active.site})`
-    : `[mock2] framework upgraded from seed → version ${row.version} (seed content changed since v${latest.version})`);
-  return row;
-}
+// Live guidance (mock2/live-guidance.js) publishes through this same function,
+// and it never republishes OLDER guidance than the latest version carries
+// (framework-upgrade.js: the guidance floor). Implementation: framework-upgrade.js.
+export const upgradeFrameworkFromSeed = createSeedUpgrader({
+  getCurrent: () => getCurrentFrameworkVersion(),
+  insert: (fields) => insertFrameworkVersion(fields),
+  resolveAuthor: (id) => resolveSeedAuthor(id),
+});

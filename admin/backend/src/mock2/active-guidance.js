@@ -38,6 +38,18 @@ export function setLiveGuidance({ bundle, site, release_sha256, fetched_at }) {
 }
 
 /**
+ * Put back a guidance snapshot taken with getActiveGuidance() (a failed publish
+ * must not leave the active guidance on a release no framework version carries).
+ */
+export function restoreActiveGuidance(snapshot) {
+  live = snapshot && snapshot.origin === 'site' ? snapshot : null;
+  report();
+}
+
+/** Back to the vendored seed (reset_to_seed). */
+export function clearLiveGuidance() { live = null; report(); }
+
+/**
  * The constitution to publish: the vendored seed's own (it already carries the
  * seed's pinned block) unless a newer site release is active, in which case the
  * pinned block is re-rendered from that release exactly as the sync script does.

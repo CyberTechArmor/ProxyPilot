@@ -326,8 +326,12 @@ export function buildVersionCheck({
   // Live guidance: when a verified site release newer than the seed is active,
   // that release is what this host runs, so it is what the site is compared with.
   const guidance = standards.guidance || null;
+  // A newer version whose guidance files are all unchanged (content_matches_version)
+  // is current as well: there is nothing to adopt.
   const liveActive = guidance?.active_origin === 'site' && normalizeVersion(guidance.active_version) ? normalizeVersion(guidance.active_version) : null;
-  const sourceVersion = liveActive || (standards.source_version ?? standards.seed_version);
+  const baseVersion = liveActive || (standards.source_version ?? standards.seed_version);
+  const matched = normalizeVersion(guidance?.content_matches_version || '') || null;
+  const sourceVersion = matched && (!baseVersion || compareVersions(matched, baseVersion) > 0) ? matched : baseVersion;
   const sameStandardsFamily = !standards.version_family || standards.version_family === 'mock2-core';
   const decision = decideUpdate({
     installed: { version: currentVersion, sha: inst.sha },
@@ -377,13 +381,15 @@ export function buildVersionCheck({
         : decision.standards.available ? 'adoption_required' : 'current',
       next_action: !decision.standards.available ? null
         : guidance?.enabled
-          ? 'Live guidance is on: ProxyPilot adopts this release at its next check (at boot and daily), or now with refresh_standards_guidance.'
+          ? `Live guidance is on: ProxyPilot adopts this release at its next check (at boot and daily), or now with refresh_standards_guidance${guidance.auto_rebuild === false ? '; projects adopt it through the manual update cycle (live_guidance_auto_rebuild is off)' : '; idle projects then rebuild against it automatically'}.`
           : 'Review and integrate the published standards, then deploy a ProxyPilot build containing that adoption.',
       guidance: guidance ? {
         active_origin: guidance.active_origin || 'seed',
         active_version: normalizeVersion(guidance.active_version) || null,
         active_site: guidance.active_site || null,
         live_enabled: guidance.enabled ?? null,
+        auto_rebuild: guidance.auto_rebuild ?? null,
+        content_matches_version: matched,
         last_check_at: guidance.last_check_at || null,
         last_result: guidance.last_result || null,
         last_error: guidance.last_error || null,

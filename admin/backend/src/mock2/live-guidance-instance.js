@@ -9,8 +9,9 @@ import { getSetting } from '../db.js';
 import { readStandardsSeedVersion } from '../lib/self-update.js';
 import { STANDARDS_MANIFEST_URL } from '../lib/self-update-logic.js';
 import { MOCK2_DATA_DIR } from './provision.js';
-import { getLiveGuidanceSetting } from './settings.js';
-import { upgradeFrameworkFromSeed } from './framework.js';
+import { getLiveGuidanceSetting, setLiveGuidanceSetting, getLiveGuidanceAutoRebuild } from './settings.js';
+import { upgradeFrameworkFromSeed, getCurrentFrameworkVersion } from './framework.js';
+import { pinnedGuidanceVersion } from './guidance-release-logic.js';
 import { createLiveGuidance, LIVE_GUIDANCE_INTERVAL_MS } from './live-guidance.js';
 
 export const STANDARDS_SOURCE_KEY = 'mcp.standards_source_url';
@@ -28,8 +29,11 @@ export function standardsSourceUrl() {
 export const liveGuidance = createLiveGuidance({
   dataDir: LIVE_GUIDANCE_DIR,
   isEnabled: getLiveGuidanceSetting,
+  isAutoRebuild: getLiveGuidanceAutoRebuild,
   sourceUrl: standardsSourceUrl,
-  publish: (active) => upgradeFrameworkFromSeed(null, active),
+  publish: (active, opts) => upgradeFrameworkFromSeed(null, active, opts),
+  currentPinnedVersion: () => pinnedGuidanceVersion(getCurrentFrameworkVersion()?.constitution_md),
+  freeze: (by) => setLiveGuidanceSetting('off', by),
 });
 
 export { LIVE_GUIDANCE_INTERVAL_MS };

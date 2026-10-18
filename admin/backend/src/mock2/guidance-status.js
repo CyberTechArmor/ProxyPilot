@@ -6,6 +6,7 @@
 
 const status = {
   enabled: null,
+  auto_rebuild: null,
   active_origin: null,
   active_version: null,
   active_site: null,
@@ -16,6 +17,9 @@ const status = {
   last_result: null,
   last_error: null,
   last_site_version: null,
+  // The newest site release whose selected files equal the active guidance
+  // (a version-only release): current, nothing to publish.
+  content_matches_version: null,
   last_published_framework_version: null,
 };
 

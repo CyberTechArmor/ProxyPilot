@@ -4481,7 +4481,7 @@ async function toolPushGitRemote(args, auth) {
 // exactly like the dashboard's Update now button.
 
 async function toolCheckProxypilotUpdate(args) {
-  const out = await selfUpdateCheck({ repo: getGitHubRepo(), currentVersion: getCurrentVersion(), force: args.force === true });
+  const out = await selfUpdateCheck({ repo: getGitHubRepo(), currentVersion: getCurrentVersion(), force: args.force === true, standardsUrl: getSetting('mcp.standards_source_url') || null });
   return toolResult(out);
 }
 

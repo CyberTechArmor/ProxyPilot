@@ -22,6 +22,15 @@ export const REQUIRED_GUIDANCE = Object.freeze([
   'Universal-Integration-New-App-Prompt.md', 'Universal-Integration-Existing-App-Prompt.md', 'stack.versions.json',
 ]);
 
+// The release source of the governing constitution (rendered into the pinned
+// block and shipped as .mock2/standards/constitution.md).
+export const CONSTITUTION_SOURCE = 'core/claude/CLAUDE.md';
+// Fetch limits for the live path: a selected file may not declare or deliver
+// more than MAX_GUIDANCE_FILE_BYTES, and a release may not select more than
+// MAX_GUIDANCE_ENTRIES files (30 today).
+export const MAX_GUIDANCE_FILE_BYTES = 4 * 1024 * 1024;
+export const MAX_GUIDANCE_ENTRIES = 200;
+
 const SAFE_SRC = /^[a-zA-Z0-9_./-]+$/;
 const SEMVER = /^\d+\.\d+\.\d+$/;
 
@@ -39,7 +48,7 @@ export function validateReleaseIdentity(release) {
 /** The release entries ProxyPilot carries as guidance. */
 export function selectGuidanceEntries(release) {
   return release.files.filter((f) => f && typeof f.src === 'string' && (
-    f.src === 'core/claude/CLAUDE.md' || f.src === 'core/mock2/profiles/profile-cpr.md'
+    f.src === CONSTITUTION_SOURCE || f.src === 'core/mock2/profiles/profile-cpr.md'
     || f.src === 'core/mock2/templates/repo/.mock2/capacity.md'
     || f.src.startsWith('core/cpr/') || f.src.startsWith('core/claude/rules/')));
 }
@@ -52,7 +61,7 @@ export function assertSafeSource(src) {
 
 /** Where a release source file lands in a project (and in the bundle). */
 export function guidancePathFor(src) {
-  const relative = src === 'core/claude/CLAUDE.md' ? 'constitution.md'
+  const relative = src === CONSTITUTION_SOURCE ? 'constitution.md'
     : src.startsWith('core/claude/rules/') ? src.slice('core/claude/'.length)
       : src.startsWith('core/mock2/profiles/') ? 'profile-cpr.md' : src.slice('core/cpr/'.length);
   return src === 'core/mock2/templates/repo/.mock2/capacity.md' ? '.mock2/capacity.md' : `.mock2/standards/${relative}`;
@@ -73,13 +82,17 @@ export function verifyEntryBytes(entry, bytes) {
 export async function buildGuidanceBundle(release, readBytes) {
   validateReleaseIdentity(release);
   const files = [];
+  const targets = new Set();
   for (const f of selectGuidanceEntries(release)) {
     assertSafeSource(f.src);
+    const target = guidancePathFor(f.src);
+    if (targets.has(target)) throw new Error(`Duplicate guidance target: ${target}`);
+    targets.add(target);
     const bytes = await readBytes(f.src, f);
     const hash = verifyEntryBytes(f, bytes);
     const content = bytes.toString('utf8');
     if (!Buffer.from(content, 'utf8').equals(bytes)) throw new Error(`Not UTF-8 text: ${f.src}`);
-    files.push({ path: guidancePathFor(f.src), source: f.src, sha256: hash, content });
+    files.push({ path: target, source: f.src, sha256: hash, content });
   }
   assertRequiredGuidance(files);
   return { family: GUIDANCE_FAMILY, version: release.version, updated: release.updated, scope: GUIDANCE_SCOPE, files };
@@ -117,7 +130,7 @@ export const serializeBundle = (bundle) => JSON.stringify(bundle, null, 2) + '\n
 
 /** The canonical constitution text a bundle carries. */
 export function bundleConstitution(bundle) {
-  const f = bundle.files.find((x) => x.path.endsWith('/constitution.md'));
+  const f = bundle.files.find((x) => x.source === CONSTITUTION_SOURCE);
   if (!f) throw new Error('Missing required guidance: constitution.md');
   return f.content;
 }
@@ -130,6 +143,49 @@ export function renderPinnedConstitution(platformConstitution, bundle) {
   const old = String(platformConstitution);
   const original = old.includes(PINNED_MARKER) ? old.slice(0, old.indexOf(PINNED_MARKER)).trimEnd() : old.trimEnd();
   return `${original}\n\n${PINNED_MARKER}\n# Governing Mock2 guidance: ${bundle.version}\n\nThe following pinned guidance supersedes historical general-workflow wording above.\nProxyPilot's concrete identity, authorization, private-data and execution contracts remain binding.\nLoad the applicable rules and CPR documents from .mock2/standards/ before dependent work.\nThis guidance adoption does not install Relay runtime/producers or migrate existing integrations.\n\n${bundleConstitution(bundle)}\n${PINNED_END}\n`;
+}
+
+/**
+ * Throws before anything is downloaded when a release selects too many files or
+ * declares one larger than the cap (the download itself is capped as well).
+ */
+export function assertFetchLimits(entries, { maxEntries = MAX_GUIDANCE_ENTRIES, maxBytes = MAX_GUIDANCE_FILE_BYTES } = {}) {
+  if (entries.length > maxEntries) throw new Error(`Release selects ${entries.length} guidance files (limit ${maxEntries})`);
+  for (const e of entries) {
+    if (!Number.isInteger(e.bytes) || e.bytes < 0 || e.bytes > maxBytes) throw new Error(`Release entry ${e.src} declares ${e.bytes} bytes (limit ${maxBytes})`);
+  }
+  return entries;
+}
+
+/**
+ * True when the release's selected files are exactly the bundle's files (same
+ * targets, same sha256): a version-only release that changes no guidance.
+ */
+export function sameGuidanceContent(entries, bundle) {
+  if (!bundle || !Array.isArray(bundle.files) || entries.length !== bundle.files.length) return false;
+  const have = new Map(bundle.files.map((f) => [f.path, f.sha256]));
+  return entries.every((e) => have.get(guidancePathFor(e.src)) === e.sha256);
+}
+
+/** The Mock2 version named in a constitution's pinned block, or null. */
+export function pinnedGuidanceVersion(constitution) {
+  const text = String(constitution || '');
+  const at = text.indexOf(PINNED_MARKER);
+  if (at < 0) return null;
+  const m = text.slice(at).match(/^# Governing Mock2 guidance: (\d+\.\d+\.\d+)$/m);
+  return m ? m[1] : null;
+}
+
+/**
+ * The seed's platform sections with another constitution's pinned block: used
+ * when the published guidance is newer than what this process can render (the
+ * live cache is gone), so a platform change still lands without a downgrade.
+ */
+export function keepPinnedBlock(platformConstitution, publishedConstitution) {
+  const old = String(platformConstitution);
+  const original = old.includes(PINNED_MARKER) ? old.slice(0, old.indexOf(PINNED_MARKER)).trimEnd() : old.trimEnd();
+  const pub = String(publishedConstitution);
+  return `${original}\n\n${pub.slice(pub.indexOf(PINNED_MARKER))}`;
 }
 
 /** standards-version.json after adopting a release (the vendored seed only). */

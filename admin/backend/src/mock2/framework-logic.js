@@ -125,3 +125,40 @@ export function parseFrameworkImport(doc) {
     || (fromVersion ? `Imported framework (exported from v${fromVersion})` : 'Imported framework');
   return { ok: true, data: { ...content, changelog, exported_from_version: fromVersion } };
 }
+
+// Provenance of a seed-upgrade publish (framework-upgrade.js):
+// * a verified live-guidance release from the standards site (mock2/live-guidance.js)
+//   → source 'git_sync' with the release as source_git_commit and the site +
+//   release.json hash in the changelog (auto-adopt can skip these:
+//   live_guidance_auto_rebuild);
+// * the vendored seed → source 'in_app', including a platform change that kept
+//   newer published guidance (`kept`) and a deliberate reset to the seed
+//   (`resetFrom`, refresh_standards_guidance reset_to_seed).
+export function seedUpgradeProvenance(active, latestVersion, { kept = null, resetFrom = null } = {}) {
+  if (active?.origin === 'site' && !kept) {
+    return {
+      changelog: `Live guidance — Mock2 ${active.version} from ${active.site} (release.json sha256 ${active.release_sha256}; every file verified against it), on the vendored seed since v${latestVersion}. Projects adopt it like a seed upgrade (automatic rebuilds follow live_guidance_auto_rebuild).`,
+      source: 'git_sync',
+      sourceGitCommit: `mock2-core@${active.version}`,
+    };
+  }
+  if (resetFrom) {
+    return {
+      changelog: `Reset to the vendored seed guidance (Mock2 ${active?.version}) from live guidance ${resetFrom}, since v${latestVersion}. Projects adopt it automatically (or via a manual update cycle).`,
+      source: 'in_app',
+      sourceGitCommit: null,
+    };
+  }
+  return {
+    changelog: kept
+      ? `Seed upgrade — vendored platform content changed since v${latestVersion}; the published Mock2 guidance ${kept} is kept (newer than this build's seed). Projects adopt it automatically (or via a manual update cycle).`
+      : `Seed upgrade — vendored framework content changed since v${latestVersion} (gate / skill / constitution fixes). Projects adopt it automatically (or via a manual update cycle).`,
+    source: 'in_app',
+    sourceGitCommit: null,
+  };
+}
+
+// A framework version published from the live standards site (auto-adopt asks).
+export function isLiveSourcedVersion(row) {
+  return row?.source === 'git_sync' && /^mock2-core@\d+\.\d+\.\d+$/.test(String(row?.source_git_commit || ''));
+}

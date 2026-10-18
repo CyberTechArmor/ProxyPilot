@@ -19,7 +19,20 @@ these documents under `.mock2/standards/` with VERSION and PROVENANCE.json.
 Existing project files require an explicit hash-aware rollout; publishing a
 framework version does not certify their local files or deployed application.
 
-Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`.
+**This is the floor, not the ceiling.** At runtime ProxyPilot reads newer
+releases from the pinned standards site (`release.json` beside the manifest URL),
+verifies every selected file against it (sha256 + bytes), caches the result in
+`$MOCK2_DATA_DIR/guidance/<version>/` and publishes a framework version from it —
+at boot, daily, and on demand (`refresh_standards_guidance`). It is used only when
+newer than this seed; any failure leaves the active guidance unchanged. The
+`live_guidance` setting (on by default) freezes it when off;
+`refresh_standards_guidance` `reset_to_seed: true` returns to this seed. Only new
+projects receive a newer release's `.mock2/standards/` files. See
+`docs/mock2/standards-and-cpr.md` §4.
+
+Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`
+(an optional second argument writes into another seed directory). Selection and
+verification are `mock2/guidance-release-logic.js`, shared with the live path.
 Every required source file is checked against release.json before output.
 Source release.json SHA256 at adoption:
 `745cb748d94f4ae229b1c4731fc26f10d1e3ba28403f774399ecd6ea1512574d`

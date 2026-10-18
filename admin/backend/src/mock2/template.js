@@ -23,7 +23,7 @@ import { PLATFORM_VERSION_PATH, renderPlatformVersionFile } from './base-app-upg
 import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
-import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
+import { getActiveGuidance } from './active-guidance.js';
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
@@ -369,11 +369,24 @@ host integration work; a guidance version never proves those capabilities.
 - \`interview.md\` — answers captured during Stage 2 (optional, for audit)
 `,
     },
+    ...guidanceSeedFiles(),
+  ];
+}
+
+// The pinned guidance a new project starts with: the ACTIVE guidance — the
+// vendored seed, or a verified newer release from the standards site
+// (active-guidance.js) — with VERSION and PROVENANCE.json. A site release also
+// records where it was delivered from and the release.json hash it was checked
+// against.
+function guidanceSeedFiles(active = getActiveGuidance()) {
+  const guidance = active.bundle;
+  return [
     ...guidance.files.map(({ path, content }) => ({ path, content })),
     { path: '.mock2/standards/VERSION', content: `${guidance.version}\n` },
     { path: '.mock2/standards/PROVENANCE.json', content: JSON.stringify({
       family: guidance.family, version: guidance.version, scope: guidance.scope,
       source: 'https://git.fractionate.ai/mock2/mock2-core',
+      ...(active.origin === 'site' ? { delivered_from: active.site, release_sha256: active.release_sha256 } : {}),
       files: guidance.files.map(({ path, source, sha256 }) => ({ path, source, sha256 })),
       relay_runtime: 'not_installed_by_guidance_seed',
     }, null, 2) + '\n' },

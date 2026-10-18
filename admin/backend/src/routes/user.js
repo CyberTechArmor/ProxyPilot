@@ -1267,7 +1267,7 @@ userRouter.get('/version', (req, res) => {
 userRouter.get('/version/check', requireAdmin, async (req, res) => {
   try {
     const force = req.query.force === '1' || req.query.force === 'true';
-    const data = await checkForUpdates({ repo: getGitHubRepo(), currentVersion: getCurrentVersion(), force });
+    const data = await checkForUpdates({ repo: getGitHubRepo(), currentVersion: getCurrentVersion(), force, standardsUrl: getSetting('mcp.standards_source_url') || null });
     res.json(data);
   } catch (error) {
     console.error('Error checking for updates:', error);

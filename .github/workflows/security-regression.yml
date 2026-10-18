@@ -80,7 +80,7 @@ jobs:
         run: node --test src/__tests__/browser-runtime-install.test.js src/__tests__/update-runner-maintenance.test.js src/__tests__/update-runner-policy.test.js src/__tests__/self-update-logic.test.js src/__tests__/self-update-runner.test.js
       - name: Build identity and pinned standards guidance
         working-directory: admin/backend
-        run: node --test src/__tests__/build-identity.test.js src/__tests__/upstream-guidance.test.js src/__tests__/self-update-driver.test.js src/__tests__/mock2-standards-seed.test.js src/__tests__/mock2-framework.test.js
+        run: node --test src/__tests__/build-identity.test.js src/__tests__/upstream-guidance.test.js src/__tests__/self-update-driver.test.js src/__tests__/mock2-standards-seed.test.js src/__tests__/mock2-framework.test.js src/__tests__/live-guidance.test.js
       - run: bash -n install.sh update.sh scripts/install-incus-stable.sh scripts/incus-stable-candidate.sh scripts/upgrade-incus-stable.sh
       - run: bash scripts/tests/incus-upgrade-preflight.sh
   audit:
@@ -131,6 +131,7 @@ jobs:
         run: |
           export BROWSER_EXE="$(node --input-type=module -e "import { chromium } from '../backend/node_modules/playwright-core/index.mjs'; console.log(chromium.executablePath())")"
           node tests/self-update-panel.browser.mjs
+          node tests/framework-live-guidance.browser.mjs
           node --test tests/agent-runs-cleanup.test.mjs
           node tests/agent-runs.browser.mjs
           node tests/agent-runs-a7.browser.mjs

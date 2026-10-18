@@ -401,6 +401,47 @@ export function setFrameworkAutoAdopt(value, updatedBy = null) {
   return getFrameworkAutoAdopt();
 }
 
+// ---- Live Mock2 guidance (mock2/live-guidance.js) ----
+//
+// 'on' (DEFAULT): at boot, daily and on demand, read release.json from the pinned
+// standards source, and when its version is newer than the active guidance,
+// download and verify the guidance files, cache them in the data dir and publish
+// a framework version from them (projects adopt it like a seed upgrade). 'off':
+// freeze — nothing is fetched and the active guidance stays as it is (reset to
+// the seed is refresh_standards_guidance reset_to_seed).
+export const LIVE_GUIDANCE_KEY = 'live_guidance';
+
+export function getLiveGuidanceSetting() {
+  const raw = String(getMock2Setting(LIVE_GUIDANCE_KEY, 'on')).trim().toLowerCase();
+  return !(raw === 'off' || raw === '0' || raw === 'false');
+}
+
+export function setLiveGuidanceSetting(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(LIVE_GUIDANCE_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
+  return getLiveGuidanceSetting();
+}
+
+// 'on': a framework version published from the live standards site starts the
+// automatic update cycle like any other (framework_auto_adopt permitting).
+// 'off': auto-adopt skips versions whose source is the live site — projects
+// adopt them only through the manual update cycle; seed versions still adopt.
+// The default lives in this ONE constant (flip it here). 'on' = the behaviour
+// before this setting existed.
+export const LIVE_GUIDANCE_AUTO_REBUILD_DEFAULT = 'on';
+export const LIVE_GUIDANCE_AUTO_REBUILD_KEY = 'live_guidance_auto_rebuild';
+
+export function getLiveGuidanceAutoRebuild() {
+  const raw = String(getMock2Setting(LIVE_GUIDANCE_AUTO_REBUILD_KEY, LIVE_GUIDANCE_AUTO_REBUILD_DEFAULT)).trim().toLowerCase();
+  return !(raw === 'off' || raw === '0' || raw === 'false');
+}
+
+export function setLiveGuidanceAutoRebuild(value, updatedBy = null) {
+  const v = String(value || '').trim().toLowerCase();
+  setMock2Setting(LIVE_GUIDANCE_AUTO_REBUILD_KEY, v === 'off' || v === '0' || v === 'false' ? 'off' : 'on', updatedBy);
+  return getLiveGuidanceAutoRebuild();
+}
+
 // ---- Stall watchdog thresholds (stuck-build recovery timing) ----
 //
 // Two dashboard-tunable minute values:

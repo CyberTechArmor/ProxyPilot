@@ -39,6 +39,9 @@ export function adoptInstruction(fromVersion, toVersion) {
 //    reconcile (its first build pins current on its own)
 //  * actually behind   — last-built framework ≠ current
 //  * idle              — no live/blocked cycle, nothing holding the checkout lock
+//  * live auto-rebuild — a version published from the live standards site
+//    (source git_sync) is adopted automatically only when
+//    live_guidance_auto_rebuild is on; otherwise it waits for the manual cycle
 //  * not yet attempted — no cycle already pins the current version. Every
 //    cycle (including a refused or failed adoption) pins at start, so this is
 //    the idempotency latch: a failing adoption never retries itself forever
@@ -50,9 +53,12 @@ export function shouldAutoAdopt({
   latestCycleStatus = null,
   hasCycleOnCurrent = false,
   lockHeld = false,
+  liveSourced = false,
+  liveAutoRebuild = true,
 } = {}) {
   if (!enabled) return { adopt: false, reason: 'auto-adopt off' };
   if (!currentFrameworkId) return { adopt: false, reason: 'no framework version' };
+  if (liveSourced && !liveAutoRebuild) return { adopt: false, reason: 'live guidance version; automatic rebuild off' };
   if (project.lifecycle !== 'active') return { adopt: false, reason: `project ${project.lifecycle || 'missing'}` };
   if (!project.design_approved_at) return { adopt: false, reason: 'design not approved' };
   if (!project.last_built_framework_version_id) return { adopt: false, reason: 'never built' };

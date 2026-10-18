@@ -285,3 +285,20 @@ test('noteCompletedUpdateOnBoot audits a fresh success once and clears the dismi
   assert.equal(audits.length, 2);
   assert.equal(settings.last_update_version, '1.5.1');
 });
+
+test('checkForUpdates compares against the pinned standards source when one is set', async () => {
+  clearUpdateCheckCache();
+  const { fetchImpl, calls } = stubFetch([
+    ['/releases/latest', { body: { tag_name: 'v1.4.0', html_url: 'https://gh/rel', body: null } }],
+    ['raw.githubusercontent.com', { body: { version: '1.4.0' } }],
+    ['/commits/main', { body: { sha: 'sha', commit: { committer: { date: '2026-09-04T00:00:00Z' } } } }],
+    ['/compare/', { body: { ahead_by: 0 } }],
+    ['manifest.json', { body: { version: '99.0.0' } }],
+  ]);
+  const out = await checkForUpdates({ repo: 'o/r', currentVersion: '1.4.0', fetchImpl, call: deadCall, standardsUrl: 'https://standards.example/m2/manifest.json' });
+  assert.ok(calls.some((u) => String(u) === 'https://standards.example/m2/manifest.json'), 'the pinned manifest was read');
+  assert.ok(!calls.some((u) => String(u).startsWith('https://mock2.fractionate.ai/')), 'not the seed default');
+  assert.equal(out.standards.site, 'https://standards.example/m2');
+  assert.equal(out.standards.site_version, '99.0.0');
+  clearUpdateCheckCache();
+});

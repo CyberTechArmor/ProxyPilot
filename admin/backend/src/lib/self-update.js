@@ -24,6 +24,7 @@ import { readFile, stat, open as fsOpen } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentCall, AgentError } from './agent.js';
 import { RUNNING_BUILD } from './build-identity.js';
+import { getGuidanceStatus } from '../mock2/guidance-status.js';
 import {
   CHECK_CACHE_MS,
   STANDARDS_MANIFEST_URL,
@@ -312,17 +313,21 @@ export function clearUpdateCheckCache() {
  * repo (force bypasses); the host checkout facts are read every time so a
  * just-finished update shows its new commit immediately.
  */
-export async function checkForUpdates({ repo, currentVersion, force = false, fetchImpl = fetch, call = agentCall, now = Date.now } = {}) {
+// standardsUrl: the pinned standards source (the mcp.standards_source_url
+// setting, set_standards_source) — the same manifest live guidance reads from;
+// the seed's manifest when nothing is pinned.
+export async function checkForUpdates({ repo, currentVersion, force = false, fetchImpl = fetch, call = agentCall, now = Date.now, standardsUrl = null } = {}) {
   const installed = await installedState({ call, force, now });
   const branch = installed.branch && installed.branch !== 'HEAD' ? installed.branch : 'main';
-  const key = `${repo}@${branch}`;
+  const manifestUrl = standardsUrl || readStandardsSeedVersion().manifest || STANDARDS_MANIFEST_URL;
+  const key = `${repo}@${branch}@${manifestUrl}`;
   let net = checkCache && checkCache.key === key && now() - checkCache.at < CHECK_CACHE_MS && !force ? checkCache : null;
   let cached = !!net;
   if (!net) {
     const seed = readStandardsSeedVersion();
     const [github, manifest] = await Promise.all([
       fetchLatestFromGitHub({ repo, branch, installedSha: installed.sha, fetchImpl }),
-      fetchStandardsManifest({ url: seed.manifest || STANDARDS_MANIFEST_URL, fetchImpl }),
+      fetchStandardsManifest({ url: manifestUrl, fetchImpl }),
     ]);
     net = { key, at: now(), github, manifest, seed, installedSha: installed.sha };
     checkCache = net;
@@ -346,10 +351,13 @@ export async function checkForUpdates({ repo, currentVersion, force = false, fet
       seed_version: net.seed.version,
       version_family: net.seed.family,
       source_version: net.seed.source_version,
+      // Live guidance (mock2/live-guidance.js): read fresh, never cached — the
+      // active guidance may be a verified site release newer than the seed.
+      guidance: getGuidanceStatus(),
       adoption_scope: net.seed.adoption_scope,
       site_version: net.manifest.site_version,
       changelog: net.manifest.changelog,
-      site: STANDARDS_SITE_URL,
+      site: manifestUrl.replace(/\/manifest\.json$/, '') || STANDARDS_SITE_URL,
       source: net.seed.source,
       synced: net.seed.synced,
       error: net.manifest.error || net.seed.error || null,

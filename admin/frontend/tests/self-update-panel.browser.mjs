@@ -41,7 +41,17 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `horizontal overflow at ${width}`);
     if (evidence) await page.screenshot({ path: resolve(evidence, `self-update-${width}.png`), fullPage: true });
   }
-  console.log('Real SelfUpdatePanel: running/checkout mismatch and adoption message passed at 360, 375, 768, 1280, 1920 px, without horizontal overflow.');
+  // Live guidance on: the site release is adopted at the next check, not by a new build.
+  await writeFile(jsx, `import React from 'react'; import {createRoot} from 'react-dom/client'; import Panel from './src/components/SelfUpdatePanel.jsx'; import './src/index.css'; createRoot(document.getElementById('root')).render(<main style={{padding:16,maxWidth:900,margin:'auto'}}><h1>Application settings</h1><Panel updateInfo={${JSON.stringify({ ...info, standards: { ...info.standards, adoption_scope: 'guidance', source_version: '1.23.3', site_version: '1.23.4', guidance: { active_origin: 'site', active_version: '1.23.3', live_enabled: true } } })}} checking={false} onRefresh={()=>{}}/></main>);`);
+  for (const width of [360, 768]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__self-update-check.html`);
+    await page.getByText('adopted at the next live guidance check', { exact: true }).waitFor();
+    await page.getByText('(from the standards site)', { exact: false }).waitFor();
+    await page.addStyleTag({ content: 'html,body { overflow-x: visible !important; }' });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `horizontal overflow at ${width} (live guidance)`);
+  }
+  console.log('Real SelfUpdatePanel: running/checkout mismatch and adoption message passed at 360, 375, 768, 1280, 1920 px, without horizontal overflow; live-guidance wording at 360 and 768.');
 } finally {
   await browser?.close(); await server?.close();
   await Promise.all([unlink(html).catch(() => {}), unlink(jsx).catch(() => {})]);

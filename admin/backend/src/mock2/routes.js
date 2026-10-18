@@ -130,7 +130,7 @@ import {
 } from './provision.js';
 import { normalizeCloneMode, cloneCopyPatch, cloneSourceError } from './clone-logic.js';
 import { publishDomain } from './publish.js';
-import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric, getPhaseRoutingSetting, setPhaseRoutingSetting, getPhasePostureSetting, setPhasePostureSetting } from './settings.js';
+import { getIdleStopDays, setMock2Setting, IDLE_STOP_DAYS_KEY, getChatMaxChars, CHAT_MAX_CHARS_KEY, CHAT_MAX_CHARS_OPTIONS, getIntegrationGateMode, INTEGRATION_GATE_MODE_KEY, getComponentAutoApply, COMPONENT_AUTO_APPLY_KEY, getAllLaneTuning, getLaneTuning, setLaneTuning, getGlobalThinking, setGlobalThinking, getFastCodeModelSetting, setFastCodeModelSetting, getSmokeBrowserSetting, setSmokeBrowserSetting, smokeEnv, getDesignReviewSetting, setDesignReviewSetting, getSetupFlowSetting, setSetupFlowSetting, getFrameworkAutoAdopt, setFrameworkAutoAdopt, getLiveGuidanceSetting, setLiveGuidanceSetting, getLiveGuidanceAutoRebuild, setLiveGuidanceAutoRebuild, getCostSaver, setCostSaver, getStallSettings, setStallSettings, getDesignArtDirection, setDesignArtDirection, getDesignTasteRubric, setDesignTasteRubric, getPhaseRoutingSetting, setPhaseRoutingSetting, getPhasePostureSetting, setPhasePostureSetting } from './settings.js';
 import { PHASE_POSTURES, PROJECT_PROVIDER_PREFS, normalizeProviderPreference, detectPhaseProviders, resolvePhaseModelMap } from './phase-routing-logic.js';
 import { TUNING_LANES, TUNING_LANE_LABELS, TUNING_EFFORTS, TUNING_THINKING, GLOBAL_THINKING_MODES } from './lane-tuning-logic.js';
 import { getMock2Db } from './db.js';
@@ -2252,6 +2252,33 @@ export function createMock2Router() {
     const value = setFrameworkAutoAdopt(parsed.data.setting, req.user.id) ? 'on' : 'off';
     logAudit(req.user.id, 'MOCK2_SETTING_FRAMEWORK_AUTO_ADOPT', 'mock2_setting', 0, { framework_auto_adopt: value }, req.ip);
     res.json({ setting: value });
+  });
+
+  // Live Mock2 guidance (mock2/live-guidance.js). setting 'on' (default) reads
+  // newer releases from the pinned standards site at boot, daily and on demand
+  // and publishes them as framework versions; 'off' freezes (nothing fetched,
+  // the active guidance stays). auto_rebuild: whether such a version starts the
+  // automatic update cycle (live_guidance_auto_rebuild). The status says which
+  // guidance is active (seed or site), its version, and the last check.
+  const liveGuidanceState = async () => {
+    const { getGuidanceStatus } = await import('./guidance-status.js');
+    return { setting: getLiveGuidanceSetting() ? 'on' : 'off', auto_rebuild: getLiveGuidanceAutoRebuild() ? 'on' : 'off', status: getGuidanceStatus() };
+  };
+  router.get('/settings/live-guidance', requireAdmin, async (_req, res) => {
+    res.json(await liveGuidanceState());
+  });
+  router.post('/settings/live-guidance', requireAdmin, async (req, res) => {
+    const parsed = z.object({ setting: z.enum(['on', 'off']).optional(), auto_rebuild: z.enum(['on', 'off']).optional() })
+      .refine((b) => b.setting !== undefined || b.auto_rebuild !== undefined, 'nothing to set')
+      .safeParse(req.body || {});
+    if (!parsed.success) return res.status(400).json({ error: "send setting and/or auto_rebuild as 'on' or 'off'" });
+    if (parsed.data.setting !== undefined) setLiveGuidanceSetting(parsed.data.setting, req.user.id);
+    if (parsed.data.auto_rebuild !== undefined) setLiveGuidanceAutoRebuild(parsed.data.auto_rebuild, req.user.id);
+    const { recordGuidanceCheck } = await import('./guidance-status.js');
+    recordGuidanceCheck({ enabled: getLiveGuidanceSetting(), auto_rebuild: getLiveGuidanceAutoRebuild() });
+    const state = await liveGuidanceState();
+    logAudit(req.user.id, 'MOCK2_SETTING_LIVE_GUIDANCE', 'mock2_setting', 0, { live_guidance: state.setting, live_guidance_auto_rebuild: state.auto_rebuild }, req.ip);
+    res.json(state);
   });
 
   // Per-phase model routing (phase-routing@1) — default on; 'off' restores the

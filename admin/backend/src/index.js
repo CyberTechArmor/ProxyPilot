@@ -752,7 +752,30 @@ if (mock2Gate.enabled) {
     // the fix can actually reach projects. Idempotent — a no-op when the seed is
     // unchanged. Adoption is then automatic (the sweep below); the manual update
     // cycle remains as the fallback and the off-switch path.
+    // Live Mock2 guidance (docs/mock2/standards-and-cpr.md §4): load the last
+    // verified site release from the data dir FIRST (synchronous, local only), so
+    // the seed upgrade below renders the same guidance it published before the
+    // restart and republishes nothing. A cache not newer than the vendored seed
+    // is ignored — the seed is the floor.
+    let liveGuidanceMod = null;
+    try {
+      liveGuidanceMod = await import('./mock2/live-guidance-instance.js');
+      liveGuidanceMod.liveGuidance.loadCache();
+    } catch (err) { console.error('[mock2] live guidance cache load failed:', err?.message || err); }
     try { upgradeFrameworkFromSeed(null); } catch (err) { console.error('[mock2] framework seed upgrade failed:', err?.message || err); }
+    // Then check the pinned standards site for a newer release — non-blocking at
+    // boot and daily after. Hard timeouts; any failure leaves the active guidance
+    // as it is and is reported (get_standards_version / check_proxypilot_update),
+    // never thrown. The live_guidance setting ('on' by default) turns it off.
+    if (liveGuidanceMod) {
+      const { liveGuidance, LIVE_GUIDANCE_INTERVAL_MS } = liveGuidanceMod;
+      const check = (reason) => liveGuidance.refresh({ reason }).then((r) => {
+        if (r.result === 'updated') console.log(`[mock2] live guidance: Mock2 ${r.site_version} from ${r.site} published as framework v${r.framework_version}`);
+        else if (r.result === 'error') console.warn(`[mock2] live guidance check failed (active guidance unchanged): ${r.error}`);
+      }).catch((err) => console.error('[mock2] live guidance check failed:', err?.message || err));
+      setTimeout(() => check('boot'), 5000).unref();
+      setInterval(() => check('daily'), LIVE_GUIDANCE_INTERVAL_MS).unref();
+    }
     // Built-in component seed: the bundled auth component (sign-in + forced
     // first-admin bootstrap) is published on first boot, and an existing stored
     // copy that cannot wire the bootstrap (an OLD imported document) is

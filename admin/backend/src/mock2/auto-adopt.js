@@ -25,7 +25,8 @@ import { startBuild, readProjectFile } from './audit.js';
 import { countConfirmedRules } from './audit-logic.js';
 import { RULES_PATH } from './rules-view-logic.js';
 import { containerNameForProject } from './provision.js';
-import { getFrameworkAutoAdopt } from './settings.js';
+import { getFrameworkAutoAdopt, getLiveGuidanceAutoRebuild } from './settings.js';
+import { isLiveSourcedVersion } from './framework-logic.js';
 import { shouldAutoAdopt, adoptInstruction, adoptChatNotice } from './auto-adopt-logic.js';
 
 // Re-entrancy latch: a sweep can await several startBuild calls; the interval
@@ -40,6 +41,9 @@ export async function sweepFrameworkAutoAdopt() {
     if (!getFrameworkAutoAdopt()) return { checked: 0, started: 0 };
     const framework = getCurrentFrameworkVersion();
     if (!framework) return { checked: 0, started: 0 };
+    // A version from the live standards site rebuilds projects unattended only
+    // when live_guidance_auto_rebuild is on (shouldAutoAdopt has the same rule).
+    if (isLiveSourcedVersion(framework) && !getLiveGuidanceAutoRebuild()) return { checked: 0, started: 0, skipped: 'live guidance version; automatic rebuild off' };
     const db = getMock2Db();
     // Cheap pre-filter in SQL; the authoritative decision is shouldAutoAdopt.
     const behind = db.prepare(
@@ -89,6 +93,8 @@ async function maybeAdoptProject(projectId, framework) {
     latestCycleStatus: latest?.status || null,
     hasCycleOnCurrent: (onCurrent?.n || 0) > 0,
     lockHeld,
+    liveSourced: isLiveSourcedVersion(framework),
+    liveAutoRebuild: getLiveGuidanceAutoRebuild(),
   });
   if (!verdict.adopt) return false;
 

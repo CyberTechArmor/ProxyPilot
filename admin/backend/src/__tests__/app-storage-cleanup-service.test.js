@@ -59,7 +59,12 @@ test('stale checks, ineligible ids and missing snapshot acknowledgement create n
   const w = world();
   w.store.putCheck(nodusCheck({ checkId: 'chk-2', startedAt: '2026-10-20T22:40:00Z', finishedAt: '2026-10-20T22:41:00Z' }));
   await expectError(w.service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-1', items: [ids.cache] }), 'CHECK_STALE', 409);
-  await expectError(w.service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-2', items: [ids.live] }), 'NOT_ELIGIBLE', 409);
+  await assert.rejects(w.service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-2', items: [ids.live] }), err => {
+    assert.equal(err.code, 'NOT_ELIGIBLE'); assert.equal(err.status, 409);
+    assert.deepEqual(err.items.map(x => x.id), [ids.live], 'the offending ids and reasons travel as error.items');
+    assert.match(err.items[0].reason, /Not eligible/);
+    return true;
+  });
   await expectError(w.service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-2', snapshots: [ids.snap1] }), 'SNAPSHOT_ACK_REQUIRED', 400);
   await expectError(w.service.requestCleanup({ targetKey: 'application:9', checkId: 'chk-2', items: [ids.cache] }), 'TARGET_NOT_FOUND', 404);
   await expectError(w.service.requestCleanup({ targetKey: '../etc', checkId: 'chk-2', items: [ids.cache] }), 'TARGET_NOT_FOUND', 404);
@@ -110,6 +115,12 @@ test('getCleanup takes the job verdict when the operation never wrote one, and a
   assert.equal((await lost.service.getCleanup(CLEANUP_ID)).status, 'failed');
   assert.equal(lost.alerts.length, 1); assert.equal(lost.alerts[0].kind, 'cleanup');
 
+  const cancelled = world();
+  await cancelled.service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-1', items: [ids.cache] });
+  cancelled.jobs.set('job-1', { id: 'job-1', status: 'cancelled', outcome: 'cancelled' });
+  assert.equal((await cancelled.service.getCleanup(CLEANUP_ID)).status, 'cancelled');
+  assert.equal(cancelled.alerts.length, 0);
+
   const recorded = world();
   await recorded.service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-1', items: [ids.cache] });
   recorded.jobs.set('job-1', { id: 'job-1', status: 'succeeded', progress_json: JSON.stringify({ result: { cleanup: { status: 'partial', removed: [], skipped: [{ id: ids.cache, label: 'x', reason: 'y' }], failed: [] } } }) });
@@ -117,4 +128,20 @@ test('getCleanup takes the job verdict when the operation never wrote one, and a
   assert.equal(await recorded.service.getCleanup('not-an-id'), null);
   assert.equal((await recorded.service.listCleanups('application:1')).length, 1);
   assert.deepEqual(await recorded.service.listCleanups('bad'), []);
+});
+
+test('getCleanup shows the job with its newest events, and the journal at its recoverable size', async () => {
+  const store = memoryStore(); store.putCheck(nodusCheck());
+  const service = createCleanupService({
+    store, getCheck: id => store.getCheck(id), submitJob: async () => ({ jobId: 'job-1' }), resolveTarget: () => nodusTarget(),
+    activityFor: () => ({}), now: () => NOW, newId: () => CLEANUP_ID,
+    getJob: () => ({ id: 'job-1', status: 'running', phase: 'cleanup:item' }),
+    listEvents: () => Array.from({ length: 30 }, (_, i) => ({ id: i, at: `t${i}`, kind: 'step', message: `step ${i}`, data_json: '{"secret":"x"}' })),
+  });
+  await service.requestCleanup({ targetKey: 'application:1', checkId: 'chk-1', items: [ids.journal] });
+  const view = await service.getCleanup(CLEANUP_ID);
+  assert.equal(view.job.status, 'running'); assert.equal(view.job.phase, 'cleanup:item');
+  assert.equal(view.job.events.length, 20); assert.equal(view.job.events.at(-1).message, 'step 29');
+  assert.equal('data_json' in view.job.events[0], false, 'event data is not passed through');
+  assert.equal(view.selection[0].bytes, 331_564_544, 'the journal counts what vacuuming returns, not its whole size');
 });

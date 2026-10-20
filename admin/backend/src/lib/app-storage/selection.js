@@ -38,6 +38,9 @@ export class SelectionError extends Error {
     this.code = code;
     this.status = status;
     if (details) this.details = details;
+    // NOT_ELIGIBLE: the offending ids with their reasons, where the route
+    // reads them (error.items; contract-changes.md, WS3 item 5).
+    if (details?.items) this.items = details.items;
   }
 }
 

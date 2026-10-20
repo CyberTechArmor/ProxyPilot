@@ -23,8 +23,8 @@ import { normalizeRequest, validateCleanupRequest, resolveSelection, selectionEs
 export const TARGET_KEY_RE = /^(application|project):[1-9][0-9]*$/;
 export const ORIGINS = Object.freeze(['user', 'policy']);
 export const GUEST_BUSY_MESSAGE = 'A build or another change is running on this application; try again when it finishes.';
-export const CLEANUP_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'partial', 'failed', 'refused']);
-const TERMINAL = new Set(['succeeded', 'partial', 'failed', 'refused']);
+export const CLEANUP_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'partial', 'failed', 'refused', 'cancelled']);
+const TERMINAL = new Set(['succeeded', 'partial', 'failed', 'refused', 'cancelled']);
 const JOB_TERMINAL = new Set(['succeeded', 'failed', 'deferred', 'refused', 'recovery_required', 'cancelled']);
 const BUSY_CODES = new Set(['CONTAINER_BUSY', 'CONTAINER_LOCK_STALE', 'GUEST_BUSY', 'APPLICATION_BUSY', 'lock_held', 'lock_stale']);
 
@@ -69,7 +69,7 @@ export function busyFrom(activity) {
 
 export function createCleanupService({
   store, getCheck, submitJob, resolveTarget, activityFor, now = () => Date.now(), audit = () => {}, monitor = null,
-  getJob = null, estimate = selectionEstimate, newId = () => `cln_${randomUUID()}`, log = () => {},
+  getJob = null, listEvents = null, estimate = selectionEstimate, newId = () => `cln_${randomUUID()}`, log = () => {},
 }) {
   const record = entry => { try { const r = audit(entry); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) { log('audit failed', e?.message || e); } };
 
@@ -151,8 +151,10 @@ export function createCleanupService({
     const recorded = parse(job.progress_json ?? job.progress)?.result?.cleanup;
     let result = recorded && CLEANUP_STATUSES.includes(recorded.status) ? recorded : null;
     if (!result) {
-      const refused = job.status === 'refused' || job.status === 'cancelled' || job.status === 'deferred';
-      result = { status: refused ? 'refused' : 'failed', reason: refused ? `The cleanup did not start: ${job.reason || job.outcome || job.status}.` : `The cleanup job ended (${job.outcome || job.status}) before it recorded a result.`, removed: [], skipped: [], failed: [], health: 'not-checked' };
+      const refused = job.status === 'refused' || job.status === 'deferred';
+      const status = job.status === 'cancelled' ? 'cancelled' : refused ? 'refused' : 'failed';
+      const reason = status === 'cancelled' ? 'The cleanup was cancelled before it recorded a result.' : refused ? `The cleanup did not start: ${job.reason || job.outcome || job.status}.` : `The cleanup job ended (${job.outcome || job.status}) before it recorded a result.`;
+      result = { status, reason, removed: [], skipped: [], failed: [], health: 'not-checked' };
     }
     const finishedAt = job.finished_at || iso(now());
     await store.updateCleanup(row.id, { status: result.status, result, finishedAt });
@@ -162,11 +164,20 @@ export function createCleanupService({
     return { ...row, status: result.status, result, finishedAt };
   }
 
-  const summary = job => (job ? { id: job.id, status: job.status, phase: job.phase ?? null, outcome: job.outcome ?? null, reason: job.reason ?? null } : null);
+  // The job as the UI reads it: status, phase and its last 20 events (the
+  // engine redacts events on write).
+  const summary = async job => {
+    if (!job) return null;
+    let events = [];
+    if (typeof listEvents === 'function') {
+      try { events = ((await listEvents(job.id)) || []).slice(-20).map(e => ({ at: e.at ?? e.created_at ?? null, kind: e.kind ?? null, phase: e.phase ?? null, message: e.message ?? null })); } catch { events = []; }
+    }
+    return { id: job.id, status: job.status, phase: job.phase ?? null, outcome: job.outcome ?? null, reason: job.reason ?? null, events };
+  };
   const publicView = async row => ({
     ...row,
-    selection: row.selection.map(e => ({ id: e.id, label: e.label, category: e.category, kind: e.kind, action: e.action, bytes: e.allocatedBytes, memoryBacked: e.memoryBacked === true })),
-    job: row.jobId && typeof getJob === 'function' ? summary(await getJob(row.jobId)) : null,
+    selection: row.selection.map(e => ({ id: e.id, label: e.label, category: e.category, kind: e.kind, action: e.action, bytes: e.action === 'vacuum-journal' && e.recoverableBytes != null ? e.recoverableBytes : e.allocatedBytes, memoryBacked: e.memoryBacked === true })),
+    job: row.jobId && typeof getJob === 'function' ? await summary(await getJob(row.jobId)) : null,
   });
 
   async function getCleanup(id) {

@@ -11,6 +11,7 @@ import { MIGRATION_TOOLS } from './migration.js';
 import { APPLICATION_RELEASE_TOOLS } from './application-releases.js';
 import { DISCOVERY_TOOLS } from './discovery.js';
 import { PLATFORM_TOOLS } from './platform.js';
+import { APP_STORAGE_TOOLS } from './app-storage.js';
 
 export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   builds: BUILD_TOOLS,
@@ -25,6 +26,7 @@ export const MCP_EXT_TOOL_GROUPS = Object.freeze({
   platform: PLATFORM_TOOLS,
   discovery: DISCOVERY_TOOLS,
   application_releases: APPLICATION_RELEASE_TOOLS,
+  app_storage: APP_STORAGE_TOOLS,
 });
 
 export const MCP_EXT_TOOLS = Object.freeze(Object.values(MCP_EXT_TOOL_GROUPS).flat());

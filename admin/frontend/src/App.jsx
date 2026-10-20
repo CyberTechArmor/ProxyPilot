@@ -17,6 +17,7 @@ import McpAccess from '@/pages/McpAccess';
 import Troubleshooting from '@/pages/Troubleshooting';
 import Housekeeping from '@/pages/Housekeeping';
 import Storage from '@/pages/Storage';
+import AppStorage from '@/pages/AppStorage';
 import Migrations from '@/pages/Migrations';
 import Projects from '@/pages/Projects';
 import Connections from '@/pages/Connections';
@@ -115,6 +116,9 @@ function App() {
         {/* Host drives + ZFS pools/datasets/snapshots/replication (admin only;
             the page self-guards and the backend requires an admin session). */}
         <Route path="storage" element={<Storage />} />
+        {/* Per-application storage check, cleanup, rules and alerts (admin
+            only; the page self-guards and the backend requires admin + sudo). */}
+        <Route path="storage/applications" element={<AppStorage />} />
         <Route path="migrations" element={<Migrations />} />
         <Route path="notifications" element={<Notifications />} />
         <Route path="domains" element={<DomainProvisioning />} />

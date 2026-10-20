@@ -1023,6 +1023,17 @@ server.listen(PORT, '0.0.0.0', () => {
     },
   });
   process.once('exit', stopSnapshotRetention);
+  // Application storage: enabled storage-policy snapshot rules feed the limits
+  // above (re-read on every use; the static file until the policy module is
+  // installed), and the retention scheduler runs the periodic cleanup rules.
+  // (Integration: pass WS1's shared checkService/cleanupService instances.)
+  import('./lib/app-storage/cleanup-deps.js')
+    .then(async (m) => {
+      const { getMock2Db } = await import('./mock2/db.js');
+      return m.startAppStorageAutomation({ getMainDb: getDb, getMock2Db, logAudit, reconcileSnapshots: stopSnapshotRetention.reconcile, log: (...a) => console.log(...a) });
+    })
+    .then((stop) => process.once('exit', stop))
+    .catch((err) => console.error('[app-storage] automation did not start:', err?.message || err));
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
 

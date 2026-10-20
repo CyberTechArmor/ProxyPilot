@@ -789,6 +789,30 @@ if (mock2Gate.enabled) {
       audit: (req, action, id, detail) => logAudit(req.user?.id ?? null, action, 'application', String(id), detail, req.ip),
     });
     app.use('/api/application-releases', authenticateToken, blockPendingRole, applicationRouter);
+    // Application storage (docs/features/application-storage.md): the read-only
+    // storage check, cleanup (sudo; the cleanup service plugs in through
+    // setCleanupService — until then those endpoints answer 503), retention
+    // policies and the per-application alert monitor. Its state lives in
+    // mock2.db, so it is mounted only here. A failure leaves Dev Studio up.
+    try {
+      const [{ registerAppStorageRoutes }, appStorageLib] = await Promise.all([
+        import('./routes/app-storage.js'), import('./lib/app-storage/index.js'),
+      ]);
+      const appStorage = await appStorageLib.getAppStorage();
+      const appStorageRouter = express.Router();
+      registerAppStorageRoutes(appStorageRouter, {
+        storage: () => appStorage,
+        cleanupService: () => appStorage.cleanupService(),
+        requireAdmin, requireSudo,
+        audit: (req, action, targetKey, detail) => logAudit(req.user?.id ?? null, action, 'app_storage', String(targetKey), detail, req.ip),
+      });
+      app.use('/api/app-storage', authenticateToken, blockPendingRole, appStorageRouter);
+      // Every 15 minutes (PROXYPILOT_APP_STORAGE_MONITOR_CRON); off with PROXYPILOT_DISABLE_CRONS=1.
+      appStorageLib.startAppStorageMonitor({ storage: appStorage })
+        .catch((err) => console.error('[app-storage] monitor failed to start:', err?.message || err));
+    } catch (err) {
+      console.error('[app-storage] failed to initialize — leaving /api/app-storage unmounted:', err?.message || err);
+    }
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>

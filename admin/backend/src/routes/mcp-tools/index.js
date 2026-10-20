@@ -15,6 +15,7 @@ import { createApplicationReleaseHandlers } from './application-releases.js';
 import { createDiscoveryHandlers } from './discovery.js';
 import { createSelfGitHandlers } from './self-git.js';
 import { createPlatformHandlers } from './platform.js';
+import { createAppStorageHandlers } from './app-storage.js';
 
 export function createExtendedHandlers(ctx) {
   const kit = createToolkit(ctx);
@@ -32,6 +33,7 @@ export function createExtendedHandlers(ctx) {
     createDiscoveryHandlers(kit),
     createSelfGitHandlers(kit),
     createApplicationReleaseHandlers(kit),
+    createAppStorageHandlers(kit),
   ];
   const out = {};
   for (const fam of families) {

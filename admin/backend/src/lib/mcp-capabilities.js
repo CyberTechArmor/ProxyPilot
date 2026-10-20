@@ -8,6 +8,7 @@ export const MCP_WORKFLOWS = Object.freeze([
   { id: 'containers', title: 'Inspect containers and durable setup jobs', keywords: 'lxc incus container job logs resources', tools: ['list_lxc_containers', 'get_lxc_container', 'get_lxc_setup_job', 'list_lxc_setup_jobs', 'get_host_usage'] },
   { id: 'platform', title: 'Platform setup and service readiness', keywords: 'platform sso keycloak openbao pomerium vault infisical', tools: ['get_platform_setup', 'get_platform_service', 'platform_preflight', 'apply_platform_setup', 'get_platform_job'] },
   { id: 'migration', title: 'Adopt an application or machine', keywords: 'migrate migration import adopt move machine', tools: ['list_migrations', 'create_migration', 'get_migration', 'approve_migration', 'migration_cutover'] },
+  { id: 'app-storage', title: 'Application storage check (read-only)', keywords: 'storage disk space usage grow growth cleanup clean application nodus project check', tools: ['list_application_storage', 'request_application_storage_check', 'get_application_storage_check'] },
   { id: 'storage', title: 'Storage plans and backups', keywords: 'storage zfs disks backup restore snapshot', tools: ['list_disks', 'zpool_status', 'zfs_list', 'list_host_snapshots', 'backup_proxypilot_db'] },
 ]);
 

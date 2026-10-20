@@ -5,6 +5,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { APPLICATION_RELEASE_RETENTION, cleanupReleaseArtifacts } from './application-release-cleanup.js';
 import { containedScript, parseContainment, reapStaleWritersScript, parseStaleWriters } from './guest-probes.js';
 
 import { APPLICATION_JOB_KINDS, applicationGuestName } from './application-deploy-logic.js';
@@ -18,6 +19,7 @@ function safeError(code, message) { const e = new Error(message); e.code = code;
 // systemd and HTTP bodies never enter API-visible job logs.
 const GUEST_PROGRAM = String.raw`
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');
+const cleanupReleaseArtifacts=${cleanupReleaseArtifacts.toString()};
 const a=JSON.parse(Buffer.from(process.argv[1],'base64').toString());
 function fail(code){process.stdout.write(JSON.stringify({ok:false,code}));process.exit(1)}
 function run(cmd,args,opts={}){const r=cp.spawnSync(cmd,args,{encoding:'utf8',maxBuffer:1024*1024,...opts});if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
@@ -46,10 +48,17 @@ else if(a.action==='script'){
  const args=['run',a.script];const r=cp.spawnSync(a.user==='root'?'npm':'runuser',a.user==='root'?args:['-u',a.user,'--','npm',...args],{cwd:a.stage,stdio:'ignore',timeout:a.timeout});
  out={ok:r.status===0,code:r.status===0?'SCRIPT_PASSED':'SCRIPT_FAILED'};if(!out.ok){process.stdout.write(JSON.stringify(out));process.exit(1)}
 }
+else if(a.action==='release_cleanup'){out.cleanup=cleanupReleaseArtifacts(fs,p,a);}
 else if(a.action==='seal'){
  // Builds run as the service user. Reclaim the tree before root-owned Git
  // integrity checks; leave Git's repository ownership protection enabled.
  freeze(a.stage);
+ if(a.retention?.trimBuildCache){
+  const cache=p.join(a.stage,'.cache');
+  if(fs.lstatSync(a.stage).isSymbolicLink()||fs.realpathSync(a.stage)!==a.stage)fail('UNSAFE_CACHE_TARGET');
+  if(run('git',['-C',a.stage,'ls-files','--','.cache'])!=='')fail('TRACKED_BUILD_CACHE');
+  if(fs.existsSync(cache))fs.rmSync(cache,{recursive:true,force:false});
+ }
  if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
  if(run('git',['-C',a.stage,'status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
  const artifactDigest=inventory(a.stage);const fd=fs.openSync(p.join(a.stage,'.proxypilot-release.json'),'wx',0o444);try{fs.writeFileSync(fd,JSON.stringify({...a.marker,artifactDigest}));fs.fsyncSync(fd)}finally{fs.closeSync(fd)}freeze(a.stage);const stageFd=fs.openSync(a.stage,'r');try{fs.fsyncSync(stageFd)}finally{fs.closeSync(stageFd)}fs.renameSync(a.stage,a.release);const parentFd=fs.openSync(p.dirname(a.release),'r');try{fs.fsyncSync(parentFd)}finally{fs.closeSync(parentFd)}out.artifactDigest=artifactDigest;
@@ -103,6 +112,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   const reference = { sha: params.sha, profileRevision: params.profileRevision, profileDigest: params.profileDigest };
   const prepared = await (kind === 'application_deploy' ? service.prepareDeployment(params.applicationId, reference) : service.prepareCandidate(params.applicationId, reference));
   const { profile, candidate, gitDir } = prepared;
+  const retention = Object.hasOwn(APPLICATION_RELEASE_RETENTION, profile.targetId) ? APPLICATION_RELEASE_RETENTION[profile.targetId] : null;
   const container = applicationGuestName(profile.targetId);
   if (job.app !== container) throw safeError('GUEST_IDENTITY_MISMATCH', 'The saved profile does not match the locked application guest.');
   if (profile.digest !== params.profileDigest || profile.revision !== params.profileRevision || candidate.sha !== params.sha || candidate.treeSha !== params.treeSha) throw safeError('PROFILE_CHANGED', 'Saved application profile or candidate changed; create a new job.');
@@ -113,7 +123,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   let disruptive = false;
   const guest = async (action, extra = {}, timeoutMs = 90000) => {
     job.fence({ safe: !disruptive });
-    const r = await exec.guest(container, containedScript(attempt, guestScript({ action, profile, ...extra })), { timeoutMs });
+    const r = await exec.guest(container, containedScript(attempt, guestScript({ action, profile, retention, ...extra })), { timeoutMs });
     job.fence({ safe: !disruptive });
     if (parseContainment(r?.stderr)?.kind === 'none') throw safeError('CONTAINMENT_UNAVAILABLE', 'Application scripts require guest process containment.');
     let answer; try { answer = JSON.parse(String(r?.stdout || '').trim()); } catch { throw safeError('GUEST_RESULT_INVALID', 'The application operation did not return a valid bounded result.'); }
@@ -151,7 +161,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     // A requested rerun replaces the current acceptance only when it passes;
     // failure must not leave an earlier pass masquerading as this run's result.
     await service.recordValidation(params.applicationId, candidate.sha, { profileDigest: profile.digest, treeSha: candidate.treeSha, passed: false, evidenceDigest: digest({ jobId: job.id, state: 'running' }), jobId: job.id, releasePath: release });
-    let transfer;
+    let transfer; let guestCleaned = false;
     try {
       await hostFs.mkdir(hostRoot, { recursive: true, mode: 0o700 });
       transfer = await hostFs.mkdtemp(path.join(hostRoot, 'bundle-'));
@@ -173,15 +183,23 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
       await hostFs.chmod(hostBundle, 0o600);
       // The transfer target and root are fixed by the immutable profile.
       await guest('prepare', { root });
+      if (retention) await guest('release_cleanup', { stage, bundle, release, sweepStages: true }, 120000);
       job.fence({ safe: true }); const r = await exec.host(['incus', 'file', 'push', hostBundle, `${container}${bundle}`], { timeoutMs: 120000 }); if (r.code !== 0) throw safeError('TRANSFER_FAILED', 'Git bundle transfer failed.');
       mark('stage'); await guest('stage', { stage, release, bundle, sha: candidate.sha, treeSha: candidate.treeSha, scripts, user: identity.user, group: identity.group }, 120000);
       const evidence = [];
       for (const script of scripts) { mark(`script:${script}`); await guest('script', { stage, script, user: identity.user, timeout: 600000 }, 620000); evidence.push({ script, passed: true }); }
       const evidenceDigest = digest({ sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidence });
       const sealed = await guest('seal', { stage, release, sha: candidate.sha, treeSha: candidate.treeSha, marker: { sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest } });
+      if (retention) { const cleaned = await guest('release_cleanup', { stage, bundle, release }, 120000); guestCleaned = true; job.event?.('cleanup', 'Release retention applied', cleaned.cleanup); }
       job.fence({ safe: true }); await service.recordValidation(params.applicationId, candidate.sha, { profileDigest: profile.digest, treeSha: candidate.treeSha, passed: true, evidenceDigest, artifactDigest: sealed.artifactDigest, jobId: job.id, releasePath: release });
       mark('validated'); return { ok: true, outcome: 'validated', verification: { state: 'tested', sha: candidate.sha, evidenceDigest, releasePath: release } };
-    } finally { if (transfer) await hostFs.rm(transfer, { recursive: true, force: true }); }
+    } finally {
+      if (retention && !guestCleaned) {
+        try { const cleaned = await guest('release_cleanup', { stage, bundle, release }, 120000); job.event?.('cleanup', 'Build workspace and transfer archive removed', cleaned.cleanup); }
+        catch (error) { job.event?.('cleanup_failed', 'Guest cleanup was not verified; the next validation will retry after checking prior writers are stopped', { code: error.code || 'CLEANUP_FAILED' }); }
+      }
+      if (transfer) await hostFs.rm(transfer, { recursive: true, force: true });
+    }
   }
   mark('inspect'); const previous = await guest('inspect', { strict: true });
   if (!validation?.passed || !/^[a-f0-9]{64}$/.test(validation.artifactDigest || '') || validation.profileDigest !== profile.digest || validation.treeSha !== candidate.treeSha || typeof release !== 'string' || !release.startsWith(`${root}/${candidate.sha}-p${profile.revision}-`) || release.includes('/../')) throw safeError('VALIDATION_REQUIRED', 'This exact candidate, profile and release artifact need successful validation.');

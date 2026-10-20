@@ -1,0 +1,4 @@
+{
+  "$comment": "Opted-in application targets only. Retain live and incoming/rollback releases plus roots containing shared model data. Remove abandoned staging and transfer archives; trim generated build caches before sealing new artifacts.",
+  "targets": { "nodus": { "keepReleases": 2, "trimBuildCache": true } }
+}

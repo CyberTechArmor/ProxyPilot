@@ -73,6 +73,8 @@ import { attachAgentLiveServer } from './routes/agent-live-ws.js';
 import { randomUUID } from 'node:crypto';
 import { createDemoFixtureWriter } from './lib/operational-demo-fixtures.js';
 import { runHostCapture } from './lib/lxc-zip.js';
+import { spawnHost } from './lib/host-exec.js';
+import { startSnapshotRetention, readRetentionInstance } from './lib/snapshot-retention.js';
 import { decryptSecret } from './lib/secrets.js';
 import { postNotification } from './lib/notifications.js';
 import { backupRoot, ensureRoot } from './lib/backup-local-store.js';
@@ -1009,6 +1011,18 @@ attachAgentLiveServer(server,{agentRuns:browserRuntime.live,pathKind:'browser-ag
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
+  const stopSnapshotRetention = startSnapshotRetention({
+    spawnMonitor: () => spawnHost('incus', ['--force-local', '--project', 'default', 'monitor', '--type=lifecycle', '--format=json'], { stdio: ['ignore', 'pipe', 'pipe'] }),
+    listInstance: name => readRetentionInstance(async ([bin, ...argv], options) => {
+      const result = await runHostCapture(bin, argv, options);
+      return { ...result, code: result.timedOut ? 124 : result.status };
+    }, name),
+    deleteSnapshot: async (name, snapshot) => {
+      const { runLifecycle } = await import('./mock2/ops.js');
+      return runLifecycle({ kind: 'snapshot_delete', containerName: name, snapshot: snapshot.name, expect: { created_at: snapshot.created_at }, via: 'snapshot-retention' });
+    },
+  });
+  process.once('exit', stopSnapshotRetention);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
 

@@ -204,7 +204,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   if (!before) before = { guestUsedBytes: liveInfo?.fs?.usedBytes ?? null, datasetUsedBytes: await hostUsage() };
 
   // ── 3. the check it was approved from, and the target as the check saw it ──
-  const check = checkView(await (deps.getCheck || store.getCheck)(row.checkId));
+  const check = checkView(await (deps.getCheck ? deps.getCheck(row.checkId) : store.getCheck(row.checkId)));
   const byId = new Map((check?.items || []).map(i => [i.id, i]));
   const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
   const matchesCheck = e => { const i = byId.get(e.id); return !!i && i.status === 'eligible' && i.action === e.action && (i.location || 'guest') === e.location && (i.path ?? null) === e.path && same(i.identity, e.identity) && (e.kind !== 'group' || same((i.members || []).map(m => [m.path, m.identity]), (e.members || []).map(m => [m.path, m.identity]))); };

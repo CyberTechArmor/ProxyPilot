@@ -109,6 +109,9 @@ test('effective release retention comes from a stored policy when one is supplie
   assert.deepEqual(await resolveReleaseRetention(null, 'nodus'), staticReleaseRetention('nodus'));
   assert.deepEqual(await resolveReleaseRetention(async id => (id === 'shop' ? { keepReleases: 4, trimBeforeSeal: ['.cache', 'coverage'], workspaces: false } : null), 'shop'), { keepReleases: 4, trimBeforeSeal: ['.cache', 'coverage'], workspaces: false });
   assert.equal(await resolveReleaseRetention(async () => null, 'nodus'), null, 'a disabled releases rule with no static entry means no retention');
+  // The policy module reports the workspaces rule as an object.
+  assert.equal((await resolveReleaseRetention(async () => ({ keepReleases: 2, trimBeforeSeal: ['.cache'], workspaces: { enabled: false, abandonedAfterHours: 1 }, source: 'policy' }), 'nodus')).workspaces, false);
+  assert.equal((await resolveReleaseRetention(async () => ({ keepReleases: 2, trimBeforeSeal: ['.cache'], workspaces: { enabled: true, abandonedAfterHours: 1 }, source: 'static' }), 'nodus')).workspaces, true);
 });
 
 test('release context: the previous live release is the rollback and a newer validated candidate is protected', () => {

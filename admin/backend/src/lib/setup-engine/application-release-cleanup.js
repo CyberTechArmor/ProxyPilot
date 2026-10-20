@@ -23,7 +23,9 @@ export function normalizeReleaseRetention(entry) {
   const listed = Array.isArray(entry.trimBeforeSeal) ? entry.trimBeforeSeal : (entry.trimBuildCache === true ? ['.cache'] : []);
   const trim = [...new Set(listed.filter(validTrimEntry))].slice(0, 20);
   trim.sort((a, b) => (a === '.cache' ? -1 : b === '.cache' ? 1 : 0));
-  return { keepReleases: entry.keepReleases, trimBeforeSeal: trim, workspaces: entry.workspaces !== false };
+  // `workspaces` is a boolean or the policy rule ({ enabled, abandonedAfterHours }).
+  const workspaces = entry.workspaces && typeof entry.workspaces === 'object' ? entry.workspaces.enabled !== false : entry.workspaces !== false;
+  return { keepReleases: entry.keepReleases, trimBeforeSeal: trim, workspaces };
 }
 
 // The static opt-in (Nodus), normalized. Unlisted targets → null (unchanged).

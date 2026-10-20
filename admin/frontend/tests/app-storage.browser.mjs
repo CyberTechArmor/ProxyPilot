@@ -131,7 +131,12 @@ try {
       if (w < 640) assert.ok(box.width >= w - 1 && box.x <= 1, `review dialog is full screen at ${w}px`);
     }
     ok(`review dialog: full screen below sm, no horizontal scroll at ${WIDTHS.join('/')} px`);
-    await page.getByRole('button', { name: 'Cancel' }).click();
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+    await page.getByRole('dialog').waitFor({ state: 'detached' });
+    assert.match(await summary(page), /^2 selected/, 'closing the review keeps the selection');
+    assert.equal(world.state.cleanupAttempts, 0, 'closing the review sends nothing');
+    ok('375px: the review closes with its X, keeps the selection and sends nothing');
 
     await page.goto(`${origin}/storage/applications?target=application:1&tab=rules`);
     await page.getByTestId('policy-source').waitFor();

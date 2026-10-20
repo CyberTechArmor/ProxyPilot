@@ -35,8 +35,10 @@ import {
   ArrowLeft, Loader2, ExternalLink, RefreshCw, Trash2, UserPlus, Flag, ShieldAlert,
   Archive, RotateCcw, Play, Lock, Download, GitBranch,
   Circle, Hammer, Unlock, Clock, Sparkles, TerminalSquare, MessageSquare, LayoutPanelLeft, Eye,
-  Library, Cpu,
+  Library, Cpu, PieChart,
 } from 'lucide-react';
+import { storageHref } from '@/components/app-storage/app-storage-model.mjs';
+import { TEXT as STORAGE_TEXT } from '@/components/app-storage/app-storage-text.js';
 import { statusChip } from '@/lib/mock2-status.jsx';
 import ConceptStage from '@/components/mock2/ConceptStage';
 // The asset library belongs to the DESIGN stage too, not only the build phase:
@@ -1078,6 +1080,22 @@ export default function ProjectDetail() {
             <div className="flex justify-between gap-3"><span>Bridge IP</span><span className="font-mono break-all">{project.bridge_ip || '—'}</span></div>
             <div className="flex justify-between gap-3"><span>Web port</span><span className="font-mono">{project.web_port || '—'}</span></div>
             <div className="flex justify-between gap-3"><span>Repo</span><span className="font-mono break-all">{project.repo_path || '—'}</span></div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* Storage check, cleanup, rules and alerts for this project's container
+          (admin only, like the Application storage page it links to). */}
+      {isAdmin && project.container_name ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">{STORAGE_TEXT.storageLink}</CardTitle>
+            <CardDescription>{STORAGE_TEXT.storageLinkHint}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button asChild variant="outline" size="sm" className="h-11 sm:h-10">
+              <Link to={storageHref('project', project.id)}><PieChart className="h-4 w-4 mr-1" />{STORAGE_TEXT.storageLink}</Link>
+            </Button>
           </CardContent>
         </Card>
       ) : null}

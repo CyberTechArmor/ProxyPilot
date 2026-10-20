@@ -157,7 +157,7 @@ export function resolvePolicy(target, { store, installedAt = null, diskLimitByte
   try { row = store ? store.getPolicy(target.key) : null; } catch { row = null; }
   if (row) {
     try {
-      return { policy: validatePolicy(row.policy), source: row.source, revision: row.revision, stored: true, defaults, updatedAt: row.updatedAt, updatedBy: row.updatedBy };
+      return { policy: validatePolicy(row.policy), source: row.source, revision: row.revision, stored: true, defaults, updatedAt: row.updatedAt, updatedBy: row.updatedBy, proposedRules: row.proposedRules ?? null };
     } catch {
       return { policy: defaults.policy, source: defaults.source, revision: row.revision, stored: true, invalidStored: true, defaults, updatedAt: row.updatedAt, updatedBy: row.updatedBy };
     }
@@ -165,11 +165,21 @@ export function resolvePolicy(target, { store, installedAt = null, diskLimitByte
   return { policy: defaults.policy, source: defaults.source, revision: 0, stored: false, defaults, updatedAt: null, updatedBy: null };
 }
 
-/** Rules on, and rules that are a proposal (off by default, nothing runs until turned on). */
-export function ruleStates(policy, source) {
+/**
+ * Rules on, and rules that are a proposal (off by default, nothing runs until
+ * turned on). A stored policy carries its own list (`stored`): a proposal
+ * stays one until that rule is turned on, whatever else is edited.
+ */
+export function ruleStates(policy, source, stored = null) {
   const enabledRules = RULE_KEYS.filter((k) => policy?.rules?.[k]?.enabled);
-  const proposedRules = ['defaults-existing', 'preserved'].includes(source) ? RULE_KEYS.filter((k) => !policy?.rules?.[k]?.enabled) : [];
+  const base = Array.isArray(stored) ? stored : ['defaults-existing', 'preserved'].includes(source) ? RULE_KEYS : [];
+  const proposedRules = RULE_KEYS.filter((k) => base.includes(k) && !policy?.rules?.[k]?.enabled);
   return { enabledRules, proposedRules };
+}
+
+/** The proposals left after an edit: those still off (turning a rule on ends its proposal). */
+export function proposedAfterEdit(previousProposed, nextPolicy) {
+  return RULE_KEYS.filter((k) => (previousProposed || []).includes(k) && !nextPolicy?.rules?.[k]?.enabled);
 }
 
 /** Flattened changes for the audit: { 'rules.caches.enabled': [false, true], … }. */

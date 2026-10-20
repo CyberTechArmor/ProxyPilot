@@ -75,6 +75,8 @@ test('policies: revision + 1 on every save, lost updates refused with POLICY_CHA
   assert.deepEqual(b.policy, { version: 1, x: 2 });
   assert.throws(() => store.putPolicy('application:1', { policy: { version: 1 }, expectedRevision: 1 }), (e) => e.code === 'POLICY_CHANGED' && e.status === 409);
   assert.equal(store.putPolicy('application:1', { policy: { version: 1, x: 3 } }).revision, 3, 'no expected revision = last write wins');
+  assert.equal(store.getPolicy('application:1').proposedRules, null);
+  assert.deepEqual(store.putPolicy('application:1', { policy: { version: 1 }, proposedRules: ['logs', 'history'] }).proposedRules, ['logs', 'history'], 'the per-rule proposal marker is kept with the row');
   assert.equal(store.listPolicies().length, 1);
 });
 

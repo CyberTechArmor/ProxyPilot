@@ -65,7 +65,7 @@ export function growthAlert({ name, guest, targetKey, growth, windowHours }) {
   };
 }
 
-/** `incus list --all-projects --format json` → Map(name → { status, usedBytes, project }); the default project wins a name clash. */
+/** `incus list --all-projects --format json` → Map(name → { status ('Running', 'Stopped', … as Incus says), usedBytes, project }); the default project wins a name clash. */
 export function parseGuestList(json) {
   let list; try { list = typeof json === 'string' ? JSON.parse(json) : json; } catch { return new Map(); }
   const out = new Map();
@@ -75,7 +75,7 @@ export function parseGuestList(json) {
     const project = c?.project || 'default';
     if (out.has(name) && out.get(name).project === 'default') continue;
     const usage = Number(c?.state?.disk?.root?.usage);
-    out.set(name, { status: String(c?.status || '').toLowerCase() || null, usedBytes: Number.isFinite(usage) && usage > 0 ? usage : null, project });
+    out.set(name, { status: c?.status ? String(c.status) : null, usedBytes: Number.isFinite(usage) && usage > 0 ? usage : null, project });
   }
   return out;
 }

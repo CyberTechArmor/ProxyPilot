@@ -153,13 +153,13 @@ test('guest list parsing and the cached lister', async () => {
     { name: 'm2-4', status: 'Running', state: null },
   ];
   const m = parseGuestList(JSON.stringify(list));
-  assert.deepEqual(m.get('pp-nodus'), { status: 'running', usedBytes: 2956918784, project: 'default' });
+  assert.deepEqual(m.get('pp-nodus'), { status: 'Running', usedBytes: 2956918784, project: 'default' }, 'the status is kept as Incus says it');
   assert.equal(m.get('m2-4').usedBytes, null);
   assert.equal(parseGuestList('nope').size, 0);
   let calls = 0; let t = 0;
   const exec = { host: async (argv) => { calls += 1; return argv.includes('--all-projects') ? { code: 1, stdout: '' } : { code: 0, stdout: JSON.stringify(list) }; } };
   const lister = createGuestLister(exec, { ttlMs: 1000, now: () => t });
-  assert.equal((await lister()).get('pp-nodus').status, 'running');
+  assert.equal((await lister()).get('pp-nodus').status, 'Running');
   assert.equal(calls, 2, 'falls back to the plain list');
   await lister();
   assert.equal(calls, 2, 'cached');

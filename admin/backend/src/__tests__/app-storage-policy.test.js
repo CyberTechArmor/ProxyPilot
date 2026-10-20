@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_POLICY, RULE_KEYS, validatePolicy, defaultPolicyFor, resolvePolicy, effectiveReleaseRetention, effectiveSnapshotLimits,
-  policySelection, policyEffects, policyDiff, ruleStates, isNewTarget, STATIC_RELEASE_RETENTION, STATIC_SNAPSHOT_RETENTION, NEW_TRIM_BEFORE_SEAL,
+  policySelection, policyEffects, policyDiff, ruleStates, proposedAfterEdit, isNewTarget, STATIC_RELEASE_RETENTION, STATIC_SNAPSHOT_RETENTION, NEW_TRIM_BEFORE_SEAL,
 } from '../lib/app-storage/policy.js';
 import { createStorageStore } from '../lib/app-storage/store.js';
 import { databases, registerNodus } from './helpers/app-storage-world.js';
@@ -180,6 +180,19 @@ test('policyEffects: what each rule (on or proposed) would do now', () => {
   assert.match(fx.caches.note, /^Would remove 1 item, about 10 B, now\.$/);
   assert.equal(fx.tempFiles.items, 1);
   assert.equal(policyEffects(null, p, NOW)[0].note, 'Run a storage check to see what this rule would do.');
+});
+
+test('proposals: a stored list survives edits of other rules; turning a rule on ends its proposal', () => {
+  const { policy } = defaultPolicyFor(oldApp, { installedAt: INSTALLED });
+  assert.deepEqual(ruleStates(policy, 'defaults-existing').proposedRules, RULE_KEYS);
+  assert.deepEqual(ruleStates(policy, 'defaults-new').proposedRules, []);
+  const edited = clone(policy); edited.rules.caches.enabled = true;
+  const left = proposedAfterEdit(RULE_KEYS, edited);
+  assert.deepEqual(left, RULE_KEYS.filter((k) => k !== 'caches'));
+  assert.deepEqual(ruleStates(edited, 'edited', left), { enabledRules: ['caches'], proposedRules: left });
+  edited.rules.caches.enabled = false;
+  assert.equal(ruleStates(edited, 'edited', proposedAfterEdit(left, edited)).proposedRules.includes('caches'), false, 'turned on then off reads Off');
+  assert.deepEqual(ruleStates(edited, 'edited', null).proposedRules, [], 'an edited row without a list has no proposals');
 });
 
 test('policyDiff names exactly what changed (for the audit)', () => {

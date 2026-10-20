@@ -18,7 +18,7 @@ function setup(t, { now = () => NOW } = {}) {
   W.registerNodus(mock2Db, world);
   mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (4, 'Shop', 'm2-4', 'active', '/var/lib/proxypilot/mock2/repos/4.git', '2026-10-01 10:00:00')").run();
   const exec = W.scriptedExec({ prefix: root, snapshots: [{ name: 'snap0', created_at: '2026-10-18T10:00:00Z' }], snapshotUsed: { snap0: 4e7 } });
-  const guests = new Map([['pp-nodus', { status: 'running', usedBytes: 2956918784 }], ['m2-4', { status: 'stopped', usedBytes: null }]]);
+  const guests = new Map([['pp-nodus', { status: 'Running', usedBytes: 2956918784 }], ['m2-4', { status: 'Stopped', usedBytes: null }]]);
   guests.checkedAt = new Date(NOW).toISOString();
   const s = createAppStorage({ mock2Db, mainDb, exec, now, notifications: bell(), listGuests: async () => guests, logger: null });
   return { s, mock2Db, mainDb, root, exec };
@@ -44,13 +44,13 @@ test('one running check per target; the result is stored and readable; the overv
   const o = await s.overview();
   assert.equal(o.checkedAt, new Date(NOW).toISOString());
   const nodus = o.targets.find((x) => x.key === 'application:1');
-  assert.deepEqual([nodus.name, nodus.guest, nodus.guestStatus, nodus.usage.usedBytes], ['Nodus', 'pp-nodus', 'running', 2956918784]);
+  assert.deepEqual([nodus.name, nodus.guest, nodus.guestStatus, nodus.usage.usedBytes], ['Nodus', 'pp-nodus', 'Running', 2956918784]);
   assert.equal(nodus.lastCheck.checkId, a.checkId);
   assert.ok(nodus.lastCheck.eligibleBytes > 0);
   assert.equal(nodus.runningCheckId, null);
   assert.deepEqual(nodus.policy, { source: 'preserved', enabledRules: ['releases', 'snapshots', 'workspaces'], proposedRules: ['caches', 'tempFiles', 'testArtifacts', 'logs', 'history'] });
   const shop = o.targets.find((x) => x.key === 'project:4');
-  assert.deepEqual([shop.kind, shop.guestStatus, shop.usage, shop.lastCheck], ['project', 'stopped', null, null]);
+  assert.deepEqual([shop.kind, shop.guestStatus, shop.usage, shop.lastCheck], ['project', 'Stopped', null, null]);
   assert.equal(shop.policy.source, 'defaults-existing');
 });
 
@@ -99,8 +99,14 @@ test('policy through the shared instance: defaults with their effects, a whole-d
   assert.deepEqual([r.revision, r.source], [1, 'edited']);
   assert.deepEqual(r.changed, { 'rules.caches.enabled': [false, true] });
   assert.equal(s.getPolicy('application:1').source, 'edited');
-  assert.deepEqual(s.getPolicy('application:1').proposedRules, [], 'an edited policy has no proposals, only rules on or off');
-  assert.throws(() => s.putPolicy('application:1', next, { expectedRevision: 0 }), (e) => e.code === 'POLICY_CHANGED' && e.status === 409);
+  assert.deepEqual(r.proposedRules, ['tempFiles', 'testArtifacts', 'logs', 'history']);
+  assert.deepEqual(s.getPolicy('application:1').proposedRules, ['tempFiles', 'testArtifacts', 'logs', 'history'], 'editing one rule leaves the other proposals proposed');
+  const off = JSON.parse(JSON.stringify(s.getPolicy('application:1').policy));
+  off.rules.caches.enabled = false;
+  s.putPolicy('application:1', off, { expectedRevision: 1 });
+  assert.deepEqual(s.getPolicy('application:1').proposedRules, ['tempFiles', 'testArtifacts', 'logs', 'history'], 'a rule turned on and off again is Off, not proposed');
+  next.rules.tempFiles.enabled = true;
+  assert.throws(() => s.putPolicy('application:1', next, { expectedRevision: 1 }), (e) => e.code === 'POLICY_CHANGED' && e.status === 409);
   assert.throws(() => s.putPolicy('application:1', { version: 1 }, {}), (e) => e.code === 'INVALID_POLICY' && e.status === 400);
   assert.equal(s.effectiveReleaseRetention('nodus').keepReleases, 2);
   assert.deepEqual({ ...s.effectiveSnapshotLimits() }, { 'pp-nodus': 3 });
@@ -109,8 +115,8 @@ test('policy through the shared instance: defaults with their effects, a whole-d
 test('target detail and the cleanup stand-in', async (t) => {
   const { s } = setup(t);
   const check = await s.runCheck('application:1');
-  const d = s.targetDetail('application:1');
-  assert.deepEqual(d.target, { key: 'application:1', kind: 'application', id: 1, name: 'Nodus', guest: 'pp-nodus' });
+  const d = await s.targetDetail('application:1');
+  assert.deepEqual(d.target, { key: 'application:1', kind: 'application', id: 1, name: 'Nodus', guest: 'pp-nodus', guestStatus: 'Running' });
   assert.equal(d.latestCheck.checkId, check.checkId);
   assert.equal(d.policy.source, 'preserved');
   assert.deepEqual(d.activity, []);

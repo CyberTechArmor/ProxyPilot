@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS mock2_storage_policies (
   policy_json TEXT NOT NULL,
   source TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  updated_by TEXT
+  updated_by TEXT,
+  proposed_json TEXT
 );
 CREATE TABLE IF NOT EXISTS mock2_storage_cleanups (
   id TEXT PRIMARY KEY,
@@ -106,7 +107,7 @@ export function createStorageStore(db, { now = () => Date.now() } = {}) {
 
   function getPolicy(targetKey) {
     const r = db.prepare('SELECT * FROM mock2_storage_policies WHERE target_key = ?').get(String(targetKey));
-    return r ? { targetKey: r.target_key, revision: Number(r.revision), policy: parse(r.policy_json), source: r.source, updatedAt: r.updated_at, updatedBy: r.updated_by || null } : null;
+    return r ? { targetKey: r.target_key, revision: Number(r.revision), policy: parse(r.policy_json), source: r.source, updatedAt: r.updated_at, updatedBy: r.updated_by || null, proposedRules: Array.isArray(parse(r.proposed_json)) ? parse(r.proposed_json) : null } : null;
   }
 
   function getCleanup(id) {
@@ -162,7 +163,7 @@ export function createStorageStore(db, { now = () => Date.now() } = {}) {
      * Save a policy document as the next revision. `expectedRevision` (the
      * revision the editor read; 0 = none stored yet) refuses a lost update.
      */
-    putPolicy(targetKey, { policy, source = 'edited', updatedBy = null, expectedRevision = undefined } = {}) {
+    putPolicy(targetKey, { policy, source = 'edited', updatedBy = null, expectedRevision = undefined, proposedRules = null } = {}) {
       if (!policy || typeof policy !== 'object') throw new Error('putPolicy needs a policy document');
       const current = getPolicy(targetKey);
       const currentRevision = current ? current.revision : 0;
@@ -173,19 +174,21 @@ export function createStorageStore(db, { now = () => Date.now() } = {}) {
       }
       const revision = currentRevision + 1;
       const at = iso(nowMs());
+      // Rules still proposed (never turned on) keep that marker across edits of other rules.
+      const proposed = Array.isArray(proposedRules) ? JSON.stringify(proposedRules.map(String)) : null;
       if (current) {
-        const r = db.prepare('UPDATE mock2_storage_policies SET revision = ?, policy_json = ?, source = ?, updated_at = ?, updated_by = ? WHERE target_key = ? AND revision = ?')
-          .run(revision, JSON.stringify(policy), String(source), at, updatedBy == null ? null : String(updatedBy), String(targetKey), currentRevision);
+        const r = db.prepare('UPDATE mock2_storage_policies SET revision = ?, policy_json = ?, source = ?, updated_at = ?, updated_by = ?, proposed_json = ? WHERE target_key = ? AND revision = ?')
+          .run(revision, JSON.stringify(policy), String(source), at, updatedBy == null ? null : String(updatedBy), proposed, String(targetKey), currentRevision);
         if (Number(r?.changes || 0) !== 1) { const e = new Error('The policy changed while it was being saved; reload it and try again.'); e.code = 'POLICY_CHANGED'; e.status = 409; throw e; }
       } else {
-        db.prepare('INSERT INTO mock2_storage_policies (target_key, revision, policy_json, source, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(String(targetKey), revision, JSON.stringify(policy), String(source), at, updatedBy == null ? null : String(updatedBy));
+        db.prepare('INSERT INTO mock2_storage_policies (target_key, revision, policy_json, source, updated_at, updated_by, proposed_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(String(targetKey), revision, JSON.stringify(policy), String(source), at, updatedBy == null ? null : String(updatedBy), proposed);
       }
       return getPolicy(targetKey);
     },
     listPolicies() {
       return db.prepare('SELECT * FROM mock2_storage_policies ORDER BY target_key').all()
-        .map((r) => ({ targetKey: r.target_key, revision: Number(r.revision), policy: parse(r.policy_json), source: r.source, updatedAt: r.updated_at, updatedBy: r.updated_by || null }));
+        .map((r) => getPolicy(r.target_key));
     },
 
     /* ----------------------------- cleanups ----------------------------- */

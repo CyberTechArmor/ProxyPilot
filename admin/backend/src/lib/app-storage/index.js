@@ -12,7 +12,7 @@ import { createAppStorageMonitor, createGuestLister, registerMonitor, unregister
 import { backendExec, exportsFor } from './host-measures.js';
 import { estimateSelection } from './accounting.js';
 import {
-  RULES, RULE_KEYS, DEFAULT_POLICY, resolvePolicy, ruleStates, validatePolicy, policyDiff, policyEffects,
+  RULES, RULE_KEYS, DEFAULT_POLICY, resolvePolicy, ruleStates, proposedAfterEdit, validatePolicy, policyDiff, policyEffects,
   effectiveReleaseRetention, effectiveSnapshotLimits,
 } from './policy.js';
 
@@ -43,7 +43,7 @@ export function createAppStorage({
   };
   const policyFor = (target) => {
     const r = resolvePolicy(target, { store, installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
-    return { ...r, ...ruleStates(r.policy, r.source) };
+    return { ...r, ...ruleStates(r.policy, r.source, r.stored ? r.proposedRules : null) };
   };
   const guestLister = listGuests || createGuestLister(executor, { now });
   const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger });
@@ -73,17 +73,24 @@ export function createAppStorage({
     const policy = validatePolicy(input);
     const before = policyFor(target);
     const changed = policyDiff(before.policy, policy);
-    const row = store.putPolicy(target.key, { policy, source: 'edited', updatedBy: userId == null ? null : String(userId), expectedRevision });
-    return { targetKey: target.key, policy: row.policy, revision: row.revision, source: row.source, changed, previousRevision: before.revision, previousSource: before.source };
+    const proposedRules = proposedAfterEdit(before.proposedRules, policy);
+    const row = store.putPolicy(target.key, { policy, source: 'edited', updatedBy: userId == null ? null : String(userId), expectedRevision, proposedRules });
+    return { targetKey: target.key, policy: row.policy, revision: row.revision, source: row.source, proposedRules, changed, previousRevision: before.revision, previousSource: before.source };
   }
 
-  function targetDetail(targetKey) {
+  async function guestStatusOf(target, latest) {
+    try { const g = (await guestLister())?.get?.(target.guest); if (g) return g.status || null; } catch { /* fall back to the last check */ }
+    return latest?.guest?.status || null;
+  }
+
+  async function targetDetail(targetKey) {
     const target = resolve(targetKey);
     const running = store.runningCheck(target.key, { maxAgeMs: 15 * 60 * 1000 });
     const pol = getPolicy(target.key);
+    const latest = checks.latestCheck(target.key);
     return {
-      target: { key: target.key, kind: target.kind, id: target.id, name: target.name, guest: target.guest, ...(target.kind === 'project' ? { lifecycle: target.lifecycle } : {}) },
-      latestCheck: checks.latestCheck(target.key),
+      target: { key: target.key, kind: target.kind, id: target.id, name: target.name, guest: target.guest, guestStatus: await guestStatusOf(target, latest), ...(target.kind === 'project' ? { lifecycle: target.lifecycle } : {}) },
+      latestCheck: latest,
       runningCheckId: running?.id || null,
       policy: { policy: pol.policy, source: pol.source, revision: pol.revision, enabledRules: pol.enabledRules, proposedRules: pol.proposedRules },
       effects: pol.effects,

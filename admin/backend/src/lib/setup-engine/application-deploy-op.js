@@ -5,7 +5,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { APPLICATION_RELEASE_RETENTION, cleanupReleaseArtifacts } from './application-release-cleanup.js';
+import { RELEASE_CLEANUP_SOURCE, resolveReleaseRetention, releaseContextFromApplication } from './application-release-cleanup.js';
 import { containedScript, parseContainment, reapStaleWritersScript, parseStaleWriters } from './guest-probes.js';
 
 import { APPLICATION_JOB_KINDS, applicationGuestName } from './application-deploy-logic.js';
@@ -19,7 +19,7 @@ function safeError(code, message) { const e = new Error(message); e.code = code;
 // systemd and HTTP bodies never enter API-visible job logs.
 const GUEST_PROGRAM = String.raw`
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');
-const cleanupReleaseArtifacts=${cleanupReleaseArtifacts.toString()};
+${RELEASE_CLEANUP_SOURCE}
 const a=JSON.parse(Buffer.from(process.argv[1],'base64').toString());
 function fail(code){process.stdout.write(JSON.stringify({ok:false,code}));process.exit(1)}
 function run(cmd,args,opts={}){const r=cp.spawnSync(cmd,args,{encoding:'utf8',maxBuffer:1024*1024,...opts});if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
@@ -53,11 +53,32 @@ else if(a.action==='seal'){
  // Builds run as the service user. Reclaim the tree before root-owned Git
  // integrity checks; leave Git's repository ownership protection enabled.
  freeze(a.stage);
- if(a.retention?.trimBuildCache){
-  const cache=p.join(a.stage,'.cache');
+ // Generated build output is discarded BEFORE the artifact digest exists; a
+ // sealed artifact is never edited. A tracked .cache refuses (as it always
+ // has); any other tracked, linked or invalid entry is kept and reported.
+ const trim=Array.isArray(a.retention?.trimBeforeSeal)?a.retention.trimBeforeSeal:(a.retention?.trimBuildCache?['.cache']:[]);
+ if(trim.length){
   if(fs.lstatSync(a.stage).isSymbolicLink()||fs.realpathSync(a.stage)!==a.stage)fail('UNSAFE_CACHE_TARGET');
-  if(run('git',['-C',a.stage,'ls-files','--','.cache'])!=='')fail('TRACKED_BUILD_CACHE');
-  if(fs.existsSync(cache))fs.rmSync(cache,{recursive:true,force:false});
+  if(fs.existsSync(p.join(a.stage,'.proxypilot-release.json')))fail('ALREADY_SEALED');
+  out.trim={removed:[],kept:[]};
+  for(const rel of trim){
+   if(rel==='.cache'){
+    const cache=p.join(a.stage,'.cache');
+    if(run('git',['-C',a.stage,'ls-files','--','.cache'])!=='')fail('TRACKED_BUILD_CACHE');
+    if(fs.existsSync(cache)){fs.rmSync(cache,{recursive:true,force:false});out.trim.removed.push(rel)}
+    continue;
+   }
+   if(typeof rel!=='string'||!/^[A-Za-z0-9._\/-]{1,200}$/.test(rel)||rel.startsWith('/')||rel.endsWith('/')||rel.split('/').some(s=>!s||s==='.'||s==='..'||s==='.git')){out.trim.kept.push({path:String(rel).slice(0,200),reason:'invalid'});continue}
+   if(run('git',['-C',a.stage,'ls-files','--',rel])!==''){out.trim.kept.push({path:rel,reason:'tracked'});continue}
+   let at=a.stage,state='ok';
+   for(const part of rel.split('/').slice(0,-1)){at=p.join(at,part);let s=null;try{s=fs.lstatSync(at)}catch(e){if(e.code!=='ENOENT')throw e}if(!s){state='absent';break}if(!s.isDirectory()||s.isSymbolicLink()){state='link';break}}
+   if(state==='absent')continue;
+   if(state==='link'){out.trim.kept.push({path:rel,reason:'link'});continue}
+   const target=p.join(a.stage,rel);let st=null;try{st=fs.lstatSync(target)}catch(e){if(e.code!=='ENOENT')throw e}
+   if(!st)continue;
+   if(st.isSymbolicLink()){out.trim.kept.push({path:rel,reason:'link'});continue}
+   fs.rmSync(target,{recursive:true,force:false});out.trim.removed.push(rel);
+  }
  }
  if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
  if(run('git',['-C',a.stage,'status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
@@ -106,17 +127,28 @@ process.stdout.write(JSON.stringify(out));
 function guestScript(data) { return `node -e ${quote(GUEST_PROGRAM)} ${quote(Buffer.from(JSON.stringify(data)).toString('base64'))}\n`; }
 export { guestScript as applicationGuestScript };
 
-export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, releaseRetention = null, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
   if (typeof service === 'function') service = await service();
   if (!service) { const m = await import('../../mock2/application-releases.js'); service = await m.getApplicationReleaseService(); }
   const reference = { sha: params.sha, profileRevision: params.profileRevision, profileDigest: params.profileDigest };
   const prepared = await (kind === 'application_deploy' ? service.prepareDeployment(params.applicationId, reference) : service.prepareCandidate(params.applicationId, reference));
   const { profile, candidate, gitDir } = prepared;
-  const retention = Object.hasOwn(APPLICATION_RELEASE_RETENTION, profile.targetId) ? APPLICATION_RELEASE_RETENTION[profile.targetId] : null;
+  // The storage policy's effective release retention when one is enabled,
+  // else the static opt-in (Nodus), else none. An unreadable policy applies
+  // no retention at all rather than a guessed one.
+  let retention = null;
+  try { retention = await resolveReleaseRetention(releaseRetention, profile.targetId); }
+  catch { retention = null; job.event?.('retention_unavailable', 'The storage policy could not be read; no release retention was applied to this job.'); }
   const container = applicationGuestName(profile.targetId);
   if (job.app !== container) throw safeError('GUEST_IDENTITY_MISMATCH', 'The saved profile does not match the locked application guest.');
   if (profile.digest !== params.profileDigest || profile.revision !== params.profileRevision || candidate.sha !== params.sha || candidate.treeSha !== params.treeSha) throw safeError('PROFILE_CHANGED', 'Saved application profile or candidate changed; create a new job.');
   const root = profile.releaseRoot || `/var/lib/proxypilot/application-releases/${params.applicationId}`;
+  // The recorded rollback release and the validated candidate waiting to be
+  // deployed are kept by retention; the guest re-derives the rest itself.
+  let releaseContext = { previousSha: null, rollback: null, protect: [] };
+  if (retention && typeof service.getApplication === 'function') {
+    try { releaseContext = releaseContextFromApplication(await service.getApplication(params.applicationId), { root }); } catch { /* the guest falls back to the release markers */ }
+  }
   const validation = candidate.validation || prepared.validation;
   const release = kind === 'application_validate' ? `${root}/${candidate.sha}-p${profile.revision}-${job.id}` : validation?.releasePath;
   const attempt = `${job.id}-${job.epoch || 1}`;
@@ -183,19 +215,20 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
       await hostFs.chmod(hostBundle, 0o600);
       // The transfer target and root are fixed by the immutable profile.
       await guest('prepare', { root });
-      if (retention) await guest('release_cleanup', { stage, bundle, release, sweepStages: true }, 120000);
+      if (retention) await guest('release_cleanup', { stage, bundle, release, sweepStages: retention.workspaces !== false, ...releaseContext }, 120000);
       job.fence({ safe: true }); const r = await exec.host(['incus', 'file', 'push', hostBundle, `${container}${bundle}`], { timeoutMs: 120000 }); if (r.code !== 0) throw safeError('TRANSFER_FAILED', 'Git bundle transfer failed.');
       mark('stage'); await guest('stage', { stage, release, bundle, sha: candidate.sha, treeSha: candidate.treeSha, scripts, user: identity.user, group: identity.group }, 120000);
       const evidence = [];
       for (const script of scripts) { mark(`script:${script}`); await guest('script', { stage, script, user: identity.user, timeout: 600000 }, 620000); evidence.push({ script, passed: true }); }
       const evidenceDigest = digest({ sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidence });
       const sealed = await guest('seal', { stage, release, sha: candidate.sha, treeSha: candidate.treeSha, marker: { sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest } });
-      if (retention) { const cleaned = await guest('release_cleanup', { stage, bundle, release }, 120000); guestCleaned = true; job.event?.('cleanup', 'Release retention applied', cleaned.cleanup); }
+      if (sealed.trim && (sealed.trim.removed?.length || sealed.trim.kept?.length)) job.event?.('trim', sealed.trim.kept?.length ? 'Generated build output removed before sealing; some entries were kept' : 'Generated build output removed before sealing', sealed.trim);
+      if (retention) { const cleaned = await guest('release_cleanup', { stage, bundle, release, ...releaseContext }, 120000); guestCleaned = true; job.event?.('cleanup', 'Release retention applied', cleaned.cleanup); }
       job.fence({ safe: true }); await service.recordValidation(params.applicationId, candidate.sha, { profileDigest: profile.digest, treeSha: candidate.treeSha, passed: true, evidenceDigest, artifactDigest: sealed.artifactDigest, jobId: job.id, releasePath: release });
       mark('validated'); return { ok: true, outcome: 'validated', verification: { state: 'tested', sha: candidate.sha, evidenceDigest, releasePath: release } };
     } finally {
       if (retention && !guestCleaned) {
-        try { const cleaned = await guest('release_cleanup', { stage, bundle, release }, 120000); job.event?.('cleanup', 'Build workspace and transfer archive removed', cleaned.cleanup); }
+        try { const cleaned = await guest('release_cleanup', { stage, bundle, release, ...releaseContext }, 120000); job.event?.('cleanup', 'Build workspace and transfer archive removed', cleaned.cleanup); }
         catch (error) { job.event?.('cleanup_failed', 'Guest cleanup was not verified; the next validation will retry after checking prior writers are stopped', { code: error.code || 'CLEANUP_FAILED' }); }
       }
       if (transfer) await hostFs.rm(transfer, { recursive: true, force: true });

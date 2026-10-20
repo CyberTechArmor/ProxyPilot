@@ -403,7 +403,9 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
     { path: '.env.example', content: envExample(webPort) },
     {
       path: '.gitignore',
-      content: '.env\n__pycache__/\nnode_modules/\ndist/\n*.log\n',
+      // Generated test output, caches and the check runner's local state stay
+      // out of checkpoints (`git add -A`), so they never ride into the bare repo.
+      content: '.env\n__pycache__/\nnode_modules/\ndist/\n*.log\ntest-results/\nplaywright-report/\ncoverage/\n.cache/\n/.mock2/cache/\n/.mock2/evidence/\n',
     },
     {
       path: 'README.md',

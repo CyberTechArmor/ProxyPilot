@@ -11,7 +11,7 @@ import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { BTN, DIALOG_BODY, Notice } from '@/components/storage/shared';
-import { formatBytes, isCleanupFinished } from './app-storage-model.mjs';
+import { cleanupEvents, formatBytes, isCleanupFinished, reclaimedFigure } from './app-storage-model.mjs';
 import { TEXT } from './app-storage-text.js';
 import { Figure, errorText, usePolling } from './parts.jsx';
 
@@ -45,7 +45,8 @@ export default function CleanupResult({ cleanupId, client = api, onRunCheck, onC
   usePolling(Boolean(cleanup) && !finished, load);
 
   const r = cleanup?.result || {};
-  const events = cleanup?.job?.events || [];
+  const events = cleanupEvents(cleanup?.job);
+  const reclaimed = reclaimedFigure(r.reclaimed?.guestBytes);
   const HealthIcon = HEALTH_ICON[r.health] || AlertTriangle;
   const remaining = r.remaining?.guest;
 
@@ -59,22 +60,26 @@ export default function CleanupResult({ cleanupId, client = api, onRunCheck, onC
         {error && <Notice level="error"><p>{error}</p></Notice>}
         {!cleanup && !error && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />{TEXT.loading}</p>}
         {cleanup && !finished && (
-          <div className="flex items-center gap-2 text-sm" role="status"><Loader2 className="h-4 w-4 animate-spin" />{cleanup.status === 'queued' ? TEXT.queued : TEXT.cleaningUpShort}</div>
+          <div className="space-y-1" role="status">
+            <p className="flex items-center gap-2 text-sm"><Loader2 className="h-4 w-4 animate-spin shrink-0" />{cleanup.status === 'queued' ? TEXT.queued : TEXT.cleaningUpShort}</p>
+            {cleanup.status !== 'queued' && events.length > 0 && <p className="text-xs text-muted-foreground break-words pl-6">{events.at(-1).message}</p>}
+          </div>
         )}
         {finished && (
           <>
             {cleanup.status === 'refused' && cleanup.result?.reason && <Notice level="warn"><p>{cleanup.result.reason}</p></Notice>}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Figure label={TEXT.reclaimed} value={r.reclaimed?.guestBytes != null ? formatBytes(r.reclaimed.guestBytes) : '—'} hint={r.estimateBytes != null ? `${TEXT.estimated}: ${formatBytes(r.estimateBytes)}` : null} />
+              <Figure label={TEXT.reclaimed} value={reclaimed == null ? '—' : reclaimed === 0 ? TEXT.noChangeMeasured : formatBytes(reclaimed)} hint={r.estimateBytes != null ? `${TEXT.estimated}: ${formatBytes(r.estimateBytes)}` : null} />
               <Figure label={TEXT.remaining} value={remaining ? TEXT.usedOfAvailable(formatBytes(remaining.usedBytes), formatBytes(remaining.availableBytes)) : '—'} />
             </div>
             {r.reclaimed?.settling && <Notice level="info"><p>{TEXT.settling}</p></Notice>}
+            {Array.isArray(r.notes) && r.notes.length > 0 && <ul className="list-disc pl-4 text-xs text-muted-foreground space-y-0.5">{r.notes.map((n, i) => <li key={i} className="break-words">{n}</li>)}</ul>}
             <div className={`rounded-lg border p-3 flex items-start gap-2 text-sm ${r.health === 'failed' ? 'border-red-500/40 bg-red-500/10' : ''}`} data-testid="health">
               <HealthIcon className={`h-4 w-4 mt-0.5 shrink-0 ${r.health === 'passed' ? 'text-emerald-500' : r.health === 'failed' ? 'text-red-500' : 'text-muted-foreground'}`} aria-hidden="true" />
               <div className="min-w-0"><p className="font-medium">{TEXT.health}</p><p className="break-words">{TEXT.healthText[r.health] || TEXT.healthText['not-checked']}</p></div>
             </div>
             {!r.removed?.length && <p className="text-sm text-muted-foreground">{TEXT.noneRemoved}</p>}
-            <List title={TEXT.removed} items={r.removed} render={(x) => <p className="break-words">{x.label} <span className="text-xs text-muted-foreground">{formatBytes(x.bytes)}</span></p>} />
+            <List title={TEXT.removed} items={r.removed} render={(x) => <p className="break-words"><span>{x.label}</span> <span className="text-xs text-muted-foreground">{formatBytes(x.bytes)}</span></p>} />
             <List title={TEXT.skipped} tone="text-amber-600 dark:text-amber-400" items={r.skipped} render={(x) => <><p className="break-words">{x.label}</p><p className="text-xs text-muted-foreground break-words">{x.reason}</p></>} />
             <List title={TEXT.failed} tone="text-red-500" items={r.failed} render={(x) => <><p className="break-words">{x.label}</p><p className="text-xs text-red-500 break-words">{x.error}</p></>} />
           </>
@@ -82,7 +87,7 @@ export default function CleanupResult({ cleanupId, client = api, onRunCheck, onC
         {events.length > 0 && (
           <details className="rounded-lg border p-3 text-xs">
             <summary className="min-h-11 flex items-center cursor-pointer text-sm font-medium">{TEXT.recentEvents}</summary>
-            <ul className="space-y-1 pt-1">{events.slice(-20).map((e, i) => <li key={e.id ?? i} className="break-words">{e.message || e.kind}</li>)}</ul>
+            <ul className="space-y-1 pt-1">{events.map((e, i) => <li key={e.id ?? `${e.at}-${i}`} className="break-words">{e.message}</li>)}</ul>
           </details>
         )}
       </div>

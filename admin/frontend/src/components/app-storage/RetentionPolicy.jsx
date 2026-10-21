@@ -15,7 +15,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { BTN, Checkbox, Chip, Notice } from '@/components/storage/shared';
 import {
-  RULE_FIELDS, RULE_KEYS, alertsForm, alertsFormChanged, effectFor, formatBytes, formatSize, ruleForm, ruleFormChanged, ruleState,
+  RULE_FIELDS, RULE_KEYS, alertsForm, alertsFormChanged, effectFor, effectNote, formatBytes, formatSize, ruleForm, ruleFormChanged, ruleState,
   validateAlertsForm, validateRuleForm, withAlerts, withRule,
 } from './app-storage-model.mjs';
 import { ALERT_TEXT, POLICY_SOURCE_LABELS, POLICY_TEXT, RULE_STATE_HINTS, RULE_TEXT } from './app-storage-text.js';
@@ -34,7 +34,7 @@ function NumberField({ id, label, value, onChange, error, disabled }) {
   );
 }
 
-const rangeText = (e) => (e === 'positive' ? POLICY_TEXT.positive : e ? POLICY_TEXT.range(e.min, e.max) : null);
+const rangeText = (e) => (e === 'positive' ? POLICY_TEXT.positive : e?.gb ? POLICY_TEXT.gbRange(e.min, e.max) : e ? POLICY_TEXT.range(e.min, e.max) : null);
 
 function Effect({ effect, changed }) {
   if (!effect) return <p className="text-xs text-muted-foreground">{POLICY_TEXT.effectUnknown}</p>;
@@ -42,7 +42,7 @@ function Effect({ effect, changed }) {
     <div className="rounded-md bg-muted/50 p-2 text-xs space-y-0.5" data-testid="rule-effect">
       <p><span className="font-medium">{POLICY_TEXT.effectsTitle}:</span> {POLICY_TEXT.effect(effect.items, formatSize(effect.bytes, 'estimate'))}</p>
       {effect.examples?.length > 0 && <p className="text-muted-foreground break-words">{POLICY_TEXT.effectExamples(effect.examples.slice(0, 3))}</p>}
-      {effect.note && <p className="text-muted-foreground break-words">{effect.note}</p>}
+      {effectNote(effect) && <p className="text-muted-foreground break-words">{effectNote(effect)}</p>}
       {changed && <p className="text-amber-600 dark:text-amber-400">{POLICY_TEXT.effectsForSaved}</p>}
     </div>
   );

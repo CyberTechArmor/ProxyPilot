@@ -648,14 +648,18 @@ test('facts without describeReleases\' answer never make a release cleanable', (
   assert.match(r.at(`/opt/r/${name}`).reason, /could not be worked out/);
 });
 
-test('a sealed release whose validation has not passed is kept (describeReleases\' pending), not cleanable', async (t) => {
+test('a sealed release whose validation has no result yet is kept (describeReleases\' pending); a rejected one is not', async (t) => {
   const R = W.RELEASE_ROOT;
   const { at } = await nodusCheck(t, { mutate: (root, world) => {
-    world.candidates.push({ sha: W.OLD_SHA, checkpointAt: new Date(NOW - 6 * W.DAY).toISOString(), validation: { passed: false, releasePath: `${R}/${W.OLD}`, validatedAt: null } });
+    world.candidates.push({ sha: W.OLD_SHA, checkpointAt: new Date(NOW - 6 * W.DAY).toISOString(), validation: { passed: null, releasePath: `${R}/${W.OLD}`, validatedAt: null } });
   } });
   const old = at(`${R}/${W.OLD}`);
-  assert.deepEqual([old.status, old.sub, old.action], ['protected', 'pending', null]);
-  assert.equal(old.reason, 'Its validation has not passed (it may still be running), so it is kept.');
+  assert.deepEqual([old.status, old.sub, old.action, old.label], ['protected', 'pending', null, `Release ${W.OLD_SHA.slice(0, 8)} (being validated)`]);
+  assert.equal(old.reason, 'Its validation has no result yet, so it is kept.');
+  const rejected = await nodusCheck(t, { mutate: (root, world) => {
+    world.candidates.push({ sha: W.OLD_SHA, checkpointAt: new Date(NOW - 6 * W.DAY).toISOString(), validation: { passed: false, releasePath: `${R}/${W.OLD}`, validatedAt: null } });
+  } });
+  assert.equal(rejected.at(`${R}/${W.OLD}`).status, 'eligible', 'a failed validation is a rejection (WS2), not pending');
 });
 
 /* ---- re-review N1: an application's one-off logs are a leftover worth a look ---- */
@@ -688,4 +692,16 @@ test('a current log nothing writes to for 14 days and nothing holds open needs a
   for (const cfg of Object.values(every.rules)) if (cfg && typeof cfg === 'object') cfg.enabled = true;
   const picked = policySelection({ items: r.items }, every, NOW).items.map((id) => r.items.find((x) => x.id === id).path);
   assert.deepEqual(picked, ['/var/log/old.log.1']);
+});
+
+test('a resolved target keeps a validation without a result as null, so the release roles can see it pending', async (t) => {
+  const { resolveTarget } = await import('../lib/app-storage/targets.js');
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const { mock2Db } = W.databases();
+  const world = W.buildNodusGuest(root, NOW);
+  world.candidates.push({ sha: W.OLD_SHA, checkpointAt: new Date(NOW - 6 * W.DAY).toISOString(), validation: { passed: null, releasePath: `${W.RELEASE_ROOT}/${W.OLD}` } });
+  W.registerNodus(mock2Db, world);
+  const app = resolveTarget('application:1', { mock2Db });
+  assert.equal(app.candidates.find((c) => c.sha === W.OLD_SHA).validation.passed, null);
+  assert.deepEqual(scanPlanFor(app).releases.pending, [`${W.RELEASE_ROOT}/${W.OLD}`]);
 });

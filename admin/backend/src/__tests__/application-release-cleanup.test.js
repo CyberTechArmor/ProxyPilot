@@ -10,7 +10,7 @@ import { applicationGuestScript, runApplicationReleaseOperation } from '../lib/s
 const job = '11111111-1111-4111-8111-111111111111';
 const releaseName = number => `${String(number).repeat(40)}-p6-${job}`;
 function fixture(t) {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'release-retention-'));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'release-retention-')); fs.chmodSync(parent, 0o755); // read-only git runs unprivileged
   t.after(() => { if (path.basename(parent).startsWith('release-retention-') && path.dirname(parent) === fs.realpathSync(os.tmpdir())) fs.rmSync(parent, { recursive: true, force: true }); });
   const root = path.join(parent, 'releases'); fs.mkdirSync(root);
   const create = number => { const dir = path.join(root, releaseName(number)); fs.mkdirSync(dir); fs.writeFileSync(path.join(dir, '.proxypilot-release.json'), JSON.stringify({ sha: String(number).repeat(40) })); return dir; };
@@ -172,8 +172,10 @@ test('release context: the facts describeReleases decides from (recorded previou
   assert.deepEqual(releaseContextFromApplication(app, { root }), {
     previousSha: '2'.repeat(40), rollback: `${root}/prev`, previousLive: null, liveVerifiedAt: '2026-10-20T10:00:00Z',
     validated: [{ sha: '2'.repeat(40), path: `${root}/prev`, validatedAt: '2026-10-19T10:00:00Z' }, { sha: '3'.repeat(40), path: `${root}/waiting`, validatedAt: '2026-10-20T11:00:00Z' }],
-    pending: [`${root}/failed`],
-  }, 'without a history source the live record names the previous release; folders outside the release root are not passed on');
+    pending: [],
+  }, 'without a history source the live record names the previous release; a failed validation is not pending; folders outside the release root are not passed on');
+  const running = releaseContextFromApplication({ ...app, candidates: [...app.candidates, { sha: '7'.repeat(40), validation: { passed: null, releasePath: `${root}/running` } }, { sha: '8'.repeat(40), validation: { releasePath: `${root}/unknown` } }] }, { root });
+  assert.deepEqual(running.pending, [`${root}/running`, `${root}/unknown`], 'pending means no result yet (passed null or missing)');
   assert.deepEqual(releaseContextFromApplication({ live: null, candidates: [] }, { root }), { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [], pending: [] });
   // A supplied history is the one answer, even against the live record's previousSha (a release rolled back from).
   const history = releaseContextFromApplication(app, { root, previousLive: { sha: '6'.repeat(40), path: `${root}/before` } });
@@ -199,6 +201,34 @@ test('the cap removes the oldest releases outside the protected set; the release
   for (const kept of [f.live, f.obsolete, f.candidate, waiting, pending, old2]) assert.equal(fs.existsSync(kept), true, kept);
   assert.equal(fs.existsSync(old1), false, 'the oldest release outside the protected set is the one removed');
   assert.throws(() => removeSelectedRelease(fs, path, { ...f.a, ...facts, path: pending }, () => { throw new Error('must not remove'); }), /RELEASE_IS_CANDIDATE/);
+});
+
+test('a failed validation is a rejection: removed oldest-first by the cap like any other release, while one without a result stays', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  const rejectedOld = f.create(4); fs.utimesSync(rejectedOld, f.at(0), f.at(0));
+  const noResult = f.create(5); fs.utimesSync(noResult, f.at(1), f.at(1));
+  const app = { live: { sha: '1'.repeat(40), releasePath: f.live, verifiedAt: '2026-10-20T12:00:00Z' }, candidates: [
+    { sha: '4'.repeat(40), validation: { passed: false, releasePath: rejectedOld } },
+    { sha: '5'.repeat(40), validation: { passed: null, releasePath: noResult } },
+  ] };
+  const ctx = releaseContextFromApplication(app, { root: f.root, previousLive: f.a.previousLive });
+  assert.deepEqual(ctx.pending, [noResult]);
+  const result = cleanupReleaseArtifacts(fs, path, { ...f.a, ...ctx });
+  assert.equal(result.releasesRemoved, 1);
+  assert.equal(fs.existsSync(rejectedOld), false, 'the rejected release went, oldest first');
+  for (const kept of [f.live, f.obsolete, f.candidate, noResult]) assert.equal(fs.existsSync(kept), true, kept);
+});
+
+test('release markers are read through the pinned folders: a marker that is a link or too large is not a release marker', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  const linked = f.create(4); fs.rmSync(path.join(linked, '.proxypilot-release.json'));
+  const outside = path.join(f.parent, 'outside-marker.json'); fs.writeFileSync(outside, JSON.stringify({ sha: '4'.repeat(40) }));
+  fs.symlinkSync(outside, path.join(linked, '.proxypilot-release.json'));
+  const big = f.create(5); fs.writeFileSync(path.join(big, '.proxypilot-release.json'), JSON.stringify({ sha: '5'.repeat(40), pad: 'x'.repeat(5000) }));
+  const d = describeReleases(fs, path, f.a);
+  assert.equal(d.sealed.some(r => r.path === linked), false, 'a linked marker is never followed');
+  assert.equal(d.sealed.some(r => r.path === big), false, 'a marker over 4 KiB is not read');
+  assert.ok(d.sealed.find(r => r.path === f.obsolete).sha, 'ordinary markers still read');
 });
 
 test('a release containing the live application model data is never pruned', { skip: process.platform === 'win32' }, t => {
@@ -314,7 +344,7 @@ test('an already sealed tree is never trimmed', { skip: process.platform === 'wi
 });
 
 function opFixture({ targetId = 'nodus' } = {}) {
-  const calls = [];
+  const calls = [], hostCalls = [];
   const profile = { targetId, sourceDir: '/opt/app', releaseRoot: '/opt/app-releases', serviceName: 'app.service', healthUrl: 'http://127.0.0.1:3000/ready', installScript: 'deps', buildScript: 'build', validationScripts: ['test'], preservePaths: [], envFiles: [], revision: 1, digest: 'c'.repeat(64) };
   const candidate = { sha: 'a'.repeat(40), treeSha: 'b'.repeat(40) };
   const service = {
@@ -323,7 +353,7 @@ function opFixture({ targetId = 'nodus' } = {}) {
     getApplication: async () => ({ live: { sha: '1'.repeat(40), releasePath: '/opt/app-releases/live', previousSha: '2'.repeat(40), verifiedAt: '2026-10-20T10:00:00Z' }, candidates: [{ sha: '2'.repeat(40), live: { releasePath: '/opt/app-releases/prev' } }] }),
   };
   const exec = {
-    host: async argv => { if (argv.includes('bundle') && argv.includes('create')) fs.writeFileSync(argv[argv.indexOf('create') + 1], 'fixture'); return { code: 0, stdout: '' }; },
+    host: async argv => { hostCalls.push(argv); if (argv.includes('bundle') && argv.includes('create')) fs.writeFileSync(argv[argv.indexOf('create') + 1], 'fixture'); return { code: 0, stdout: '' }; },
     guest: async (container, script) => {
       if (script.includes('STALE_WRITERS:')) return { code: 0, stdout: 'STALE_WRITERS:0\n' };
       const body = Buffer.from(script.match(/printf '%s' '([^']+)' \| base64/)[1], 'base64').toString();
@@ -337,7 +367,7 @@ function opFixture({ targetId = 'nodus' } = {}) {
   };
   const job = { id: '11111111-1111-4111-8111-111111111111', app: `pp-${targetId}`, epoch: 1, fence() {}, checkpoint() {}, event() {} };
   const params = { applicationId: 1, profileRevision: 1, profileDigest: profile.digest, sha: candidate.sha, treeSha: candidate.treeSha };
-  return { calls, service, exec, job, params };
+  return { calls, hostCalls, service, exec, job, params };
 }
 
 test('validation applies the stored policy, passes rollback/candidate protection, and keeps Nodus on the static file', async t => {
@@ -360,6 +390,9 @@ test('validation applies the stored policy, passes rollback/candidate protection
   await runApplicationReleaseOperation({ kind: 'application_validate', params: failing.params, exec: failing.exec, job: failing.job, service: failing.service, hostRoot: temp, releaseRetention: async () => ({ keepReleases: 2 }), releaseHistory: async () => { throw new Error('db locked'); } });
   assert.equal(failing.calls.find(c => c.action === 'release_cleanup').previousLive, null, 'an unreadable history is unknown, never guessed');
   assert.deepEqual(f.calls.find(c => c.action === 'seal').retention.trimBeforeSeal, ['.cache', 'coverage']);
+  // The host transfer copy carries its application: bundle-app<id>-<random>.
+  const init = f.hostCalls.find(argv => argv[1] === 'init');
+  assert.match(path.basename(path.dirname(init[3])), /^bundle-app1-[A-Za-z0-9]{6}$/);
 
   const nodus = opFixture({ targetId: 'nodus' });
   await runApplicationReleaseOperation({ kind: 'application_validate', params: nodus.params, exec: nodus.exec, job: nodus.job, service: nodus.service, hostRoot: temp });

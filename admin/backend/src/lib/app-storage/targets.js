@@ -109,7 +109,7 @@ export function resolveTarget(key, { mock2Db }) {
       live: app.live || null,
       // Each candidate's own live record (its last time live), so the
       // release roles can name the folder a previous release ran from.
-      candidates: (app.candidates || []).map((c) => ({ sha: c.sha, checkpointAt: c.checkpointAt, validation: c.validation ? { passed: !!c.validation.passed, releasePath: c.validation.releasePath || null, validatedAt: c.validation.validatedAt || null, jobId: c.validation.jobId || null } : null, live: c.live && typeof c.live === 'object' ? { releasePath: c.live.releasePath || null, verifiedAt: c.live.verifiedAt || null } : null })),
+      candidates: (app.candidates || []).map((c) => ({ sha: c.sha, checkpointAt: c.checkpointAt, validation: c.validation ? { passed: c.validation.passed === true ? true : c.validation.passed === false ? false : null, releasePath: c.validation.releasePath || null, validatedAt: c.validation.validatedAt || null, jobId: c.validation.jobId || null } : null, live: c.live && typeof c.live === 'object' ? { releasePath: c.live.releasePath || null, verifiedAt: c.live.verifiedAt || null } : null })),
       // The release that ran before the live one, from the deploy history
       // (release-history.js); null when unknown.
       previousLive: previousLiveRelease(mock2Db, id),

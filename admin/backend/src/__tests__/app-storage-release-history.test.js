@@ -80,3 +80,24 @@ test('a release rolled back FROM is never the previous one: live R5, rolled back
   const six = { ...R('6'), previousSha: S('5'), verifiedAt: '2026-10-09T00:00:00Z' };
   assert.deepEqual(previousLiveFrom(six, [...again, { sha: S('6'), live: six }]), { sha: S('5'), path: rel('5') });
 });
+
+test('a second rollback to the same release keeps the first: R5 → R4, R6 deployed, R6 → R4 gives R3 (not R5)', () => {
+  const R = c => ({ sha: S(c), releasePath: rel(c) });
+  // As stored: each candidate row keeps only its own last live record (R4's
+  // first rollback record was overwritten by the second), while the live
+  // records carry the accumulated rolledBackFrom list forward (recordLive).
+  const r5Back = { sha: S('5'), at: '2026-10-04T00:00:00Z' };
+  const r6Back = { sha: S('6'), at: '2026-10-06T00:00:00Z' };
+  const rows = [
+    { sha: S('3'), live: { ...R('3'), previousSha: S('2'), verifiedAt: '2026-10-01T00:00:00Z' } },
+    { sha: S('5'), live: { ...R('5'), previousSha: S('4'), verifiedAt: '2026-10-03T00:00:00Z' } },
+    { sha: S('6'), live: { ...R('6'), previousSha: S('4'), rolledBackFrom: [r5Back], verifiedAt: '2026-10-05T00:00:00Z' } },
+    { sha: S('4'), live: { ...R('4'), previousSha: S('6'), rollbackOf: S('6'), rolledBackFrom: [r5Back, r6Back], verifiedAt: '2026-10-06T00:00:00Z' } },
+  ];
+  const live = rows[3].live;
+  assert.deepEqual(previousLiveFrom(live, rows), { sha: S('3'), path: rel('3') });
+  assert.deepEqual(previousLiveRelease(db({ live, rows }), 1), { sha: S('3'), path: rel('3') });
+  // Without the carried list (only the overwritten row's rollbackOf R6) it would have been R5.
+  const { rolledBackFrom, ...bare } = live;
+  assert.deepEqual(previousLiveFrom(bare, rows.map(r => (r.sha === S('4') ? { ...r, live: bare } : { ...r, live: { ...r.live, rolledBackFrom: undefined } }))), { sha: S('5'), path: rel('5') });
+});

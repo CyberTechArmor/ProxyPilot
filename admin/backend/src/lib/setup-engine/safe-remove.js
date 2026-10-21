@@ -20,6 +20,8 @@
 //                                time (SYMLINK_IN_PATH / NOT_A_DIRECTORY)
 //   openDirAt(dfd, name), lstatAt(dfd, name), existsAt(dfd, name),
 //   renameAt(dfd, from, to), listAt(dfd), close(fd), same(a, b)
+//   readFileAt(dfd, name, maxBytes)   a bounded read of a regular file,
+//                                never through a link
 //   removeTreeAt(dfd, name, dev, expect)   post-order removal of dfd/name:
 //                                links are unlinked, never followed; a child
 //                                on another device is MOUNT_INSIDE; a name
@@ -27,6 +29,8 @@
 //                                CHANGED_DURING_REMOVAL → { bytes, entries }
 //   removePath(x)                removeTreeAt for one absolute path, nothing
 //                                mounted at or below it, parent fsynced
+//   freezeTree(dir)              the seal's freeze (root-owned, read-only),
+//                                by the same fd walk (CHANGED_DURING_FREEZE)
 //   mountedAt(x), mountOf(x), inUse(x), refresh()   /proc/self/mounts and
 //                                the open-file scan, re-read when older than
 //                                2 seconds
@@ -87,6 +91,21 @@ export function safeRemover(fs, p) {
   const existsAt = (dfd, name) => { try { lstatAt(dfd, name); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
   const renameAt = (dfd, from, to) => { if (!nameOk(from) || !nameOk(to)) refuse('INVALID_PATH'); fs.renameSync(at(dfd, from), at(dfd, to)); };
   const listAt = dfd => fs.readdirSync(fdPath(dfd), { encoding: 'buffer' });
+  // readFileAt(dfd, name, maxBytes) → { stat, data } of a regular file opened
+  // O_NOFOLLOW|O_NONBLOCK from its pinned parent, or null (a link, not a
+  // regular file, larger than maxBytes, gone).
+  function readFileAt(dfd, name, maxBytes = 4096) {
+    if (!nameOk(name)) return null;
+    let fd = null;
+    try {
+      fd = fs.openSync(at(dfd, name), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK);
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > maxBytes) return null;
+      const buffer = Buffer.alloc(Math.max(1, stat.size));
+      const n = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      return { stat, data: buffer.subarray(0, n) };
+    } catch (e) { return null; } finally { if (fd !== null) close(fd); }
+  }
   // Post-order removal of dfd/name. `expect` (the stat the caller verified)
   // must still be what the name is; a directory is entered by fd only after
   // its fstat matches the lstat just taken, and removed only while the name
@@ -145,6 +164,48 @@ export function safeRemover(fs, p) {
   }
   const inUse = x => openPaths().some(o => o === x || o.startsWith(x + '/'));
   const refresh = () => { mountList = null; openList = null; };
+  // freezeTree(dir): the release seal's freeze, through the same walker —
+  // every entry owned by root; directories 0755, files 0444 (0555 when
+  // executable). A link is re-owned (lchown, never followed); a file is
+  // opened O_NOFOLLOW from its pinned parent and changed through that fd
+  // only; a directory is entered by fd after its fstat matches its lstat;
+  // another filesystem is never entered; anything else keeps its mode.
+  function freezeAt(dfd, dev) {
+    for (const name of listAt(dfd)) {
+      const st = lstatAt(dfd, name);
+      if (st.isSymbolicLink()) { fs.lchownSync(at(dfd, name), 0, 0); continue; }
+      if (st.isDirectory()) {
+        if (st.dev !== dev) refuse('MOUNT_INSIDE');
+        const cfd = openDirAt(dfd, name);
+        try {
+          const opened = fs.fstatSync(cfd);
+          if (opened.dev !== dev) refuse('MOUNT_INSIDE');
+          if (!same(opened, st)) refuse('CHANGED_DURING_FREEZE');
+          freezeAt(cfd, dev);
+          fs.fchownSync(cfd, 0, 0); fs.fchmodSync(cfd, 0o755);
+        } finally { close(cfd); }
+      } else if (st.isFile()) {
+        let ffd;
+        try { ffd = fs.openSync(at(dfd, name), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK); }
+        catch (e) { if (e.code === 'ELOOP') refuse('CHANGED_DURING_FREEZE'); throw e; }
+        try {
+          const opened = fs.fstatSync(ffd);
+          if (!opened.isFile() || !same(opened, st)) refuse('CHANGED_DURING_FREEZE');
+          fs.fchownSync(ffd, 0, 0); fs.fchmodSync(ffd, (opened.mode & 0o111) ? 0o555 : 0o444);
+        } finally { close(ffd); }
+      } else {
+        fs.lchownSync(at(dfd, name), 0, 0);
+      }
+    }
+  }
+  function freezeTree(dir) {
+    const fd = openDir(dir);
+    try {
+      const st = fs.fstatSync(fd);
+      freezeAt(fd, st.dev);
+      fs.fchownSync(fd, 0, 0); fs.fchmodSync(fd, 0o755);
+    } finally { close(fd); }
+  }
   function removePath(x) {
     if (typeof x !== 'string' || x.charAt(0) !== '/' || p.normalize(x) !== x || x === '/' || x.endsWith('/') || x.indexOf('\0') !== -1) refuse('INVALID_PATH');
     if (mountedAt(x)) refuse('MOUNT_INSIDE');
@@ -157,7 +218,7 @@ export function safeRemover(fs, p) {
       return r;
     } finally { close(pfd); }
   }
-  return { openDir, openDirAt, lstatAt, existsAt, renameAt, listAt, close, same, removeTreeAt, removePath, mountedAt, mountOf, inUse, refresh };
+  return { openDir, openDirAt, lstatAt, existsAt, renameAt, listAt, readFileAt, close, same, removeTreeAt, removePath, freezeTree, mountedAt, mountOf, inUse, refresh };
 }
 
 export const SAFE_REMOVE_SOURCE = `const safeRemover=${safeRemover.toString()};`;

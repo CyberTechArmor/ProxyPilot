@@ -142,3 +142,60 @@ test('open files are re-read for every entry of a small batch: a process that st
   assert.equal(out.results[1].status, 'refused'); assert.equal(out.results[1].code, 'IN_USE');
   assert.equal(fs.existsSync(second), true);
 });
+
+test('in a large batch open files are re-read once the last read is 2 s old, and not before', { skip }, t => {
+  // 25 entries (more than the per-entry refresh of a small batch). While the
+  // first entry is removed a process starts working inside the last one;
+  // the hook moves the program's clock 3 s forward at that moment, or holds
+  // it still (so the run never depends on how fast this machine is).
+  const runBatch = clockJump => {
+    const base = world(t);
+    const root = path.join(base, 'tmp'); fs.mkdirSync(root);
+    const entries = [];
+    for (let i = 0; i < 25; i += 1) { const d = path.join(root, `e${String(i).padStart(2, '0')}`); fs.mkdirSync(d); fs.writeFileSync(path.join(d, 'f'), 'x'); entries.push({ path: d, identity: identity(d) }); }
+    const last = entries[24].path, pidFile = path.join(base, 'worker.pid');
+    const hookFile = path.join(base, 'late-worker-clock.cjs');
+    fs.writeFileSync(hookFile, `const fs=require('node:fs'),cp=require('node:child_process');const now=Date.now,t0=now();let off=0;Date.now=()=>${clockJump ? 'now()+off' : 't0'};const u=fs.unlinkSync;let done=false;fs.unlinkSync=function(...a){const r=u.apply(this,a);if(!done){done=true;cp.spawnSync('sh',['-c','cd "$1" && (sleep 30 </dev/null >/dev/null 2>&1 & echo $! > "$2")','sh',${JSON.stringify(last)},${JSON.stringify(pidFile)}]);off+=${clockJump}}return r};`);
+    t.after(() => { try { process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch { /* gone */ } });
+    const out = run({ action: 'remove', cleanupId: CLEANUP_ID, approvedRoots: [root], checkInUse: true, entries }, { require: hookFile });
+    assert.equal(fs.existsSync(pidFile), true, 'the late worker started');
+    return { out, last };
+  };
+  const stale = runBatch(3000);
+  assert.equal(stale.out.results[24].status, 'refused', 'the read became 2 s old, so it was taken again');
+  assert.equal(stale.out.results[24].code, 'IN_USE');
+  assert.equal(fs.existsSync(stale.last), true);
+  const fresh = runBatch(0);
+  assert.equal(fresh.out.results[24].status, 'removed', 'within 2 s the batch keeps its one read (cheap for 100 000 entries)');
+});
+
+test('the seal freezes the build tree through the same walker: a link swapped in mid-freeze never changes a protected file', { skip }, t => {
+  const base = world(t); fs.chmodSync(base, 0o755);
+  const protectedFile = path.join(base, 'etc-shadow'); fs.writeFileSync(protectedFile, 'secret'); fs.chmodSync(protectedFile, 0o600);
+  const root = path.join(base, 'releases'); fs.mkdirSync(path.join(root, '.staging'), { recursive: true }); fs.chmodSync(root, 0o755);
+  const stage = path.join(root, '.staging', '44444444-4444-4444-8444-444444444444-1');
+  fs.mkdirSync(path.join(stage, 'dist'), { recursive: true }); fs.writeFileSync(path.join(stage, 'dist', 'victim'), 'built'); fs.chmodSync(path.join(stage, 'dist', 'victim'), 0o644);
+  const data = { action: 'seal', profile: { sourceDir: path.join(base, 'current'), releaseRoot: root, preservePaths: [], envFiles: [] }, retention: null, stage, release: path.join(root, 'sealed'), sha: 'a'.repeat(40), treeSha: 'b'.repeat(40), marker: { sha: 'a'.repeat(40) } };
+  const r = spawnSync('sh', ['-c', `NODE_OPTIONS='--require ${hook('race-swap-lstat.cjs')}' ${applicationGuestScript(data).trim()}`], { encoding: 'utf8', env: { ...process.env, SWAP_DIR_SUFFIX: '/dist/victim', SWAP_TARGET: protectedFile, SWAP_MARK: path.join(base, 'swapped') } });
+  assert.equal(fs.existsSync(path.join(base, 'swapped')), true, 'the race happened');
+  assert.equal(fs.statSync(protectedFile).mode & 0o7777, 0o600, 'the protected file keeps its mode');
+  assert.equal(fs.readFileSync(protectedFile, 'utf8'), 'secret');
+  assert.equal(JSON.parse(r.stdout).ok, false, 'the seal stops rather than freeze through the link');
+  assert.equal(fs.existsSync(path.join(root, 'sealed')), false, 'nothing was sealed');
+});
+
+test('a release marker swapped for a link between the look and the read is never read through the link', { skip }, t => {
+  const base = world(t); fs.chmodSync(base, 0o755);
+  const root = path.join(base, 'releases'); fs.mkdirSync(root); fs.chmodSync(root, 0o755);
+  const mk = (c, s) => { const d = path.join(root, `${c.repeat(40)}-p1-11111111-1111-4111-8111-11111111111${c}`); fs.mkdirSync(d); fs.chmodSync(d, 0o755); fs.writeFileSync(path.join(d, '.proxypilot-release.json'), JSON.stringify({ sha: c.repeat(40) })); const at = new Date(Date.UTC(2026, 9, 20, 12, 0, s)); fs.utimesSync(d, at, at); return d; };
+  const old = mk('a', 1), live = mk('b', 2);
+  const sourceDir = path.join(base, 'current'); fs.symlinkSync(live, sourceDir);
+  // A file elsewhere that claims to be the previous release's marker.
+  const forged = path.join(base, 'forged.json'); fs.writeFileSync(forged, JSON.stringify({ sha: 'f'.repeat(40) }));
+  const out = run({ action: 'live', sourceDir, profile: { releaseRoot: root, sourceDir, preservePaths: [], envFiles: [] }, previousLive: { sha: 'f'.repeat(40), path: null } },
+    { require: hook('race-swap-lstat.cjs'), env: { SWAP_DIR_SUFFIX: `${path.basename(old)}/.proxypilot-release.json`, SWAP_TARGET: forged } });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const seen = (out.releases?.sealed || []).find(r => r.path === old);
+  assert.notEqual(seen?.sha, 'f'.repeat(40), 'the forged marker behind the link is never read');
+  assert.notEqual(out.releases?.rollback, old, 'so the forged sha never makes it the rollback release');
+});

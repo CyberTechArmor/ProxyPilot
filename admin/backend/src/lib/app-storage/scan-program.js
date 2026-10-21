@@ -10,43 +10,62 @@
 //     targets (which paths are open);
 //   - runs `journalctl --disk-usage`, `systemctl show <unit> -p User`,
 //     `getent passwd <user>` and `git ls-files -z -- <paths>`;
-//   - reads exactly two kinds of file contents, each at most 4 KiB: the
-//     release marker `.proxypilot-release.json` and `.git` link files.
+//   - reads exactly three kinds of file contents: the release marker
+//     `.proxypilot-release.json` and `.git` link files (each at most 4 KiB),
+//     and /etc/passwd (the unprivileged account safe git runs as).
 // It never follows a symlink while walking (lstat only; a link is reported
 // with its target string and whether that target exists), never descends into
 // another filesystem, and never writes anything.
 
-// Git inside a guest repository the service user may own: never as root over
-// someone else's repository (git then runs as the repository's owner), with
-// every configuration that can run a command switched off on the command line
-// (command-line -c wins over the repository's own .git/config), no system or
-// global configuration, no pager, no prompts, no hooks and a clean
-// environment. `safe.directory=*` is never used. Shared as source text so the
-// cleanup program can embed the same function (contract-changes.md).
-//   safeGit(cp, fs, repo, args) → { ok, stdout, asUid, reason }
+// Git is the ONE safe git (lib/setup-engine/safe-git.js SAFE_GIT_SOURCE, the
+// same the release and cleanup programs embed): read-only git never runs as
+// root (the repository's non-root owner, else nobody), with an exact
+// safe.directory, --no-optional-locks, every configuration that can run a
+// command switched off on the command line and a clean environment. The scan
+// only ever runs `git ls-files -z -- <paths>`: with no -m/-d/-o/--eol it
+// reads the index and prints names, so no filter, textconv or diff driver
+// runs, and the one command an index read can start (core.fsmonitor) is off.
 import { describeReleases } from '../setup-engine/application-release-cleanup.js';
+import { SAFE_GIT_SOURCE } from '../setup-engine/safe-git.js';
+import { SAFE_REMOVE_SOURCE } from '../setup-engine/safe-remove.js';
 
-export const SAFE_GIT_ARGS = Object.freeze(['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.sshCommand=false', '-c', 'protocol.allow=never']);
-export const SAFE_GIT_ENV = Object.freeze({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat', LC_ALL: 'C' });
-export const SAFE_GIT_SOURCE = String.raw`function safeGit(cp,fs,repo,args){
-  let st=null;try{st=fs.lstatSync(repo)}catch(e){st=null}
-  if(!st||!st.isDirectory()||st.isSymbolicLink())return{ok:false,reason:'not a directory'};
-  const env=Object.assign({PATH:process.env.PATH||'/usr/local/bin:/usr/bin:/bin',HOME:'/nonexistent'},${JSON.stringify(SAFE_GIT_ENV)});
-  const opts={encoding:'utf8',maxBuffer:8*1024*1024,timeout:20000,stdio:['ignore','pipe','pipe'],cwd:'/',env};
-  const amRoot=typeof process.getuid==='function'&&process.getuid()===0;
-  let asUid=null;
-  if(st.uid!==0){if(!amRoot&&typeof process.getuid==='function'&&process.getuid()!==st.uid)return{ok:false,reason:'owned by another account'};if(amRoot){opts.uid=st.uid;opts.gid=st.gid;asUid=st.uid}}
-  let r;try{r=cp.spawnSync('git',${JSON.stringify(SAFE_GIT_ARGS)}.concat(['-C',repo],args),opts)}catch(e){return{ok:false,reason:'git could not start'}}
-  if(r.error||r.status!==0)return{ok:false,reason:'git refused or failed',asUid};
-  return{ok:true,stdout:String(r.stdout||''),asUid};
-}`;
+/** The only git command the scan runs (the index, nothing else). */
+export const SCAN_GIT_ARGS = Object.freeze(['ls-files', '-z', '--']);
+
+/**
+ * readOnlyFs(fs) → a view of fs with the read operations only. Every open
+ * loses its write, create, truncate and append flags (a request for one is
+ * refused) and gains O_NOFOLLOW | O_NONBLOCK; readFileSync reads /proc only;
+ * every other operation (write, rename, unlink, chmod, …) is not there and
+ * throws. describeReleases and the shared fd walker it reads markers with
+ * (safe-remove.js) run over this view in the scan, so even the remover's own
+ * code cannot change anything here. Serialized into the program.
+ */
+export function readOnlyFs(fs) {
+  const C = fs.constants;
+  const WRITE = C.O_WRONLY | C.O_RDWR | C.O_CREAT | C.O_TRUNC | C.O_APPEND | C.O_EXCL;
+  const deny = (op) => function () { const e = new Error(`read-only view: ${op}`); e.code = 'EROFS'; throw e; };
+  const view = { constants: C };
+  for (const k of ['lstatSync', 'statSync', 'fstatSync', 'readdirSync', 'realpathSync', 'existsSync', 'readlinkSync', 'readSync', 'closeSync', 'statfsSync']) if (typeof fs[k] === 'function') view[k] = fs[k].bind(fs);
+  if (view.realpathSync && fs.realpathSync.native) view.realpathSync.native = fs.realpathSync.native.bind(fs.realpathSync);
+  view.openSync = function (f, flags) {
+    let n = flags === undefined || flags === 'r' ? C.O_RDONLY : flags;
+    if (typeof n !== 'number' || (n & WRITE)) return deny('openSync for writing')();
+    return fs.openSync(f, n | (C.O_NOFOLLOW || 0) | (C.O_NONBLOCK || 0));
+  };
+  view.readFileSync = function (f, o) {
+    if (typeof f !== 'string' || !f.startsWith('/proc/')) return deny('readFileSync outside /proc')();
+    return fs.readFileSync(f, o);
+  };
+  return new Proxy(view, { get: (t, k) => (k in t ? t[k] : (typeof k === 'string' && /Sync$|^(write|append|rm|unlink|rename|mkdir|mkdtemp|chmod|chown|lchown|truncate|copyFile|cp|utimes|symlink|link|open|create)/.test(k) ? deny(k) : undefined)) });
+}
 
 // The release roles (live, rollback, waiting candidate, backing roots, kept
 // releases) are decided by describeReleases from application-release-cleanup.js,
 // the one definition the release job's retention and the storage cleanup run
 // too. It is embedded as source and runs here over a read-only view of fs
-// (every open is O_RDONLY|O_NOFOLLOW|O_NONBLOCK; it only lstats, reads link
-// targets and reads each 4 KiB release marker).
+// (readOnlyFs: every open read-only, O_NOFOLLOW|O_NONBLOCK; it only lstats,
+// reads link targets and reads each 4 KiB release marker).
 export const DESCRIBE_RELEASES_SOURCE = `const describeReleases=${describeReleases.toString()};`;
 
 const SCAN_PROGRAM_SOURCE = String.raw`
@@ -95,10 +114,14 @@ for(const raw of (Array.isArray(a.resolve)?a.resolve:[])){
   out.resolved[raw]={exists:!!s&&real!==null,isLink:!!s&&s.isSymbolicLink(),realpath:real,linkTarget:s&&s.isSymbolicLink()?safeReadlink(f):null};
 }
 function safeReadlink(f){try{return fs.readlinkSync(f)}catch(e){return null}}
-// Release roles: describeReleases (embedded below), never decided here.
+// Release roles: describeReleases (embedded below), never decided here. It
+// reads markers through the shared fd walker (safe-remove.js), and both run
+// over readOnlyFs: nothing in either can write here.
+const readOnlyFs=${readOnlyFs.toString()};
+${SAFE_REMOVE_SOURCE}
 ${DESCRIBE_RELEASES_SOURCE}
 if(a.releases&&typeof a.releases==='object'&&a.releases.profile){
-  const roFs=Object.assign(Object.create(fs),{openSync:function(f){return fs.openSync(f,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0)|(fs.constants.O_NONBLOCK||0))}});
+  const roFs=readOnlyFs(fs);
   try{const d=describeReleases(roFs,p,a.releases);out.releases={ok:true,root:d.root,live:d.live,rollback:d.rollback||null,rollbackUnknown:!!d.rollbackUnknown,waiting:d.waiting||null,pending:Array.from(d.pending||[]).sort(),backing:Array.from(d.backing).sort(),protect:Array.from(d.protect).sort(),sealed:d.sealed.map(function(r){return{path:r.path,sha:r.sha||null}})}}
   catch(e){const m=String(e&&e.message||'');out.releases={ok:false,code:/^[A-Z_]{3,64}$/.test(m)?m:(e&&e.code==='ENOENT'?'RELEASE_ROOT_MISSING':'RELEASES_UNREADABLE')}}
 }
@@ -116,7 +139,7 @@ if(a.journal){const j=run('journalctl',['--disk-usage']);const m=j&&/take up ([0
 // Tracked test: which of these paths git tracks (nothing is checked out or written).
 for(const t of (Array.isArray(a.tracked)?a.tracked:[])){
   if(!t||!absOk(t.repo)||!Array.isArray(t.paths))continue;const paths=t.paths.filter(function(x){return typeof x==='string'&&x&&!x.startsWith('/')&&!x.split('/').includes('..')}).slice(0,100);
-  const g=safeGit(cp,fs,t.repo,['ls-files','-z','--'].concat(paths));
+  const g=safeGit(cp,fs,t.repo,${JSON.stringify(SCAN_GIT_ARGS)}.concat(paths));
   out.tracked[t.repo]=g.ok?{ok:true,paths:g.stdout.split('\0').filter(Boolean).slice(0,5000),...(g.asUid!=null?{asUid:g.asUid}:{})}:{ok:false,paths:[],reason:g.reason};
 }
 // Items: each depth-0 root is one item; each child of a depth-1 root is one item.

@@ -353,7 +353,7 @@ function classifyReleaseChild(it, { context }) {
     if (!context.releasesKnown) return { ...release, status: 'protected', sub: 'unknown', label: `Release ${sha8}`, reason: releasesUnknownReason(context.releasesUnknown) };
     if (it.path === context.rollbackRelease) return { ...release, status: 'protected', sub: 'rollback', label: `Release ${sha8} (rollback)`, reason: 'Kept so you can roll back to the previous version.' };
     if (it.path === context.waitingCandidate) return { ...release, status: 'protected', sub: 'candidate', label: `Release ${sha8} (waiting to deploy)`, reason: 'A validated release waiting to be deployed.' };
-    if ((context.pendingReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'pending', label: `Release ${sha8} (validation not passed)`, reason: 'Its validation has not passed (it may still be running), so it is kept.' };
+    if ((context.pendingReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'pending', label: `Release ${sha8} (being validated)`, reason: 'Its validation has no result yet, so it is kept.' };
     if (context.rollbackUnknown) return { ...release, status: 'protected', sub: 'rollback-unknown', label: `Release ${sha8}`, reason: ROLLBACK_UNKNOWN_REASON };
     if ((context.keptReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'kept', label: `Release ${sha8}`, reason: 'Kept by the release process.' };
     return { ...release, status: 'eligible', sub: 'sealed', action: 'remove-release', label: `Release ${sha8}`, reason: 'An older release that is no longer needed for rollback.' };

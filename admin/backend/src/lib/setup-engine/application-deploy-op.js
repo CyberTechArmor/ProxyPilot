@@ -48,8 +48,10 @@ function inside(root,x){return x===root||x.startsWith(root+'/')}
 function protectedPath(target){let at='/';for(const part of p.resolve(target).split('/').filter(Boolean)){at=p.join(at,part);if(!fs.existsSync(at))break;const s=fs.lstatSync(at);if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==0||(s.mode&0o022))fail('UNSAFE_RELEASE_DIRECTORY')}}
 function inventory(root){const rows=[];const excluded=[...a.profile.preservePaths,...a.profile.envFiles].filter(x=>inside(a.profile.sourceDir,x)).map(x=>p.relative(a.profile.sourceDir,x));function walk(dir,rel=''){for(const n of fs.readdirSync(dir).sort()){const r=rel?rel+'/'+n:n;if(r==='.git'||r==='.proxypilot-release.json'||excluded.some(x=>r===x||r.startsWith(x+'/')))continue;const f=p.join(dir,n),s=fs.lstatSync(f);if(s.isSymbolicLink()){if(!inside(root,fs.realpathSync(f)))fail('ARTIFACT_SYMLINK_ESCAPE');rows.push([r,'link',fs.readlinkSync(f)])}else if(s.isDirectory())walk(f,r);else if(s.isFile())rows.push([r,'file',crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')]);else fail('ARTIFACT_TYPE_UNSUPPORTED')}}walk(root);return crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex')}
 // The tree the service user built is frozen by the fd-relative walker
-// (safe-remove.js): a link swapped in mid-freeze is never followed.
-function freeze(root){safeRemover(fs,p).freezeTree(root)}
+// (safe-remove.js): a link swapped in mid-freeze is never followed, a file
+// also linked from outside the tree is copied rather than re-owned, and a
+// tree too deep to walk is refused with its own code (TOO_DEEP).
+function freeze(root){try{safeRemover(fs,p).freezeTree(root)}catch(e){if(e&&typeof e.refusal==='string'&&/^[A-Z_]{3,64}$/.test(e.refusal))fail(e.refusal);throw e}}
 function identity(root){let m;try{m=JSON.parse(fs.readFileSync(p.join(root,'.proxypilot-release.json'),'utf8'))}catch{m={sha:git(root,['rev-parse','HEAD'])}}if(!/^[a-f0-9]{40}$/.test(m.sha||''))fail('NO_RELEASE_IDENTITY');return m}
 function layout(){if(!a.profile.releaseRoot)fail('RELEASE_ROOT_REQUIRED');protectedPath(p.dirname(a.profile.sourceDir));protectedPath(a.profile.releaseRoot);const link=fs.lstatSync(a.profile.sourceDir);if(!link.isSymbolicLink())fail('SYMLINK_LAYOUT_REQUIRED');if(link.uid!==0)fail('UNSAFE_RELEASE_DIRECTORY');const target=fs.realpathSync(a.profile.sourceDir);const root=fs.realpathSync(a.profile.releaseRoot);if(!inside(root,target)||target===root)fail('RELEASE_OUTSIDE_ROOT');return {target,root,identity:identity(target)}}
 function service(){const unit=a.profile.serviceName;const loaded=run('systemctl',['show',unit,'--property=LoadState','--value']);if(loaded!=='loaded')fail('SERVICE_NOT_LOADED');const workingDir=run('systemctl',['show',unit,'--property=WorkingDirectory','--value']);const start=run('systemctl',['show',unit,'--property=ExecStart','--value']);if(workingDir!==a.profile.sourceDir&&!start.includes(a.profile.sourceDir+'/'))fail('SERVICE_LAYOUT_UNSUPPORTED');return {user:run('systemctl',['show',unit,'--property=User','--value'])||'root',group:run('systemctl',['show',unit,'--property=Group','--value'])||''}}
@@ -163,6 +165,9 @@ process.stdout.write(JSON.stringify(out));
 // Guest refusals that have a plain explanation of their own.
 const PLAIN_GUEST_FAILURES = Object.freeze({
   GIT_METADATA_CHANGED: "The repository's git metadata changed during the build, so this release was not sealed.",
+  TOO_DEEP: 'The build left folders nested too deeply to seal safely, so this release was not sealed.',
+  CHANGED_DURING_FREEZE: 'The build output changed while it was being sealed, so this release was not sealed.',
+  MOUNT_INSIDE: 'The build output contains a mounted filesystem, so this release was not sealed.',
 });
 
 function guestScript(data) { return `node -e ${quote(GUEST_PROGRAM)} ${quote(Buffer.from(JSON.stringify(data)).toString('base64'))}\n`; }

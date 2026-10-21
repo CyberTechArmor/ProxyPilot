@@ -304,6 +304,56 @@ test('a .git swapped during the build is refused at the seal with a plain reason
   await assert.rejects(runApplicationReleaseOperation({kind:'application_validate',params,...f,exec,hostRoot,sleep:async()=>{}}),e=>e.message==="The repository's git metadata changed during the build, so this release was not sealed.");
 });
 
+test('a file hard-linked from outside the stage is copied at the seal, never re-owned: the outside file keeps its owner, mode and bytes', async t => {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'app-hardlink-')); t.after(()=>fs.rm(root,{recursive:true,force:true}));await fs.chmod(root,0o755);
+  const repo=path.join(root,'repo'),stageRoot=path.join(root,'.staging'),stage=path.join(stageRoot,'job'),release=path.join(root,'release'),bundle=path.join(stageRoot,'source.bundle');
+  await fs.mkdir(repo);await fs.mkdir(stageRoot,{mode:0o711});
+  await fs.writeFile(path.join(repo,'package.json'),JSON.stringify({name:'fixture',version:'1.0.0',scripts:{check:'true'}}));
+  execFileSync('git',['init','-q',repo]);execFileSync('git',['-C',repo,'add','package.json']);execFileSync('git',['-C',repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);
+  const exactSha=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),exactTree=execFileSync('git',['-C',repo,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim();
+  execFileSync('git',['-C',repo,'bundle','create',bundle,'HEAD']);await fs.chmod(bundle,0o600);
+  const profile={sourceDir:'/opt/fixture',preservePaths:[],envFiles:[]};
+  const run=data=>spawnSync('sh',['-c',applicationGuestScript(data)],{encoding:'utf8'});
+  const staged=run({action:'stage',profile,stage,release,bundle,sha:exactSha,treeSha:exactTree,scripts:['check'],user:'root',group:''});assert.equal(staged.status,0,staged.stdout);
+  // What a package manager leaves: files hard-linked from a store in the
+  // service user's home (here uid 65534), a pair linked to each other inside
+  // the stage, and a link (symlink) that is itself hard-linked from outside.
+  const store=path.join(root,'home','store');await fs.mkdir(store,{recursive:true});await fs.chown(path.join(root,'home'),65534,65534);await fs.chown(store,65534,65534);
+  const outside=path.join(store,'index.js'),outsideBin=path.join(store,'cli'),outsideLink=path.join(store,'entry');
+  await fs.writeFile(outside,'module.exports = 1;\n');await fs.chown(outside,65534,65534);await fs.chmod(outside,0o600);
+  await fs.writeFile(outsideBin,'#!/bin/sh\necho cli\n');await fs.chown(outsideBin,65534,65534);await fs.chmod(outsideBin,0o700);
+  await fs.symlink('index.js',outsideLink);await fs.lchown(outsideLink,65534,65534);
+  await fs.mkdir(path.join(stage,'node_modules','pkg'),{recursive:true});
+  await fs.link(outside,path.join(stage,'node_modules','pkg','index.js'));await fs.link(outsideBin,path.join(stage,'node_modules','pkg','cli'));await fs.link(outsideLink,path.join(stage,'node_modules','pkg','entry'));
+  await fs.writeFile(path.join(stage,'a.txt'),'pair');await fs.link(path.join(stage,'a.txt'),path.join(stage,'b.txt'));
+  const marker={sha:exactSha,treeSha:exactTree,profileDigest,evidenceDigest:'d'.repeat(64)};
+  const sealed=run({action:'seal',profile,stage,release,sha:exactSha,treeSha:exactTree,gitIdentity:JSON.parse(staged.stdout).gitIdentity,marker});assert.equal(sealed.status,0,sealed.stdout);
+  // Outside the stage nothing changed.
+  for(const [f,mode,bytes] of [[outside,0o600,'module.exports = 1;\n'],[outsideBin,0o700,'#!/bin/sh\necho cli\n']]){
+    const st=await fs.stat(f);assert.deepEqual([st.uid,st.gid,st.mode&0o7777,st.nlink],[65534,65534,mode,1],f);assert.equal(await fs.readFile(f,'utf8'),bytes);
+  }
+  assert.equal((await fs.lstat(outsideLink)).uid,65534,'the outside link keeps its owner');assert.equal((await fs.lstat(outsideLink)).nlink,1);
+  // The release holds root-owned, read-only copies with the same bytes.
+  const pkg=path.join(release,'node_modules','pkg');
+  for(const [f,mode,bytes] of [[path.join(pkg,'index.js'),0o444,'module.exports = 1;\n'],[path.join(pkg,'cli'),0o555,'#!/bin/sh\necho cli\n'],[path.join(release,'a.txt'),0o444,'pair'],[path.join(release,'b.txt'),0o444,'pair']]){
+    const st=await fs.lstat(f);assert.deepEqual([st.isFile(),st.uid,st.gid,st.mode&0o7777,st.nlink],[true,0,0,mode,1],f);assert.equal(await fs.readFile(f,'utf8'),bytes);
+  }
+  const entry=await fs.lstat(path.join(pkg,'entry'));assert.deepEqual([entry.isSymbolicLink(),entry.uid,entry.nlink],[true,0,1]);assert.equal(await fs.readlink(path.join(pkg,'entry')),'index.js');
+  const left=execFileSync('find',[release,'-name','.pp-freeze-*'],{encoding:'utf8'});assert.equal(left,'','no temporary copy is left behind');
+  // The artifact digest is the content's: the sealed release verifies.
+  const verified=run({action:'artifact',profile,release,...marker,artifactDigest:JSON.parse(sealed.stdout).artifactDigest});assert.equal(verified.status,0,verified.stdout);
+});
+
+test('a freeze refusal reaches the job as a plain reason (too deep, changed, a mount)', async () => {
+  const reasons={TOO_DEEP:'The build left folders nested too deeply to seal safely, so this release was not sealed.',CHANGED_DURING_FREEZE:'The build output changed while it was being sealed, so this release was not sealed.',MOUNT_INSIDE:'The build output contains a mounted filesystem, so this release was not sealed.'};
+  for(const [code,message] of Object.entries(reasons)){
+    const f=fixture();const exec={...f.exec,guest:async(c,script)=>{const r=await f.exec.guest(c,script);if(script.includes('printf')){const body=Buffer.from(script.match(/printf '%s' '([^']+)' \| base64/)[1],'base64').toString();const data=JSON.parse(Buffer.from(body.match(/ '([A-Za-z0-9+/=]+)'\n$/)[1],'base64').toString());if(data.action==='seal')return{code:1,stdout:JSON.stringify({ok:false,code}),stderr:'CONTAINMENT:systemd fixture'};}return r;}};
+    const hostRoot=await fs.mkdtemp(path.join(os.tmpdir(),'app-plain-'));
+    try{await assert.rejects(runApplicationReleaseOperation({kind:'application_validate',params,...f,exec,hostRoot,sleep:async()=>{}}),e=>e.code===code&&e.message===message);}
+    finally{await fs.rm(hostRoot,{recursive:true,force:true});}
+  }
+});
+
 test('real guest link program preserves absolute data paths, rejects tracked collision and nested symlink escape', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'app-guest-')); t.after(() => fs.rm(root, { recursive: true, force: true })); await fs.chmod(root, 0o755); // read-only git runs unprivileged
   const old = path.join(root, 'old'), release = path.join(root, 'new'), source = path.join(root, 'current');

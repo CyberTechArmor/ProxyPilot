@@ -35,7 +35,9 @@
 //   removePath(x)                removeTreeAt for one absolute path, nothing
 //                                mounted at or below it, parent fsynced
 //   freezeTree(dir)              the seal's freeze (root-owned, read-only),
-//                                by the same fd walk (CHANGED_DURING_FREEZE)
+//                                by the same iterative fd walk
+//                                (CHANGED_DURING_FREEZE, TOO_DEEP); a file
+//                                with other links is copied, never changed
 //   mountedAt(x), mountOf(x), inUse(x), refresh()   /proc/self/mounts and
 //                                the open-file scan, re-read when older than
 //                                2 seconds
@@ -121,8 +123,9 @@ export function safeRemover(fs, p) {
   // Directories are walked iteratively (no recursion, so depth never
   // overflows the stack) with at most MAX_DEPTH directories open; deeper, or
   // out of file descriptors, is TOO_DEEP. Each directory is entered by fd
-  // only after its fstat matches the lstat just taken.
-  function enterAt(parentFd, name, st, dev, depth) {
+  // only after its fstat matches the lstat just taken (else `changed`);
+  // onEnter(fd) runs before its entries are listed.
+  function enterAt(parentFd, name, st, dev, depth, changed = 'CHANGED_DURING_REMOVAL', onEnter = null) {
     if (st.dev !== dev) refuse('MOUNT_INSIDE');
     if (depth >= MAX_DEPTH) refuse('TOO_DEEP');
     let fd;
@@ -131,7 +134,8 @@ export function safeRemover(fs, p) {
     try {
       const opened = fs.fstatSync(fd);
       if (opened.dev !== dev) refuse('MOUNT_INSIDE');
-      if (!same(opened, st)) refuse('CHANGED_DURING_REMOVAL');
+      if (!same(opened, st)) refuse(changed);
+      if (onEnter) onEnter(fd);
       return { parentFd, name, st, fd, names: listAt(fd), i: 0 };
     } catch (e) { close(fd); throw e; }
   }
@@ -213,47 +217,107 @@ export function safeRemover(fs, p) {
   }
   const inUse = x => openPaths().some(o => o === x || o.startsWith(x + '/'));
   const refresh = () => { mountList = null; openList = null; };
-  // freezeTree(dir): the release seal's freeze, through the same walker —
-  // every entry owned by root; directories 0755, files 0444 (0555 when
-  // executable). A link is re-owned (lchown, never followed); a file is
-  // opened O_NOFOLLOW from its pinned parent and changed through that fd
-  // only; a directory is entered by fd after its fstat matches its lstat;
-  // another filesystem is never entered; anything else keeps its mode.
-  function freezeAt(dfd, dev) {
-    for (const name of listAt(dfd)) {
-      const st = lstatAt(dfd, name);
-      if (st.isSymbolicLink()) { fs.lchownSync(at(dfd, name), 0, 0); continue; }
-      if (st.isDirectory()) {
-        if (st.dev !== dev) refuse('MOUNT_INSIDE');
-        const cfd = openDirAt(dfd, name);
-        try {
-          const opened = fs.fstatSync(cfd);
-          if (opened.dev !== dev) refuse('MOUNT_INSIDE');
-          if (!same(opened, st)) refuse('CHANGED_DURING_FREEZE');
-          freezeAt(cfd, dev);
-          fs.fchownSync(cfd, 0, 0); fs.fchmodSync(cfd, 0o755);
-        } finally { close(cfd); }
-      } else if (st.isFile()) {
-        let ffd;
-        try { ffd = fs.openSync(at(dfd, name), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK); }
-        catch (e) { if (e.code === 'ELOOP') refuse('CHANGED_DURING_FREEZE'); throw e; }
-        try {
-          const opened = fs.fstatSync(ffd);
-          if (!opened.isFile() || !same(opened, st)) refuse('CHANGED_DURING_FREEZE');
-          fs.fchownSync(ffd, 0, 0); fs.fchmodSync(ffd, (opened.mode & 0o111) ? 0o555 : 0o444);
-        } finally { close(ffd); }
-      } else {
-        fs.lchownSync(at(dfd, name), 0, 0);
-      }
+  // freezeTree(dir): the release seal's freeze, by the same iterative walk
+  // as the remover (no recursion; TOO_DEEP past MAX_DEPTH folders or out of
+  // file descriptors) — every entry owned by root; directories 0755, files
+  // 0444 (0555 when executable). A directory is entered by fd after its
+  // fstat matches its lstat and is re-owned BEFORE its entries are touched,
+  // so nobody else can add, rename or swap a name in it meanwhile; another
+  // filesystem is never entered. A file is opened O_NOFOLLOW from its pinned
+  // parent and changed through that fd only. A link is re-owned (lchown,
+  // never followed); anything else keeps its mode.
+  // An inode with more than one link may also be named OUTSIDE the tree (a
+  // package store in the service user's home, a preserved data path), so it
+  // is never changed: a regular file is copied byte for byte into a new
+  // root-owned file made O_CREAT|O_EXCL|O_NOFOLLOW in the same pinned
+  // folder, synced, given its frozen owner and mode, and renamed over the
+  // name (the original inode keeps its other names, owner, mode and bytes);
+  // a link is re-created the same way; any other shared entry is left alone.
+  const FREEZE_COPY = 1 << 20;
+  function tempAt(dfd, make) {
+    for (let n = 0; n < 1000; n += 1) {
+      const tmp = '.pp-freeze-' + n;
+      try { return { tmp, made: make(at(dfd, tmp)) }; }
+      catch (e) { if (e.code !== 'EEXIST') throw e; }
     }
+    refuse('CHANGED_DURING_FREEZE');
   }
-  function freezeTree(dir) {
-    const fd = openDir(dir);
+  function replaceAt(dfd, name, st, tmp) {
+    if (!same(lstatAt(dfd, name), st)) refuse('CHANGED_DURING_FREEZE');
+    fs.renameSync(at(dfd, tmp), at(dfd, name));
+  }
+  function freezeFileAt(dfd, name, st) {
+    let ffd;
+    try { ffd = fs.openSync(at(dfd, name), C.O_RDONLY | C.O_NOFOLLOW | C.O_NONBLOCK); }
+    catch (e) { if (e.code === 'ELOOP') refuse('CHANGED_DURING_FREEZE'); throw e; }
     try {
-      const st = fs.fstatSync(fd);
-      freezeAt(fd, st.dev);
-      fs.fchownSync(fd, 0, 0); fs.fchmodSync(fd, 0o755);
-    } finally { close(fd); }
+      const opened = fs.fstatSync(ffd);
+      if (!opened.isFile() || !same(opened, st)) refuse('CHANGED_DURING_FREEZE');
+      const mode = (opened.mode & 0o111) ? 0o555 : 0o444;
+      if (opened.nlink <= 1) { fs.fchownSync(ffd, 0, 0); fs.fchmodSync(ffd, mode); return; }
+      const { tmp, made: tfd } = tempAt(dfd, x => fs.openSync(x, C.O_WRONLY | C.O_CREAT | C.O_EXCL | C.O_NOFOLLOW, 0o600));
+      let done = false;
+      try {
+        const buf = Buffer.alloc(FREEZE_COPY);
+        let pos = 0;
+        for (;;) {
+          const n = fs.readSync(ffd, buf, 0, buf.length, pos);
+          if (n <= 0) break;
+          for (let w = 0; w < n;) w += fs.writeSync(tfd, buf, w, n - w, pos + w);
+          pos += n;
+        }
+        // The other name may still be written to: a copy that is not the
+        // whole, unchanged file is not frozen.
+        const after = fs.fstatSync(ffd);
+        if (pos !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) refuse('CHANGED_DURING_FREEZE');
+        fs.fsyncSync(tfd);
+        fs.fchownSync(tfd, 0, 0); fs.fchmodSync(tfd, mode);
+        replaceAt(dfd, name, opened, tmp);
+        done = true;
+      } finally {
+        close(tfd);
+        if (!done) { try { fs.unlinkSync(at(dfd, tmp)); } catch (e) { /* not made */ } }
+      }
+    } finally { close(ffd); }
+  }
+  function freezeEntryAt(dfd, name, st) {
+    if (st.isFile()) return freezeFileAt(dfd, name, st);
+    if (st.nlink <= 1) { fs.lchownSync(at(dfd, name), 0, 0); return; }
+    if (!st.isSymbolicLink()) return; // a shared special file: never changed (the artifact refuses it anyway)
+    const target = fs.readlinkSync(at(dfd, name), { encoding: 'buffer' });
+    const { tmp } = tempAt(dfd, x => fs.symlinkSync(target, x));
+    let done = false;
+    try { fs.lchownSync(at(dfd, tmp), 0, 0); replaceAt(dfd, name, st, tmp); done = true; }
+    finally { if (!done) { try { fs.unlinkSync(at(dfd, tmp)); } catch (e) { /* not made */ } } }
+  }
+  const freezeDir = fd => { fs.fchownSync(fd, 0, 0); fs.fchmodSync(fd, 0o755); };
+  function freezeTree(dir) {
+    const top = openDir(dir);
+    const stack = [];
+    try {
+      const dev = fs.fstatSync(top).dev;
+      freezeDir(top);
+      stack.push({ fd: null, names: listAt(top), i: 0, dfd: top });
+      while (stack.length) {
+        const cur = stack[stack.length - 1];
+        if (cur.i >= cur.names.length) { stack.pop(); if (cur.fd !== null) close(cur.fd); continue; }
+        const name = cur.names[cur.i++];
+        const st = lstatAt(cur.dfd, name);
+        if (st.isDirectory()) {
+          const child = enterAt(cur.dfd, name, st, dev, stack.length, 'CHANGED_DURING_FREEZE', freezeDir);
+          child.dfd = child.fd;
+          stack.push(child);
+          continue;
+        }
+        freezeEntryAt(cur.dfd, name, st);
+      }
+    } catch (e) {
+      if (e && (e.code === 'EMFILE' || e.code === 'ENFILE')) refuse('TOO_DEEP');
+      throw e;
+    } finally {
+      for (const f of stack) if (f.fd !== null) close(f.fd);
+      close(top);
+    }
   }
   function removePath(x) {
     if (typeof x !== 'string' || x.charAt(0) !== '/' || p.normalize(x) !== x || x === '/' || x.endsWith('/') || x.indexOf('\0') !== -1) refuse('INVALID_PATH');

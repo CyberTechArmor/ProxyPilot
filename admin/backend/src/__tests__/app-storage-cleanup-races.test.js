@@ -188,6 +188,24 @@ test('the seal freezes the build tree through the same walker: a link swapped in
   assert.equal(fs.existsSync(path.join(root, 'sealed')), false, 'nothing was sealed');
 });
 
+test('a hard-linked file written through its other name while the seal copies it stops the seal; the outside file is left as its owner wrote it', { skip }, t => {
+  const base = world(t); fs.chmodSync(base, 0o755);
+  const store = path.join(base, 'home'); fs.mkdirSync(store); fs.chownSync(store, 65534, 65534);
+  const outside = path.join(store, 'shared.js'); fs.writeFileSync(outside, 'original'); fs.chownSync(outside, 65534, 65534); fs.chmodSync(outside, 0o600);
+  const root = path.join(base, 'releases'); fs.mkdirSync(path.join(root, '.staging'), { recursive: true }); fs.chmodSync(root, 0o755);
+  const stage = path.join(root, '.staging', '55555555-5555-4555-8555-555555555555-1');
+  fs.mkdirSync(path.join(stage, 'node_modules'), { recursive: true }); fs.linkSync(outside, path.join(stage, 'node_modules', 'shared.js'));
+  const data = { action: 'seal', profile: { sourceDir: path.join(base, 'current'), releaseRoot: root, preservePaths: [], envFiles: [] }, retention: null, stage, release: path.join(root, 'sealed'), sha: 'a'.repeat(40), treeSha: 'b'.repeat(40), marker: { sha: 'a'.repeat(40) } };
+  const r = spawnSync('sh', ['-c', `NODE_OPTIONS='--require ${hook('race-write-during-copy.cjs')}' ${applicationGuestScript(data).trim()}`], { encoding: 'utf8', env: { ...process.env, WRITE_TARGET: outside, SWAP_MARK: path.join(base, 'written') } });
+  assert.equal(fs.existsSync(path.join(base, 'written')), true, 'the race happened');
+  assert.deepEqual(JSON.parse(r.stdout), { ok: false, code: 'CHANGED_DURING_FREEZE' });
+  const st = fs.statSync(outside);
+  assert.deepEqual([st.uid, st.mode & 0o7777], [65534, 0o600], 'the outside file keeps its owner and mode');
+  assert.equal(fs.readFileSync(outside, 'utf8'), 'original changed');
+  assert.deepEqual(fs.readdirSync(path.join(stage, 'node_modules')), ['shared.js'], 'the half-made copy is removed');
+  assert.equal(fs.existsSync(path.join(root, 'sealed')), false, 'nothing was sealed');
+});
+
 test('a release marker swapped for a link between the look and the read is never read through the link', { skip }, t => {
   const base = world(t); fs.chmodSync(base, 0o755);
   const root = path.join(base, 'releases'); fs.mkdirSync(root); fs.chmodSync(root, 0o755);
@@ -261,6 +279,34 @@ test('the release job reports a workspace too deep to remove and goes on with th
   const answer = JSON.parse(r.stdout);
   assert.equal(answer.ok, true, r.stdout);
   assert.deepEqual(answer.cleanup.kept.map(k => k.code), ['TOO_DEEP']);
+});
+
+test('a build tree too deep to freeze is refused at the seal with TOO_DEEP: depth 12000 (which overflowed the old recursion) and 1500 under 256 file descriptors; 200 deep is sealed', { skip }, t => {
+  const base = deepWorld(t); fs.chmodSync(base, 0o755);
+  const root = path.join(base, 'releases'); fs.mkdirSync(path.join(root, '.staging'), { recursive: true }); fs.chmodSync(root, 0o755); fs.chmodSync(path.join(root, '.staging'), 0o711);
+  const sealAt = (name, depth, fdLimit) => {
+    const stage = path.join(root, '.staging', name); fs.mkdirSync(stage, { mode: 0o755 });
+    spawnSync('git', ['init', '-q', stage]); fs.writeFileSync(path.join(stage, 'app.js'), 'source');
+    spawnSync('git', ['-C', stage, 'add', 'app.js']); spawnSync('git', ['-C', stage, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
+    const rev = x => spawnSync('git', ['-C', stage, 'rev-parse', x], { encoding: 'utf8' }).stdout.trim();
+    const sha = rev('HEAD'), treeSha = rev('HEAD^{tree}');
+    deepTree(stage, 'dist', depth);
+    const release = path.join(root, `sealed-${name}`);
+    const data = { action: 'seal', profile: { sourceDir: path.join(base, 'current'), releaseRoot: root, preservePaths: [], envFiles: [] }, retention: null, stage, release, sha, treeSha, marker: { sha, treeSha } };
+    const r = spawnSync('sh', ['-c', `${fdLimit ? `ulimit -n ${fdLimit}; ` : ''}${applicationGuestScript(data).trim()}`], { encoding: 'utf8', maxBuffer: 1 << 24 });
+    let answer; try { answer = JSON.parse(r.stdout); } catch { answer = { raw: r.stdout, stderr: r.stderr }; }
+    return { answer, release };
+  };
+  const deep = sealAt('stack', 12000, null);
+  assert.deepEqual([deep.answer.ok, deep.answer.code], [false, 'TOO_DEEP'], JSON.stringify(deep.answer).slice(0, 300));
+  assert.equal(fs.existsSync(deep.release), false, 'nothing was sealed');
+  const limited = sealAt('fds', 1500, 256);
+  assert.deepEqual([limited.answer.ok, limited.answer.code], [false, 'TOO_DEEP'], JSON.stringify(limited.answer).slice(0, 300));
+  const fine = sealAt('fine', 200, 256);
+  assert.equal(fine.answer.ok, true, JSON.stringify(fine.answer).slice(0, 300));
+  let leaf = path.join(fine.release, 'dist'); for (let i = 0; i < 200; i += 1) leaf = path.join(leaf, 'd');
+  const st = fs.lstatSync(path.join(leaf, 'f'));
+  assert.deepEqual([st.uid, st.mode & 0o7777], [0, 0o444], 'the deepest file is frozen');
 });
 
 test('reclaimed bytes count a file only when its last link goes', { skip }, t => {

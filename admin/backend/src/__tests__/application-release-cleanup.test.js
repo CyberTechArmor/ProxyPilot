@@ -10,7 +10,7 @@ import { applicationGuestScript, runApplicationReleaseOperation } from '../lib/s
 const job = '11111111-1111-4111-8111-111111111111';
 const releaseName = number => `${String(number).repeat(40)}-p6-${job}`;
 function fixture(t) {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'release-retention-'));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'release-retention-')); fs.chmodSync(parent, 0o755); // read-only git runs unprivileged
   t.after(() => { if (path.basename(parent).startsWith('release-retention-') && path.dirname(parent) === fs.realpathSync(os.tmpdir())) fs.rmSync(parent, { recursive: true, force: true }); });
   const root = path.join(parent, 'releases'); fs.mkdirSync(root);
   const create = number => { const dir = path.join(root, releaseName(number)); fs.mkdirSync(dir); fs.writeFileSync(path.join(dir, '.proxypilot-release.json'), JSON.stringify({ sha: String(number).repeat(40) })); return dir; };

@@ -465,6 +465,7 @@ working copies (e.g. `/opt/nodus-w48`) have no in-product removal by design.
 `migration-service.test.js` ("create: validates, mints one token, …") checks that
 `r.token.split('_')[2]` does not appear in the migration view. The token's secret is base64url
 (`lib/migration/token.js`), which can itself contain `_`, so the split sometimes yields a short fragment that
-occurs in the JSON by chance. Seen once in a full run on 2026-10-21; the file passes alone. Fix: take everything
+occurs in the JSON by chance. Seen in a full run on 2026-10-21 and in about 1 of 40 runs of the file alone;
+product code is unaffected (it uses `parseToken`). Fix: take everything
 after the second `_` (`r.token.split('_').slice(2).join('_')`).
 

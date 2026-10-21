@@ -1,5 +1,5 @@
 // Per-application storage and growth alerts: dedupe (out-of-band dispatch
-// only when an alert is new), resolution with hysteresis, the growth window,
+// when an alert is new or escalates), resolution with hysteresis, the growth window,
 // the cleanup and health alerts the cleanup job posts, and the active set
 // rebuilt from the bell rows after a restart.
 
@@ -19,7 +19,10 @@ function bell() {
     rows, dispatched, posts,
     post(n) { posts.push(n); rows.set(n.dedupe_key, { ...rows.get(n.dedupe_key), ...n, dismissed: false }); },
     resolve(key, { reason } = {}) { const r = rows.get(key); if (r && !r.dismissed) { r.dismissed = true; r.reason = reason; return true; } return false; },
-    list() { return [...rows.values()].filter((r) => !r.dismissed).map((r) => ({ dedupe_key: r.dedupe_key, level: r.level, title: r.title })); },
+    // The real listNotifications shape: dismissed rows only with includeDismissed,
+    // dismissed_at set, and "auto-resolved: <reason>" as the body of a resolved row.
+    list({ includeDismissed = false } = {}) { return [...rows.values()].filter((r) => includeDismissed || !r.dismissed).map((r) => ({ dedupe_key: r.dedupe_key, level: r.level, title: r.title, body: r.dismissed && r.reason ? `auto-resolved: ${r.reason}` : (r.body ?? null), dismissed_at: r.dismissed ? '2026-10-20 00:00:00' : null })); },
+    dismiss(key) { const r = rows.get(key); if (r) r.dismissed = true; },
     async dispatch(m) { dispatched.push(m); },
   };
 }
@@ -64,7 +67,7 @@ test('a usage alert is posted once to the channels, refreshed in the bell, kept 
   w.set(15.5e9);
   await w.monitor.runOnce();
   assert.equal(w.bell.rows.get(key).level, 'error', 'escalates at 1.5× the warning level');
-  assert.equal(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').length, 1, 'the channels hear about a condition once');
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning', 'error'], 'the channels hear about the condition once, and again when it escalates');
   assert.equal(w.bell.dispatched.filter((d) => d.event === 'appstorage.growth').length, 1, 'the 5.1 GB jump is also growth');
   w.clock.advance(15 * 60_000); w.set(9.7e9);
   await w.monitor.runOnce();
@@ -101,6 +104,43 @@ test('alerts turned off: no samples, and open alerts are resolved', async () => 
   w.guests.clear();
   w.policy.alerts.enabled = true;
   assert.equal((await w.monitor.runOnce()).sampled, 0, 'a guest without usage is not sampled');
+});
+
+test('a usage warning that escalates to an error is delivered to the channels again; going back down and up is not repeated', async () => {
+  const w = world();
+  w.set(10.4e9);
+  await w.monitor.runOnce();
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning']);
+  w.clock.advance(15 * 60_000); w.set(15.5e9);
+  await w.monitor.runOnce();
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning', 'error'], 'the escalation reaches the channels');
+  w.clock.advance(15 * 60_000); w.set(14e9);
+  await w.monitor.runOnce();
+  w.clock.advance(15 * 60_000); w.set(15.5e9);
+  await w.monitor.runOnce();
+  assert.equal(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').length, 2, 'an error that was already delivered is not delivered again');
+});
+
+test('after a restart, an alert an administrator dismissed while it is still active is not delivered again; one the monitor resolved is not taken', async () => {
+  const w = world();
+  w.set(10.4e9);
+  await w.monitor.runOnce();
+  assert.equal(w.bell.dispatched.length, 1);
+  w.bell.dismiss('appstorage:usage:application:1');
+  w.bell.post({ level: 'warning', title: 'over', source: 'app-storage', dedupe_key: 'appstorage:growth:application:2' });
+  w.bell.resolve('appstorage:growth:application:2', { reason: 'growth fell below the threshold' });
+  // A restart: a new monitor over the same bell.
+  const again = createAppStorageMonitor({ store: w.store, listTargets: () => [w.target], listGuests: async () => w.guests, policyFor: () => ({ policy: w.policy }), notifications: w.bell, now: w.clock.now, logger: null });
+  assert.equal(await again.hydrate(), 1);
+  assert.equal(again.active.has('appstorage:usage:application:1'), true, 'dismissed by a person, still taken');
+  assert.equal(again.active.has('appstorage:growth:application:2'), false, 'auto-resolved rows are over');
+  w.clock.advance(15 * 60_000);
+  await again.runOnce();
+  assert.equal(w.bell.dispatched.length, 1, 'no second delivery after the restart');
+  // It still escalates.
+  w.clock.advance(15 * 60_000); w.set(15.5e9);
+  await again.runOnce();
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning', 'error']);
 });
 
 test('after a restart the active set comes back from the bell rows, so a recovered condition still resolves', async () => {

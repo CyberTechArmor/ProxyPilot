@@ -10,9 +10,13 @@
 //   appstorage:health:<targetKey>  posted when the health check after a cleanup
 //                                  failed; resolved by the next passing one.
 // Bell rows dedupe on the key; the out-of-band channels (push, email, SMS,
-// webhooks: events appstorage.usage|growth|cleanup|health) fire only when an
-// alert is new. The active set is rebuilt at boot from the bell rows. The
-// whole-pool storage-monitor is separate and unchanged.
+// webhooks: events appstorage.usage|growth|cleanup|health) fire when an alert
+// is new and again when an open alert escalates to a worse level than was
+// delivered (a usage warning that becomes an error). The active set is
+// rebuilt at boot from the bell rows, including ones an administrator
+// dismissed while the condition was still there (so a restart does not
+// deliver them again); rows the monitor resolved itself ("auto-resolved: …")
+// are not taken. The whole-pool storage-monitor is separate and unchanged.
 
 import cron from 'node-cron';
 import { formatBytes } from './accounting.js';
@@ -138,8 +142,13 @@ async function defaultNotifications() {
  * policyFor, notifications, now, logger }) → { runOnce, hydrate, alertsFor,
  * active, postCleanupAlert }.
  */
+const LEVEL_RANK = { info: 0, warning: 1, error: 2 };
+const rankOf = (level) => LEVEL_RANK[level] ?? 1;
+
 export function createAppStorageMonitor({ store, listTargets, listGuests, policyFor, notifications = null, now = () => Date.now(), logger = console } = {}) {
   const active = new Set();
+  // The worst level the channels have heard about for each open alert.
+  const delivered = new Map();
   let running = false;
   let notes = notifications;
   const n = async () => (notes ||= await defaultNotifications());
@@ -147,9 +156,11 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
   async function raise(alert, targetKey) {
     const bell = await n();
     const isNew = !active.has(alert.key);
+    const escalated = !isNew && rankOf(alert.level) > rankOf(delivered.get(alert.key));
     try { bell.post({ level: alert.level, title: alert.title, body: alert.body, source: SOURCE, source_id: targetKey, dedupe_key: alert.key }); } catch (e) { logger?.error?.('[app-storage-monitor] post failed', e?.message); }
     active.add(alert.key);
-    if (!isNew) return false;
+    if (!isNew && !escalated) return false;
+    delivered.set(alert.key, alert.level);
     try { await bell.dispatch?.({ event: alert.event, level: alert.level, title: alert.title, body: alert.body, link: linkFor(targetKey), dedupe_key: alert.key }); } catch (e) { logger?.error?.('[app-storage-monitor] dispatch failed', e?.message); }
     return true;
   }
@@ -158,6 +169,7 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
     const bell = await n();
     try { bell.resolve(key, { reason }); } catch { /* ignore */ }
     active.delete(key);
+    delivered.delete(key);
     return true;
   }
 
@@ -215,17 +227,29 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
       open.add(row.dedupe_key);
       if (active.has(row.dedupe_key)) continue;
       active.add(row.dedupe_key);
+      delivered.set(row.dedupe_key, row.level || 'error');
       try { await bell.dispatch?.({ event: `appstorage.${k.kind}`, level: row.level, title: row.title, body: row.body, link: linkFor(k.targetKey), dedupe_key: row.dedupe_key }); } catch (e) { logger?.error?.('[app-storage-monitor] dispatch failed', e?.message); }
       summary.relayed = [...(summary.relayed || []), row.dedupe_key];
     }
-    for (const key of [...active]) { const k = parseAlertKey(key); if (k && ['cleanup', 'health'].includes(k.kind) && !open.has(key)) active.delete(key); }
+    for (const key of [...active]) { const k = parseAlertKey(key); if (k && ['cleanup', 'health'].includes(k.kind) && !open.has(key)) { active.delete(key); delivered.delete(key); } }
   }
 
-  /** Rebuild the active set from the bell rows (non-dismissed, appstorage: keys). */
+  /**
+   * Rebuild the active set from the bell rows (appstorage: keys): the open
+   * rows, and the ones an administrator dismissed (the condition may still
+   * be there; it was delivered already). A row the monitor or the cleanup
+   * job resolved (body "auto-resolved: …") is over and is not taken.
+   */
   async function hydrate() {
     try {
       const bell = await n();
-      for (const row of bell.list?.({ limit: 1000 }) || []) if (row?.dedupe_key && String(row.dedupe_key).startsWith(ALERT_PREFIX)) active.add(row.dedupe_key);
+      for (const row of bell.list?.({ limit: 1000, includeDismissed: true }) || []) {
+        const key = row?.dedupe_key;
+        if (!key || !String(key).startsWith(ALERT_PREFIX) || !parseAlertKey(key)) continue;
+        if (row.dismissed_at && /^auto-resolved:/.test(String(row.body || ''))) continue;
+        active.add(key);
+        delivered.set(key, row.level || 'warning');
+      }
     } catch { /* fresh install */ }
     return active.size;
   }
@@ -247,8 +271,8 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
     runOnce, hydrate, alertsFor, active,
     postCleanupAlert: async (targetKey, outcome, opts = {}) => {
       const r = await postCleanupAlert(targetKey, outcome, { ...opts, notifications: opts.notifications || await n() });
-      for (const k of r.posted) active.add(k);
-      for (const k of r.resolved) active.delete(k);
+      for (const k of r.posted) { active.add(k); delivered.set(k, 'error'); }
+      for (const k of r.resolved) { active.delete(k); delivered.delete(k); }
       return r;
     },
   };

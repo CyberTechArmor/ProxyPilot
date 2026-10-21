@@ -1,70 +1,76 @@
-// Application storage — the SEAM between the cleanup/retention half (WS2) and
-// the check/store/policy/monitor half (WS1). Everything WS2 needs from WS1 is
-// reached here, and only here, by the module paths and export names DESIGN.md
-// fixes (§1, §2.5, §3.4, §4, §5):
+// Application storage — the wiring of the cleanup half (WS2) onto the shared
+// storage modules (store.js, targets.js, policy.js, perform-check.js,
+// monitor.js), for the two processes that run it:
 //
-//   ./store.js          createStorageStore(mock2Db)
-//   ./targets.js        resolveTarget(key, { mock2Db, mainDb }),
-//                       activityFor(target, { mainDb, mock2Db, excludeJobId }),
-//                       listTargets({ mock2Db, mainDb })
-//   ./policy.js         effectiveReleaseRetention(targetId, { mock2Db }),
-//                       effectiveSnapshotLimits({ mock2Db, mainDb }),
-//                       policySelection(check, policy), policyFor? (see below)
-//   ./perform-check.js  performCheck({ target, activity, exec, store, policy, now, origin })
-//   ./monitor.js        postCleanupAlert(event, { mainDb? })
-//   ./check-service.js  createCheckService(...) (only when no instance is passed)
+//   the backend      createBackendCleanupService({ storage, mainDb, logAudit })
+//                    → the service the routes call; index.js installs it with
+//                    storage.setCleanupService(...). startAppStorageAutomation
+//                    ({ storage, reconcileSnapshots }) feeds the policy-fed
+//                    snapshot limits and starts the retention scheduler over
+//                    the SAME storage instance (its check service and cleanup
+//                    service).
+//   the host runner  runnerAppStorage({ mainDb, mock2DbPath }) → the
+//                    executor's appStorage: release retention for release
+//                    jobs, the storage_cleanup op's dependencies, the
+//                    snapshot limits for the runner's own snapshot jobs.
 //
-// They are imported lazily, so this branch builds, boots and tests before WS1
-// lands: until then release jobs and snapshot retention use the static files
-// (Nodus unchanged), and the cleanup job and the scheduler report themselves
-// unavailable. The integrator checks the names above against WS1's exports
-// (contract-changes.md, 2026-10-20 entries) and adjusts this file only.
+// The host runner has no db.js connection: its alerts go to the bell over the
+// main DB it opened (bellOver), and the out-of-band delivery (push, e-mail,
+// webhooks) is left to the backend's monitor, which relays a runner-posted
+// cleanup or health alert once on its next round (monitor.js runOnce).
 
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { setSnapshotLimitsProvider } from '../snapshot-retention.js';
-import { APPLICATION_RELEASE_RETENTION } from '../setup-engine/application-release-cleanup.js';
 import { getJob } from '../setup-engine/store.js';
 import { createExportStore } from '../lxc-exports.js';
 import { createCleanupService } from './cleanup-service.js';
 import { createRetentionScheduler } from './retention-scheduler.js';
+import { createStorageStore, readInstalledAt } from './store.js';
+import { resolveTarget, activityFor } from './targets.js';
+import { resolvePolicy, effectiveReleaseRetention, effectiveSnapshotLimits } from './policy.js';
+import { performCheck, newCheckId } from './perform-check.js';
+import { postCleanupAlert } from './monitor.js';
+import { checkView } from './check-service.js';
+import { exportsFor } from './host-measures.js';
 
-const WS1_MODULES = Object.freeze({ store: './store.js', targets: './targets.js', policy: './policy.js', performCheck: './perform-check.js', monitor: './monitor.js', checkService: './check-service.js' });
-export class AppStorageUnavailable extends Error { constructor(missing) { super(`application storage module ${missing} is not installed`); this.code = 'APP_STORAGE_UNAVAILABLE'; } }
-
-const cache = new Map();
-async function load(key, { optional = false } = {}) {
-  if (cache.has(key)) return cache.get(key);
-  const p = import(WS1_MODULES[key]).catch(e => {
-    cache.delete(key);
-    if (e?.code === 'ERR_MODULE_NOT_FOUND' && String(e.message || '').includes(WS1_MODULES[key].slice(2))) { if (optional) return null; throw new AppStorageUnavailable(WS1_MODULES[key]); }
-    throw e;
-  });
-  cache.set(key, p);
-  return p;
-}
-export async function loadAppStorageModules() {
-  const [store, targets, policy, performCheck, monitor] = await Promise.all(['store', 'targets', 'policy', 'performCheck', 'monitor'].map(k => load(k)));
-  return { store, targets, policy, performCheck, monitor };
-}
-
-const parse = v => { if (v == null) return null; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
-
-// The policy document in force for a target: WS1's policyFor when it exports
-// one (defaults applied there), else the stored row's document.
-export async function policyOf(targetKey, { policy, store, mock2Db, mainDb }) {
-  if (typeof policy?.policyFor === 'function') return policy.policyFor(targetKey, { mock2Db, mainDb, store });
-  const row = await store.getPolicy?.(targetKey);
-  return parse(row?.policy_json ?? row?.policy) || null;
-}
-
-// audit_log through a given main DB handle (the runner has no db.js
-// singleton; the columns are those of db.js logAudit).
+// audit_log through a given main DB handle (the columns of db.js logAudit).
 export function auditInto(db, { resourceType = 'app_storage' } = {}) {
   return entry => {
     db.prepare('INSERT INTO audit_log (id, user_id, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(randomUUID(), entry.userId ?? null, entry.action, resourceType, entry.targetKey ?? null, JSON.stringify(entry.details ?? {}), entry.ip ?? null);
+  };
+}
+
+// The bell (notifications table, migration 300) over a given main DB handle,
+// with notifications.js's semantics: post upserts on dedupe_key (a repeat
+// re-emerges a dismissed row, re-flags unread only when escalating to error),
+// resolve dismisses with "auto-resolved: <reason>", list shows open rows.
+// No dispatch here: see the header.
+export function bellOver(db) {
+  return {
+    post({ level = 'info', title, body = null, source, source_id = null, dedupe_key = null } = {}) {
+      if (dedupe_key) {
+        const existing = db.prepare('SELECT id FROM notifications WHERE dedupe_key = ?').get(dedupe_key);
+        if (existing) {
+          db.prepare(`UPDATE notifications SET level = ?, title = ?, body = ?, source = ?, source_id = ?, seen_count = seen_count + 1, last_seen_at = CURRENT_TIMESTAMP,
+            read_at = CASE WHEN read_at IS NULL THEN NULL WHEN ? = 'error' AND level <> 'error' THEN NULL ELSE read_at END, dismissed_at = NULL WHERE dedupe_key = ?`)
+            .run(level, title, body, source, source_id, level, dedupe_key);
+          return existing.id;
+        }
+      }
+      const id = randomUUID();
+      db.prepare('INSERT INTO notifications (id, level, title, body, source, source_id, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, level, title, body, source, source_id, dedupe_key);
+      return id;
+    },
+    resolve(dedupe_key, { reason = 'recovered' } = {}) {
+      if (!dedupe_key) return false;
+      return Number(db.prepare('UPDATE notifications SET dismissed_at = CURRENT_TIMESTAMP, body = ? WHERE dedupe_key = ? AND dismissed_at IS NULL').run(`auto-resolved: ${reason}`, dedupe_key).changes) > 0;
+    },
+    list({ limit = 50, includeDismissed = false } = {}) {
+      return db.prepare(`SELECT * FROM notifications WHERE ${includeDismissed ? '1=1' : 'dismissed_at IS NULL'} ORDER BY last_seen_at DESC LIMIT ?`).all(Math.max(1, Number(limit) || 50));
+    },
   };
 }
 
@@ -84,82 +90,52 @@ export async function submitStorageCleanupJob(db, { cleanupId, targetKey, guest,
   return { jobId: r.job.id };
 }
 
-// ── the backend side ────────────────────────────────────────────────────
+// The newest 20 events of a job, oldest first (a long cleanup writes a
+// checkpoint per item).
+const newestEvents = db => id => db.prepare('SELECT * FROM (SELECT * FROM setup_job_events WHERE job_id = ? ORDER BY id DESC LIMIT 20) ORDER BY id').all(String(id));
 
-// The cleanup service WS1's routes call (requestCleanup/getCleanup/listCleanups).
-export async function createBackendCleanupService({ mainDb, mock2Db, logAudit, now = () => Date.now(), modules = null }) {
-  const m = modules || await loadAppStorageModules();
-  const store = m.store.createStorageStore(mock2Db);
+// ── the backend ─────────────────────────────────────────────────────────
+
+/** The cleanup service over the backend's shared storage instance (lib/app-storage/index.js). */
+export function createBackendCleanupService({ storage, mainDb, logAudit, now = () => Date.now() }) {
   return createCleanupService({
-    store,
-    getCheck: id => store.getCheck(id),
+    store: storage.store,
+    getCheck: id => storage.store.getCheck(id),
     submitJob: spec => submitStorageCleanupJob(mainDb, spec),
-    resolveTarget: key => m.targets.resolveTarget(key, { mock2Db, mainDb }),
-    activityFor: target => m.targets.activityFor(target, { mainDb, mock2Db }),
+    resolveTarget: key => storage.resolveTarget(key),
+    activityFor: target => storage.activityFor(target),
     now,
     audit: e => logAudit(e.userId ?? null, e.action, 'app_storage', e.targetKey ?? null, e.details ?? {}, e.ip ?? null),
-    monitor: { postCleanupAlert: event => m.monitor.postCleanupAlert(event) },
+    monitor: { postCleanupAlert: (key, outcome, opts) => storage.postCleanupAlert(key, outcome, opts) },
     getJob: id => getJob(mainDb, id),
-    // The newest 20, oldest first: a long cleanup writes a checkpoint per item.
-    listEvents: id => mainDb.prepare('SELECT * FROM (SELECT * FROM setup_job_events WHERE job_id = ? ORDER BY id DESC LIMIT 20) ORDER BY id').all(String(id)),
+    listEvents: newestEvents(mainDb),
   });
 }
 
-// Installs the policy-fed snapshot limits for this process. Without WS1's
-// policy module the static file stays in force. → true when installed.
-export async function installSnapshotLimitsProvider({ getMainDb, getMock2Db, log = () => {} }) {
-  let policy;
-  try { policy = await load('policy', { optional: true }); } catch (e) { log('[app-storage] policy module failed to load; snapshot limits stay on the static file', e?.message || e); return false; }
-  if (typeof policy?.effectiveSnapshotLimits !== 'function') return false;
-  setSnapshotLimitsProvider(() => policy.effectiveSnapshotLimits({ mock2Db: getMock2Db(), mainDb: getMainDb() }));
-  return true;
-}
-
-// startAppStorageAutomation — the index.js hook: policy-fed snapshot limits
-// (then a reconcile so a newly limited guest is pruned at once) and the
-// retention scheduler (off with PROXYPILOT_DISABLE_CRONS=1). Pass the shared
-// check service when WS1 has one; one is created otherwise. → stop()
-export async function startAppStorageAutomation({ getMainDb, getMock2Db, logAudit, reconcileSnapshots = null, checkService = null, cleanupService = null, log = console.log, env = process.env }) {
-  const stops = [];
-  if (await installSnapshotLimitsProvider({ getMainDb, getMock2Db, log })) { try { reconcileSnapshots?.(); } catch { /* the listener retries on its own */ } }
-  if (env.PROXYPILOT_DISABLE_CRONS === '1') return () => {};
-  let m;
-  try { m = await loadAppStorageModules(); } catch (e) { log(e?.code === 'APP_STORAGE_UNAVAILABLE' ? '[app-storage] retention scheduler not started: the storage check modules are not installed' : `[app-storage] retention scheduler not started: ${e?.message || e}`); return () => {}; }
-  const mainDb = getMainDb(), mock2Db = getMock2Db();
-  const store = m.store.createStorageStore(mock2Db);
-  const cleanups = cleanupService || await createBackendCleanupService({ mainDb, mock2Db, logAudit, modules: m });
-  let checks = checkService;
-  if (!checks) { const cs = await load('checkService'); checks = cs.createCheckService({ mock2Db, mainDb, audit: logAudit }); }
+// startAppStorageAutomation — the index.js hook. Snapshot limits follow the
+// enabled policies (re-read on every use; then a reconcile so a newly limited
+// guest is pruned at once), and the retention scheduler runs the periodic
+// rules through storage.runCheck and storage.cleanupService() — the shared
+// instances, never second copies. → stop()
+export function startAppStorageAutomation({ storage, reconcileSnapshots = null, log = console.log, env = process.env }) {
+  setSnapshotLimitsProvider(() => storage.effectiveSnapshotLimits());
+  try { reconcileSnapshots?.(); } catch { /* the listener reconciles on its own */ }
+  if (env.PROXYPILOT_DISABLE_CRONS === '1') return () => { setSnapshotLimitsProvider(null); };
   const scheduler = createRetentionScheduler({
-    listTargets: () => m.targets.listTargets({ mock2Db, mainDb }),
-    resolveTarget: key => m.targets.resolveTarget(key, { mock2Db, mainDb }),
-    policyFor: key => policyOf(key, { policy: m.policy, store, mock2Db, mainDb }),
-    runCheck: key => awaitCheck(checks, key),
-    policySelection: typeof m.policy.policySelection === 'function' ? m.policy.policySelection : null,
-    activityFor: target => m.targets.activityFor(target, { mainDb, mock2Db }),
-    requestCleanup: spec => cleanups.requestCleanup(spec),
-    monitor: { postCleanupAlert: event => m.monitor.postCleanupAlert(event) },
+    listTargets: () => storage.listTargets(),
+    resolveTarget: key => storage.resolveTarget(key),
+    policyFor: key => storage.policyFor(storage.resolveTarget(key))?.policy || null,
+    runCheck: key => storage.runCheck(key, { origin: 'policy' }),
+    activityFor: target => storage.activityFor(target),
+    requestCleanup: spec => storage.cleanupService().requestCleanup(spec),
+    monitor: { postCleanupAlert: (key, outcome, opts) => storage.postCleanupAlert(key, outcome, opts) },
     log, env,
   });
-  scheduler.start();
-  stops.push(() => scheduler.stop());
-  return () => { for (const s of stops) try { s(); } catch { /* */ } };
+  scheduler.start().catch(() => {});
+  return () => { scheduler.stop(); setSnapshotLimitsProvider(null); };
 }
 
-// Requests a policy check and waits for it to finish (bounded).
-export async function awaitCheck(checks, targetKey, { timeoutMs = 15 * 60_000, pollMs = 2000, sleep = ms => new Promise(r => setTimeout(r, ms)), now = () => Date.now() } = {}) {
-  const started = await checks.requestCheck(targetKey, { origin: 'policy', userId: null });
-  const until = now() + timeoutMs;
-  for (;;) {
-    const c = await checks.getCheck(started.checkId);
-    const view = c && (Array.isArray(c.items) ? c : parse(c.result_json ?? c.result) || c);
-    if (view && view.status && view.status !== 'running') return view;
-    if (now() > until) throw Object.assign(new Error('the storage check did not finish in time'), { code: 'CHECK_TIMEOUT' });
-    await sleep(pollMs);
-  }
-}
-
-// ── the host runner side ────────────────────────────────────────────────
+// ── the host runner ─────────────────────────────────────────────────────
 
 function hostExec(argv, { timeoutMs = 120_000 } = {}) {
   return new Promise(resolve => {
@@ -187,44 +163,55 @@ export function runnerExportStore(mainDb) {
   });
 }
 
+// The cleanup's rescan: a stored check (origin 'cleanup') through the same
+// performCheck the backend runs, over the runner's executor.
+export async function storedRescan({ store, mock2Db, mainDb, target, activity, exec, now = () => Date.now() }) {
+  const checkId = newCheckId();
+  store.insertCheck({ id: checkId, targetKey: target.key, origin: 'cleanup', requestedBy: 'storage-cleanup' });
+  let policy = null;
+  try { policy = resolvePolicy(target, { store, installedAt: readInstalledAt(mock2Db), diskLimitBytes: store.latestCheck(target.key)?.result?.totals?.limit?.bytes ?? null }).policy; } catch { policy = null; }
+  const result = await performCheck({ target, activity, exec, policy, now, origin: 'cleanup', checkId, mainDb, listExports: guest => exportsFor(mainDb, guest) });
+  store.finishCheck(checkId, { status: result.status, result, errorCode: result.error?.code || null, finishedAt: result.finishedAt });
+  return result;
+}
+
+// The storage_cleanup op's dependencies over the given databases.
+export function cleanupDepsFor({ mainDb, mock2Db, now = () => Date.now(), bell = bellOver(mainDb), exports = runnerExportStore(mainDb) }) {
+  const store = createStorageStore(mock2Db, { now });
+  return {
+    store,
+    getCheck: id => checkView(store.getCheck(id)),
+    resolveTarget: key => resolveTarget(key, { mock2Db }),
+    activityFor: (target, opts = {}) => activityFor(target, { mainDb, mock2Db, now: now(), ...opts }),
+    rescan: args => storedRescan({ store, mock2Db, mainDb, now, ...args }),
+    monitor: { postCleanupAlert: (key, outcome, opts = {}) => postCleanupAlert(key, outcome, { ...opts, notifications: bell }) },
+    audit: auditInto(mainDb),
+    exports,
+  };
+}
+
 // runnerAppStorage({ mainDb, mock2DbPath }) → the executor's appStorage for
-// the host runner: release retention from the policy (static file until WS1
-// is installed) and the storage cleanup op's dependencies.
+// the host runner.
 export function runnerAppStorage({ mainDb, mock2DbPath, openDb = null, log = () => {} }) {
   let mock2 = null;
-  const mock2Db = async () => {
+  const mock2Db = () => {
     if (!mock2) mock2 = (async () => { if (openDb) return openDb(mock2DbPath); const { default: Database } = await import('better-sqlite3'); const db = new Database(mock2DbPath, { fileMustExist: true, timeout: 5000 }); db.pragma('busy_timeout = 5000'); return db; })();
+    mock2.catch(() => { mock2 = null; });
     return mock2;
   };
   return {
+    // The policy's release rule when it is on, else the static file; without
+    // a readable mock2.db, the static file (Nodus keeps its numbers).
     async releaseRetention(targetId) {
-      const policy = await load('policy', { optional: true });
-      if (typeof policy?.effectiveReleaseRetention !== 'function') return Object.hasOwn(APPLICATION_RELEASE_RETENTION, targetId) ? APPLICATION_RELEASE_RETENTION[targetId] : null;
-      return policy.effectiveReleaseRetention(targetId, { mock2Db: await mock2Db() });
+      let db2 = null;
+      try { db2 = await mock2Db(); } catch (e) { log('release retention from the static file:', e?.message || e); }
+      return effectiveReleaseRetention(targetId, { mock2Db: db2 });
     },
-    async cleanup() {
-      const m = await loadAppStorageModules();
-      const db2 = await mock2Db();
-      const store = m.store.createStorageStore(db2);
-      return {
-        store,
-        getCheck: id => store.getCheck(id),
-        resolveTarget: key => m.targets.resolveTarget(key, { mock2Db: db2, mainDb }),
-        activityFor: (target, opts = {}) => m.targets.activityFor(target, { mainDb, mock2Db: db2, ...opts }),
-        performCheck: args => m.performCheck.performCheck(args),
-        policyFor: key => policyOf(key, { policy: m.policy, store, mock2Db: db2, mainDb }),
-        monitor: { postCleanupAlert: event => m.monitor.postCleanupAlert(event, { mainDb }) },
-        audit: auditInto(mainDb),
-        exports: runnerExportStore(mainDb),
-      };
-    },
-    // The policy-fed snapshot limits for this runner's own snapshot jobs;
-    // without WS1's policy module nothing is opened and the static file stays.
+    async cleanup() { return cleanupDepsFor({ mainDb, mock2Db: await mock2Db() }); },
+    // The policy-fed snapshot limits for this runner's own snapshot jobs.
     async installSnapshotLimits() {
-      const policy = await load('policy', { optional: true });
-      if (typeof policy?.effectiveSnapshotLimits !== 'function') return false;
       const db2 = await mock2Db();
-      setSnapshotLimitsProvider(() => policy.effectiveSnapshotLimits({ mock2Db: db2, mainDb }));
+      setSnapshotLimitsProvider(() => effectiveSnapshotLimits({ mock2Db: db2, mainDb }));
       return true;
     },
     mock2DbPath: path.resolve(mock2DbPath),

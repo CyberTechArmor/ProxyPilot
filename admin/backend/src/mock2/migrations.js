@@ -1975,4 +1975,48 @@ export const MOCK2_MIGRATIONS = [
       if (!cols.includes('summary_json')) d.exec('ALTER TABLE mock2_storage_checks ADD COLUMN summary_json TEXT');
     },
   },
+  {
+    // Task continuity (Flightdeck): one row per task — a build (one per
+    // mock2_requests row, hence the partial unique index) or an ask-lane
+    // investigation — that outlives the chat, so "continue" resumes the right
+    // work after a disconnect or restart. The row is authoritative; the
+    // state/tasks/<task_key>/ files mirror it (files_revision = the revision
+    // they were last written from) and authorize nothing. New table only. The
+    // DDL is written out here, never read from the store module (tasks.js).
+    version: 562,
+    name: 'mock2_tasks',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL,
+          task_key TEXT UNIQUE,
+          intent TEXT NOT NULL,
+          status TEXT NOT NULL,
+          goal TEXT NOT NULL,
+          request_id INTEGER,
+          last_cycle_id INTEGER,
+          authorized_by INTEGER,
+          authorized_at TEXT,
+          folder TEXT,
+          branch TEXT,
+          last_verified_step TEXT,
+          next_step TEXT,
+          completed_steps_json TEXT,
+          checks_json TEXT,
+          blockers_json TEXT,
+          remaining_json TEXT,
+          uncertain_json TEXT,
+          context_json TEXT,
+          revision INTEGER NOT NULL DEFAULT 1,
+          files_revision INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_tasks_project ON mock2_tasks(project_id, updated_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mock2_tasks_request ON mock2_tasks(request_id) WHERE request_id IS NOT NULL;
+      `);
+    },
+  },
 ];

@@ -22,9 +22,10 @@ const iso = (ms) => new Date(ms).toISOString();
 test('migration 560 is the next mock2 migration and creates the four tables and the installed-at mark once', () => {
   assert.ok(m560, 'migration 560 is registered');
   assert.equal(m560.name, 'mock2_app_storage');
-  assert.equal(MOCK2_MIGRATIONS.at(-1).version, 561);
-  assert.equal(MOCK2_MIGRATIONS.at(-2).version, 560);
-  assert.equal(MOCK2_MIGRATIONS.at(-3).version, 559);
+  // 559 → 560 → 561 in order; later features append after them (562 mock2_tasks).
+  const i560 = MOCK2_MIGRATIONS.indexOf(m560);
+  assert.equal(MOCK2_MIGRATIONS[i560 + 1].version, 561);
+  assert.equal(MOCK2_MIGRATIONS[i560 - 1].version, 559);
   const db = freshDb();
   m560.up(db);
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mock2_storage_%' ORDER BY name").all().map((r) => r.name);

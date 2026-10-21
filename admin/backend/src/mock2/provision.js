@@ -101,6 +101,8 @@ mkdir -p "$(dirname "$REPO")"
 rm -rf "$REPO"
 git init --bare -b main "$REPO"
 WT="$(mktemp -d)"
+# The temporary worktree goes on failure too (set -e exits early).
+trap 'rm -rf "$WT"' EXIT
 git init -q -b main "$WT"
 # Payload on STDIN: base64 tarball -> working tree. Reads stdin to EOF before
 # any later command runs, so nothing downstream can steal the remaining bytes.
@@ -110,7 +112,6 @@ GIT_AUTHOR_NAME="ProxyPilot Mock2" GIT_AUTHOR_EMAIL="mock2@proxypilot.local" \
 GIT_COMMITTER_NAME="ProxyPilot Mock2" GIT_COMMITTER_EMAIL="mock2@proxypilot.local" \
   git -C "$WT" commit -q -m "seed: ${projectName.replace(/["'`$\\]/g, '')} placeholder (Mock2 M2 template)"
 git -C "$WT" push -q "$REPO" main:main
-rm -rf "$WT"
 echo "[mock2] seeded bare repo $REPO"
 `;
 }

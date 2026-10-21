@@ -1,0 +1,6 @@
+{
+  "$comment": "Per-instance rolling retention in the default Incus project. Creation prunes under the owning job's lease; lifecycle events also cover snapshots made outside ProxyPilot. Unlisted guests are untouched.",
+  "guests": {
+    "pp-nodus": 3
+  }
+}

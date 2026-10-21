@@ -20,6 +20,7 @@ import { snapshotArgv, isSnapshotCliShapeError, SNAPSHOT_CLI_SUBCOMMAND, SNAPSHO
 import { parseInstanceList, snapshotPlanVerdict } from './restore-logic.js';
 import { hostArgv, noopJob, tailOf } from './op-kit.js';
 import { sanitizeReason } from './logic.js';
+import { enforceSnapshotRetention, currentSnapshotLimits } from '../snapshot-retention.js';
 
 export function resolveRestoreSnapshotPlan(params = {}) {
   return {
@@ -37,16 +38,22 @@ export function resolveRestoreSnapshotPlan(params = {}) {
 // createSnapshotWithFallback(host, name, snap) → { ok, form } | { ok: false, error }
 // The CLI form (subcommand vs legacy) is discovered by the client's own
 // answer, as routes/mcp.js does; every other failure is returned as itself.
-export async function createSnapshotWithFallback(host, name, snap, { form = SNAPSHOT_CLI_SUBCOMMAND, timeoutMs = 120_000 } = {}) {
+export async function createSnapshotWithFallback(host, name, snap, { form = SNAPSHOT_CLI_SUBCOMMAND, timeoutMs = 120_000, deferRetention = false, limits = currentSnapshotLimits } = {}) {
   let r = await host(['incus', ...snapshotArgv('create', name, snap, form)], { timeoutMs });
   if (r.code !== 0 && isSnapshotCliShapeError(r.stderr)) {
     const other = form === SNAPSHOT_CLI_SUBCOMMAND ? SNAPSHOT_CLI_LEGACY : SNAPSHOT_CLI_SUBCOMMAND;
     const retry = await host(['incus', ...snapshotArgv('create', name, snap, other)], { timeoutMs });
-    if (retry.code === 0) return { ok: true, form: other };
-    r = isSnapshotCliShapeError(retry.stderr) ? r : retry;
+    if (retry.code === 0) { r = retry; form = other; }
+    else r = isSnapshotCliShapeError(retry.stderr) ? r : retry;
   }
   if (r.code !== 0) return { ok: false, error: tailOf(r, 300) || 'unknown error' };
-  return { ok: true, form };
+  // A restore must keep its selected target until the restore completes.
+  // The lifecycle listener prunes after that job releases the guest's lease.
+  // The limits in force are re-read here (policy-fed when a provider is
+  // installed; the static file otherwise).
+  const retention = deferRetention ? { ok: true, deferred: true } : await enforceSnapshotRetention(host, name, { createdSnapshot: snap, limits });
+  if (!retention.ok) return { ok: false, created: true, error: `snapshot ${snap} was created but retention failed: ${retention.error}`, retention };
+  return { ok: true, form, retention };
 }
 
 // runRestoreSnapshotOperation({ params, exec, job, reuse, log }) →
@@ -87,7 +94,7 @@ export async function runRestoreSnapshotOperation({ params, exec, job = noopJob(
   }
   if (!pre) {
     const name = `${p.preRestorePrefix}-${String(job.id || 'adhoc').slice(0, 8)}-${Date.now().toString(36)}`;
-    const c = await createSnapshotWithFallback(host, p.container, name);
+    const c = await createSnapshotWithFallback(host, p.container, name, { deferRetention: true });
     if (!c.ok) return fail('protect', `refusing to restore without a pre-restore snapshot: ${c.error}`);
     const again = await list();
     const found = again.instance && (again.instance.snapshots || []).find((s) => s && s.name === name);

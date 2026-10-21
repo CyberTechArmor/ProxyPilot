@@ -351,6 +351,32 @@ export function parseContainment(stderr) {
 // recorded (scope units, cgroups), then the legacy marker scripts that carry
 // no job id or another one, waits, and reports live survivors as
 // `STALE_WRITERS:<n>`. Records whose groups are empty are removed.
+// reapAttemptScriptsScript(attemptId) → the CURRENT attempt's leftovers: the
+// release job runs each build script in its own scope or cgroup (above);
+// once the last script has returned, any process still in one of them was
+// left behind by the build. All of them are killed before the seal, then
+// counted: prints STALE_WRITERS:<still alive> (parseStaleWriters). Run
+// uncontained, like the stale-writer reap.
+export function reapAttemptScriptsScript(attemptId, { runDir = CONTAINMENT_RUN_DIR } = {}) {
+  const id = String(attemptId || 'adhoc');
+  if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
+  if (!/^\/[A-Za-z0-9._\/-]+$/.test(runDir)) throw new Error('runDir must be an absolute path');
+  return [
+    `: reap_attempt_scripts job=${id}`,
+    `RUN='${runDir}'; CUR='${id}'; me=$$`,
+    'alive() { st=$(sed -E "s/^[^)]*\\) //" /proc/$1/stat 2>/dev/null | cut -d" " -f1); [ -n "$st" ] && [ "$st" != "Z" ] && [ "$st" != "X" ]; }',
+    'live_in() { c=0; for p in $(cat "$1" 2>/dev/null); do [ "$p" = "$me" ] && continue; alive "$p" && c=$((c + 1)); done; echo $c; }',
+    'for u in $(cat "$RUN/$CUR.units" 2>/dev/null); do systemctl kill --signal=KILL --kill-whom=all "$u" >/dev/null 2>&1 || true; done',
+    'for g in $(cat "$RUN/$CUR.cgroups" 2>/dev/null); do [ -d "$g" ] || continue; if [ -f "$g/cgroup.kill" ]; then echo 1 > "$g/cgroup.kill" 2>/dev/null || true; else for p in $(cat "$g/cgroup.procs" 2>/dev/null); do [ "$p" = "$me" ] || kill -9 "$p" 2>/dev/null || true; done; fi; done',
+    'sleep 1',
+    'n=0',
+    'for u in $(cat "$RUN/$CUR.units" 2>/dev/null); do cg=$(systemctl show -p ControlGroup --value "$u" 2>/dev/null); if [ -n "$cg" ] && [ -f "/sys/fs/cgroup$cg/cgroup.procs" ]; then n=$((n + $(live_in "/sys/fs/cgroup$cg/cgroup.procs"))); fi; done',
+    'for g in $(cat "$RUN/$CUR.cgroups" 2>/dev/null); do [ -d "$g" ] || continue; n=$((n + $(live_in "$g/cgroup.procs"))); done',
+    'echo "STALE_WRITERS:$n"',
+    '',
+  ].join('\n');
+}
+
 export function reapStaleWritersScript(currentJobId, { runDir = CONTAINMENT_RUN_DIR } = {}) {
   const id = String(currentJobId || 'adhoc');
   if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');

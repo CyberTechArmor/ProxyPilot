@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { RefreshCw, Loader2, AlertCircle, CheckCircle2, GitBranch } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { RefreshCw, Loader2, AlertCircle, CheckCircle2, GitBranch, PieChart } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ACTIVE_JOB_STATES, profileFromForm, profileToForm, releaseSummary, releaseBranchHead, jobPresentation } from './application-release-model.mjs';
+import { storageHref } from '../app-storage/app-storage-model.mjs';
+import { TEXT as STORAGE_TEXT } from '../app-storage/app-storage-text.js';
 
 const date = value => value ? new Date(value).toLocaleString() : 'Not recorded';
 const errorMessage = error => [error.message, error.next_action].filter(Boolean).join(' ');
@@ -103,7 +106,7 @@ export default function ApplicationReleases({ containerName, client = api }) {
     {!loading && <div className="flex flex-col sm:flex-row gap-2"><label className="flex-1 min-w-0 text-sm">Application<select aria-label="Application" className="mt-1 h-11 w-full rounded-md border bg-background px-3" value={application?.id ?? ''} onChange={e => { setApplicationId(e.target.value); setSelectedSha(''); setSelectedJob(''); setEditing(false); }} disabled={disabled}><option value="" disabled>{applications.length ? 'Choose application' : 'No registered application'}</option>{applications.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>{applications.length === 0 && <Button className="h-11 sm:self-end" variant="outline" disabled={disabled} onClick={() => { setRegistering(true); setEditing(false); }}>Register existing app</Button>}</div>}
     {(registering || editing) && <ProfileForm key={registering ? 'new' : `${editing.id}-${editing.profile.revision}`} application={registering ? null : editing} containerName={containerName} connectors={connectors} busy={Boolean(busy)} onSave={save} onCancel={() => { setEditing(false); setRegistering(false); }}/>}
     {application && <>
-      <div className="rounded-lg border p-3 flex flex-col sm:flex-row gap-3 sm:justify-between"><div className="min-w-0 text-sm"><strong className="break-words">{application.name}</strong><p className="break-all font-mono text-xs mt-1">{application.profile.sourceDir}</p><p className="text-xs text-muted-foreground mt-1">Profile revision {application.profile.revision} · {application.profile.serviceName}</p></div><Button variant="outline" className="h-11" disabled={disabled || registering} onClick={() => setEditing(application)}>Edit profile</Button></div>
+      <div className="rounded-lg border p-3 flex flex-col sm:flex-row gap-3 sm:justify-between"><div className="min-w-0 text-sm"><strong className="break-words">{application.name}</strong><p className="break-all font-mono text-xs mt-1">{application.profile.sourceDir}</p><p className="text-xs text-muted-foreground mt-1">Profile revision {application.profile.revision} · {application.profile.serviceName}</p></div><div className="flex flex-wrap gap-2 sm:self-start"><Button variant="outline" className="h-11" disabled={disabled || registering} onClick={() => setEditing(application)}>Edit profile</Button><Button asChild variant="outline" className="h-11"><Link to={storageHref('application', application.id)} title={STORAGE_TEXT.storageLinkApplicationHint}><PieChart className="h-4 w-4 mr-2"/>{STORAGE_TEXT.storageLink}</Link></Button></div></div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Evidence title="Selected candidate" sha={candidate?.sha} detail={candidate ? `Profile revision ${candidate.profileRevision}` : 'Checkpoint a source commit first.'}/>
         <Evidence title="Latest passed validation" sha={state.tested?.sha} detail={date(state.tested?.validation?.validatedAt)}/>

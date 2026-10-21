@@ -27,6 +27,7 @@ import { reconcileServiceL4Forwards } from '../lib/l4-reconciler.js';
 import { shellSingleQuote } from '../lib/shell-quote.js';
 import { registerLxcWorkspaceRoutes } from './lxc-workspace.js';
 import { exportStore } from '../lib/lxc-exports-instance.js';
+import { readVolumeUsedBytes } from '../lib/app-storage/host-measures.js';
 import { restoreHazards, restoreNotes } from '../lib/lxc-exports.js';
 import { hasHostBinary } from '../lib/host-exec.js';
 import { COMPRESSION_SETTING, resolveCompression, incusCompressionArgs } from '../lib/export-compression.js';
@@ -1311,34 +1312,11 @@ function formatSnapshotError(prefix, error, timeoutMs) {
   };
 }
 
-// Read actual disk usage (bytes) for a storage volume. Used by the
-// snapshot-list enrichment and the export-info endpoints. The
-// /state endpoint is the only API that returns true used bytes
-// across storage backends (ZFS, btrfs, LVM-thin, dir, ceph) — the
-// volume-show config returns *quotas*, not usage.
-//
-// `volumePath` is everything after `/volumes/` — for example
-// `container/pp-dev` for the live container or
-// `container/pp-dev/snapshots/Test2` for a snapshot.
-//
-// Returns the used bytes as an integer or null when the lookup
-// failed (older incus, backend without per-volume accounting, etc).
-async function readVolumeUsedBytes(pool, volumePath) {
-  if (!pool || !volumePath) return null;
-  try {
-    const r = await execOnHost(
-      `incus query /1.0/storage-pools/${pool}/volumes/${volumePath}/state 2>/dev/null`,
-      { timeout: 5000 }
-    );
-    const state = JSON.parse(r.stdout || '{}');
-    const used = state?.usage?.used ?? state?.used ?? null;
-    if (typeof used === 'number' && used > 0) return used;
-    if (typeof used === 'string' && /^\d+$/.test(used)) return parseInt(used, 10);
-    return null;
-  } catch {
-    return null;
-  }
-}
+// readVolumeUsedBytes(pool, volumePath) — the actual used bytes of a storage
+// volume (snapshot-list enrichment, export-info estimates). It lives in
+// lib/app-storage/host-measures.js, which the application storage check
+// shares; same `incus query …/state` read, same null on any failure. A 0 is
+// returned as 0 (a fresh snapshot); the whole-volume callers treat 0 as unknown.
 
 // Resolve the storage pool a container's root device lives on.
 // Returns the pool name or null on any failure. Cached at the call
@@ -4140,7 +4118,8 @@ lxcRouter.get('/containers/:name/export-info', async (req, res) => {
   // indeterminate progress bar.
   const pool = await resolveContainerPool(incusName);
   if (pool) {
-    estimatedBytes = await readVolumeUsedBytes(pool, `container/${incusName}`);
+    // A whole volume never holds 0 bytes: 0 means the driver did not say.
+    estimatedBytes = (await readVolumeUsedBytes(pool, `container/${incusName}`)) || null;
   }
 
   res.json({ success: true, estimatedBytes, isRunning });
@@ -4227,7 +4206,8 @@ lxcRouter.get('/containers/:name/snapshot/:snapshotName/export-info', async (req
   let estimatedBytes = null;
   const pool = await resolveContainerPool(incusName);
   if (pool) {
-    estimatedBytes = await readVolumeUsedBytes(pool, `container/${incusName}/snapshots/${snapshotName}`);
+    // The snapshot's own used bytes are not what its export holds; 0 is no estimate.
+    estimatedBytes = (await readVolumeUsedBytes(pool, `container/${incusName}/snapshots/${snapshotName}`)) || null;
   }
   res.json({ success: true, estimatedBytes });
 });
@@ -4481,7 +4461,7 @@ async function refreshSnapshotJob(job) {
         const r = await execOnHost(`incus query /1.0/instances/${job.incusName}?recursion=1 2>/dev/null`, { timeout: 5000 });
         const instance = JSON.parse(r.stdout || '{}');
         const pool = instance?.expanded_devices?.root?.pool || instance?.devices?.root?.pool;
-        if (pool) sizeBytes = await readVolumeUsedBytes(pool, `container/${job.incusName}`);
+        if (pool) sizeBytes = (await readVolumeUsedBytes(pool, `container/${job.incusName}`)) || null;
       } catch {}
       db.prepare('INSERT INTO snapshot_durations (container_name, duration_ms, size_bytes) VALUES (?, ?, ?)').run(job.name, duration, sizeBytes);
       // Keep at most the 20 most recent rows per container.

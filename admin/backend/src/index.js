@@ -73,6 +73,8 @@ import { attachAgentLiveServer } from './routes/agent-live-ws.js';
 import { randomUUID } from 'node:crypto';
 import { createDemoFixtureWriter } from './lib/operational-demo-fixtures.js';
 import { runHostCapture } from './lib/lxc-zip.js';
+import { spawnHost } from './lib/host-exec.js';
+import { startSnapshotRetention, readRetentionInstance } from './lib/snapshot-retention.js';
 import { decryptSecret } from './lib/secrets.js';
 import { postNotification } from './lib/notifications.js';
 import { backupRoot, ensureRoot } from './lib/backup-local-store.js';
@@ -787,6 +789,34 @@ if (mock2Gate.enabled) {
       audit: (req, action, id, detail) => logAudit(req.user?.id ?? null, action, 'application', String(id), detail, req.ip),
     });
     app.use('/api/application-releases', authenticateToken, blockPendingRole, applicationRouter);
+    // Application storage (docs/features/application-storage.md): the read-only
+    // storage check, cleanup (sudo; the cleanup service plugs in through
+    // setCleanupService — until then those endpoints answer 503), retention
+    // policies and the per-application alert monitor. Its state lives in
+    // mock2.db, so it is mounted only here. A failure leaves Dev Studio up.
+    try {
+      const [{ registerAppStorageRoutes }, appStorageLib] = await Promise.all([
+        import('./routes/app-storage.js'), import('./lib/app-storage/index.js'),
+      ]);
+      const appStorage = await appStorageLib.getAppStorage();
+      const appStorageRouter = express.Router();
+      registerAppStorageRoutes(appStorageRouter, {
+        storage: () => appStorage,
+        cleanupService: () => appStorage.cleanupService(),
+        requireAdmin, requireSudo,
+        audit: (req, action, targetKey, detail) => logAudit(req.user?.id ?? null, action, 'app_storage', String(targetKey), detail, req.ip),
+      });
+      app.use('/api/app-storage', authenticateToken, blockPendingRole, appStorageRouter);
+      // The cleanup service (requestCleanup/getCleanup/listCleanups): cleanups
+      // run as storage_cleanup jobs on the host runner.
+      const { createBackendCleanupService } = await import('./lib/app-storage/cleanup-deps.js');
+      appStorage.setCleanupService(createBackendCleanupService({ storage: appStorage, mainDb: getDb(), logAudit }));
+      // Every 15 minutes (PROXYPILOT_APP_STORAGE_MONITOR_CRON); off with PROXYPILOT_DISABLE_CRONS=1.
+      appStorageLib.startAppStorageMonitor({ storage: appStorage })
+        .catch((err) => console.error('[app-storage] monitor failed to start:', err?.message || err));
+    } catch (err) {
+      console.error('[app-storage] failed to initialize — leaving /api/app-storage unmounted:', err?.message || err);
+    }
     // Re-publish enabled parent-domain Caddy site files after restart (M1).
     // Non-fatal — never blocks the listen even if Caddy is momentarily down.
     reconcileMock2Domains().catch((err) =>
@@ -1009,6 +1039,29 @@ attachAgentLiveServer(server,{agentRuns:browserRuntime.live,pathKind:'browser-ag
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`ProxyPilot backend running on port ${PORT}`);
+  const stopSnapshotRetention = startSnapshotRetention({
+    spawnMonitor: () => spawnHost('incus', ['--force-local', '--project', 'default', 'monitor', '--type=lifecycle', '--format=json'], { stdio: ['ignore', 'pipe', 'pipe'] }),
+    listInstance: name => readRetentionInstance(async ([bin, ...argv], options) => {
+      const result = await runHostCapture(bin, argv, options);
+      return { ...result, code: result.timedOut ? 124 : result.status };
+    }, name),
+    deleteSnapshot: async (name, snapshot) => {
+      const { runLifecycle } = await import('./mock2/ops.js');
+      return runLifecycle({ kind: 'snapshot_delete', containerName: name, snapshot: snapshot.name, expect: { created_at: snapshot.created_at }, via: 'snapshot-retention' });
+    },
+  });
+  process.once('exit', stopSnapshotRetention);
+  // Application storage: enabled storage-policy snapshot rules feed the limits
+  // above (re-read on every use), and the retention scheduler runs the
+  // periodic cleanup rules — over the same shared instance the routes use
+  // (its check service and cleanup service). Without Dev Studio there is no
+  // mock2.db (none is created here) and the static snapshot file stays in force.
+  if (mock2Gate.enabled) {
+    Promise.all([import('./lib/app-storage/index.js'), import('./lib/app-storage/cleanup-deps.js')])
+      .then(async ([lib, deps]) => deps.startAppStorageAutomation({ storage: await lib.getAppStorage(), reconcileSnapshots: stopSnapshotRetention.reconcile, log: (...a) => console.log(...a) }))
+      .then((stop) => process.once('exit', stop))
+      .catch((err) => console.error('[app-storage] retention automation did not start:', err?.message || err));
+  }
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
 

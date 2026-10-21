@@ -1902,4 +1902,77 @@ export const MOCK2_MIGRATIONS = [
     name: 'mock2_existing_application_releases',
     up: d => d.exec(APPLICATION_RELEASE_SCHEMA),
   },
+  {
+    // Application storage (docs/features/application-storage.md): storage
+    // checks (newest 20 per target), per-target retention policies, cleanup
+    // records (newest 50 per target) and usage samples (30 days) — new tables
+    // only. Records once when the feature arrived (app_storage.installed_at):
+    // targets created after it get the "new application" defaults, earlier
+    // ones get every destructive rule as a proposal that runs only once
+    // someone turns it on. INSERT OR IGNORE keeps the first time forever.
+    // The DDL is written out here, never read from the store module, so a
+    // later edit of store.js cannot change what this migration does.
+    version: 560,
+    name: 'mock2_app_storage',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_storage_checks (
+          id TEXT PRIMARY KEY,
+          target_key TEXT NOT NULL,
+          origin TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT,
+          requested_by TEXT,
+          result_json TEXT,
+          error_code TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_storage_checks_target ON mock2_storage_checks(target_key, started_at);
+        CREATE TABLE IF NOT EXISTS mock2_storage_policies (
+          target_key TEXT PRIMARY KEY,
+          revision INTEGER NOT NULL,
+          policy_json TEXT NOT NULL,
+          source TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          updated_by TEXT,
+          proposed_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS mock2_storage_cleanups (
+          id TEXT PRIMARY KEY,
+          target_key TEXT NOT NULL,
+          check_id TEXT NOT NULL,
+          origin TEXT NOT NULL,
+          status TEXT NOT NULL,
+          job_id TEXT,
+          scope TEXT,
+          selection_json TEXT NOT NULL,
+          result_json TEXT,
+          created_at TEXT NOT NULL,
+          finished_at TEXT,
+          requested_by TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_storage_cleanups_target ON mock2_storage_cleanups(target_key, created_at);
+        CREATE TABLE IF NOT EXISTS mock2_storage_samples (
+          target_key TEXT NOT NULL,
+          sampled_at TEXT NOT NULL,
+          used_bytes INTEGER NOT NULL,
+          PRIMARY KEY (target_key, sampled_at)
+        );
+      `);
+      d.prepare(`INSERT OR IGNORE INTO mock2_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, NULL)`)
+        .run('app_storage.installed_at', new Date().toISOString(), new Date().toISOString());
+    },
+  },
+  {
+    // Application storage: a small summary of each finished check (totals and
+    // what can be cleaned up) beside its full result, so the overview and the
+    // monitor never parse the full result. Additive; rows from before it are
+    // summarised on first read.
+    version: 561,
+    name: 'mock2_app_storage_check_summary',
+    up: (d) => {
+      const cols = d.prepare('PRAGMA table_info(mock2_storage_checks)').all().map((c) => c.name);
+      if (!cols.includes('summary_json')) d.exec('ALTER TABLE mock2_storage_checks ADD COLUMN summary_json TEXT');
+    },
+  },
 ];

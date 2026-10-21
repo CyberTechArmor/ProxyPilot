@@ -47,6 +47,8 @@ import {
 } from './logic.js';
 import { runDeployOperation, PreviousWriterAliveError, ContainmentUnavailableError } from './deploy-op.js';
 import { APPLICATION_JOB_KINDS, runApplicationReleaseOperation } from './application-deploy-op.js';
+import { APPLICATION_RELEASE_RETENTION } from './application-release-cleanup.js';
+import { STORAGE_CLEANUP_JOB_KINDS, runStorageCleanupOperation } from './storage-cleanup-op.js';
 import { runRestoreDbOperation } from './restore-db-op.js';
 import { runRestoreSnapshotOperation } from './restore-snapshot-op.js';
 import { runRetrySecretsOperation } from './retry-secrets-op.js';
@@ -188,7 +190,19 @@ export function recordUncertainSetup(db, { job, lock, owner, reason, nowMs }) {
 const KEEPALIVE_MS = 10_000;
 const JOB_CLAIM = Symbol('job claim');
 
-export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {}, pomeriumDeps = {}, infisicalDeps = {}, openbaoDeps = {}, vaultwardenDeps = {}, fullPlatformDeps = {}, keycloakLdapDeps = {}, applicationService = null }) {
+// appStorage (optional; the host runner supplies it): an object, or a
+// function returning (a promise of) one, with
+//   releaseRetention(targetId) → the effective release retention (storage
+//                                policy, else the static file) for release jobs
+//   previousLive(applicationId) → { sha, path } | null, the release live
+//                                before the current one (release-history.js)
+//   cleanup                    → the storage cleanup op's deps (or a function
+//                                returning them): store, resolveTarget,
+//                                activityFor, performCheck, monitor, audit,
+//                                exports, getCheck, policyFor
+export async function resolveAppStorage(appStorage) { return typeof appStorage === 'function' ? appStorage() : appStorage; }
+
+export async function executeJob(job, { db, owner, exec, reviewLogin = null, nowMs = () => Date.now(), log = () => {}, inputsDir = null, sleep = null, keepAliveMs = KEEPALIVE_MS, reservedPortsPath = null, keycloakDeps = {}, pomeriumDeps = {}, infisicalDeps = {}, openbaoDeps = {}, vaultwardenDeps = {}, fullPlatformDeps = {}, keycloakLdapDeps = {}, applicationService = null, appStorage = null }) {
   const epoch = Number(job.epoch);
   let keepLease = false;
   let keepAlive = null;
@@ -336,7 +350,14 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         progress: data => { guard(); recordProgress(db, { id: job.id, owner, epoch, progress: data, nowMs: nowMs() }); },
         event: (kind, message, data = null) => { guard(); event(kind, message, data); } };
       try {
-        const result = await runApplicationReleaseOperation({ kind: job.kind, params: p, exec, job: handle, prior: parseJson(p.recoveryOf ? getJob(db, p.recoveryOf)?.checkpoint_json : job.checkpoint_json), service: applicationService, ...(sleep ? { sleep } : {}) });
+        // The storage policy's release retention when the runner supplies it,
+        // else the static file (the op's own default).
+        const releaseRetention = appStorage ? async (targetId) => { const s = await resolveAppStorage(appStorage); return typeof s?.releaseRetention === 'function' ? s.releaseRetention(targetId) : (Object.hasOwn(APPLICATION_RELEASE_RETENTION, targetId) ? APPLICATION_RELEASE_RETENTION[targetId] : null); } : null;
+        // Which release ran before the live one, from the deploy history
+        // (release-history.js over the runner's mock2.db); without it the
+        // guest removes no release.
+        const releaseHistory = appStorage ? async (applicationId) => { const s = await resolveAppStorage(appStorage); return typeof s?.previousLive === 'function' ? s.previousLive(applicationId) : null; } : null;
+        const result = await runApplicationReleaseOperation({ kind: job.kind, params: p, exec, job: handle, prior: parseJson(p.recoveryOf ? getJob(db, p.recoveryOf)?.checkpoint_json : job.checkpoint_json), service: applicationService, releaseRetention, releaseHistory, ...(sleep ? { sleep } : {}) });
         guard();
         if (p.recoveryOf && result.recovered) annotateTerminalOutcome(db, { id: p.recoveryOf, fromStatus: 'recovery_required', outcome: 'application_recovered', reason: `Recovered and verified by application release job ${job.id}.`, nowMs: nowMs() });
         recordProgress(db, { id: job.id, owner, epoch, progress: { result }, nowMs: nowMs() });
@@ -350,6 +371,39 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
           return fin('recovery_required', 'application_recovery_required', 'The release was interrupted during promotion or rollback. Its previous target is preserved in the checkpoint; verify and recover it before another write.', { state: 'recovery_required', previousTarget: cp.previousTarget, nextTarget: cp.nextTarget });
         }
         return fin('failed', e.applicationReleaseSafe ? e.code : 'application_operation_failed', e.applicationReleaseSafe ? e.message : 'The application release failed; raw command output is withheld.', { state: 'not_verified' });
+      }
+    }
+    if (STORAGE_CLEANUP_JOB_KINDS.includes(job.kind)) {
+      // Modelled on the application branch: the independent host runner only,
+      // a keep-alive for long removals, every guest command fenced. The plan
+      // carries the cleanup id; the op reads everything else from the row.
+      if (parseOwner(owner)?.kind !== 'runner' || typeof exec.host !== 'function') {
+        requeueJob(db, { id: job.id, by: owner, reason: 'Storage cleanup requires the independent host runner.', notBeforeMs: nowMs() + 30000, nowMs: nowMs() });
+        return { status: 'requeued', outcome: 'runner_unavailable' };
+      }
+      let lost = false;
+      const renew = () => {
+        if (!(heartbeat(db, { id: job.id, owner, epoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0) || !(renewLock(db, { app: job.app, owner, epoch: lockEpoch, leaseMs: LEASE_MS, nowMs: nowMs() }) > 0)) lost = true;
+      };
+      const guard = (opts = {}) => { if (lost) throw new FencedError(job.id); renew(); if (lost) throw new FencedError(job.id); fence(opts); };
+      keepAlive = setInterval(() => { try { renew(); } catch { lost = true; } }, Math.max(20, keepAliveMs)); keepAlive.unref?.();
+      const handle = { id: job.id, app: job.app, epoch, fence: guard,
+        checkpoint: (phase, data) => { guard(); checkpoint(db, { id: job.id, owner, epoch, phase, checkpoint: data, message: phase, nowMs: nowMs() }); },
+        progress: data => { guard(); recordProgress(db, { id: job.id, owner, epoch, progress: data, nowMs: nowMs() }); },
+        event: (kind, message, data = null) => { guard(); event(kind, message, data); } };
+      let cleanupDeps = null;
+      try { const s = await resolveAppStorage(appStorage); cleanupDeps = typeof s?.cleanup === 'function' ? await s.cleanup() : s?.cleanup || null; } catch (e) { log('storage cleanup deps', e?.message || e); cleanupDeps = null; }
+      if (!cleanupDeps?.store) return fin('failed', 'dependencies_unavailable', 'The storage cleanup is not available on this runner; nothing was removed.');
+      try {
+        const out = await runStorageCleanupOperation({ params: p, exec, job: handle, prior: parseJson(job.checkpoint_json), db, deps: cleanupDeps, now: nowMs, ...(sleep ? { sleep } : {}) });
+        guard();
+        recordProgress(db, { id: job.id, owner, epoch, progress: { result: { cleanup: out.result } }, nowMs: nowMs() });
+        const r = out.result || {};
+        const summary = `Storage cleanup ${out.status}: ${(r.removed || []).length} removed, ${(r.skipped || []).length} skipped, ${(r.failed || []).length} failed; health ${r.health || 'not-checked'}.`;
+        return fin(out.status === 'refused' ? 'refused' : out.status === 'failed' ? 'failed' : 'succeeded', out.status, summary, null);
+      } catch (e) {
+        if (e?.code === 'FENCED' || e?.code === 'CANCELLED') throw e;
+        return fin('failed', e?.storageCleanupSafe ? e.code : 'storage_cleanup_failed', e?.storageCleanupSafe ? e.message : 'The storage cleanup failed; command output is withheld.');
       }
     }
     if (['keycloak_setup','pomerium_apply','infisical_apply','openbao_apply','vaultwarden_apply','full_platform_apply','keycloak_ldap'].includes(job.kind)) {

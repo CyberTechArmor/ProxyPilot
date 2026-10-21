@@ -8,7 +8,7 @@ import { SETTLING_NOTE } from '../lib/setup-engine/storage-cleanup-op.js';
 import { createCleanupService } from '../lib/app-storage/cleanup-service.js';
 import { submitStorageCleanupJob } from '../lib/app-storage/cleanup-deps.js';
 import { unwrapContained } from './helpers/scripted-guest.js';
-import { memoryStore, nodusTarget, nodusCheck, projectTarget, ids, releasePath, RELEASES } from './helpers/app-storage-world.js';
+import { memoryStore, nodusTarget, nodusCheck, projectTarget, ids, releasePath, RELEASES } from './helpers/app-storage-cleanup-world.js';
 
 const RUNNER = ownerIdentity({ kind: 'runner', host: 'test', pid: 1, instance: 'one' });
 const RUNNER2 = ownerIdentity({ kind: 'runner', host: 'test', pid: 2, instance: 'two' });

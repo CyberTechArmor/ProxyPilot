@@ -98,7 +98,7 @@ async function request(endpoint, options = {}, _retryOnSudo = true) {
   if (!response.ok && (noReplay || typeof data.error === 'object')) {
     const failure = data.error;
     const verificationCode = data.sudo_required === true ? 'ELEVATION_REQUIRED' : data.control_verification_required === true ? 'AGENT_CONTROL_VERIFICATION_REQUIRED' : undefined;
-    throw new ApiError(typeof failure === 'object' && failure?.message ? failure.message : typeof failure === 'string' && failure ? failure : typeof data.message === 'string' ? data.message : 'Request refused. Verify your session, then submit explicitly.', response.status, { code: failure?.code ?? (typeof data.code === 'string' && /^[A-Z_]{1,64}$/.test(data.code) ? data.code : verificationCode), next_action: failure?.next_action });
+    throw new ApiError(typeof failure === 'object' && failure?.message ? failure.message : typeof failure === 'string' && failure ? failure : typeof data.message === 'string' ? data.message : 'Request refused. Verify your session, then submit explicitly.', response.status, { code: failure?.code ?? (typeof data.code === 'string' && /^[A-Z_]{1,64}$/.test(data.code) ? data.code : verificationCode), next_action: failure?.next_action, ...(failure && typeof failure === 'object' ? { details: failure } : {}) });
   }
 
   if (response.status === 401) {
@@ -2282,6 +2282,28 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ op, params, plan_token, confirm: true, ...(passphrase ? { passphrase } : {}) }),
       }),
+  },
+
+  // Application storage (backend routes/app-storage.js, DESIGN §6). Reads and
+  // the storage check request are plain admin calls (a check only reads); the
+  // cleanup POST and the policy PUT are sudo-gated, and request() opens the
+  // sudo modal and replays the call once — that prompt is the one approval,
+  // nothing else asks again. Errors arrive as { error: { code, message } }.
+  // A cleanup with nothing selected is never sent (app-storage-model.mjs
+  // cleanupRequest); the server would answer { changed: false } anyway.
+  appStorage: {
+    overview: () => request('/app-storage/overview'),
+    target: (kind, id) => request(`/app-storage/targets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`),
+    requestCheck: (kind, id) =>
+      request(`/app-storage/targets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/checks`, { method: 'POST', body: '{}' }),
+    check: (checkId) => request(`/app-storage/checks/${encodeURIComponent(checkId)}`),
+    // body = { checkId, items, snapshots, exports, acknowledgeSnapshotLoss, scope }
+    requestCleanup: (kind, id, body) =>
+      request(`/app-storage/targets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/cleanups`, { method: 'POST', body: JSON.stringify(body) }),
+    cleanup: (cleanupId) => request(`/app-storage/cleanups/${encodeURIComponent(cleanupId)}`),
+    policy: (kind, id) => request(`/app-storage/targets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/policy`),
+    savePolicy: (kind, id, policy, expectedRevision) =>
+      request(`/app-storage/targets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/policy`, { method: 'PUT', body: JSON.stringify({ policy, expectedRevision }) }),
   },
 
   // Migrations — adopt a running application from another server, VM or

@@ -1,4 +1,5 @@
 import { APPLICATION_RELEASE_SCHEMA } from './application-profile.js';
+import { APP_STORAGE_SCHEMA, INSTALLED_AT_SETTING } from '../lib/app-storage/store.js';
 
 // Mock2 schema migrations — block 500, applied ONLY inside data/db/mock2.db
 // (ADR-001: the Mock2 state file, including model API keys, does not exist
@@ -1901,5 +1902,21 @@ export const MOCK2_MIGRATIONS = [
     version: 559,
     name: 'mock2_existing_application_releases',
     up: d => d.exec(APPLICATION_RELEASE_SCHEMA),
+  },
+  {
+    // Application storage (docs/features/application-storage.md): storage
+    // checks (newest 20 per target), per-target retention policies, cleanup
+    // records (newest 50 per target) and usage samples (30 days) — new tables
+    // only. Records once when the feature arrived (app_storage.installed_at):
+    // targets created after it get the "new application" defaults, earlier
+    // ones get every destructive rule as a proposal that runs only once
+    // someone turns it on. INSERT OR IGNORE keeps the first time forever.
+    version: 560,
+    name: 'mock2_app_storage',
+    up: (d) => {
+      d.exec(APP_STORAGE_SCHEMA);
+      d.prepare(`INSERT OR IGNORE INTO mock2_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, NULL)`)
+        .run(INSTALLED_AT_SETTING, new Date().toISOString(), new Date().toISOString());
+    },
   },
 ];

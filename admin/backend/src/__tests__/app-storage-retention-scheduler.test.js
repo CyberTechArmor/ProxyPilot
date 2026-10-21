@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRetentionScheduler, schedulerSelection, enabledPeriodicRules, DEFAULT_CRON } from '../lib/app-storage/retention-scheduler.js';
-import { nodusCheck, nodusTarget, ids } from './helpers/app-storage-world.js';
+import { nodusCheck, nodusTarget, ids } from './helpers/app-storage-cleanup-world.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const on = (over = {}) => ({ enabled: true, ...over });

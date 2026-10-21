@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCleanupService, busyFrom, GUEST_BUSY_MESSAGE } from '../lib/app-storage/cleanup-service.js';
 import { NOTHING_SELECTED } from '../lib/app-storage/selection.js';
-import { memoryStore, nodusTarget, nodusCheck, ids } from './helpers/app-storage-world.js';
+import { memoryStore, nodusTarget, nodusCheck, ids } from './helpers/app-storage-cleanup-world.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const CLEANUP_ID = 'cln_11111111-1111-4111-8111-111111111111';

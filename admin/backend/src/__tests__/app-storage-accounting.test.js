@@ -181,3 +181,19 @@ test('a dir or btrfs pool: the figures are the shared host filesystem\'s, flagge
   assert.equal(r.items.some((it) => it.kind === 'pseudo'), false, 'no "Not measured individually" from host-wide numbers');
   assert.ok(r.notes.some((n) => /shares the host filesystem/.test(n)));
 });
+
+test('several snapshots but not all free at least the sum of their figures; one frees exactly its own; a 0 figure is 0', () => {
+  const snap = (id, bytes) => item({ id, category: 'snapshots', kind: 'snapshot', location: 'host', allocatedBytes: bytes, logicalBytes: bytes });
+  const check = { items: [snap('s1', 40e6), snap('s2', 30e6), snap('s3', 0)], totals: { dataset: { snapshotsBytes: 200e6 } } };
+  const two = estimateSelection(check, { snapshots: ['s1', 's2'] });
+  assert.equal(two.snapshotBytes, 70e6);
+  assert.equal(two.precision, 'at-least', 'a subset is a lower bound');
+  assert.ok(two.notes.includes('Deleting these snapshots together frees at least this much: space that only they share is freed too, but it is in none of their own figures.'));
+  const one = estimateSelection(check, { snapshots: ['s2'] });
+  assert.equal(one.precision, 'exact');
+  assert.equal(one.notes.some((x) => /at least this much/.test(x)), false);
+  const fresh = estimateSelection(check, { snapshots: ['s3'] });
+  assert.deepEqual([fresh.snapshotBytes, fresh.precision], [0, 'exact']);
+  const every = estimateSelection(check, { snapshots: ['s1', 's2', 's3'] });
+  assert.deepEqual([every.snapshotBytes, every.precision], [200e6, 'estimate']);
+});

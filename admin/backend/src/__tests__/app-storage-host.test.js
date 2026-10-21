@@ -15,7 +15,11 @@ test('readVolumeUsedBytes runs `incus query …/state` as argv and returns used 
   assert.deepEqual(calls[0][0], ['incus', 'query', '/1.0/storage-pools/Storage/volumes/container/pp-nodus/snapshots/s1/state']);
   assert.equal(calls[0][1].timeoutMs, 5000);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"used":"99"}' }) }), 99);
-  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":0}}' }) }), null);
+  // 0 is a real figure: a fresh snapshot holds nothing of its own yet.
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":0}}' }) }), 0);
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":"0"}}' }) }), 0);
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":-1}}' }) }), null);
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{}}' }) }), null);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 1, stdout: '' }) }), null);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: 'not json' }) }), null);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => { throw new Error('boom'); } }), null);

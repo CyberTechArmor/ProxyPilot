@@ -184,7 +184,11 @@ export function estimateSelection(check, { items = [], snapshots = [], exports =
     snapBytes = held;
     out.notes.push('Every snapshot is selected, so the space all of them hold together is counted (about).');
   }
-  if (pickedSnaps.length) out.precision = worsePrecision(out.precision, everySnapshot ? 'estimate' : 'exact');
+  // One snapshot frees exactly what only it holds. Several (but not all) free
+  // at least the sum: space only they share is in none of their own figures.
+  const snapshotSubset = pickedSnaps.length > 1 && !everySnapshot;
+  if (pickedSnaps.length) out.precision = worsePrecision(out.precision, everySnapshot ? 'estimate' : snapshotSubset ? 'at-least' : 'exact');
+  if (snapshotSubset) out.notes.push('Deleting these snapshots together frees at least this much: space that only they share is freed too, but it is in none of their own figures.');
   for (const it of pickedSnaps) add(it, n(it.allocatedBytes));
   if (everySnapshot && cats.has('snapshots')) cats.get('snapshots').bytes = snapBytes;
   out.snapshotBytes = snapBytes;

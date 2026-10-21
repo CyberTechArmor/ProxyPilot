@@ -569,3 +569,12 @@ test('the snapshot note says in plain words why the figures add up to less', () 
   assert.equal(note, "Each snapshot's figure is the space only that snapshot holds. Space that several snapshots share is freed only when all of them are deleted, so the figures add up to less than the total held by snapshots.");
   assert.doesNotMatch(r.notes.join(' '), /blocks/);
 });
+
+test('a snapshot that holds 0 bytes of its own is 0, exact, with no "could not be read" hint', () => {
+  const host = { status: 'Running', running: true, unmeasured: [], exports: [], snapshots: [{ name: 'fresh', createdAt: new Date(NOW - 60_000).toISOString(), usedBytes: 0 }, { name: 'unknown', createdAt: new Date(NOW - W.DAY).toISOString(), usedBytes: null }] };
+  const r = run(appTarget, facts([], []), { host });
+  const fresh = r.items.find((it) => it.kind === 'snapshot' && it.label === 'fresh');
+  assert.deepEqual([fresh.allocatedBytes, fresh.precision, fresh.hint], [0, 'exact', null]);
+  const unknown = r.items.find((it) => it.kind === 'snapshot' && it.label === 'unknown');
+  assert.deepEqual([unknown.precision, unknown.hint], ['estimate', 'The space only this snapshot holds could not be read.']);
+});

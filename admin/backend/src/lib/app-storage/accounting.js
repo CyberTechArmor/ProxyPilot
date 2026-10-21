@@ -109,7 +109,7 @@ export function summarizeCategories(items) {
  */
 export function estimateSelection(check, { items = [], snapshots = [], exports = [] } = {}) {
   const byId = new Map((check?.items || []).map((it) => [it.id, it]));
-  const out = { count: 0, bytes: 0, diskBytes: 0, memoryBytes: 0, snapshotBytes: 0, exportBytes: 0, logicalBytes: 0, precision: 'exact', notes: [], byCategory: [], unknownIds: [], notEligible: [] };
+  const out = { count: 0, bytes: 0, diskBytes: 0, memoryBytes: 0, snapshotBytes: 0, exportBytes: 0, logicalBytes: 0, hardLinkedBytes: 0, precision: 'exact', notes: [], byCategory: [], unknownIds: [], notEligible: [] };
   const seen = new Set();
   const cats = new Map();
   const take = (id, expect) => {
@@ -129,11 +129,12 @@ export function estimateSelection(check, { items = [], snapshots = [], exports =
     c.count += 1; c.bytes += bytes; cats.set(it.category, c);
     out.precision = worsePrecision(out.precision, it.precision);
   };
-  let memorySelected = false; let journalSelected = false;
+  let memorySelected = false; let journalSelected = false; let hardLinked = 0;
   for (const id of items) {
     const it = take(id, 'items'); if (!it) continue;
     const bytes = eligibleBytesOf(it);
     if (it.kind === 'journal') { journalSelected = true; out.precision = worsePrecision(out.precision, 'estimate'); }
+    if (Number(it.hardLinkedBytes) > 0) { hardLinked += Number(it.hardLinkedBytes); out.precision = worsePrecision(out.precision, 'estimate'); }
     if (it.memoryBacked) { out.memoryBytes += bytes; memorySelected = true; } else out.diskBytes += bytes;
     out.logicalBytes += it.kind === 'journal' ? bytes : n(it.logicalBytes);
     add(it, bytes);
@@ -154,11 +155,13 @@ export function estimateSelection(check, { items = [], snapshots = [], exports =
   out.snapshotBytes = snapBytes;
   for (const id of exports) { const it = take(id, 'exports'); if (!it) continue; out.exportBytes += n(it.allocatedBytes); add(it, n(it.allocatedBytes)); }
   out.bytes = out.diskBytes + out.memoryBytes + out.snapshotBytes + out.exportBytes;
+  out.hardLinkedBytes = hardLinked;
   out.byCategory = CATEGORIES.filter((c) => cats.has(c.key)).map((c) => ({ ...cats.get(c.key), label: c.label }));
   const fileItems = out.count - pickedSnaps.length - (out.byCategory.find((c) => c.key === 'exports')?.count || 0);
   if (fileItems > 0 && allSnaps.length > 0 && !everySnapshot) out.notes.push('Space held by snapshots is only returned after those snapshots are deleted.');
   if (memorySelected) out.notes.push(`Memory, not disk: ${formatBytes(out.memoryBytes)} of this is temporary files held in memory.`);
   if (journalSelected) out.notes.push('The system journal figure is an estimate of what trimming it to its limit frees.');
   if (anyPartial) out.notes.push('Some sizes are lower bounds because their measurement stopped early.');
+  if (hardLinked > 0) out.notes.push(`About ${formatBytes(hardLinked)} of this is in files that also exist elsewhere under another name (hard links); that space is freed only when every copy is removed, so the figure is an estimate.`);
   return out;
 }

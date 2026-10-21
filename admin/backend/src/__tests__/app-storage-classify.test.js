@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { performCheck } from '../lib/app-storage/perform-check.js';
 import { classify, buildContext, scanPlanFor, namePattern, isSealedRelease, GROUP_THRESHOLD } from '../lib/app-storage/classify.js';
 import * as W from './helpers/app-storage-world.js';
+import { policySelection, DEFAULT_POLICY } from '../lib/app-storage/policy.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const CHECK_ID = 'chk_00000000-0000-4000-8000-000000000001';
@@ -354,4 +355,53 @@ test('a stopped guest, a guest without Node.js and an unknown guest are reported
   const broken = await performCheck({ target: W.nodusTarget(world), exec: null, now: NOW, checkId: CHECK_ID });
   assert.equal(broken.status, 'failed');
   assert.equal(broken.error.code, 'NO_EXECUTOR');
+});
+
+/* ---- review finding 4 / 14: an unknown age never satisfies an age rule ---- */
+
+test('a walk cut by its budget, or with unreadable parts, has an unknown age: Needs a look, never eligible by age', () => {
+  const nodusApp = { ...appTarget, profile: { ...appTarget.profile, releaseRoot: '/opt/r' } };
+  const f = facts([{ path: '/tmp', depth: 1, role: 'temp' }, { path: '/opt/r/.staging', depth: 1, role: 'staging' }, { path: '/root/.cache', depth: 1, role: 'cache' }], [
+    { path: '/tmp/playwright-transform-cache-989', r: 0, partial: true, logicalBytes: 0, allocatedBytes: 4096 },
+    { path: '/tmp/half-readable', r: 0, inaccessible: 2, inaccessiblePaths: ['/tmp/half-readable/a', '/tmp/half-readable/b'] },
+    { path: '/tmp/fully-measured-old', r: 0 },
+    { path: `/opt/r/.staging/${W.OLD_JOB}-1`, r: 1, partial: true },
+    { path: '/root/.cache/pip', r: 2, partial: true },
+  ]);
+  const r = run(nodusApp, f);
+  const cut = r.at('/tmp/playwright-transform-cache-989');
+  assert.deepEqual([cut.status, cut.precision, cut.action], ['investigate', 'at-least', null]);
+  assert.equal(cut.reason, 'Too large to measure fully here, so how recently it changed is unknown.');
+  const half = r.at('/tmp/half-readable');
+  assert.deepEqual([half.status, half.precision], ['investigate', 'at-least'], 'unreadable parts lower the precision');
+  assert.equal(half.reason, 'Parts of it could not be read, so how recently it changed is unknown.');
+  assert.equal(half.hint, '2 parts could not be read and are not counted: /tmp/half-readable/a, /tmp/half-readable/b.');
+  assert.deepEqual(half.inaccessiblePaths, ['/tmp/half-readable/a', '/tmp/half-readable/b']);
+  assert.equal(r.at('/tmp/fully-measured-old').status, 'eligible');
+  assert.equal(r.at(`/opt/r/.staging/${W.OLD_JOB}-1`).status, 'investigate');
+  // A cache has no age rule in the check, but the automatic caches rule (maxAgeDays) never picks a partial one.
+  const pip = r.at('/root/.cache/pip');
+  assert.deepEqual([pip.status, pip.precision], ['eligible', 'at-least']);
+  const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  assert.deepEqual(sel.items.map((id) => r.items.find((x) => x.id === id).path), ['/tmp/fully-measured-old']);
+});
+
+test('project check results and host transfer bundles cut by the budget are not eligible either', () => {
+  const p = run(projTarget, facts([{ path: '/srv/app/.mock2/evidence', depth: 1, role: 'evidence' }], [{ path: '/srv/app/.mock2/evidence/run-old', r: 0, partial: true }]));
+  assert.equal(p.at('/srv/app/.mock2/evidence/run-old').status, 'investigate');
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: '/var/lib/proxypilot/application-release-transfers', role: 'host-transfers' }], items: [{ path: '/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3', r: 0, type: 'dir', partial: true, mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const a = run(appTarget, facts([], []), { host });
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').status, 'investigate');
+});
+
+test('on real files, a check cut by its budget makes nothing eligible through an age rule', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const world = W.buildNodusGuest(root, NOW);
+  const r = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root }), now: NOW, checkId: CHECK_ID, listExports: () => [], budget: { ms: 60_000, entries: 60 } });
+  assert.equal(r.guest.budgetExceeded, true);
+  const partialEligible = r.items.filter((it) => it.status === 'eligible' && it.precision === 'at-least');
+  assert.ok(partialEligible.every((it) => ['caches', 'test_reports'].includes(it.category)), partialEligible.map((it) => it.path).join(', '));
+  assert.ok(r.items.some((it) => it.status === 'investigate' && /how recently it changed is unknown/.test(it.reason)));
+  const sel = policySelection(r, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  assert.ok(sel.items.every((id) => r.items.find((x) => x.id === id).precision !== 'at-least'));
 });

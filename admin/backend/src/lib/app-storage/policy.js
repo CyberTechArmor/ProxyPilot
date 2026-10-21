@@ -297,7 +297,8 @@ function meetsRule(ruleKey, item, ruleCfg, nowMs) {
 
 function selectForRule(check, ruleKey, ruleCfg, nowMs) {
   const cats = RULES[ruleKey]?.categories || [];
-  return (check?.items || []).filter((it) => it.status === 'eligible' && cats.includes(it.category) && !SKIP_KINDS.has(it.kind) && meetsRule(ruleKey, it, ruleCfg, nowMs));
+  // A partial measurement has an unknown age: no age rule selects it.
+  return (check?.items || []).filter((it) => it.status === 'eligible' && cats.includes(it.category) && !SKIP_KINDS.has(it.kind) && (it.kind === 'journal' || it.precision !== 'at-least') && meetsRule(ruleKey, it, ruleCfg, nowMs));
 }
 
 const itemBytes = (it) => (it.kind === 'journal' ? Number(it.recoverableBytes || 0) : Number(it.allocatedBytes || 0));

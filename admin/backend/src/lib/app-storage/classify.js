@@ -162,8 +162,30 @@ export function buildContext({ target, activity = {}, facts = null } = {}) {
 
 const kindOf = (it) => ({ dir: 'directory', file: 'file', link: 'link', other: 'other' }[it.type] || 'other');
 
+// A walk cut short by the budget, or one with unreadable parts, does not know
+// how recently its contents changed: an age rule can never decide for it.
+const AGE_ROLES = new Set(['temp', 'staging', 'evidence', 'log', 'host-transfers']);
+export function unknownAgeReason(it) {
+  if (it?.partial) return 'Too large to measure fully here, so how recently it changed is unknown.';
+  if (Number(it?.inaccessible) > 0) return 'Parts of it could not be read, so how recently it changed is unknown.';
+  return null;
+}
+function ageGuard(cls, it, role) {
+  if (!cls || cls.status !== 'eligible' || !AGE_ROLES.has(role)) return cls;
+  const why = unknownAgeReason(it);
+  return why ? { ...cls, status: 'investigate', reason: why, action: null } : cls;
+}
+
+function unreadableHint(it) {
+  const n = Number(it.inaccessible || 0);
+  if (!n) return null;
+  const paths = (it.inaccessiblePaths || []).slice(0, 3);
+  return `${n === 1 ? 'One part' : `${n} parts`} could not be read and ${n === 1 ? 'is' : 'are'} not counted${paths.length ? `: ${paths.join(', ')}${n > paths.length ? ', …' : ''}` : ''}.`;
+}
+
 function fileItem(it, root, cls) {
   const status = cls.status;
+  const unreadable = unreadableHint(it);
   return {
     id: null,
     category: cls.category,
@@ -173,12 +195,13 @@ function fileItem(it, root, cls) {
     sub: cls.sub || null,
     status,
     reason: cls.reason,
-    hint: cls.hint || null,
+    hint: [cls.hint, unreadable].filter(Boolean).join(' ') || null,
     logicalBytes: Number(it.logicalBytes || 0),
     allocatedBytes: Number(it.allocatedBytes || 0),
     files: Number(it.files || 0),
     newestMtimeMs: Number.isFinite(it.newestMtimeMs) ? it.newestMtimeMs : (Number.isFinite(it.mtimeMs) ? it.mtimeMs : null),
-    precision: it.partial ? 'at-least' : 'exact',
+    precision: it.partial || Number(it.inaccessible || 0) > 0 ? 'at-least' : 'exact',
+    hardLinkedBytes: Number(it.hardLinkedBytes || 0),
     memoryBacked: !!it.memoryBacked,
     action: status === 'eligible' ? (cls.action || 'remove') : null,
     location: cls.location || 'guest',
@@ -477,7 +500,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
       continue;
     }
     if (['db-dump', 'unit-copy', 'env-copy'].includes(root.role)) { historyRole.push({ it, root }); continue; }
-    const cls = classifyGuestItem(it, root, env);
+    const cls = ageGuard(classifyGuestItem(it, root, env), it, root.role);
     if (!cls) continue;
     const item = fileItem(it, root, cls);
     if (root.role === 'temp') temp.push(item); else items.push(item);
@@ -490,7 +513,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
   for (const it of host?.hostFiles?.items || []) {
     if (it.missing) continue;
     const root = hostRoots[it.r] || {};
-    if (root.role === 'host-transfers') items.push(fileItem(it, root, transferClass(it, env)));
+    if (root.role === 'host-transfers') items.push(fileItem(it, root, ageGuard(transferClass(it, env), it, root.role)));
     else if (root.role === 'host-repo') items.push(fileItem(it, root, { category: 'data', status: 'protected', location: 'host', reason: "The project's source history, kept by ProxyPilot (on the host)." }));
   }
   // Snapshots and exports: separate selections.

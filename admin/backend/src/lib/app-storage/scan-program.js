@@ -134,7 +134,7 @@ function measure(it,r){
   const parent=lst(p.posix.dirname(it.path));if(parent&&parent.dev!==st.dev)it.mountPoint=true;
   if(openAnc.has(it.path))it.inUse=true;
   if(st.isSymbolicLink()){it.type='link';it.linkTarget=safeReadlink(it.path);try{it.linkTargetExists=it.linkTarget!==null&&fs.existsSync(p.posix.resolve(p.posix.dirname(it.path),it.linkTarget))}catch(e){it.linkTargetExists=false}return}
-  if(st.isFile()){it.type='file';it.files=1;if(st.nlink>1){const k=st.dev+':'+st.ino;if(seen.has(k)){it.sharedBytes=it.allocatedBytes;it.logicalBytes=0;it.allocatedBytes=0}else seen.add(k)}return}
+  if(st.isFile()){it.type='file';it.files=1;if(st.nlink>1){const k=st.dev+':'+st.ino;if(seen.has(k)){it.sharedBytes=it.allocatedBytes;it.logicalBytes=0;it.allocatedBytes=0}else{seen.add(k);it.hardLinkedBytes=it.allocatedBytes}}return}
   if(!st.isDirectory()){it.type='other';it.special=st.isSocket()?'socket':st.isFIFO()?'fifo':st.isCharacterDevice()||st.isBlockDevice()?'device':'other';return}
   it.type='dir';
   if(r.marker){const mk=p.posix.join(it.path,'.proxypilot-release.json');const ms=lst(mk);if(ms){if(ms.isFile()&&!ms.isSymbolicLink()){const txt=readSmall(mk);let j=null;try{j=txt?JSON.parse(txt):null}catch(e){j=null}it.marker=j&&typeof j==='object'?{present:true,sha:HEX40.test(j.sha||'')?j.sha:null,treeSha:HEX40.test(j.treeSha||'')?j.treeSha:null,artifactDigest:HEX64.test(j.artifactDigest||'')?j.artifactDigest:null}:{present:true,unreadable:true}}else it.marker={present:false,unsafe:true}}}
@@ -156,7 +156,7 @@ function measure(it,r){
       if(s.mtimeMs>it.newestMtimeMs)it.newestMtimeMs=s.mtimeMs;
       if(s.isDirectory()&&s.dev!==st.dev){it.crossesDevice=true;continue}
       let lb=s.size,ab=s.blocks*512;
-      if(s.isFile()&&s.nlink>1){const k=s.dev+':'+s.ino;if(seen.has(k)){it.sharedBytes+=ab;continue}seen.add(k)}
+      if(s.isFile()&&s.nlink>1){const k=s.dev+':'+s.ino;if(seen.has(k)){it.sharedBytes+=ab;continue}seen.add(k);it.hardLinkedBytes=(it.hardLinkedBytes||0)+ab}
       if(s.isDirectory()){it.dirs++;stack.push(f)}else if(s.isFile())it.files++;else if(s.isSymbolicLink())it.links++;else it.others++;
       it.logicalBytes+=lb;it.allocatedBytes+=ab;
       if(bd){const b=bd.get(rel0===null?n:rel0);if(b){b.logicalBytes+=lb;b.allocatedBytes+=ab;if(s.isFile())b.files++}}

@@ -129,3 +129,16 @@ test('on real files: a hard link shared between a data folder and a leftover is 
   assert.equal(pseudo.allocatedBytes, r.totals.unattributedBytes);
   assert.equal(pseudo.precision, 'estimate');
 });
+
+test('hard links: the collector records hard-linked bytes per item and the estimate says the figure is uncertain', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const world = W.buildNodusGuest(root, NOW);
+  const r = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root }), now: NOW, checkId: 'chk_00000000-0000-4000-8000-000000000003', listExports: () => [] });
+  const data = r.items.find((it) => it.path === '/var/lib/nodus');
+  assert.ok(data.hardLinkedBytes >= 900, 'the item that carries the shared file records its hard-linked bytes');
+  const est = estimateSelection({ items: [item({ id: 'x', allocatedBytes: 5000, hardLinkedBytes: 4096 })] }, { items: ['x'] });
+  assert.equal(est.precision, 'estimate');
+  assert.equal(est.hardLinkedBytes, 4096);
+  assert.ok(est.notes.some((n) => /hard links/.test(n)));
+  assert.equal(estimateSelection({ items: [item({ id: 'y', allocatedBytes: 5000 })] }, { items: ['y'] }).precision, 'exact');
+});

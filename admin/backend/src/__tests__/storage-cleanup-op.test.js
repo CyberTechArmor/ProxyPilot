@@ -145,7 +145,7 @@ test('an approved cleanup removes in order, deletes snapshots and exports, check
   const host = w.calls.find(c => c.host?.[1] === '-e');
   assert.equal(JSON.parse(Buffer.from(host.host[3], 'base64').toString()).approvedRoots[0], '/var/lib/proxypilot/application-release-transfers', 'host items run the same program on the host');
   const release = w.calls.find(c => c.action === 'remove-release');
-  assert.equal(release.rollback, releasePath(2)); assert.deepEqual(release.protect, [releasePath(2)]);
+  assert.equal(release.rollback, releasePath(2)); assert.equal(release.previousSha, '2'.repeat(40), 'the guest decides the roles from the recorded facts');
   assert.equal(w.state.snapshots.some(s => s.name === 'snap-1'), false);
   assert.equal(w.state.exports.has(7), false);
   assert.ok(w.calls.some(c => c.action === 'verify' && c.expected === releasePath(3) && c.sha === '3'.repeat(40)), 'the deploy op verify proves the live release is untouched');

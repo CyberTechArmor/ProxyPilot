@@ -35,15 +35,30 @@ or successful sealing. Interrupted cleanup is retried on the next validation.
 the newest other sealed releases until the number is reached. With the default
 of 2 that is exactly live + rollback.
 
-- The rollback release is the release the previous live version runs from:
-  the path ProxyPilot recorded for the previous live commit, else the sealed
-  release whose marker names that commit, else the newest other sealed
-  release.
+- The rollback release is the release that was live before the current one.
+  It is identified, never guessed from folder times:
+  1. the path ProxyPilot recorded for the previous live commit;
+  2. else the sealed release whose marker names that commit;
+  3. else the deploy history: the other release most recently recorded live
+     before the current one (`lib/app-storage/release-history.js`
+     `previousLiveRelease`, passed in by the host runner).
+- Verifying a live release keeps its recorded previous release (before
+  2026-10 `application_verify` dropped it).
+- **When nothing identifies the previous release, no release is removed.**
+  Every sealed release is kept and the storage check shows them as protected:
+  "The previous release could not be identified, so no release is removed
+  until the next deployment records it." Workspaces and bundles are still
+  cleaned. A validated release that was never deployed is never taken for the
+  rollback release.
+- These roles are decided in one place, `describeReleases`
+  (`lib/setup-engine/application-release-cleanup.js`), which the release job,
+  the storage cleanup and the storage check all use.
 - The **release being validated** is kept and is **not counted**, so starting a
   validation no longer deletes the rollback release. (Before 2026-10 the
   incoming release was counted, and the first cleanup of every validation
   removed the previous release before the new build had even passed.)
-- A **validated candidate still waiting to be deployed** is kept and not
+- A **validated candidate still waiting to be deployed** (the newest passed
+  validation made after the live release was recorded) is kept and not
   counted.
 - Roots backing preserved shared models/data are always kept and not counted.
 
@@ -56,7 +71,8 @@ Only recognized sealed release directories are eligible; unknown files and
 staging symlinks are left alone. The live pointer is rechecked before each
 obsolete-release deletion. The same predicates decide a release a person
 selects in a storage cleanup (`removeSelectedRelease`): live, rollback,
-candidate and backing roots are refused there too.
+candidate and backing roots are refused there too, and so is every release
+while the rollback release is unknown.
 
 ## Trimming before sealing
 

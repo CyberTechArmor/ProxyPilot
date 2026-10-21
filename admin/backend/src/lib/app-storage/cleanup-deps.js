@@ -32,6 +32,7 @@ import { resolveTarget, activityFor } from './targets.js';
 import { resolvePolicy, effectiveReleaseRetention, effectiveSnapshotLimits } from './policy.js';
 import { performCheck, newCheckId } from './perform-check.js';
 import { postCleanupAlert } from './monitor.js';
+import { previousLiveRelease } from './release-history.js';
 import { checkView } from './check-service.js';
 import { exportsFor } from './host-measures.js';
 
@@ -187,6 +188,8 @@ export function cleanupDepsFor({ mainDb, mock2Db, now = () => Date.now(), bell =
     monitor: { postCleanupAlert: (key, outcome, opts = {}) => postCleanupAlert(key, outcome, { ...opts, notifications: bell }) },
     audit: auditInto(mainDb),
     exports,
+    // The release that ran before the live one (deploy history; null = unknown).
+    previousLive: target => (target?.kind === 'application' ? previousLiveRelease(mock2Db, target.id) : null),
   };
 }
 
@@ -208,6 +211,11 @@ export function runnerAppStorage({ mainDb, mock2DbPath, openDb = null, log = () 
       return effectiveReleaseRetention(targetId, { mock2Db: db2 });
     },
     async cleanup() { return cleanupDepsFor({ mainDb, mock2Db: await mock2Db() }); },
+    // For release jobs: the deploy history's previous release; null (no
+    // release is removed) when mock2.db cannot be read.
+    async previousLive(applicationId) {
+      try { return previousLiveRelease(await mock2Db(), applicationId); } catch (e) { log('previous release unknown:', e?.message || e); return null; }
+    },
     // The policy-fed snapshot limits for this runner's own snapshot jobs.
     async installSnapshotLimits() {
       const db2 = await mock2Db();

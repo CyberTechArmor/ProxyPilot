@@ -11,11 +11,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeRoot, buildNodusGuest, scriptedExec, databases, registerNodus, cleanupRoot, LIVE, ROLLBACK, OLD, CANDIDATE, ADOPTED, OLD_JOB, ACTIVE_JOB, RELEASE_ROOT } from './helpers/app-storage-world.js';
+import { makeRoot, buildNodusGuest, scriptedExec, databases, registerNodus, cleanupRoot, LIVE, ROLLBACK, ROLLBACK_SHA, OLD, CANDIDATE, ADOPTED, OLD_JOB, ACTIVE_JOB, RELEASE_ROOT } from './helpers/app-storage-world.js';
 import { unwrapContained } from './helpers/scripted-guest.js';
 import { createAppStorage } from '../lib/app-storage/index.js';
 import { createBackendCleanupService, cleanupDepsFor, bellOver, auditInto, runnerExportStore } from '../lib/app-storage/cleanup-deps.js';
 import { CLEANUP_PROGRAM } from '../lib/app-storage/cleanup-program.js';
+import { ROLLBACK_UNKNOWN_REASON } from '../lib/setup-engine/application-release-cleanup.js';
 import { ensureSetupEngineSchema, claimNextJob, getJob, runnerHeartbeat } from '../lib/setup-engine/store.js';
 import { executeJob } from '../lib/setup-engine/executor.js';
 import { ownerIdentity } from '../lib/setup-engine/logic.js';
@@ -72,7 +73,7 @@ function worldExec(root) {
   return { exec, state };
 }
 
-async function setup(t) {
+async function setup(t, { history = true } = {}) {
   const root = makeRoot('pp-cleanup-e2e-');
   t.after(() => cleanupRoot(root));
   const world = buildNodusGuest(root, Date.now());
@@ -81,7 +82,13 @@ async function setup(t) {
   mainDb.exec(`CREATE TABLE audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE notifications (id TEXT PRIMARY KEY, level TEXT NOT NULL, title TEXT NOT NULL, body TEXT, source TEXT NOT NULL, source_id TEXT, dedupe_key TEXT, seen_count INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT, dismissed_at TEXT);
     CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);`);
-  registerNodus(mock2Db, world);
+  const appId = registerNodus(mock2Db, world);
+  // The deploy history: the rollback release was live before the current one
+  // (the live record itself has previousSha null, as on the real Nodus).
+  if (history) {
+    mock2Db.prepare("INSERT INTO mock2_application_candidates (application_id, sha, profile_revision, profile_digest, tree_sha, checkpoint_at, hygiene_json, validation_json, live_json) VALUES (?, ?, 6, ?, ?, ?, '{}', ?, ?)")
+      .run(appId, ROLLBACK_SHA, 'd'.repeat(64), 'b'.repeat(40), new Date(Date.now() - 5 * 86_400_000).toISOString(), JSON.stringify({ passed: true, releasePath: `${RELEASE_ROOT}/${ROLLBACK}` }), JSON.stringify({ sha: ROLLBACK_SHA, releasePath: `${RELEASE_ROOT}/${ROLLBACK}`, verifiedAt: new Date(Date.now() - 4 * 86_400_000).toISOString() }));
+  }
   // A ready prepared download of the guest, recorded under its short name.
   const exportFile = path.join(root, 'exports', 'nodus-20261003.tar.zst');
   fs.mkdirSync(path.dirname(exportFile), { recursive: true }); fs.writeFileSync(exportFile, Buffer.alloc(5000, 1));
@@ -189,6 +196,19 @@ test('end to end: an item changed between the check and the cleanup is skipped, 
   assert.deepEqual(quarantined(w.root), []);
   // A skip is not a failure: no cleanup alert is raised.
   assert.equal(w.mainDb.prepare("SELECT COUNT(*) AS n FROM notifications WHERE dedupe_key = 'appstorage:cleanup:application:1' AND dismissed_at IS NULL").get().n, 0);
+});
+
+test('end to end: without a recorded previous release or deploy history, no release is removed', { skip }, async t => {
+  const w = await setup(t, { history: false });
+  const old = w.check.items.find(it => it.path === `${RELEASE_ROOT}/${OLD}`);
+  assert.ok(old);
+  // Once the check shares describeReleases it keeps the release itself; until then the job refuses it.
+  if (old.status !== 'eligible') { assert.equal(old.status, 'protected'); return; }
+  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: [old.id], origin: 'user', userId: 1 });
+  await w.runJob();
+  const cleanup = await w.storage.cleanupService().getCleanup(approved.cleanupId);
+  assert.deepEqual(cleanup.result.skipped, [{ id: old.id, label: old.label, reason: ROLLBACK_UNKNOWN_REASON }]);
+  assert.equal(fs.existsSync(w.P(`${RELEASE_ROOT}/${OLD}/.proxypilot-release.json`)), true);
 });
 
 test('a cleanup alert the host runner posts is delivered once by the backend monitor', { skip }, async t => {

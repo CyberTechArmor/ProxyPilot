@@ -127,7 +127,7 @@ process.stdout.write(JSON.stringify(out));
 function guestScript(data) { return `node -e ${quote(GUEST_PROGRAM)} ${quote(Buffer.from(JSON.stringify(data)).toString('base64'))}\n`; }
 export { guestScript as applicationGuestScript };
 
-export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, releaseRetention = null, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, releaseRetention = null, releaseHistory = null, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
   if (typeof service === 'function') service = await service();
   if (!service) { const m = await import('../../mock2/application-releases.js'); service = await m.getApplicationReleaseService(); }
   const reference = { sha: params.sha, profileRevision: params.profileRevision, profileDigest: params.profileDigest };
@@ -143,11 +143,15 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   if (job.app !== container) throw safeError('GUEST_IDENTITY_MISMATCH', 'The saved profile does not match the locked application guest.');
   if (profile.digest !== params.profileDigest || profile.revision !== params.profileRevision || candidate.sha !== params.sha || candidate.treeSha !== params.treeSha) throw safeError('PROFILE_CHANGED', 'Saved application profile or candidate changed; create a new job.');
   const root = profile.releaseRoot || `/var/lib/proxypilot/application-releases/${params.applicationId}`;
-  // The recorded rollback release and the validated candidate waiting to be
-  // deployed are kept by retention; the guest re-derives the rest itself.
-  let releaseContext = { previousSha: null, rollback: null, protect: [] };
+  // The facts the guest decides the release roles from (describeReleases):
+  // the recorded previous release, the deploy history's previous release
+  // (releaseHistory → lib/app-storage/release-history.js) and the passed
+  // validations. With none of them the guest removes no release at all.
+  let releaseContext = { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] };
   if (retention && typeof service.getApplication === 'function') {
-    try { releaseContext = releaseContextFromApplication(await service.getApplication(params.applicationId), { root }); } catch { /* the guest falls back to the release markers */ }
+    let previousLive = null;
+    try { previousLive = typeof releaseHistory === 'function' ? await releaseHistory(params.applicationId) : null; } catch { previousLive = null; }
+    try { releaseContext = releaseContextFromApplication(await service.getApplication(params.applicationId), { root, previousLive }); } catch { /* no context: the guest removes no release */ }
   }
   const validation = candidate.validation || prepared.validation;
   const release = kind === 'application_validate' ? `${root}/${candidate.sha}-p${profile.revision}-${job.id}` : validation?.releasePath;
@@ -237,7 +241,16 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   mark('inspect'); const previous = await guest('inspect', { strict: true });
   if (!validation?.passed || !/^[a-f0-9]{64}$/.test(validation.artifactDigest || '') || validation.profileDigest !== profile.digest || validation.treeSha !== candidate.treeSha || typeof release !== 'string' || !release.startsWith(`${root}/${candidate.sha}-p${profile.revision}-`) || release.includes('/../')) throw safeError('VALIDATION_REQUIRED', 'This exact candidate, profile and release artifact need successful validation.');
   await guest('artifact', { release, sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest: validation.evidenceDigest, artifactDigest: validation.artifactDigest });
-  if (kind === 'application_verify') { const proof = await verify(release, candidate.sha, validation.artifactDigest); await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, evidenceDigest: digest(proof) }); return { ok: true, outcome: 'live_verified', verification: proof }; }
+  if (kind === 'application_verify') {
+    const proof = await verify(release, candidate.sha, validation.artifactDigest);
+    // Verifying what is live must not forget which release ran before it:
+    // the same release keeps its recorded previous release; a different one
+    // (live changed outside a deployment) had the recorded one before it.
+    const before = typeof service.getApplication === 'function' ? (await service.getApplication(params.applicationId))?.live || null : null;
+    const previousSha = before?.sha === candidate.sha ? (before.previousSha && before.previousSha !== candidate.sha ? before.previousSha : null) : (/^[a-f0-9]{40}$/.test(before?.sha || '') ? before.sha : null);
+    await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, ...(previousSha ? { previousSha } : {}), evidenceDigest: digest(proof) });
+    return { ok: true, outcome: 'live_verified', verification: proof };
+  }
   if (previous.target === release) { const proof = await verify(release, candidate.sha, validation.artifactDigest); return { ok: true, outcome: 'already_live', verification: proof }; }
   // Shared paths are attached only after validation. Scripts do not receive
   // production env files or shared data during the build/test phase.

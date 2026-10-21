@@ -194,6 +194,8 @@ const JOB_CLAIM = Symbol('job claim');
 // function returning (a promise of) one, with
 //   releaseRetention(targetId) → the effective release retention (storage
 //                                policy, else the static file) for release jobs
+//   previousLive(applicationId) → { sha, path } | null, the release live
+//                                before the current one (release-history.js)
 //   cleanup                    → the storage cleanup op's deps (or a function
 //                                returning them): store, resolveTarget,
 //                                activityFor, performCheck, monitor, audit,
@@ -351,7 +353,11 @@ export async function executeJob(job, { db, owner, exec, reviewLogin = null, now
         // The storage policy's release retention when the runner supplies it,
         // else the static file (the op's own default).
         const releaseRetention = appStorage ? async (targetId) => { const s = await resolveAppStorage(appStorage); return typeof s?.releaseRetention === 'function' ? s.releaseRetention(targetId) : (Object.hasOwn(APPLICATION_RELEASE_RETENTION, targetId) ? APPLICATION_RELEASE_RETENTION[targetId] : null); } : null;
-        const result = await runApplicationReleaseOperation({ kind: job.kind, params: p, exec, job: handle, prior: parseJson(p.recoveryOf ? getJob(db, p.recoveryOf)?.checkpoint_json : job.checkpoint_json), service: applicationService, releaseRetention, ...(sleep ? { sleep } : {}) });
+        // Which release ran before the live one, from the deploy history
+        // (release-history.js over the runner's mock2.db); without it the
+        // guest removes no release.
+        const releaseHistory = appStorage ? async (applicationId) => { const s = await resolveAppStorage(appStorage); return typeof s?.previousLive === 'function' ? s.previousLive(applicationId) : null; } : null;
+        const result = await runApplicationReleaseOperation({ kind: job.kind, params: p, exec, job: handle, prior: parseJson(p.recoveryOf ? getJob(db, p.recoveryOf)?.checkpoint_json : job.checkpoint_json), service: applicationService, releaseRetention, releaseHistory, ...(sleep ? { sleep } : {}) });
         guard();
         if (p.recoveryOf && result.recovered) annotateTerminalOutcome(db, { id: p.recoveryOf, fromStatus: 'recovery_required', outcome: 'application_recovered', reason: `Recovered and verified by application release job ${job.id}.`, nowMs: nowMs() });
         recordProgress(db, { id: job.id, owner, epoch, progress: { result }, nowMs: nowMs() });

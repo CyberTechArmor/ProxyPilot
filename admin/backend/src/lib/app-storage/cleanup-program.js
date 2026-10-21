@@ -109,7 +109,7 @@ try{
  if(a.action==='live'){
   const out={ok:true,live:null};
   if(normalAbs(a.sourceDir)){try{out.isLink=fs.lstatSync(a.sourceDir).isSymbolicLink();out.live=fs.realpathSync(a.sourceDir)}catch(e){out.liveError=e.code||'UNREADABLE'}}
-  if(a.profile&&a.profile.releaseRoot){try{const d=describeReleases(fs,p,a);out.releases={root:d.root,live:d.live,rollback:d.rollback,candidate:d.candidate,protect:[...d.protect],backing:[...d.backing],sealed:d.sealed.map(r=>({path:r.path,mtimeMs:r.mtimeMs,sha:r.sha}))}}catch(e){out.releasesError=codeOf(e)}}
+  if(a.profile&&a.profile.releaseRoot){try{const d=describeReleases(fs,p,a);out.releases={root:d.root,live:d.live,rollback:d.rollback,rollbackUnknown:d.rollbackUnknown===true,waiting:d.waiting||null,candidate:d.candidate,protect:[...d.protect],backing:[...d.backing],sealed:d.sealed.map(r=>({path:r.path,mtimeMs:r.mtimeMs,sha:r.sha}))}}catch(e){out.releasesError=codeOf(e)}}
   if(a.statfs)out.fs=statfsRoot();
   emit(out);
  }

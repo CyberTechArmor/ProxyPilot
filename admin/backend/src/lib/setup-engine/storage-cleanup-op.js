@@ -30,7 +30,7 @@ import {
 } from './guest-probes.js';
 import { applicationGuestScript } from './application-deploy-op.js';
 import { APPLICATION_JOB_KINDS } from './application-deploy-logic.js';
-import { releaseContextFromApplication } from './application-release-cleanup.js';
+import { releaseContextFromApplication, ROLLBACK_UNKNOWN_REASON } from './application-release-cleanup.js';
 import { readRetentionInstance } from '../snapshot-retention.js';
 import { cleanupProgramScript, cleanupProgramArgv, parseProgramOutput } from '../app-storage/cleanup-program.js';
 import { pathAllowed, approvedRootsFor, pathTargetFor, MIN_JOURNAL_BYTES } from '../app-storage/selection.js';
@@ -57,6 +57,7 @@ const REASONS = Object.freeze({
   RELEASE_IS_ROLLBACK: 'Now protected: kept so you can roll back to the previous version.',
   RELEASE_IS_CANDIDATE: 'Now protected: a validated release waiting to be deployed.',
   RELEASE_HOLDS_SHARED_DATA: 'Now protected: holds shared data that newer releases link to.',
+  ROLLBACK_UNKNOWN: ROLLBACK_UNKNOWN_REASON,
   NOT_A_SEALED_RELEASE: 'No longer a recognised release.',
   RELEASE_OUTSIDE_ROOT: 'Outside the release folder.',
   LIVE_RELEASE_CHANGED_DURING_CLEANUP: 'The live release changed during cleanup.',
@@ -200,7 +201,11 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     return finish(acc.removed.length || acc.failed.length ? 'partial' : 'refused', { reason });
   }
   const releaseRoot = target.kind === 'application' ? (target.profile?.releaseRoot || null) : null;
-  const relCtx = target.kind === 'application' ? releaseContextFromApplication(target, { root: releaseRoot }) : { previousSha: null, rollback: null, protect: [] };
+  // The release roles are decided in the guest (describeReleases) from the
+  // live record, the deploy history and the passed validations.
+  let previousLive = null;
+  if (target.kind === 'application') { try { previousLive = deps.previousLive ? await deps.previousLive(target) : null; } catch { previousLive = null; } }
+  const relCtx = target.kind === 'application' ? releaseContextFromApplication(target, { root: releaseRoot, previousLive }) : { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] };
   const sourceDir = target.kind === 'application' ? target.profile?.sourceDir || null : null;
   let liveInfo = null;
   if (!guestUnavailable) {
@@ -229,6 +234,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
       if (!r) return 'The release folder could not be read now, so no release was removed.';
       if (e.path === r.live) return REASONS.RELEASE_IS_LIVE;
       if (e.path === r.rollback) return REASONS.RELEASE_IS_ROLLBACK;
+      if (r.rollbackUnknown) return REASONS.ROLLBACK_UNKNOWN;
       if (e.path === r.candidate || (r.protect || []).includes(e.path)) return REASONS.RELEASE_IS_CANDIDATE;
       if ((r.backing || []).includes(e.path)) return REASONS.RELEASE_HOLDS_SHARED_DATA;
     }

@@ -44,12 +44,20 @@ export async function resolveReleaseRetention(source, targetId) {
 }
 
 const SHA_RE = /^[a-f0-9]{40}$/;
-// releaseContextFromApplication(app, { root }) → { previousSha, rollback,
-// protect } for the guest: the rollback release (the previous live
-// release's recorded path) and the newest validated candidate still waiting
-// to be deployed. Paths outside the release root are ignored; the guest
-// re-derives everything it can from the release markers anyway.
-export function releaseContextFromApplication(app, { root = null } = {}) {
+// What a stored release looks like to the guest when nothing identifies the
+// rollback release (the check shows this as the reason the releases are kept).
+export const ROLLBACK_UNKNOWN_REASON = 'The previous release could not be identified, so no release is removed until the next deployment records it.';
+
+// releaseContextFromApplication(app, { root, previousLive }) → the facts the
+// guest's describeReleases decides the release roles from:
+//   previousSha   the live record's previous release, when it names one
+//   rollback      that release's recorded folder (under the release root)
+//   previousLive  { sha, path } | null from the deploy history
+//                 (lib/app-storage/release-history.js previousLiveRelease)
+//   liveVerifiedAt, validated [{ sha, path, validatedAt }]
+//                 the passed validations, for the waiting candidate
+// Nothing here decides a role: describeReleases is the one definition.
+export function releaseContextFromApplication(app, { root = null, previousLive = null } = {}) {
   const live = app?.live || null;
   const under = x => typeof x === 'string' && x.startsWith('/') && !x.includes('/../') && (!root || x.startsWith(`${root}/`));
   const previousSha = live && SHA_RE.test(live.previousSha || '') && live.previousSha !== live.sha ? live.previousSha : null;
@@ -60,12 +68,11 @@ export function releaseContextFromApplication(app, { root = null } = {}) {
     const p = c?.live?.releasePath || c?.validation?.releasePath;
     if (under(p) && p !== live?.releasePath) rollback = p;
   }
-  const liveAt = Date.parse(live?.verifiedAt || '');
-  const waiting = candidates
-    .filter(c => c?.validation?.passed === true && under(c.validation.releasePath) && c.validation.releasePath !== live?.releasePath && c.sha !== live?.sha)
-    .filter(c => !Number.isFinite(liveAt) || Date.parse(c.checkpointAt || '') > liveAt)
-    .sort((a, b) => (Date.parse(b.checkpointAt || '') || 0) - (Date.parse(a.checkpointAt || '') || 0))[0]?.validation.releasePath || null;
-  return { previousSha, rollback, protect: [...new Set([rollback, waiting].filter(Boolean))] };
+  const history = previousLive && SHA_RE.test(previousLive.sha || '') ? { sha: previousLive.sha, path: under(previousLive.path) ? previousLive.path : null } : null;
+  const validated = candidates
+    .filter(c => c?.validation?.passed === true && SHA_RE.test(c.sha || '') && under(c.validation.releasePath))
+    .map(c => ({ sha: c.sha, path: c.validation.releasePath, validatedAt: c.validation.validatedAt || c.checkpointAt || null }));
+  return { previousSha, rollback, previousLive: history, liveVerifiedAt: live?.verifiedAt || null, validated };
 }
 
 // ── guest side ──────────────────────────────────────────────────────────
@@ -76,16 +83,25 @@ export function releaseContextFromApplication(app, { root = null } = {}) {
 // come from the saved profile, the owning job and the stored cleanup row; the
 // guest lease fences the whole operation.
 
-// describeReleases(fs, p, a) → the release root's protected set as the guest
-// sees it NOW:
+// describeReleases(fs, p, a) → the release root's roles as the guest sees
+// them NOW. This is the ONE definition of the roles; the storage check, the
+// storage cleanup and the release job's retention all read its output.
 //   live      realpath of the profile's sourceDir (always kept, counted)
 //   candidate a.release, the release being validated (kept, never counted)
 //   backing   release-root children that physically hold a preserved or env
 //             path, through any symlink chain (kept, never counted)
-//   protect   a.protect: the recorded rollback and waiting candidate (kept)
-//   rollback  a.rollback when it is a sealed release, else the sealed release
-//             whose marker names a.previousSha, else the newest other sealed
-//             release by mtime (kept, counted)
+//   rollback  the release that ran before live: a.rollback (its recorded
+//             folder) when sealed, else the sealed release whose marker names
+//             a.previousSha, else a.previousLive (deploy history: its folder,
+//             else its sha) — never chosen by folder time (kept, counted).
+//             null when the previous release is known but not a sealed
+//             release here (for example the adopted original).
+//   rollbackUnknown  true when nothing identifies the previous release; then
+//             every sealed release is in `protect` and nothing is removed
+//   waiting   the newest passed validation (a.validated) made after the live
+//             release was recorded (a.liveVerifiedAt), sealed, not live and
+//             not the rollback (kept, never counted)
+//   protect   waiting + a.protect (+ every sealed release when rollbackUnknown)
 //   sealed    recognised sealed releases, newest first
 export function describeReleases(fs, p, a) {
   const refuse = code => { throw new Error(code); };
@@ -132,26 +148,42 @@ export function describeReleases(fs, p, a) {
   sealed.sort((x, y) => (y.mtimeMs - x.mtimeMs) || (x.name < y.name ? 1 : x.name > y.name ? -1 : 0));
   const protect = new Set((Array.isArray(a.protect) ? a.protect : []).filter(x => typeof x === 'string' && p.dirname(x) === root));
   const isSealed = x => sealed.some(r => r.path === x);
+  const shaOk = x => typeof x === 'string' && /^[a-f0-9]{40}$/.test(x);
+  const bySha = sha => (sealed.find(r => r.sha === sha && r.path !== live && r.path !== candidate) || {}).path || null;
+  const history = a.previousLive && typeof a.previousLive === 'object' && shaOk(a.previousLive.sha) ? a.previousLive : null;
   let rollback = null;
   if (typeof a.rollback === 'string' && a.rollback !== live && isSealed(a.rollback)) rollback = a.rollback;
-  if (!rollback && /^[a-f0-9]{40}$/.test(a.previousSha || '')) rollback = (sealed.find(r => r.sha === a.previousSha && r.path !== live && r.path !== candidate) || {}).path || null;
-  if (!rollback) rollback = (sealed.find(r => r.path !== live && r.path !== candidate && !backing.has(r.path) && !protect.has(r.path)) || {}).path || null;
-  return { root, live, candidate, backing, protect, rollback, sealed };
+  if (!rollback && shaOk(a.previousSha)) rollback = bySha(a.previousSha);
+  if (!rollback && history) rollback = (typeof history.path === 'string' && history.path !== live && history.path !== candidate && isSealed(history.path)) ? history.path : bySha(history.sha);
+  // Known: the live record or the deploy history names the previous release
+  // (even when it is not a sealed release here). Unknown: keep everything.
+  const rollbackUnknown = !rollback && !shaOk(a.previousSha) && !history;
+  const liveAt = Date.parse(a.liveVerifiedAt || '');
+  const atOf = v => Date.parse(v.validatedAt || '') || 0;
+  const waiting = ((Array.isArray(a.validated) ? a.validated : [])
+    .filter(v => v && typeof v.path === 'string' && p.dirname(v.path) === root && v.path !== live && v.path !== rollback && isSealed(v.path))
+    .filter(v => !Number.isFinite(liveAt) || atOf(v) > liveAt)
+    .sort((x, y) => atOf(y) - atOf(x))[0] || {}).path || null;
+  if (waiting) protect.add(waiting);
+  if (rollbackUnknown) for (const r of sealed) if (r.path !== live) protect.add(r.path);
+  return { root, live, candidate, backing, protect, rollback, rollbackUnknown, waiting, sealed };
 }
 
 // cleanupReleaseArtifacts(fs, p, a) → { stagesRemoved, bundlesRemoved,
-// releasesRemoved }. Counting: the live release and the rollback release are
-// counted, then the newest other sealed releases until `keepReleases` are
-// kept; the release being validated, the waiting candidate (a.protect) and
-// backing roots are kept and never counted. So `keepReleases: 2` keeps live +
-// rollback, and the release under validation never pushes the rollback out.
+// releasesRemoved, rollbackUnknown? }. Counting: the live release and the
+// rollback release are counted, then the newest other sealed releases until
+// `keepReleases` are kept; the release being validated, the waiting candidate
+// and backing roots are kept and never counted. So `keepReleases: 2` keeps
+// live + rollback, and the release under validation never pushes the rollback
+// out. When the rollback is unknown every sealed release is protected and no
+// release is removed (workspaces and bundles still are).
 export function cleanupReleaseArtifacts(fs, p, a) {
   const refuse = message => { throw new Error(message); };
   const d = describeReleases(fs, p, a);
   const keepCount = a.retention?.keepReleases;
   if (!Number.isInteger(keepCount) || keepCount < 2 || keepCount > 20) refuse('INVALID_RELEASE_RETENTION');
   const stageRoot = p.join(d.root, '.staging');
-  const out = { stagesRemoved: 0, bundlesRemoved: 0, releasesRemoved: 0 };
+  const out = { stagesRemoved: 0, bundlesRemoved: 0, releasesRemoved: 0, ...(d.rollbackUnknown ? { rollbackUnknown: true } : {}) };
   const attemptName = /^[a-f0-9-]{36}-[1-9][0-9]*(?:\.bundle)?$/;
   if (fs.existsSync(stageRoot)) {
     const stat = fs.lstatSync(stageRoot);
@@ -204,6 +236,7 @@ export function removeSelectedRelease(fs, p, a, remove) {
   if (/^[a-f0-9]{40}$/.test(a.markerSha || '') && entry.sha !== a.markerSha) refuse('CHANGED_SINCE_CHECK');
   if (target === d.live) refuse('RELEASE_IS_LIVE');
   if (target === d.rollback) refuse('RELEASE_IS_ROLLBACK');
+  if (d.rollbackUnknown) refuse('ROLLBACK_UNKNOWN');
   if (target === d.candidate || d.protect.has(target)) refuse('RELEASE_IS_CANDIDATE');
   if (d.backing.has(target)) refuse('RELEASE_HOLDS_SHARED_DATA');
   if (fs.realpathSync(a.profile.sourceDir) !== d.live) refuse('LIVE_RELEASE_CHANGED_DURING_CLEANUP');

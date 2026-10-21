@@ -14,8 +14,11 @@
 // the history records it. A release that was rolled back FROM is never it:
 // live R5, rolled back to R4 → the previous release is R3, not the failed R5.
 // A live record written by a rollback (or an automatic restore) names the
-// release it replaced in `rollbackOf`; that release counts as rolled back
-// from until it is recorded live again later.
+// release it replaced in `rollbackOf`, and every live record carries the
+// accumulated list forward (`rolledBackFrom: [{ sha, at }]`) — a candidate
+// row keeps only its own last live record, so a second rollback to the same
+// release would otherwise erase the first. A release counts as rolled back
+// from until it is recorded live again after that rollback.
 // 1. The live record names its previous release (`previousSha`, written by a
 //    deployment) and that release was not rolled back from: that release,
 //    with the folder it was deployed from.
@@ -52,7 +55,13 @@ export function previousLiveFrom(live, rows = []) {
   const records = [live, ...list.map((r) => r.live).filter(Boolean)];
   const atOf = (x) => Date.parse(x?.verifiedAt || '');
   const lastLive = (sha) => Math.max(-Infinity, ...records.filter((x) => x.sha === sha).map(atOf).filter(Number.isFinite));
-  const rolledBackFrom = (sha) => records.some((x) => x.rollbackOf === sha && Number.isFinite(atOf(x)) && atOf(x) > lastLive(sha));
+  // Every rollback known: each record's own rollbackOf, and the accumulated
+  // list the live records carry forward.
+  const rollbacks = [
+    ...records.filter((x) => SHA_RE.test(x.rollbackOf || '')).map((x) => ({ sha: x.rollbackOf, at: atOf(x) })),
+    ...records.flatMap((x) => (Array.isArray(x.rolledBackFrom) ? x.rolledBackFrom : [])).filter((x) => x && SHA_RE.test(x.sha || '')).map((x) => ({ sha: x.sha, at: Date.parse(x.at || '') })),
+  ].filter((x) => Number.isFinite(x.at));
+  const rolledBackFrom = (sha) => rollbacks.some((x) => x.sha === sha && x.at > lastLive(sha));
   if (SHA_RE.test(live.previousSha || '') && live.previousSha !== live.sha && !rolledBackFrom(live.previousSha)) return { sha: live.previousSha, path: pathFor(live.previousSha) };
   const liveAt = Date.parse(live.verifiedAt || '');
   const before = list

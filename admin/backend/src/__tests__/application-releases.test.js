@@ -144,6 +144,11 @@ test('failed revalidation clears passed evidence; rollback to a prior untracked 
  // A rollback names the release it replaced, so the deploy history never takes that one for the previous release.
  const rolled=w.service.recordLive(app.id,{sha:w.first,profileDigest:app.profile.digest,jobId:'rollback',releasePath:'/previous',evidenceDigest:proof,restored:true,rollbackOf:c.sha});
  assert.equal(rolled.live.rollbackOf,c.sha);assert.equal(Object.hasOwn(restored.live,'rollbackOf'),false);
+ // Every rollback is carried forward from live record to live record (append-only).
+ const second=w.service.recordLive(app.id,{sha:w.first,profileDigest:app.profile.digest,jobId:'rollback-2',releasePath:'/previous',evidenceDigest:proof,restored:true,rollbackOf:w.second});
+ assert.deepEqual(second.live.rolledBackFrom.map(x=>x.sha),[c.sha,w.second]);
+ const after=w.service.recordLive(app.id,{sha:w.first,profileDigest:app.profile.digest,jobId:'verify',releasePath:'/previous',evidenceDigest:proof,restored:true});
+ assert.deepEqual(after.live.rolledBackFrom.map(x=>x.sha),[c.sha,w.second],'a later record without a rollback keeps the list');
  assert.throws(()=>w.service.recordLive(app.id,{sha:w.first,profileDigest:app.profile.digest,jobId:'x',releasePath:'/previous',evidenceDigest:proof,restored:true,rollbackOf:'abc'}),/rolled-back commit/);
 });
 test('explicit absent remote branch can be initialized only after live validation and exact readback',async t=>{

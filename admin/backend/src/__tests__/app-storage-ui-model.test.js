@@ -14,7 +14,7 @@ import {
   parseTargetKey, targetKeyOf, storageHref, headerFigures, ruleState, ruleForm, validateRuleForm, withRule,
   ruleFormChanged, alertsForm, validateAlertsForm, withAlerts, alertsFormChanged, gbToBytes, bytesToGb,
   effectFor, isCheckRunning, isCheckFinished, isCleanupFinished, NOTHING_SELECTED, ALL_ELIGIBLE_SCOPE,
-  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure, groupMemberNoun, itemHint,
+  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure, groupMemberNoun, itemHint, reclaimedParts,
 } from '../../../frontend/src/components/app-storage/app-storage-model.mjs';
 import { validatePolicy } from '../lib/app-storage/policy.js';
 import {
@@ -422,4 +422,14 @@ test('used figures are named by what they measure; rules say who changed them an
   // No text promises a built-in minimum that keeps running when a rule is off (review HIGH 1).
   const words = JSON.stringify([RULE_TEXT, POLICY_TEXT.description, Object.values(RULE_STATE_HINTS).map((f) => f('x'))]);
   for (const w of ['floor', 'built-in', 'static']) assert.equal(new RegExp(w, 'i').test(words), false, w);
+});
+
+test('the measured reclaim is shown by kind: files on disk, memory, the pool with snapshots (review M8, result side)', () => {
+  assert.deepEqual(reclaimedParts({ guestBytes: 65536, memoryBytes: null, datasetBytes: 0, settling: false }), [{ key: 'disk', bytes: 65536 }]);
+  assert.deepEqual(reclaimedParts({ guestBytes: 0, memoryBytes: 1.1e9, datasetBytes: 0 }), [{ key: 'disk', bytes: 0 }, { key: 'memory', bytes: 1.1e9 }]);
+  assert.deepEqual(reclaimedParts({ guestBytes: 0, memoryBytes: null, datasetBytes: 40e6 }, { snapshotsDeleted: true }), [{ key: 'disk', bytes: 0 }, { key: 'pool', bytes: 40e6 }]);
+  assert.deepEqual(reclaimedParts({ guestBytes: 0, memoryBytes: null, datasetBytes: 0 }, { snapshotsDeleted: true }), [{ key: 'disk', bytes: 0 }, { key: 'pool', bytes: 0 }], 'a deleted snapshot always shows the pool line');
+  assert.deepEqual(reclaimedParts({ guestBytes: -4096, memoryBytes: -1, datasetBytes: -1 }), [{ key: 'disk', bytes: 0 }, { key: 'memory', bytes: 0 }]);
+  assert.deepEqual(reclaimedParts(null), []);
+  assert.deepEqual(Object.keys(TEXT.reclaimedKinds), ['disk', 'memory', 'pool']);
 });

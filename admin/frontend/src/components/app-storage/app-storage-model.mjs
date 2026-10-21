@@ -436,6 +436,26 @@ export function cleanupEvents(job) {
     .slice(-20);
 }
 
+/**
+ * The measured reclaim by kind (WS2's result: reclaimed.guestBytes = files on
+ * disk in the container, memoryBytes = memory-backed folders such as /tmp,
+ * null when none was cleaned; datasetBytes = the pool, which is where
+ * deleted snapshots show). → [{ key: 'disk'|'memory'|'pool', bytes }]
+ * Memory is listed when it was measured; the pool when snapshots were
+ * deleted or it moved.
+ */
+export function reclaimedParts(reclaimed, { snapshotsDeleted = false } = {}) {
+  const r = reclaimed || {};
+  const parts = [];
+  const disk = reclaimedFigure(r.guestBytes);
+  if (disk != null) parts.push({ key: 'disk', bytes: disk });
+  const memory = reclaimedFigure(r.memoryBytes);
+  if (memory != null) parts.push({ key: 'memory', bytes: memory });
+  const pool = reclaimedFigure(r.datasetBytes);
+  if (pool != null && (pool > 0 || snapshotsDeleted)) parts.push({ key: 'pool', bytes: pool });
+  return parts;
+}
+
 /** Space reclaimed as measured: a negative or missing figure is reported as no change measured yet. */
 export function reclaimedFigure(bytes) {
   if (bytes == null || !Number.isFinite(Number(bytes))) return null;

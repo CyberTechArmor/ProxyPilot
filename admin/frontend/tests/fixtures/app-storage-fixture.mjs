@@ -19,6 +19,9 @@ export const PROJECT_KEY = 'project:7';
 export const CHECK_ID = 'chk_5b0f2c64-1d0e-4a7b-9c55-2e7f1a6b3c90';
 export const NEW_CHECK_ID = 'chk_8a1d4e20-6b3f-4c2a-8e11-9f0d7c5b2a41';
 export const CLEANUP_ID = 'cln_3e9a7c12-4f5b-4d6e-8a90-b1c2d3e4f5a6';
+// The cleanup job's own sentences (setup-engine/storage-cleanup-op.js).
+export const PARKED_REASON = 'It changed while the cleanup ran, so it was set aside (not removed) under a name starting with .pp-cleanup-hold-; check it before removing it.';
+export const SETTLING_NOTE = 'The filesystem may still be releasing space, or snapshots still hold it; check again in a few minutes.';
 
 const LIVE = '/opt/nodus-releases/3c932650511871784d485e98e1808b9e8b5c4fd5-p6-f3ec00f4-01ac-4fd0-a1bf-2e447ccc8709';
 const ROLLBACK = '/opt/nodus-releases/62a4fbff0c7d1e2a9b8c3d4e5f60718293a4b5c6-p6-b981f91d-8e7b-4e09-94cb-e93853de3d11';
@@ -249,8 +252,12 @@ export function cleanupResult(check, body, now = Date.now()) {
   const byId = new Map(check.items.map((i) => [i.id, i]));
   const chosen = [...body.items, ...body.snapshots, ...body.exports].map((id) => byId.get(id)).filter(Boolean);
   const [first, ...rest] = chosen;
-  const skipped = first ? [{ id: first.id, label: first.label, reason: 'Changed since the check: it was modified after the storage check, so it was left alone.' }] : [];
+  // Shaped like WS2's result (ws/storage-fixes 70929e70): a changed entry is
+  // set aside under .pp-cleanup-hold-* and named in `parked`.
+  const skipped = first ? [{ id: first.id, label: first.label, reason: PARKED_REASON, ...(first.path ? { parked: [`${first.path.replace(/\/[^/]+$/, '')}/.pp-cleanup-hold-${CLEANUP_ID.slice(4, 12)}-1`] } : {}) }] : [];
   const removed = rest.map((i) => ({ id: i.id, label: i.label, bytes: i.allocatedBytes }));
+  const memory = rest.filter((i) => i.memoryBacked);
+  const snaps = rest.filter((i) => i.kind === 'snapshot');
   const estimateBytes = chosen.reduce((n, i) => n + (i.recoverableBytes ?? i.allocatedBytes), 0);
   const reclaimed = Math.round(removed.reduce((n, i) => n + i.bytes, 0) * 0.4);
   return {
@@ -261,7 +268,13 @@ export function cleanupResult(check, body, now = Date.now()) {
       removed, skipped, failed: [],
       health: 'passed',
       estimateBytes,
-      reclaimed: { guestBytes: reclaimed, datasetBytes: Math.round(reclaimed * 0.9), settling: true },
+      reclaimed: {
+        guestBytes: reclaimed,
+        memoryBytes: memory.length ? memory.reduce((n, i) => n + i.allocatedBytes, 0) : null,
+        datasetBytes: Math.round(reclaimed * 0.9) + snaps.reduce((n, i) => n + i.allocatedBytes, 0),
+        settling: true,
+      },
+      notes: [SETTLING_NOTE],
       afterCheckId: NEW_CHECK_ID,
       remaining: { ...check.totals, guest: { ...check.totals.guest, usedBytes: check.totals.guest.usedBytes - reclaimed, availableBytes: check.totals.guest.availableBytes + reclaimed } },
     },

@@ -200,6 +200,8 @@ export const TEXT = {
   reclaimed: 'Space reclaimed (measured)',
   estimated: 'Estimated before',
   noChangeMeasured: 'No change measured yet',
+  reclaimedKinds: { disk: 'Files on disk', memory: 'Memory (such as /tmp)', pool: 'Pool space, with snapshots' },
+  parkedAs: 'Set aside as:',
   settling: 'The filesystem may still be releasing space, or snapshots still hold it; check again in a few minutes.',
   recentEvents: 'What happened',
   pastCleanups: 'Past cleanups',

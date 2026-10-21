@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { createWorld, USER } from './app-storage-harness.mjs';
-import { CHECK_ID, CLEANUP_ID, NEW_CHECK_ID, nodusCheck } from './fixtures/app-storage-fixture.mjs';
+import { CHECK_ID, CLEANUP_ID, NEW_CHECK_ID, PARKED_REASON, SETTLING_NOTE, nodusCheck } from './fixtures/app-storage-fixture.mjs';
 import { ALL_ELIGIBLE_SCOPE, SNAPSHOT_ACK, SNAPSHOT_WARNING } from '../src/components/app-storage/app-storage-text.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -277,10 +277,17 @@ try {
     assert.equal(new URL(page.url()).searchParams.get('cleanup'), CLEANUP_ID);
     const result = page.getByRole('dialog');
     await result.getByText('Cleanup finished, but some items were skipped or failed.').waitFor();
-    await result.getByRole('region', { name: 'Skipped' }).getByText('Changed since the check: it was modified after the storage check, so it was left alone.').waitFor();
+    const skippedRegion = result.getByRole('region', { name: 'Skipped' });
+    await skippedRegion.getByText(PARKED_REASON).waitFor();
+    await skippedRegion.getByText('Set aside as:').waitFor();
+    await skippedRegion.getByText(/\/opt\/nodus-releases\/\.pp-cleanup-hold-[a-f0-9]+-1$/).waitFor();
+    const reclaimedBox = result.getByTestId('reclaimed');
+    await reclaimedBox.getByText('Files on disk').waitFor();
+    await reclaimedBox.getByText('Pool space, with snapshots').waitFor();
+    assert.equal(await reclaimedBox.getByText('Memory (such as /tmp)').count(), 0, 'no memory line when nothing memory-backed was cleaned');
+    assert.equal(await result.getByText(SETTLING_NOTE).count(), 1, 'the settling note appears once');
     await result.getByRole('region', { name: 'Removed' }).getByText('pp-mcp-pre-resources-20261012-0912').waitFor();
     await result.getByText('The application is running and answered its health check.').waitFor();
-    await result.getByText('The filesystem may still be releasing space, or snapshots still hold it; check again in a few minutes.').waitFor();
     await result.getByText('Space reclaimed (measured)').waitFor();
     await result.getByText('Storage now').waitFor();
     await layoutCheck(page, width, 'result');
@@ -393,8 +400,22 @@ try {
     await dialog.getByRole('button', { name: 'Clean up 1 item' }).waitFor();
     await layoutCheck(page, 360, 'review-refused');
     assert.equal(world.state.cleanupPosts.length, 0);
-    assert.deepEqual(errors, []);
     ok('360px: CHECK_STALE offers "Run a new check"; NOT_ELIGIBLE marks the refused item with its reason and removes it on request');
+    // Then a memory-backed item too: the result measures memory apart from disk.
+    refusal = null;
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await dialog.waitFor({ state: 'detached' });
+    await page.getByRole('checkbox', { name: 'Select Abandoned browser download' }).check();
+    await review(page).click();
+    await dialog.getByRole('button', { name: 'Clean up 2 items' }).click();
+    await dialog.getByText('Cleanup result').waitFor({ timeout: 15000 });
+    const box = dialog.getByTestId('reclaimed');
+    await box.getByText('Memory (such as /tmp)').waitFor();
+    await box.getByText('138 MB', { exact: true }).waitFor();
+    await box.getByText('Files on disk').waitFor();
+    await layoutCheck(page, 360, 'result-memory');
+    assert.deepEqual(errors, []);
+    ok('360px: cleaning a memory-backed item shows memory freed apart from files on disk');
     await context.close();
   }
 

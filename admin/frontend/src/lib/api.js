@@ -1721,6 +1721,10 @@ export const api = {
         // Research mode — Plan's deeper register: web search + doc retrieval,
         // ending in a phased build-ready plan.
         ...(opts.research ? { research: true } : {}),
+        // The person's own words when the question carries a mode preamble
+        // (Plan): the server resolves "continue"/"stop" against them, and they
+        // become the investigation task's goal.
+        ...(opts.said ? { said: opts.said } : {}),
       }),
     }),
   mock2AskStatus: (projectId) => request(`/mock2/projects/${projectId}/ask/status`),
@@ -1764,6 +1768,9 @@ export const api = {
         // A Redo: the prior attempt's change record rides as context server-side
         // and route-time cards are skipped.
         ...(opts.redo ? { redo: true } : {}),
+        // The person's own words when the instruction carries a mode preamble
+        // (Design): what "continue"/"stop" routing reads.
+        ...(opts.said ? { said: opts.said } : {}),
       }),
     }),
   // `since` = the highest activity seq the caller already has; the server then
@@ -1784,6 +1791,33 @@ export const api = {
   // the last checkpoint, and requeues orphaned queue entries. 409 if the build
   // is actually alive.
   mock2RestartBuild: (id) => request(`/mock2/projects/${id}/build-restart`, { method: 'POST' }),
+  // Task continuity: the build asks and investigations Flightdeck remembers
+  // apart from the chat (the database is authoritative; the project's
+  // state/tasks/<key>/ files only mirror it). Each returns TaskShape objects;
+  // scope 'unfinished' | 'all'. The chat poll already carries the current one
+  // as `current_task`.
+  mock2ListTasks: (projectId, { scope, limit } = {}) => {
+    const qs = new URLSearchParams();
+    if (scope) qs.set('scope', scope);
+    if (limit) qs.set('limit', String(limit));
+    const q = qs.toString();
+    return request(`/mock2/projects/${projectId}/tasks${q ? `?${q}` : ''}`);
+  },
+  mock2GetTask: (projectId, key) =>
+    request(`/mock2/projects/${projectId}/tasks/${encodeURIComponent(key)}`),
+  // Resume an unfinished task: a build continues from its checkpoint and
+  // checks what was uncertain before repeating anything; an investigation
+  // continues read-only. `message` (optional, ≤ 4000 chars) rides along as
+  // guidance. 202 { routed: { action, task, note } }; 409 when not resumable.
+  mock2ResumeTask: (projectId, key, message = null) =>
+    request(`/mock2/projects/${projectId}/tasks/${encodeURIComponent(key)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(message ? { message } : {}),
+    }),
+  // Stop a task: a live build stops after its current step (as Interrupt
+  // does); anything else is marked stopped. 200 { routed: { action, task, note } }.
+  mock2StopTask: (projectId, key) =>
+    request(`/mock2/projects/${projectId}/tasks/${encodeURIComponent(key)}/stop`, { method: 'POST' }),
   // Stall watchdog thresholds (admin): { restart_minutes, hard_minutes } —
   // when a silent build offers manual Restart, and when the sweep hard-stops it.
   mock2GetStallWatchdog: () => request('/mock2/settings/stall-watchdog'),

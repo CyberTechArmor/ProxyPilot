@@ -15,6 +15,8 @@ import {
   PanelLeftClose, PanelRightClose, StopCircle, PanelBottom, Maximize2, Minimize2, Info, Library,
 } from 'lucide-react';
 import { useIsMobile } from '@/hooks/use-media-query';
+import { useToast } from '@/hooks/use-toast';
+import { routedNoteText, routedOf } from './task-strip-logic';
 
 // Flightdeck — the build-phase IDE workspace. It does NOT rebuild the agent: the
 // right-hand chat is the existing harness front-end (BuildChat → startCycle/Ask),
@@ -44,6 +46,7 @@ export default function Flightdeck({
 }) {
   const online = project?.lifecycle === 'active';
   const containerName = project?.container_name || null;
+  const { toast } = useToast();
 
   // Cycle poll (mirrors BuildMode) — drives the top-bar status/cost + the
   // editor's external-change reconciliation nonce, and feeds BuildChat.
@@ -186,9 +189,14 @@ export default function Flightdeck({
     if (!canEdit || !online) return;
     // A multi-page annotation carries one image per pinned screen.
     const list = images?.length ? images : (image ? [image] : []);
-    await api.mock2StartCycle(projectId, text, list, 'quick', { skipSplit: true, skipSuggest: true });
+    const res = await api.mock2StartCycle(projectId, text, list, 'quick', { skipSplit: true, skipSuggest: true });
+    // Task continuity: the server may resolve the send against a remembered
+    // task instead of building it (e.g. pin text it reads as "only explain").
+    // Nothing else on this path would say so — the chat only shows the note.
+    const routed = routedOf(res);
+    if (routed) toast({ title: routedNoteText(routed) });
     load();
-  }, [projectId, canEdit, online, load]);
+  }, [projectId, canEdit, online, load, toast]);
   // Pins toggled to "Options" are a complaint, not an instruction: run Design
   // options scoped to the pinned page(s), with the burned-in screenshot
   // attached so the model sees the exact spots. Layouts come back in the chat.

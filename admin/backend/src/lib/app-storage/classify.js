@@ -117,10 +117,11 @@ export function isSealedRelease(it) {
 /**
  * What must stay, derived from the target's records and the facts:
  * { liveRelease, rollbackRelease, waitingCandidate, backingRoots,
- *   activeAttempts, buildActive, openRestoreJob, anyApplicationJobOpen, openJobIds }.
+ *   activeAttempts, recoveryAttempts, buildActive, openRestoreJob,
+ *   anyApplicationJobOpen, openJobIds }.
  */
 export function buildContext({ target, activity = {}, facts = null } = {}) {
-  const ctx = { liveRelease: null, rollbackRelease: null, waitingCandidate: null, backingRoots: [], activeAttempts: [...(activity.activeAttempts || [])], buildActive: !!activity.buildActive, openRestoreJob: !!activity.openRestoreJob, anyApplicationJobOpen: !!activity.anyApplicationJobOpen, openJobIds: [...(activity.openJobIds || [])] };
+  const ctx = { liveRelease: null, rollbackRelease: null, waitingCandidate: null, backingRoots: [], activeAttempts: [...(activity.activeAttempts || [])], recoveryAttempts: [...(activity.recoveryAttempts || [])], buildActive: !!activity.buildActive, openRestoreJob: !!activity.openRestoreJob, anyApplicationJobOpen: !!activity.anyApplicationJobOpen, openJobIds: [...(activity.openJobIds || [])] };
   if (target?.kind !== 'application' || !facts) return ctx;
   const p = target.profile || {};
   const live = p.sourceDir ? facts.resolved?.[p.sourceDir] : null;
@@ -226,6 +227,13 @@ const tooYoung = (it, now, ms) => !Number.isFinite(it.newestMtimeMs) || it.newes
 export const HOLD_PREFIX = '.pp-cleanup-hold-';
 const HOLD_CLASS = { category: 'other', status: 'investigate', sub: 'held', reason: 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.' };
 
+// Why a build keeps an item: running, or interrupted and waiting for recovery.
+function buildBusyReason(context) {
+  const recovering = context?.recoveryAttempts || [];
+  const running = (context?.activeAttempts || []).some((a) => !recovering.includes(a));
+  return recovering.length && !running ? 'A build was interrupted and still needs recovery.' : 'A build is running.';
+}
+
 function classifyGuestItem(it, root, env) {
   const { target, context, now, facts } = env;
   const role = root?.role;
@@ -263,16 +271,16 @@ function classifyGuestItem(it, root, env) {
       const t = facts?.tracked?.[repo];
       if (!t || !t.ok) return { category: 'test_reports', status: 'investigate', reason: 'Could not check whether Git tracks it, so it is left for you to look at.' };
       if (t.paths.some((x) => x === rel || x.startsWith(`${rel}/`))) return { category: 'test_reports', status: 'protected', reason: 'Part of the source (tracked in Git).' };
-      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: buildBusyReason(context) };
       if (it.inUse) return { category: 'test_reports', status: 'protected', reason: 'In use by a running process.' };
       return { category: 'test_reports', status: 'eligible', reason: 'Test output that the next test run writes again.' };
     }
     case 'project-cache':
-      if (context.buildActive) return { category: 'caches', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'caches', status: 'protected', reason: buildBusyReason(context) };
       if (it.inUse) return { category: 'caches', status: 'protected', reason: 'In use by a running process.' };
       return { category: 'caches', status: 'eligible', reason: 'Check results the next check computes again.' };
     case 'evidence':
-      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: buildBusyReason(context) };
       if (it.inUse) return { category: 'test_reports', status: 'protected', reason: 'In use by a running process.' };
       if (tooYoung(it, now, EVIDENCE_MIN_AGE_MS)) return { category: 'test_reports', status: 'protected', reason: 'Recent check results.' };
       return { category: 'test_reports', status: 'eligible', reason: 'An old check report.' };
@@ -282,7 +290,7 @@ function classifyGuestItem(it, root, env) {
     case 'cache': case 'cache-apt': {
       if (it.type === 'link') return { category: 'caches', status: 'investigate', reason: 'A link inside a cache folder (never followed).' };
       if (it.inUse) return { category: 'caches', status: 'protected', reason: 'In use by a running process.' };
-      if (context.buildActive) return { category: 'caches', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'caches', status: 'protected', reason: buildBusyReason(context) };
       const hint = it.name === 'ms-playwright' ? 'Tests download it again.' : null;
       return { category: 'caches', status: 'eligible', reason: role === 'cache-apt' ? 'A downloaded package file that is fetched again when needed.' : 'Downloaded files that are fetched again when needed.', hint };
     }
@@ -332,6 +340,7 @@ function classifyStaging(it, { context, now }) {
   if (!attempt) return { category: 'workspaces', status: 'investigate', reason: "Not created by ProxyPilot's build process." };
   const category = name.endsWith('.bundle') ? 'archives' : 'workspaces';
   const what = category === 'archives' ? 'A source archive' : 'A build workspace';
+  if ((context.recoveryAttempts || []).includes(attempt)) return { category, status: 'protected', reason: 'Belongs to a build that was interrupted and still needs recovery.' };
   if (context.activeAttempts.includes(attempt)) return { category, status: 'protected', reason: 'A build is using it.' };
   if (tooYoung(it, now, WORKSPACE_MIN_AGE_MS)) return { category, status: 'protected', reason: 'Changed in the last hour; a build may still be finishing.' };
   return { category, status: 'eligible', reason: `${what} left behind by a build that has ended.`, extra: { attempt } };
@@ -674,7 +683,7 @@ function transferClass(it, { target, context, now }) {
   if (owner == null) return { category: 'archives', status: 'investigate', location: 'host', sub: 'shared', reason: "In the host's shared transfer folder; its name does not say which application left it, so it is not cleaned up from an application's page.", extra: { sharedHost: true } };
   if (target.kind !== 'application' || owner !== Number(target.id)) return null;
   if (it.type === 'link') return { category: 'archives', status: 'investigate', location: 'host', reason: 'A link (never followed).' };
-  if (context.anyApplicationJobOpen) return { category: 'archives', status: 'protected', location: 'host', reason: 'An application build is running; transfer copies may be in use.' };
+  if (context.anyApplicationJobOpen) return { category: 'archives', status: 'protected', location: 'host', reason: 'An application build is running or waiting for recovery; transfer copies may be in use.' };
   if (tooYoung(it, now, WORKSPACE_MIN_AGE_MS)) return { category: 'archives', status: 'protected', location: 'host', reason: 'Changed in the last hour.' };
   return { category: 'archives', status: 'eligible', location: 'host', reason: 'A transfer copy left by an interrupted build of this application.' };
 }

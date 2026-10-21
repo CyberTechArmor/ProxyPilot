@@ -578,3 +578,15 @@ test('a snapshot that holds 0 bytes of its own is 0, exact, with no "could not b
   const unknown = r.items.find((it) => it.kind === 'snapshot' && it.label === 'unknown');
   assert.deepEqual([unknown.precision, unknown.hint], ['estimate', 'The space only this snapshot holds could not be read.']);
 });
+
+test('a staging attempt of an interrupted job that needs recovery is kept with that reason, not "left behind by a build that has ended"', () => {
+  const A = '0f0e0d0c-0b0a-4000-8000-000000000001-2';
+  const f = facts([{ path: '/opt/r/.staging', depth: 1, role: 'staging' }, { path: '/srv/app/test-results', role: 'test-report' }], [{ path: `/opt/r/.staging/${A}`, r: 0 }, { path: '/srv/app/test-results', r: 1 }], { tracked: { '/srv/app': { ok: true, paths: [] } } });
+  const TR = '/var/lib/proxypilot/application-release-transfers';
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: TR, role: 'host-transfers' }], items: [{ path: `${TR}/bundle-app2-a1b2c3`, r: 0, type: 'dir', mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const target = { ...appTarget, profile: { ...appTarget.profile, releaseRoot: '/opt/r' } };
+  const r = run(target, f, { host, context: { activeAttempts: [A], recoveryAttempts: [A], anyApplicationJobOpen: true, buildActive: true } });
+  assert.deepEqual([r.at(`/opt/r/.staging/${A}`).status, r.at(`/opt/r/.staging/${A}`).reason], ['protected', 'Belongs to a build that was interrupted and still needs recovery.']);
+  assert.deepEqual([r.at('/srv/app/test-results').status, r.at('/srv/app/test-results').reason], ['protected', 'A build was interrupted and still needs recovery.']);
+  assert.deepEqual([r.at(`${TR}/bundle-app2-a1b2c3`).status, r.at(`${TR}/bundle-app2-a1b2c3`).reason], ['protected', 'An application build is running or waiting for recovery; transfer copies may be in use.']);
+});

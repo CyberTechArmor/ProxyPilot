@@ -11,6 +11,12 @@ export const TARGET_KINDS = Object.freeze(['application', 'project']);
 const KEY_RE = /^(application|project):([1-9][0-9]{0,15})$/;
 const LIVE_CYCLE_STATUSES = Object.freeze(['queued', 'estimating', 'running']);
 const OPEN_STATUSES = "('queued','running')";
+// An application job is open while queued or running, and also while it is
+// recovery_required and not yet recovered (the same rule as the setup
+// engine's own "is an application job open", backend.js): its staging
+// attempt and transfer copies are still needed by the recovery.
+const appJobKinds = APPLICATION_JOB_KINDS.map((k) => `'${String(k).replace(/'/g, "''")}'`).join(',');
+const OPEN_JOB_SQL = `(status IN ${OPEN_STATUSES} OR (status = 'recovery_required' AND kind IN (${appJobKinds}) AND (outcome IS NULL OR outcome <> 'application_recovered')))`;
 
 export class AppStorageError extends Error {
   constructor(code, message, status = 400, extra = {}) {
@@ -102,23 +108,24 @@ const attemptOf = (job) => `${job.id}-${job.epoch || 1}`;
  */
 export function activityFor(target, { mainDb, mock2Db, now = Date.now(), excludeJobId = null } = {}) {
   const nowMs = typeof now === 'function' ? now() : Number(now);
-  const out = { openJobs: [], buildActive: false, leaseHeld: null, openRestoreJob: false, anyApplicationJobOpen: false, activeAttempts: [], openJobIds: [], reasons: [] };
+  const out = { openJobs: [], buildActive: false, leaseHeld: null, openRestoreJob: false, anyApplicationJobOpen: false, activeAttempts: [], recoveryAttempts: [], openJobIds: [], reasons: [] };
   const guest = target.guest;
   if (mainDb && tableExists(mainDb, 'setup_jobs')) {
-    const rows = mainDb.prepare(`SELECT id, kind, app, status, epoch FROM setup_jobs WHERE app = ? AND status IN ${OPEN_STATUSES} ORDER BY created_at`).all(String(guest));
+    const rows = mainDb.prepare(`SELECT id, kind, app, status, epoch FROM setup_jobs WHERE app = ? AND ${OPEN_JOB_SQL} ORDER BY created_at`).all(String(guest));
     for (const job of rows) {
       if (excludeJobId && job.id === excludeJobId) continue;
       out.openJobs.push({ id: job.id, kind: job.kind, status: job.status, attempt: attemptOf(job) });
       out.openJobIds.push(job.id, attemptOf(job));
     }
     out.activeAttempts = out.openJobs.filter((j) => APPLICATION_JOB_KINDS.includes(j.kind)).map((j) => j.attempt);
+    out.recoveryAttempts = out.openJobs.filter((j) => APPLICATION_JOB_KINDS.includes(j.kind) && j.status === 'recovery_required').map((j) => j.attempt);
     out.openRestoreJob = out.openJobs.some((j) => j.kind === 'restore_snapshot');
     const marks = APPLICATION_JOB_KINDS.map(() => '?').join(',');
-    const anyApp = mainDb.prepare(`SELECT id FROM setup_jobs WHERE kind IN (${marks}) AND status IN ${OPEN_STATUSES}`).all(...APPLICATION_JOB_KINDS);
+    const anyApp = mainDb.prepare(`SELECT id FROM setup_jobs WHERE kind IN (${marks}) AND ${OPEN_JOB_SQL}`).all(...APPLICATION_JOB_KINDS);
     out.anyApplicationJobOpen = anyApp.some((j) => j.id !== excludeJobId);
     if (target.kind === 'application') {
       const build = out.openJobs.find((j) => APPLICATION_JOB_KINDS.includes(j.kind));
-      if (build) { out.buildActive = true; out.reasons.push(`An application ${build.kind.replace('application_', '')} job is ${build.status}.`); }
+      if (build) { out.buildActive = true; out.reasons.push(build.status === 'recovery_required' ? `An application ${build.kind.replace('application_', '')} job was interrupted and needs recovery.` : `An application ${build.kind.replace('application_', '')} job is ${build.status}.`); }
     } else {
       const deploy = out.openJobs.find((j) => j.kind === 'deploy');
       if (deploy) { out.buildActive = true; out.reasons.push(`A deploy of this project is ${deploy.status}.`); }

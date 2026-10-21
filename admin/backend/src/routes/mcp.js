@@ -3014,6 +3014,8 @@ async function toolCloneProject(args, auth) {
     repoPathFor: m.provision.repoPathForProject,
     containerNameFor: m.provision.containerNameForProject,
     createdBy: auth.created_by,
+    // A clone arrives with stored content: an existing application.
+    origin: { kind: 'clone', sourceProjectId: source.id, mode },
   });
   if (auth.created_by) {
     m.projects.upsertMember({ projectId: project.id, userId: auth.created_by, role: 'editor', invitedBy: auth.created_by });

@@ -55,6 +55,24 @@ function projectGuest(row) {
   return row.container_name || `m2-${row.id}`;
 }
 
+// How a project that did not start empty arrived (mock2/projects.js
+// createProject `origin`, e.g. a clone): mock2_settings `project_origin.<id>`.
+// Such a project is an existing application for its storage rules.
+const PROJECT_ORIGIN_PREFIX = 'project_origin.';
+function projectOrigins(mock2Db, id = null) {
+  const out = new Map();
+  if (!tableExists(mock2Db, 'mock2_settings')) return out;
+  const rows = id == null
+    ? mock2Db.prepare("SELECT key, value FROM mock2_settings WHERE key LIKE 'project_origin.%'").all()
+    : mock2Db.prepare('SELECT key, value FROM mock2_settings WHERE key = ?').all(`${PROJECT_ORIGIN_PREFIX}${Number(id)}`);
+  for (const r of rows) {
+    const pid = Number(String(r.key).slice(PROJECT_ORIGIN_PREFIX.length));
+    const v = safeJson(r.value);
+    if (Number.isInteger(pid) && pid > 0 && v && typeof v === 'object' && typeof v.kind === 'string') out.set(pid, { kind: v.kind, ...(Number.isInteger(Number(v.sourceProjectId)) ? { sourceProjectId: Number(v.sourceProjectId) } : {}) });
+  }
+  return out;
+}
+
 /** Every target shown in the overview, applications first. */
 export function listTargets({ mock2Db }) {
   const out = [];
@@ -64,10 +82,11 @@ export function listTargets({ mock2Db }) {
     }
   }
   if (tableExists(mock2Db, 'mock2_projects')) {
+    const origins = projectOrigins(mock2Db);
     for (const row of mock2Db.prepare('SELECT id, name, container_name, lifecycle, created_at FROM mock2_projects ORDER BY name, id').all()) {
       // An archived project has no guest any more (its container_name is NULL).
       if (row.lifecycle === 'archived' && !row.container_name) continue;
-      out.push({ key: targetKeyOf('project', row.id), kind: 'project', id: Number(row.id), name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle, createdAt: row.created_at || null });
+      out.push({ key: targetKeyOf('project', row.id), kind: 'project', id: Number(row.id), name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle, createdAt: row.created_at || null, origin: origins.get(Number(row.id)) || null });
     }
   }
   return out;
@@ -126,6 +145,7 @@ export function resolveTarget(key, { mock2Db }) {
     key: targetKeyOf(kind, id), kind, id, name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle,
     createdAt: row.created_at || null, repoPath: row.repo_path || null, appDir: '/srv/app', repoMount: '/srv/repo.git',
     webPort: Number.isInteger(webPort) && webPort > 0 && webPort < 65536 ? webPort : null,
+    origin: projectOrigins(mock2Db, id).get(Number(id)) || null,
   };
 }
 

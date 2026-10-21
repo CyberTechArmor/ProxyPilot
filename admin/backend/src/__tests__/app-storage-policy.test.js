@@ -253,3 +253,54 @@ test('policyDiff names exactly what changed (for the audit)', () => {
   assert.deepEqual(policyDiff(a, b), { 'rules.releases.trimBeforeSeal': [['.cache'], ['.cache', 'coverage']], 'rules.caches.enabled': [true, false], 'alerts.warnBytes': [20e9, 11e9] });
   assert.deepEqual(policyDiff(a, a), {});
 });
+
+/* ---- H2 (Mock2 standard): NEW = created empty by the host; a clone is existing ---- */
+
+test('a project the host created empty after installation gets the defaults; a cloned one gets the rules as proposals', async () => {
+  const { listTargets, resolveTarget } = await import('../lib/app-storage/targets.js');
+  const { recordNewProjectDefaults } = await import('../lib/app-storage/policy.js');
+  const { mock2Db } = databases({ installedAt: '2026-10-20T22:00:00.000Z' });
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (11, 'Empty', 'm2-11', 'active', '/x/11.git', '2026-10-20 22:30:00')").run();
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (12, 'Clone of 4', 'm2-12', 'active', '/x/12.git', '2026-10-20 22:31:00')").run();
+  // What createProject writes, in the same transaction, for a clone (mock2/projects.js).
+  mock2Db.prepare("INSERT INTO mock2_settings (key, value, updated_at) VALUES ('project_origin.12', ?, '2026-10-20T22:31:00Z')").run(JSON.stringify({ kind: 'clone', sourceProjectId: 4, mode: 'fresh' }));
+  const listed = Object.fromEntries(listTargets({ mock2Db }).map((t) => [t.key, t]));
+  assert.equal(listed['project:11'].origin, null);
+  assert.deepEqual(listed['project:12'].origin, { kind: 'clone', sourceProjectId: 4 });
+  assert.deepEqual(resolveTarget('project:12', { mock2Db }).origin, { kind: 'clone', sourceProjectId: 4 });
+  const empty = defaultPolicyFor(resolveTarget('project:11', { mock2Db }), { installedAt: '2026-10-20T22:00:00.000Z' });
+  const clone = defaultPolicyFor(resolveTarget('project:12', { mock2Db }), { installedAt: '2026-10-20T22:00:00.000Z' });
+  assert.equal(empty.source, 'defaults-new');
+  assert.ok(RULE_KEYS.every((k) => empty.policy.rules[k].enabled), 'every rule on');
+  assert.equal(clone.source, 'defaults-existing');
+  assert.ok(RULE_KEYS.every((k) => !clone.policy.rules[k].enabled), 'every rule a proposal');
+  assert.deepEqual(ruleStates(clone.policy, clone.source).proposedRules, RULE_KEYS);
+  // Nothing records a clone's defaults, and it gets no snapshot limit.
+  const audits = [];
+  assert.equal(recordNewProjectDefaults(resolveTarget('project:12', { mock2Db }), { mock2Db, audit: (e) => audits.push(e) }), null);
+  assert.equal(audits.length, 0);
+  const limits = effectiveSnapshotLimits({ mock2Db, mainDb: null, staticLimits: {} });
+  assert.equal(limits['m2-11'], 3);
+  assert.equal('m2-12' in limits, false, 'a clone prunes no snapshots until someone turns the rule on');
+});
+
+test('both clone paths (dashboard route and clone_project) record the origin with the project row', async () => {
+  const { readFileSync } = await import('node:fs');
+  const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const projects = read('../mock2/projects.js');
+  assert.match(projects, /export function createProject\(\{[^}]*origin = null \}\)/);
+  // Written inside createProject's transaction, before it returns.
+  const body = projects.slice(projects.indexOf('export function createProject('), projects.indexOf('const id = tx();'));
+  assert.match(body, /INSERT OR REPLACE INTO mock2_settings[\s\S]*PROJECT_ORIGIN_KEY_PREFIX/);
+  assert.match(projects, /PROJECT_ORIGIN_KEY_PREFIX = 'project_origin\.'/);
+  for (const [file, anchor] of [['../mock2/routes.js', 'MOCK2_PROJECT_CLONE'], ['../routes/mcp.js', 'async function toolCloneProject']]) {
+    const src = read(file);
+    const at = src.indexOf(anchor);
+    const region = file.endsWith('mcp.js') ? src.slice(at, at + 2000) : src.slice(at - 2500, at);
+    assert.match(region, /origin: \{ kind: 'clone', sourceProjectId: source\.id, mode \}/, file);
+  }
+  // The from-scratch paths do not.
+  const mcp = read('../routes/mcp.js');
+  const create = mcp.slice(mcp.indexOf('---- create_project'), mcp.indexOf('async function toolCloneProject'));
+  assert.equal(/origin:/.test(create), false, 'create_project makes an empty project');
+});

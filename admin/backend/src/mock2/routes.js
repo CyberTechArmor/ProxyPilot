@@ -1149,6 +1149,8 @@ export function createMock2Router() {
         repoPathFor: repoPathForProject,
         containerNameFor: containerNameForProject,
         createdBy: req.user.id,
+        // A clone arrives with stored content: an existing application.
+        origin: { kind: 'clone', sourceProjectId: source.id, mode },
       });
       upsertMember({ projectId: project.id, userId: req.user.id, role: 'editor', invitedBy: req.user.id });
       // Inherit the source's settings (preset, harness, design approval, …)

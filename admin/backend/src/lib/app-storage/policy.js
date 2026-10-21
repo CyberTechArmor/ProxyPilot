@@ -127,10 +127,11 @@ export function isNewTarget(target, installedAt) {
  * The defaults for a target: { policy, source }.
  * - listed in a static retention file → 'preserved' (today's behaviour kept,
  *   alerts around 10 GB);
- * - a Dev Studio project created after the feature was installed →
- *   'defaults-new', every rule on;
- * - otherwise, including EVERY registered application → 'defaults-existing',
- *   every destructive rule proposed (off).
+ * - a Dev Studio project the host created empty after the feature was
+ *   installed → 'defaults-new', every rule on;
+ * - otherwise, including EVERY registered application and every project
+ *   that arrived with stored content (a clone: target.origin) →
+ *   'defaults-existing', every destructive rule proposed (off).
  */
 export function defaultPolicyFor(target, { installedAt = null, staticReleaseRetention = STATIC_RELEASE_RETENTION, staticSnapshotRetention = STATIC_SNAPSHOT_RETENTION, diskLimitBytes = null } = {}) {
   const policy = clone(DEFAULT_POLICY);
@@ -148,7 +149,10 @@ export function defaultPolicyFor(target, { installedAt = null, staticReleaseRete
     policy.alerts = { enabled: true, warnBytes: PRESERVED_WARN_BYTES, growthBytes: DEFAULT_GROWTH_BYTES, growthWindowHours: 24 };
     return { policy, source: 'preserved' };
   }
-  if (target?.kind === 'project' && isNewTarget(target, installedAt)) {
+  // New = a Dev Studio project the host created empty after installation. A
+  // project that arrived with stored content (cloned; target.origin) is an
+  // existing application: its rules start as proposals.
+  if (target?.kind === 'project' && isNewTarget(target, installedAt) && !target.origin) {
     policy.rules.releases.trimBeforeSeal = [...NEW_TRIM_BEFORE_SEAL];
     return { policy, source: 'defaults-new' };
   }

@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const vulnerabilities = report.vulnerabilities || {};
 const names = Object.keys(vulnerabilities).sort();
-const allowed = new Set(['braces', 'chokidar', 'fast-glob', 'micromatch', 'tailwindcss']);
+// tailwindcss-animate only depends on tailwindcss (no advisory of its own; the loop below still refuses one).
+const allowed = new Set(['braces', 'chokidar', 'fast-glob', 'micromatch', 'tailwindcss', 'tailwindcss-animate']);
 const advisory = 'https://github.com/advisories/GHSA-vfj7-8cjw-p6xm';
 
 if (names.length === 0) process.exit(0);

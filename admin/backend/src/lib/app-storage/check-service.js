@@ -6,6 +6,7 @@
 import { performCheck as defaultPerformCheck, newCheckId, publicTarget, CHECK_RESULT_VERSION } from './perform-check.js';
 import { AppStorageError } from './targets.js';
 import { SEPARATE_CATEGORIES } from './categories.js';
+import { FIGURE_SOURCES } from './accounting.js';
 
 /** A cleanup needs a check at most this old (DESIGN §3.1). */
 export const CHECK_MAX_AGE_MS = 60 * 60 * 1000;
@@ -133,7 +134,8 @@ export function createCheckService({
       targets.push({
         key: t.key, kind: t.kind, id: t.id, name: t.name, guest: t.guest,
         guestStatus: g?.status || null,
-        usage: g?.usedBytes != null ? { usedBytes: g.usedBytes, sampledAt: guests.checkedAt || checkedAt } : sample ? { usedBytes: sample.usedBytes, sampledAt: sample.sampledAt } : null,
+        usage: g?.usedBytes != null ? { usedBytes: g.usedBytes, sampledAt: guests.checkedAt || checkedAt, source: 'incus-root-usage', label: FIGURE_SOURCES['incus-root-usage'] }
+          : sample ? { usedBytes: sample.usedBytes, sampledAt: sample.sampledAt, source: 'monitor-sample', label: FIGURE_SOURCES['monitor-sample'] } : null,
         lastCheck: last ? { checkId: last.id, finishedAt: last.finishedAt, status: last.status, totals: last.result?.totals || null, eligibleBytes: eligibleBytesOf(last.result), eligibleMemoryBytes: eligibleMemoryBytesOf(last.result) } : null,
         runningCheckId: running?.id || null,
         alerts: (alertsFor(t.key) || []).map((a) => ({ key: a.key, level: a.level, title: a.title })),

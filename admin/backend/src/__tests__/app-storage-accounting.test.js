@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeTotals, summarizeCategories, estimateSelection, formatBytes } from '../lib/app-storage/accounting.js';
+import { computeTotals, summarizeCategories, estimateSelection, formatBytes, FIGURE_SOURCES } from '../lib/app-storage/accounting.js';
 import { performCheck } from '../lib/app-storage/perform-check.js';
 import * as W from './helpers/app-storage-world.js';
 
@@ -37,7 +37,9 @@ test('totals: what the guest sees, what was measured, what is left as an estimat
   ];
   const host = { usageBytes: 2.9e9, limit: { bytes: 220e9, source: 'root-device' }, datasetName: 'tank/c/pp-x', dataset: { usedBytes: 2.9e9, referencedBytes: 3e9, snapshotsBytes: 1.2e8, datasetBytes: 2.78e9, logicalUsedBytes: 6e9, compressRatio: 2.1, availableBytes: 97e9 } };
   const t = computeTotals({ facts, host, items });
-  assert.deepEqual(t.guest, { totalBytes: 100e9, usedBytes: 3e9, availableBytes: 97e9, precision: 'exact' });
+  assert.deepEqual(t.guest, { totalBytes: 100e9, usedBytes: 3e9, availableBytes: 97e9, precision: 'exact', shared: false, source: 'container-df', label: FIGURE_SOURCES['container-df'] });
+  assert.equal(t.sharedHostFilesystem, false);
+  assert.deepEqual([t.usageSource, t.dataset.source], ['incus-root-usage', 'zfs-dataset'], 'every used figure names where it comes from');
   assert.equal(t.measuredBytes, 1.5e9, 'only guest items on the root filesystem count');
   assert.equal(t.measuredPrecision, 'at-least', 'a partial walk makes the measured figure a lower bound');
   assert.equal(t.unattributedBytes, 1.5e9);
@@ -157,4 +159,25 @@ test('categories keep disk and memory apart; "mixed" only when something can be 
   assert.deepEqual([cats.temp.eligibleBytes, cats.temp.eligibleMemoryBytes, cats.temp.eligibleCount], [100, 50, 2]);
   assert.equal(cats.other.status, 'investigate', 'protected and needs-a-look, nothing cleanable');
   assert.equal(cats.data.status, 'mixed');
+});
+
+/* ---- review findings 10 and 17 ---- */
+
+test('a dir or btrfs pool: the figures are the shared host filesystem\'s, flagged, and nothing is estimated from them', async (t) => {
+  const facts = { rootDev: 1, fs: [{ path: '/', mount: '/', fstype: 'ext4', totalBytes: 1e12, freeBytes: 5e11, availBytes: 5e11 }] };
+  for (const driver of ['dir', 'btrfs']) {
+    const tt = computeTotals({ facts, host: { poolDriver: driver, usageBytes: 2e9 }, items: [item({ allocatedBytes: 1e9 })] });
+    assert.equal(tt.sharedHostFilesystem, true, driver);
+    assert.deepEqual([tt.guest.shared, tt.guest.source], [true, 'shared-host-df']);
+    assert.match(tt.guest.label, /shares with other containers/);
+    assert.deepEqual([tt.unattributedBytes, tt.unattributedPrecision], [null, null]);
+    assert.equal(tt.usageBytes, 2e9);
+  }
+  assert.equal(computeTotals({ facts, host: { poolDriver: 'lvm' } }).sharedHostFilesystem, false, 'an LVM volume is the container\'s own filesystem');
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const world = W.buildNodusGuest(root, NOW);
+  const r = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root, driver: 'dir' }), now: NOW, checkId: 'chk_00000000-0000-4000-8000-000000000004', listExports: () => [] });
+  assert.equal(r.totals.sharedHostFilesystem, true);
+  assert.equal(r.items.some((it) => it.kind === 'pseudo'), false, 'no "Not measured individually" from host-wide numbers');
+  assert.ok(r.notes.some((n) => /shares the host filesystem/.test(n)));
 });

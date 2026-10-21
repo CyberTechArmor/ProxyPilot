@@ -583,6 +583,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
     });
   }
   const totals = computeTotals({ facts, host, items: items.map((x) => ({ ...x, location: x.location })) });
+  if (totals.sharedHostFilesystem) notes.push('This container is on a storage pool that shares the host filesystem, so the used and available figures are the whole host\'s, and what this check did not measure one by one cannot be estimated.');
   if (facts && totals.unattributedBytes > 0) {
     items.push({
       id: null, category: 'other', label: 'Not measured individually (operating system and other files)', path: null, kind: 'pseudo', sub: null,

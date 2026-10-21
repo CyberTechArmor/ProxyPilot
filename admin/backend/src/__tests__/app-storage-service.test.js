@@ -48,6 +48,8 @@ test('one running check per target; the result is stored and readable; the overv
   assert.equal(o.checkedAt, new Date(NOW).toISOString());
   const nodus = o.targets.find((x) => x.key === 'application:1');
   assert.deepEqual([nodus.name, nodus.guest, nodus.guestStatus, nodus.usage.usedBytes], ['Nodus', 'pp-nodus', 'Running', 2956918784]);
+  assert.equal(nodus.usage.source, 'incus-root-usage', 'the overview says which "used" it shows');
+  assert.match(nodus.usage.label, /including its snapshots/);
   assert.equal(nodus.lastCheck.checkId, a.checkId);
   assert.ok(nodus.lastCheck.eligibleBytes > 0);
   assert.equal(nodus.runningCheckId, null);

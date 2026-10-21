@@ -33,9 +33,29 @@ function onRootFs(it, rootDev) {
  * root usage, = ZFS "used"), limit, dataset, memoryBacked, measuredBytes,
  * unattributedBytes, precision }
  */
+/**
+ * Where each "used" figure comes from, in plain words, so a page can say
+ * which one it shows (they differ: the container's own filesystem view, the
+ * pool's view including snapshots, the dataset).
+ */
+export const FIGURE_SOURCES = Object.freeze({
+  'container-df': "What the container's own filesystem reports (as df shows it inside the container)",
+  'shared-host-df': 'The host filesystem this container shares with other containers and the host itself; it is not this container\'s own use',
+  'incus-root-usage': 'Space the container takes on its storage pool, including its snapshots (as Incus reports it)',
+  'zfs-dataset': "The container's ZFS dataset: used includes snapshots, referenced is what the container sees",
+  'monitor-sample': 'The latest 15-minute reading of the space the container takes on its storage pool, including its snapshots',
+});
+
+/** Storage drivers whose containers see the shared host filesystem in statfs('/'). */
+export const SHARED_FS_DRIVERS = Object.freeze(['dir', 'btrfs']);
+
 export function computeTotals({ facts = null, host = null, items = [] } = {}) {
   const rootFs = facts?.fs?.find((f) => f.path === '/') || null;
-  const guest = rootFs ? { totalBytes: n(rootFs.totalBytes), usedBytes: Math.max(0, n(rootFs.totalBytes) - n(rootFs.freeBytes)), availableBytes: n(rootFs.availBytes), precision: 'exact' } : null;
+  // On a dir or btrfs pool, statfs('/') inside the container is the whole host
+  // filesystem: shown as such, and never used to estimate what is unmeasured.
+  const shared = !!rootFs && SHARED_FS_DRIVERS.includes(String(host?.poolDriver || '').toLowerCase());
+  const guestSource = shared ? 'shared-host-df' : 'container-df';
+  const guest = rootFs ? { totalBytes: n(rootFs.totalBytes), usedBytes: Math.max(0, n(rootFs.totalBytes) - n(rootFs.freeBytes)), availableBytes: n(rootFs.availBytes), precision: 'exact', shared, source: guestSource, label: FIGURE_SOURCES[guestSource] } : null;
   const memSeen = new Set();
   const memoryBacked = [];
   for (const f of facts?.fs || []) {
@@ -52,14 +72,17 @@ export function computeTotals({ facts = null, host = null, items = [] } = {}) {
   const d = host?.dataset || null;
   return {
     guest,
+    sharedHostFilesystem: shared,
     usageBytes: host?.usageBytes ?? null,
+    usageSource: host?.usageBytes != null ? 'incus-root-usage' : null,
+    usageLabel: host?.usageBytes != null ? FIGURE_SOURCES['incus-root-usage'] : null,
     limit: host?.limit || { bytes: null, source: null },
-    dataset: d ? { name: host.datasetName || null, usedBytes: d.usedBytes, referencedBytes: d.referencedBytes, snapshotsBytes: d.snapshotsBytes, datasetBytes: d.datasetBytes, logicalUsedBytes: d.logicalUsedBytes, compressRatio: d.compressRatio, availableBytes: d.availableBytes, precision: 'exact' } : null,
+    dataset: d ? { name: host.datasetName || null, usedBytes: d.usedBytes, referencedBytes: d.referencedBytes, snapshotsBytes: d.snapshotsBytes, datasetBytes: d.datasetBytes, logicalUsedBytes: d.logicalUsedBytes, compressRatio: d.compressRatio, availableBytes: d.availableBytes, precision: 'exact', source: 'zfs-dataset', label: FIGURE_SOURCES['zfs-dataset'] } : null,
     memoryBacked,
     measuredBytes: facts ? measured : null,
     measuredPrecision: facts ? precision : null,
-    unattributedBytes: guest ? Math.max(0, guest.usedBytes - measured) : null,
-    unattributedPrecision: guest ? 'estimate' : null,
+    unattributedBytes: guest && !shared ? Math.max(0, guest.usedBytes - measured) : null,
+    unattributedPrecision: guest && !shared ? 'estimate' : null,
   };
 }
 

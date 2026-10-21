@@ -190,15 +190,18 @@ export function cleanupReleaseArtifacts(fs, p, a) {
 // removeSelectedRelease(fs, p, a, remove) → { removed, ...remove(result) }.
 // The user-selected removal of ONE release (a.path), with the same
 // predicates as the retention above: a recognised sealed release directly in
-// the root, and not live, rollback, candidate, waiting candidate or backing
-// root as derived now. The live pointer is read back right before `remove`
+// the root whose marker still names a.markerSha (when given), and not live,
+// rollback, candidate, waiting candidate or backing root as derived now. The live pointer is read back right before `remove`
 // (the caller's verified, non-following removal; plain rmSync otherwise).
 export function removeSelectedRelease(fs, p, a, remove) {
   const refuse = message => { throw new Error(message); };
   const d = describeReleases(fs, p, a);
   const target = a.path;
   if (typeof target !== 'string' || p.dirname(target) !== d.root) refuse('RELEASE_OUTSIDE_ROOT');
-  if (!d.sealed.some(r => r.path === target)) refuse('NOT_A_SEALED_RELEASE');
+  const entry = d.sealed.find(r => r.path === target);
+  if (!entry) refuse('NOT_A_SEALED_RELEASE');
+  // The release the check saw: its marker still names the same commit.
+  if (/^[a-f0-9]{40}$/.test(a.markerSha || '') && entry.sha !== a.markerSha) refuse('CHANGED_SINCE_CHECK');
   if (target === d.live) refuse('RELEASE_IS_LIVE');
   if (target === d.rollback) refuse('RELEASE_IS_ROLLBACK');
   if (target === d.candidate || d.protect.has(target)) refuse('RELEASE_IS_CANDIDATE');

@@ -33,8 +33,9 @@ import { APPLICATION_JOB_KINDS } from './application-deploy-logic.js';
 import { releaseContextFromApplication } from './application-release-cleanup.js';
 import { readRetentionInstance } from '../snapshot-retention.js';
 import { cleanupProgramScript, cleanupProgramArgv, parseProgramOutput } from '../app-storage/cleanup-program.js';
-import { pathAllowed, approvedRootsFor, selectionEstimate, MIN_JOURNAL_BYTES } from '../app-storage/selection.js';
-import { cleanupRow, checkView, busyFrom } from '../app-storage/cleanup-service.js';
+import { pathAllowed, approvedRootsFor, pathTargetFor, MIN_JOURNAL_BYTES } from '../app-storage/selection.js';
+import { cleanupRow, busyFrom } from '../app-storage/cleanup-rows.js';
+import { estimateSelection } from '../app-storage/accounting.js';
 
 export { STORAGE_CLEANUP_JOB_KINDS, validateStorageCleanupJob } from './storage-cleanup-logic.js';
 
@@ -75,15 +76,16 @@ const quote = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const clone = v => JSON.parse(JSON.stringify(v));
 const profileFor = p => ({ sourceDir: p.sourceDir, releaseRoot: p.releaseRoot || null, preservePaths: p.preservePaths || [], envFiles: p.envFiles || [] });
 
-// The activity WS1 reports, with this job's own open job and lease removed
-// (activityFor is asked to exclude it; this is the belt to those braces).
+// The activity targets.js reports, with this job's own open job and lease
+// removed (activityFor is asked to exclude it; this is the belt to those braces).
 function ownFiltered(activity, jobId) {
-  if (!activity) return { openJobs: [], buildActive: false, reasons: [] };
+  if (!activity) return { openJobs: [], buildActive: false, leaseHeld: null, reasons: [] };
+  const own = new Set([jobId]);
   return {
     ...activity,
-    openJobs: (Array.isArray(activity.openJobs) ? activity.openJobs : []).filter(j => j && j.id !== jobId),
-    lease: activity.lease && activity.lease.jobId !== jobId ? activity.lease : null,
-    leaseHeld: activity.lease ? activity.lease.jobId !== jobId && activity.leaseHeld === true : activity.leaseHeld === true,
+    openJobs: (Array.isArray(activity.openJobs) ? activity.openJobs : []).filter(j => j && !own.has(j.id)),
+    leaseHeld: activity.leaseHeld && activity.leaseHeld.jobId === jobId ? null : activity.leaseHeld ?? null,
+    ...(Array.isArray(activity.openJobIds) ? { openJobIds: activity.openJobIds.filter(id => id !== jobId && !String(id).startsWith(`${jobId}-`)) } : {}),
   };
 }
 
@@ -96,6 +98,10 @@ function applicationJobOpen(db) {
   try { return !!db.prepare(`SELECT 1 AS x FROM setup_jobs WHERE kind IN (${APPLICATION_JOB_KINDS.map(() => '?').join(', ')}) AND status IN ('queued', 'running') LIMIT 1`).get(...APPLICATION_JOB_KINDS); } catch { return true; }
 }
 
+// deps: { store (store.js), resolveTarget(key), activityFor(target, { excludeJobId }),
+//   rescan({ target, activity, exec, now }) → the stored check result,
+//   getCheck(id) → the check DOCUMENT (check-service checkView of the stored row), monitor?: { postCleanupAlert(targetKey, outcome, { name }) },
+//   audit?(entry), exports?: { get(id), remove(id, { actor }) } }
 export async function runStorageCleanupOperation({ params, exec, job, prior = null, db = null, deps, now = () => Date.now(), sleep = ms => new Promise(r => setTimeout(r, ms)), settleMs = 10_000, hostNode = process.execPath }) {
   const { store } = deps;
   const iso = () => new Date(now()).toISOString();
@@ -120,7 +126,9 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   const selection = Array.isArray(row.selection) ? row.selection : [];
   const save = (phase, current = null) => job.checkpoint(phase, { storageCleanup: true, resumable: true, cleanupId: row.id, done: [...done], current, parents: { guest: [...parents.guest], host: [...parents.host] }, results: acc, before, notes, startedAt });
   const audit = entry => { try { deps.audit?.({ userId: null, targetKey: row.targetKey, ...entry }); } catch { /* the row is the record */ } };
-  const alert = async event => { if (!deps.monitor?.postCleanupAlert) return; try { await deps.monitor.postCleanupAlert({ targetKey: row.targetKey, targetName: name, cleanupId: row.id, ...event }); } catch { /* an alert never changes the result */ } };
+  // monitor.js: ok/failedCount post or resolve the cleanup alert; healthFailed
+  // true posts the health alert, false resolves it, undefined leaves it.
+  const alert = async outcome => { if (!deps.monitor?.postCleanupAlert) return; try { await deps.monitor.postCleanupAlert(row.targetKey, outcome, { name }); } catch { /* an alert never changes the result */ } };
 
   // ── executors ──
   const guestProgram = async (data, timeoutMs = 600_000) => {
@@ -204,13 +212,16 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   if (!before) before = { guestUsedBytes: liveInfo?.fs?.usedBytes ?? null, datasetUsedBytes: await hostUsage() };
 
   // ── 3. the check it was approved from, and the target as the check saw it ──
-  const check = checkView(await (deps.getCheck ? deps.getCheck(row.checkId) : store.getCheck(row.checkId)));
+  // Only a check document is accepted; anything else counts as no check, and
+  // then no entry matches it, so nothing is removed.
+  const checkDoc = deps.getCheck ? await deps.getCheck(row.checkId) : null;
+  const check = checkDoc && Array.isArray(checkDoc.items) ? checkDoc : null;
   const byId = new Map((check?.items || []).map(i => [i.id, i]));
   const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
   const matchesCheck = e => { const i = byId.get(e.id); return !!i && i.status === 'eligible' && i.action === e.action && (i.location || 'guest') === e.location && (i.path ?? null) === e.path && same(i.identity, e.identity) && (e.kind !== 'group' || same((i.members || []).map(m => [m.path, m.identity]), (e.members || []).map(m => [m.path, m.identity]))); };
   // The service user's home as the check found it (cache roots under it).
-  const pathTarget = { ...target, serviceHome: target.serviceHome ?? check?.guest?.service?.home ?? check?.context?.serviceHome ?? null, homes: target.homes ?? check?.context?.homes ?? [] };
-  const attemptsOf = a => (a.openJobs || []).map(j => j.attempt || `${j.id}-${j.epoch || 1}`);
+  const pathTarget = pathTargetFor(target, check);
+  const attemptsOf = a => (Array.isArray(a.activeAttempts) ? a.activeAttempts : []).concat((a.openJobs || []).map(j => j.attempt || `${j.id}-${j.epoch || 1}`));
 
   const protectedNow = (e, activity) => {
     if (e.category === 'releases') {
@@ -222,9 +233,9 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
       if ((r.backing || []).includes(e.path)) return REASONS.RELEASE_HOLDS_SHARED_DATA;
     }
     if (['workspaces', 'archives'].includes(e.category) && e.location === 'guest' && attemptsOf(activity).includes(path.basename(String(e.path)).replace(/\.bundle$/, ''))) return 'Now protected: a build is using it.';
-    if (e.category === 'archives' && e.location === 'host' && applicationJobOpen(db)) return 'Now protected: an application build is running.';
+    if (e.category === 'archives' && e.location === 'host' && (activity.anyApplicationJobOpen === true || (activity.anyApplicationJobOpen === undefined && applicationJobOpen(db)))) return 'Now protected: an application build is running.';
     if (e.category === 'history' && String(e.path || '').startsWith('/run/mock2-deploy/')) {
-      const open = openJobIds(db, job.id);
+      const open = Array.isArray(activity.openJobIds) ? [...activity.openJobIds, ...(openJobIds(db, job.id) || [])] : openJobIds(db, job.id);
       const owner = path.basename(e.path).split('.')[0];
       if (!open || open.some(id => owner === id || owner.startsWith(`${id}-`))) return 'Now protected: its job is still running.';
     }
@@ -283,7 +294,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     for (const m of members) parents[e.location].add(path.dirname(m.path));
     save('cleanup:item', e.id);
     const data = e.action === 'remove-release'
-      ? { action: 'remove-release', cleanupId: row.id, approvedRoots: allowed.roots, profile: profileFor(target.profile), path: e.path, identity: e.identity, ...relCtx }
+      ? { action: 'remove-release', cleanupId: row.id, approvedRoots: allowed.roots, profile: profileFor(target.profile), path: e.path, identity: e.identity, markerSha: e.identity?.markerSha || null, ...relCtx }
       : { action: 'remove', cleanupId: row.id, approvedRoots: allowed.roots, entries: members, checkInUse: true };
     const out = e.location === 'host' ? await hostProgram(data) : await guestProgram(data);
     if (!out.ok) {
@@ -315,7 +326,8 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     if (!matchesCheck(e)) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'It does not match the storage check it was approved from.' });
     const view = await deps.exports.get(e.exportId);
     if (!view) return void (wasCurrent(e.id) ? acc.removed.push({ id: e.id, label: e.label, bytes: e.allocatedBytes || 0, precision: 'estimate' }) : acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy no longer exists.' }));
-    if (view.container !== container) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy belongs to another guest.' });
+    // Export rows name the guest with or without its pp- prefix.
+    if (![container, container.replace(/^pp-/, '')].includes(view.container)) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy belongs to another guest.' });
     if (view.state !== 'ready') return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy is being prepared or did not complete.' });
     if (e.identity?.createdAt && view.created_at !== e.identity.createdAt) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy changed since the check.' });
     save('cleanup:export', e.id);
@@ -399,11 +411,12 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
 
   // ── 7. rescan, settle, re-measure ──
   let afterCheck = null;
-  if (!cancelled && deps.performCheck) {
+  if (!cancelled && deps.rescan) {
     job.event?.('step', 'Checking storage again');
     try {
       const fenced = { guest: (c, s, o) => { job.fence({ safe: false }); return exec.guest(c, s, o); }, host: (argv, o) => { job.fence({ safe: false }); return exec.host(argv, o); } };
-      afterCheck = await deps.performCheck({ target, activity: await activityNow(), exec: fenced, policy: deps.policyFor ? await deps.policyFor(row.targetKey) : null, now, origin: 'cleanup', store });
+      afterCheck = await deps.rescan({ target, activity: await activityNow(), exec: fenced, now });
+      if (afterCheck?.status === 'failed') { notes.push('The storage check after the cleanup did not complete; request a new check to see the remaining storage.'); }
     } catch (err) {
       if (err?.code === 'FENCED') throw err;
       notes.push('The storage check after the cleanup could not run; request a new check to see the remaining storage.');
@@ -421,7 +434,8 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   const byEntry = new Map(selection.map(e => [e.id, e]));
   const removedDisk = acc.removed.reduce((n, r) => { const e = byEntry.get(r.id); return e && e.action !== 'delete-snapshot' && e.action !== 'delete-export' && !e.memoryBacked && e.location === 'guest' ? n + (Number(r.bytes) || 0) : n; }, 0);
   if (removedDisk > 0 && (reclaimed.guestBytes == null || reclaimed.guestBytes < removedDisk * 0.5)) { reclaimed.settling = true; notes.push(SETTLING_NOTE); }
-  const estimateBytes = selectionEstimate(selection, check).bytes;
+  const byKind = action => selection.filter(e => (action === 'items' ? e.action !== 'delete-snapshot' && e.action !== 'delete-export' : e.action === action)).map(e => e.id);
+  const estimateBytes = check ? estimateSelection(check, { items: byKind('items'), snapshots: byKind('delete-snapshot'), exports: byKind('delete-export') }).bytes : null;
 
   // ── 8. the honest result ──
   let status;
@@ -430,10 +444,10 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   else if (acc.failed.length || acc.skipped.length || health === 'failed') status = 'partial';
   else status = 'succeeded';
   const out = await finish(status, { health, ...(healthDetail ? { healthDetail } : {}), estimateBytes, reclaimed, afterCheckId: afterCheck?.checkId ?? null, remaining: afterCheck?.totals ?? (measured?.ok && measured.fs ? { guest: { usedBytes: measured.fs.usedBytes, availableBytes: measured.fs.availBytes, totalBytes: measured.fs.totalBytes } } : null), ...(cancelled ? { reason: 'The cleanup was cancelled.' } : {}) });
-  if (acc.failed.length) await alert({ kind: 'cleanup', ok: false, level: 'error', title: `Storage cleanup for ${name} did not finish`, body: `${acc.failed.length} item${acc.failed.length === 1 ? '' : 's'} failed: ${acc.failed.slice(0, 3).map(f => f.label).join(', ')}` });
-  else if (!cancelled) await alert({ kind: 'cleanup', ok: true });
-  if (health === 'failed') await alert({ kind: 'health', ok: false, level: 'error', title: `${name} did not pass its health check after storage cleanup`, body: `The health check after the cleanup failed (${healthDetail}). Nothing was rolled back and no snapshot was taken; look at the application now.` });
-  else if (health === 'passed') await alert({ kind: 'health', ok: true });
+  // Failures post the cleanup alert and a clean run resolves it; a failed
+  // health check posts the health alert and a passing one resolves it. A
+  // cancelled run neither posts nor resolves anything.
+  if (!cancelled) await alert({ ok: status !== 'failed' && !acc.failed.length, failedCount: acc.failed.length, healthFailed: health === 'failed' ? true : health === 'passed' ? false : undefined });
   if (cancelled) throw cancelled;
   return out;
 }

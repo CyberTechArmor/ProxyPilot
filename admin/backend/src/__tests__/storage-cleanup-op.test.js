@@ -6,9 +6,11 @@ import { executeJob, reconcile } from '../lib/setup-engine/executor.js';
 import { ownerIdentity, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, STORAGE_CLEANUP_JOB_KINDS } from '../lib/setup-engine/logic.js';
 import { SETTLING_NOTE } from '../lib/setup-engine/storage-cleanup-op.js';
 import { createCleanupService } from '../lib/app-storage/cleanup-service.js';
+import { checkView } from '../lib/app-storage/check-service.js';
 import { submitStorageCleanupJob } from '../lib/app-storage/cleanup-deps.js';
 import { unwrapContained } from './helpers/scripted-guest.js';
-import { memoryStore, nodusTarget, nodusCheck, projectTarget, ids, releasePath, RELEASES } from './helpers/app-storage-cleanup-world.js';
+import { spawnSync } from 'node:child_process';
+import { memoryStore, nodusTarget, nodusCheck, projectTarget, ids, releasePath, RELEASES, CHECK_ID } from './helpers/app-storage-cleanup-world.js';
 
 const RUNNER = ownerIdentity({ kind: 'runner', host: 'test', pid: 1, instance: 'one' });
 const RUNNER2 = ownerIdentity({ kind: 'runner', host: 'test', pid: 2, instance: 'two' });
@@ -25,7 +27,7 @@ const decode = raw => {
 function world({ target = nodusTarget(), check = nodusCheck(), activity = () => ({ openJobs: [], buildActive: false, reasons: [] }), now = () => T0 } = {}) {
   const db = new DatabaseSync(':memory:'); ensureSetupEngineSchema(db);
   runnerHeartbeat(db, { owner: RUNNER, host: 'test', pid: 1, nowMs: now() });
-  const store = memoryStore(); store.putCheck(check);
+  const store = memoryStore({ now }); store.putCheck(check);
   const state = {
     used: 3_000_000_000, usedAfter: 2_000_000_000, datasetBefore: 2_900_000_000, datasetAfter: 2_000_000_000,
     snapshots: [{ name: 'snap-1', created_at: '2026-10-01T12:00:00.123456789Z' }, { name: 'snap-2', created_at: '2026-10-02T12:00:01Z' }],
@@ -71,11 +73,11 @@ function world({ target = nodusTarget(), check = nodusCheck(), activity = () => 
   const sleeps = [];
   const deps = {
     store,
-    getCheck: id => store.getCheck(id),
+    getCheck: id => checkView(store.getCheck(id)),
     resolveTarget: () => target,
     activityFor: (t, opts) => { activityCalls += 1; return activity(activityCalls, opts); },
-    performCheck: async args => { calls.push({ action: 'rescan', origin: args.origin }); return { checkId: 'chk-after', status: 'complete', totals: { guest: { usedBytes: state.usedAfter } } }; },
-    monitor: { postCleanupAlert: event => alerts.push(event) },
+    rescan: async () => { calls.push({ action: 'rescan', origin: 'cleanup' }); return { checkId: 'chk-after', status: 'complete', totals: { guest: { usedBytes: state.usedAfter, availableBytes: 1 } } }; },
+    monitor: { postCleanupAlert: (targetKey, outcome, opts) => alerts.push({ targetKey, ...outcome, ...opts }) },
     audit: entry => audits.push(entry),
     exports: { get: id => state.exports.get(id) || null, remove: id => { state.exports.delete(id); return { deleted: true, id }; } },
   };
@@ -87,8 +89,8 @@ function world({ target = nodusTarget(), check = nodusCheck(), activity = () => 
   };
   return { db, store, state, calls, alerts, audits, deps, service, run, sleeps, target };
 }
-const row = w => w.store.cleanups.get(CLEANUP_ID);
-const request = (w, extra) => w.service.requestCleanup({ targetKey: w.target.key, checkId: 'chk-1', ...extra });
+const row = w => w.store.getCleanup(CLEANUP_ID);
+const request = (w, extra) => w.service.requestCleanup({ targetKey: w.target.key, checkId: CHECK_ID, ...extra });
 
 test('the job kind is registered in every list and validates references only', () => {
   assert.deepEqual([...STORAGE_CLEANUP_JOB_KINDS], ['storage_cleanup']);
@@ -151,7 +153,7 @@ test('an approved cleanup removes in order, deletes snapshots and exports, check
   assert.deepEqual(w.sleeps, [10_000], 'one settle wait before the delayed re-read');
   assert.equal(result.reclaimed.guestBytes, 1_000_000_000); assert.equal(result.reclaimed.datasetBytes, 900_000_000); assert.equal(result.reclaimed.settling, false);
   assert.ok(result.estimateBytes >= approved.estimate.diskBytes);
-  assert.deepEqual(w.alerts.map(a => [a.kind, a.ok]), [['cleanup', true], ['health', true]], 'success resolves both alerts');
+  assert.deepEqual(w.alerts, [{ targetKey: 'application:1', ok: true, failedCount: 0, healthFailed: false, name: 'Nodus' }], 'one call: success resolves the cleanup alert and a passing health check resolves the health alert');
   assert.equal(w.audits.at(-1).action, 'STORAGE_CLEANUP_FINISHED');
   assert.equal(readLock(w.db, 'pp-nodus'), null, 'the lease is released');
   assert.equal(w.calls.some(c => c.host?.includes('create')), false, 'no snapshot is created');
@@ -179,14 +181,13 @@ test('one failed removal does not stop the others: partial, alert posted, then r
   assert.deepEqual(result.removed.map(x => x.id), [ids.group, ids.dump]);
   assert.equal(result.failed[0].id, ids.cache);
   assert.ok(w.calls.some(c => c.action === 'finish-quarantine'), 'a failed removal\'s quarantine is finished at the end');
-  const alert = w.alerts.find(a => a.kind === 'cleanup');
-  assert.equal(alert.ok, false); assert.equal(alert.level, 'error'); assert.match(alert.title, /did not finish/);
+  assert.deepEqual(w.alerts[0], { targetKey: 'application:1', ok: false, failedCount: 1, healthFailed: false, name: 'Nodus' });
   // A later, successful cleanup of the same target resolves the alert.
-  w.state.fail.clear(); w.store.cleanups.clear();
+  w.state.fail.clear(); w.store.clearCleanups();
   await request(w, { items: [ids.cache] });
   await w.run();
   assert.equal(row(w).status, 'succeeded');
-  assert.deepEqual(w.alerts.filter(a => a.kind === 'cleanup').map(a => a.ok), [false, true]);
+  assert.deepEqual(w.alerts.map(a => a.ok), [false, true]);
 });
 
 test('a build starting mid-cleanup stops it; the remaining items are reported skipped', async () => {
@@ -198,7 +199,7 @@ test('a build starting mid-cleanup stops it; the remaining items are reported sk
   const check = { ...nodusCheck({ target: { key: 'project:4', kind: 'project', id: 4, guest: 'm2-4' } }), items };
   // Activity: clear at the start and before the first item, then a build starts.
   const w = world({ target: projectTarget(), check, activity: n => ({ openJobs: [], buildActive: n >= 3, reasons: [] }) });
-  await w.service.requestCleanup({ targetKey: 'project:4', checkId: 'chk-1', items: items.map(i => i.id) });
+  await w.service.requestCleanup({ targetKey: 'project:4', checkId: CHECK_ID, items: items.map(i => i.id) });
   await w.run();
   const result = row(w).result;
   assert.deepEqual(result.removed.map(x => x.id), [items[0].id]);
@@ -214,7 +215,7 @@ test('a build already running refuses a project cleanup before anything is remov
   const items = [{ id: 'p1'.padEnd(16, '0'), category: 'temp', kind: 'directory', path: '/tmp/old-run', status: 'eligible', action: 'remove', location: 'guest', identity: { dev: 1, ino: 5 }, allocatedBytes: 10, label: 'old-run' }];
   const check = { ...nodusCheck({ target: { key: 'project:4', kind: 'project', id: 4, guest: 'm2-4' } }), items };
   const w = world({ target: projectTarget(), check, activity: () => ({ openJobs: [], buildActive: true, reasons: [] }) });
-  await w.service.requestCleanup({ targetKey: 'project:4', checkId: 'chk-1', items: [items[0].id] });
+  await w.service.requestCleanup({ targetKey: 'project:4', checkId: CHECK_ID, items: [items[0].id] });
   const { r } = await w.run();
   assert.equal(r.status, 'refused');
   assert.equal(row(w).status, 'refused'); assert.equal(row(w).result.reason, 'A build started; nothing was removed.');
@@ -263,8 +264,7 @@ test('a failing health check is reported and alerted; nothing is rolled back and
   assert.equal(result.health, 'failed'); assert.equal(result.healthDetail, 'HEALTH_FAILED');
   assert.equal(row(w).status, 'partial');
   assert.equal(w.calls.filter(c => c.action === 'verify').length, 3, 'health is retried briefly, never repaired');
-  const alert = w.alerts.find(a => a.kind === 'health');
-  assert.equal(alert.ok, false); assert.match(alert.body, /no snapshot was taken/);
+  assert.deepEqual(w.alerts, [{ targetKey: 'application:1', ok: true, failedCount: 0, healthFailed: true, name: 'Nodus' }], 'the health alert is posted; no item failed');
   assert.equal(w.calls.some(c => c.host?.includes('snapshot') && (c.host.includes('create') || c.host.length === 4)), false);
   assert.equal(w.calls.some(c => c.action === 'switch'), false);
 });
@@ -289,6 +289,7 @@ test('a protected-now item is skipped, a mismatched or out-of-bounds selection i
   const sel = row(w).selection;
   sel.find(e => e.id === ids.cache).path = '/etc'; // a tampered row: outside every approved root
   sel.find(e => e.id === ids.dump).path = '/var/backups/proxypilot-db/app-other.sql'; // allowed place, but not what the check saw
+  w.store.db.prepare('UPDATE mock2_storage_cleanups SET selection_json = ? WHERE id = ?').run(JSON.stringify(sel), CLEANUP_ID);
   await w.run();
   const result = row(w).result;
   assert.equal(result.skipped.find(x => x.id === ids.release).reason, 'Now protected: kept so you can roll back to the previous version.');
@@ -331,4 +332,17 @@ test('the executor requeues a storage cleanup claimed by the backend (runner onl
   const r = await executeJob(job, { db: w.db, owner: backend, exec: { guest: async () => { throw new Error('no'); } }, nowMs: () => T0 });
   assert.equal(r.outcome, 'runner_unavailable');
   assert.equal(getJob(w.db, job.id).status, 'queued');
+});
+
+test('the setup engine executor does not load the storage check graph (perform-check, host measures, lxc-zip)', () => {
+  // Tests that stub lib/lxc-zip.js with a load hook (security-mcp.test.js)
+  // break if the executor's static imports load it first, and the runner has
+  // no use for the check service just to run a cleanup.
+  const executor = new URL('../lib/setup-engine/executor.js', import.meta.url).href;
+  const script = `import { registerHooks } from 'node:module'; const seen = []; registerHooks({ load(u, c, n) { seen.push(u); return n(u, c); } }); await import(${JSON.stringify(executor)}); process.stdout.write(JSON.stringify(seen));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const loaded = JSON.parse(r.stdout).filter(u => /\/src\/lib\//.test(u)).map(u => u.replace(/^.*\/src\/lib\//, ''));
+  assert.ok(loaded.includes('setup-engine/storage-cleanup-op.js'));
+  for (const heavy of ['lxc-zip.js', 'host-exec.js', 'app-storage/check-service.js', 'app-storage/perform-check.js', 'app-storage/host-measures.js', 'app-storage/cleanup-service.js', 'app-storage/cleanup-deps.js']) assert.equal(loaded.includes(heavy), false, heavy);
 });

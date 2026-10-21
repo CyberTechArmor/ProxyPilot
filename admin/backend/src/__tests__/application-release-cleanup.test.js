@@ -93,8 +93,10 @@ test('removeSelectedRelease shares the predicates: live, rollback, candidate and
   fs.symlinkSync(models, path.join(f.live, 'models'), 'dir');
   assert.throws(() => removeSelectedRelease(fs, path, { ...base, profile: { ...f.a.profile, preservePaths: [path.join(f.source, 'models')] }, path: older }), /RELEASE_HOLDS_SHARED_DATA/);
   fs.unlinkSync(path.join(f.live, 'models'));
+  // The release the check saw: a marker naming another commit now is refused.
+  assert.throws(() => removeSelectedRelease(fs, path, { ...base, path: older, markerSha: '9'.repeat(40) }, () => { throw new Error('must not remove'); }), /CHANGED_SINCE_CHECK/);
   const seen = [];
-  const out = removeSelectedRelease(fs, path, { ...base, path: older }, target => { seen.push(target); fs.rmSync(target, { recursive: true }); return { bytes: 1 }; });
+  const out = removeSelectedRelease(fs, path, { ...base, path: older, markerSha: '4'.repeat(40) }, target => { seen.push(target); fs.rmSync(target, { recursive: true }); return { bytes: 1 }; });
   assert.deepEqual(seen, [older]); assert.equal(out.removed, older); assert.equal(out.bytes, 1);
   for (const target of [f.live, f.obsolete, f.candidate]) assert.equal(fs.existsSync(target), true);
 });

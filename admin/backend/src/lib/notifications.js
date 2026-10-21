@@ -89,13 +89,24 @@ export function postNotification({
 // underlying condition recovers.  e.g. the daily S3 probe that
 // passed today after failing for a week calls this on success
 // and the row is dismissed.  No-op when the key isn't present.
-export function resolveNotification(dedupe_key, { reason = 'recovered' } = {}) {
+//
+// includeDismissed: also mark a row a person already dismissed (it stays
+// dismissed; its body becomes "auto-resolved: …"), so a caller that rebuilds
+// its state from the rows knows the condition cleared. Default off: the
+// existing callers are unchanged.
+export function resolveNotification(dedupe_key, { reason = 'recovered', includeDismissed = false } = {}) {
   if (!dedupe_key) return false;
-  const r = getDb().prepare(`
-    UPDATE notifications
-    SET dismissed_at = CURRENT_TIMESTAMP, body = ?
-    WHERE dedupe_key = ? AND dismissed_at IS NULL
-  `).run(`auto-resolved: ${reason}`, dedupe_key);
+  const r = includeDismissed
+    ? getDb().prepare(`
+      UPDATE notifications
+      SET dismissed_at = COALESCE(dismissed_at, CURRENT_TIMESTAMP), body = ?
+      WHERE dedupe_key = ? AND (dismissed_at IS NULL OR body IS NULL OR body NOT LIKE 'auto-resolved:%')
+    `).run(`auto-resolved: ${reason}`, dedupe_key)
+    : getDb().prepare(`
+      UPDATE notifications
+      SET dismissed_at = CURRENT_TIMESTAMP, body = ?
+      WHERE dedupe_key = ? AND dismissed_at IS NULL
+    `).run(`auto-resolved: ${reason}`, dedupe_key);
   return r.changes > 0;
 }
 

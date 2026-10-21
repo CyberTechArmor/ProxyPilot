@@ -13,11 +13,13 @@
 // Bell rows dedupe on the key; the out-of-band channels (push, email, SMS,
 // webhooks: events appstorage.usage|growth|cleanup|health) fire when an alert
 // is new and again when an open alert escalates to a worse level than was
-// delivered (a usage warning that becomes an error). The active set is
-// rebuilt at boot from the bell rows, including ones an administrator
-// dismissed while the condition was still there (so a restart does not
-// deliver them again); rows the monitor resolved itself ("auto-resolved: …")
-// are not taken. The whole-pool storage-monitor is separate and unchanged.
+// delivered (a usage warning that becomes an error). An alert a person
+// dismissed stays dismissed while its condition holds (not re-posted, not
+// re-delivered) unless it gets worse. At boot the conditions are evaluated
+// first: an alert whose condition cleared is resolved, not restored; one that
+// still holds is restored as delivered; one that started while the backend
+// was down is new and delivered once. Resolving marks even a dismissed row
+// "auto-resolved: …". The whole-pool storage-monitor is separate and unchanged.
 
 import cron from 'node-cron';
 import { formatBytes } from './accounting.js';
@@ -150,6 +152,9 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
   const active = new Set();
   // The worst level the channels have heard about for each open alert.
   const delivered = new Map();
+  // Open alerts a person dismissed while their condition still holds: they
+  // stay dismissed (not re-posted, not re-delivered) unless they get worse.
+  const quiet = new Set();
   let running = false;
   let notes = notifications;
   const n = async () => (notes ||= await defaultNotifications());
@@ -158,6 +163,8 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
     const bell = await n();
     const isNew = !active.has(alert.key);
     const escalated = !isNew && rankOf(alert.level) > rankOf(delivered.get(alert.key));
+    if (quiet.has(alert.key) && !escalated) { active.add(alert.key); return false; }
+    quiet.delete(alert.key);
     try { bell.post({ level: alert.level, title: alert.title, body: alert.body, source: SOURCE, source_id: targetKey, dedupe_key: alert.key }); } catch (e) { logger?.error?.('[app-storage-monitor] post failed', e?.message); }
     active.add(alert.key);
     if (!isNew && !escalated) return false;
@@ -165,13 +172,44 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
     try { await bell.dispatch?.({ event: alert.event, level: alert.level, title: alert.title, body: alert.body, link: linkFor(targetKey), dedupe_key: alert.key }); } catch (e) { logger?.error?.('[app-storage-monitor] dispatch failed', e?.message); }
     return true;
   }
+  // Resolving also marks a row a person had dismissed ("auto-resolved: …"),
+  // so a later restart knows the condition cleared and a new rise is new.
+  async function resolveRow(key, reason) {
+    const bell = await n();
+    try { bell.resolve(key, { reason, includeDismissed: true }); } catch { /* ignore */ }
+  }
   async function clear(key, reason) {
     if (!active.has(key)) return false;
-    const bell = await n();
-    try { bell.resolve(key, { reason }); } catch { /* ignore */ }
+    await resolveRow(key, reason);
     active.delete(key);
     delivered.delete(key);
+    quiet.delete(key);
     return true;
+  }
+
+  /**
+   * The usage and growth conditions now, per alert key: { holds: true |
+   * false | null (unknown: no reading) , level }. The same rules as a run,
+   * read as if the alert were open (so the hysteresis band still holds it).
+   */
+  function conditionsNow(targets, guests, nowMs) {
+    const out = new Map();
+    for (const t of targets) {
+      let pol;
+      try { pol = policyFor(t)?.policy; } catch { pol = null; }
+      const alerts = pol?.alerts;
+      const usageKey = alertKey('usage', t.key); const growthKey = alertKey('growth', t.key);
+      if (!alerts?.enabled) { out.set(usageKey, { holds: false }); out.set(growthKey, { holds: false }); continue; }
+      const g = guests?.get?.(t.guest);
+      if (!g || g.usedBytes == null) { out.set(usageKey, { holds: null }); out.set(growthKey, { holds: null }); continue; }
+      const u = evaluateUsage({ usedBytes: g.usedBytes, warnBytes: alerts.warnBytes, active: true });
+      out.set(usageKey, { holds: u.action === 'raise' || u.action === 'keep', level: u.level || 'warning' });
+      const windowHours = Number(alerts.growthWindowHours) || 24;
+      let samples = [];
+      try { samples = store.samplesSince(t.key, nowMs - windowHours * 3_600_000); } catch { samples = []; }
+      out.set(growthKey, { holds: evaluateGrowth({ samples, usedBytes: g.usedBytes, growthBytes: alerts.growthBytes }).raise, level: 'warning' });
+    }
+    return out;
   }
 
   async function runOnce() {
@@ -183,6 +221,7 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
       const nowMs = now();
       const at = new Date(nowMs).toISOString();
       const targets = listTargets();
+      await refreshQuiet();
       for (const t of targets) {
         let pol;
         try { pol = policyFor(t)?.policy; } catch { pol = null; }
@@ -258,23 +297,55 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
     for (const key of [...active]) { const k = parseAlertKey(key); if (k && ['cleanup', 'health'].includes(k.kind) && !open.has(key)) { active.delete(key); delivered.delete(key); } }
   }
 
+  const autoResolved = (row) => !!row?.dismissed_at && /^auto-resolved:/.test(String(row.body || ''));
+  const personDismissed = (row) => !!row?.dismissed_at && !autoResolved(row);
+
+  // Open alerts whose bell row a person has dismissed stay dismissed.
+  async function refreshQuiet() {
+    let rows = [];
+    try { rows = (await n()).list?.({ limit: 1000, includeDismissed: true }) || []; } catch { return; }
+    const byKey = new Map(rows.filter((r) => r?.dedupe_key).map((r) => [r.dedupe_key, r]));
+    for (const key of active) {
+      const k = parseAlertKey(key);
+      if (!k || !['usage', 'growth'].includes(k.kind)) continue;
+      if (personDismissed(byKey.get(key))) quiet.add(key); else quiet.delete(key);
+    }
+  }
+
   /**
-   * Rebuild the active set from the bell rows (appstorage: keys): the open
-   * rows, and the ones an administrator dismissed (the condition may still
-   * be there; it was delivered already). A row the monitor or the cleanup
-   * job resolved (body "auto-resolved: …") is over and is not taken.
+   * At boot: re-evaluate the conditions now, then rebuild the state from the
+   * bell rows (appstorage: keys).
+   *   - A usage or growth alert whose condition no longer holds is resolved
+   *     (its row marked auto-resolved, even a dismissed one), not restored.
+   *   - One whose condition still holds (or cannot be read yet) is restored
+   *     as delivered; if a person had dismissed it, it stays dismissed and is
+   *     not delivered again (unless it gets worse).
+   *   - A row resolved earlier ("auto-resolved: …") is over, so a condition
+   *     that started while ProxyPilot was stopped is new: the first run
+   *     delivers it once.
+   *   - Cleanup and health alerts: open rows only (the relay handles them).
    */
   async function hydrate() {
-    try {
-      const bell = await n();
-      for (const row of bell.list?.({ limit: 1000, includeDismissed: true }) || []) {
-        const key = row?.dedupe_key;
-        if (!key || !String(key).startsWith(ALERT_PREFIX) || !parseAlertKey(key)) continue;
-        if (row.dismissed_at && /^auto-resolved:/.test(String(row.body || ''))) continue;
-        active.add(key);
-        delivered.set(key, row.level || 'warning');
+    let rows = [];
+    try { rows = (await n()).list?.({ limit: 1000, includeDismissed: true }) || []; } catch { return active.size; /* fresh install */ }
+    let guests = null; let targets = [];
+    try { guests = await listGuests(); } catch { guests = null; }
+    try { targets = listTargets() || []; } catch { targets = []; }
+    const conditions = conditionsNow(targets, guests, now());
+    for (const row of rows) {
+      const key = row?.dedupe_key;
+      const k = parseAlertKey(key);
+      if (!k || autoResolved(row)) continue;
+      if (k.kind === 'cleanup' || k.kind === 'health') {
+        if (!row.dismissed_at) { active.add(key); delivered.set(key, row.level || 'error'); }
+        continue;
       }
-    } catch { /* fresh install */ }
+      const c = conditions.get(key);
+      if (c && c.holds === false) { await resolveRow(key, 'the condition cleared while ProxyPilot was stopped'); continue; }
+      active.add(key);
+      delivered.set(key, row.level || 'warning');
+      if (personDismissed(row)) quiet.add(key);
+    }
     return active.size;
   }
 
@@ -292,7 +363,7 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
   }
 
   return {
-    runOnce, hydrate, alertsFor, active,
+    runOnce, hydrate, alertsFor, active, quiet,
     postCleanupAlert: async (targetKey, outcome, opts = {}) => {
       const r = await postCleanupAlert(targetKey, outcome, { ...opts, notifications: opts.notifications || await n() });
       for (const k of r.posted) { active.add(k); delivered.set(k, 'error'); }

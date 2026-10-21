@@ -4,10 +4,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { ensureSetupEngineSchema, claimNextJob, getJob, acquireLock, runnerHeartbeat, readLock, createJob, requestCancel, listEvents } from '../lib/setup-engine/store.js';
 import { executeJob, reconcile } from '../lib/setup-engine/executor.js';
 import { ownerIdentity, validateRunnerJob, reconcileDecision, RUNNER_JOB_KINDS, MUTATING_JOB_KINDS, EXCLUSIVE_JOB_KINDS, STORAGE_CLEANUP_JOB_KINDS } from '../lib/setup-engine/logic.js';
-import { SETTLING_NOTE } from '../lib/setup-engine/storage-cleanup-op.js';
+import { SETTLING_NOTE, PARKED_REASON } from '../lib/setup-engine/storage-cleanup-op.js';
 import { createCleanupService } from '../lib/app-storage/cleanup-service.js';
 import { checkView } from '../lib/app-storage/check-service.js';
 import { submitStorageCleanupJob } from '../lib/app-storage/cleanup-deps.js';
+import { resolveTarget } from '../lib/app-storage/targets.js';
 import { unwrapContained } from './helpers/scripted-guest.js';
 import { spawnSync } from 'node:child_process';
 import { memoryStore, nodusTarget, nodusCheck, projectTarget, ids, releasePath, RELEASES, CHECK_ID } from './helpers/app-storage-cleanup-world.js';
@@ -41,21 +42,25 @@ function world({ target = nodusTarget(), check = nodusCheck(), activity = () => 
     if (state.throwOn && state.throwOn(data)) throw Object.assign(new Error('fenced'), { code: 'FENCED' });
     if (state.afterAnswer) state.afterAnswer(data);
     if (data.action === 'live') return { ok: true, live: state.live, releases: { root: RELEASES, live: state.live, rollback: state.rollback, candidate: null, protect: [releasePath(2)], backing: [], sealed: [] }, fs: { usedBytes: state.used } };
-    if (data.action === 'measure') { state.measured = true; return { ok: true, fs: { usedBytes: state.usedAfter } }; }
+    // The first measure is the baseline (taken before anything changes), later ones are "after".
+    if (data.action === 'measure') {
+      const first = (state.measures = (state.measures || 0) + 1) === 1; if (!first) state.measured = true;
+      return { ok: true, fs: { usedBytes: first ? state.used : state.usedAfter }, ...(data.memoryPaths ? { memory: [{ mount: '/tmp', usedBytes: first ? state.memBefore ?? 1_000_000 : state.memAfter ?? 1_000_000 }] } : {}) };
+    }
     if (data.action === 'verify') return state.verify;
     if (data.action === 'vacuum-journal') return { ok: true, beforeBytes: 600_000_000, afterBytes: 268_435_456 };
     if (data.action === 'finish-quarantine') return { ok: true, removed: [{ dir: data.parents[0], name: `.pp-cleanup-${data.cleanupId}-0`, bytes: 10 }], failed: [], skipped: [] };
     const entries = data.action === 'remove-release' ? [{ path: data.path }] : data.entries;
-    return { ok: true, next: 1, results: entries.map(e => state.fail.has(e.path) ? { path: e.path, status: 'failed', code: 'FS_EACCES' } : state.refuse.has(e.path) ? { path: e.path, status: 'refused', code: state.refuse.get(e.path) } : { path: e.path, status: 'removed', bytes: 100, entries: 1 }) };
+    return { ok: true, next: 1, results: entries.map(e => state.fail.has(e.path) ? { path: e.path, status: 'failed', code: 'FS_EACCES' } : state.park?.has(e.path) ? { path: e.path, status: 'refused', code: 'CHANGED_SINCE_CHECK', parked: state.park.get(e.path) } : state.refuse.has(e.path) ? { path: e.path, status: 'refused', code: state.refuse.get(e.path) } : { path: e.path, status: 'removed', bytes: 100, entries: 1 }) };
   };
   const exec = {
     guest: async (container, raw) => {
       assert.equal(container, target.guest);
-      if (String(raw).includes('STALE_WRITERS:') && !String(raw).includes('printf')) return { code: 0, stdout: `STALE_WRITERS:${state.survivors ?? 0}\n` };
+      if (String(raw).includes('STALE_WRITERS:') && !String(raw).includes('printf')) { calls.push({ action: 'reap' }); return { code: 0, stdout: `STALE_WRITERS:${state.survivors ?? 0}\n` }; }
       const body = unwrapContained(raw);
       if (body.includes('UNIT_LOADED')) { calls.push({ action: 'unit' }); return { code: 0, stdout: `UNIT_LOADED:yes\nUNIT_ENABLED:enabled\nUNIT_ACTIVE:${state.unitActive === false ? 'inactive' : 'active'}\n` }; }
-      if (body.includes('PORT_SERVING')) { calls.push({ action: 'port' }); return { code: 0, stdout: 'PORT_SERVING:200\n' }; }
-      if (body.includes('ROOT:')) { calls.push({ action: 'health' }); return { code: 0, stdout: 'ROOT:200\nHEALTH:200\nLOGIN:200\n' }; }
+      if (body.includes('PORT_SERVING')) { calls.push({ action: 'port', port: Number((body.match(/127\.0\.0\.1:(\d+)\//) || [])[1]) }); return { code: 0, stdout: 'PORT_SERVING:200\n' }; }
+      if (body.includes('ROOT:')) { calls.push({ action: 'health', port: Number((body.match(/127\.0\.0\.1:(\d+)\//) || [])[1]) }); return { code: 0, stdout: 'ROOT:200\nHEALTH:200\nLOGIN:200\n' }; }
       const data = decode(raw);
       const out = answer(data);
       return { code: out.ok === false ? 1 : 0, stdout: JSON.stringify(out), stderr: 'CONTAINMENT:systemd test\n' };
@@ -130,7 +135,7 @@ test('a lease taken after submission refuses the claimed job before anything run
 });
 
 test('an approved cleanup removes in order, deletes snapshots and exports, checks health, rescans and measures', async () => {
-  const w = world();
+  const w = world(); w.state.memBefore = 1_000_000; w.state.memAfter = 999_000;
   const approved = await request(w, { items: [ids.release, ids.group, ids.cache, ids.journal, ids.dump, ids.staging, ids.hostBundle], snapshots: [ids.snap1], exports: [ids.export1], acknowledgeSnapshotLoss: true });
   const { job, r } = await w.run();
   assert.equal(r.status, 'succeeded', JSON.stringify(getJob(w.db, job.id).reason));
@@ -152,6 +157,10 @@ test('an approved cleanup removes in order, deletes snapshots and exports, check
   assert.ok(w.calls.some(c => c.action === 'rescan' && c.origin === 'cleanup'));
   assert.deepEqual(w.sleeps, [10_000], 'one settle wait before the delayed re-read');
   assert.equal(result.reclaimed.guestBytes, 1_000_000_000); assert.equal(result.reclaimed.datasetBytes, 900_000_000); assert.equal(result.reclaimed.settling, false);
+  assert.equal(result.reclaimed.memoryBytes, 1000, 'tmpfs freed is reported on its own');
+  const order = w.calls.map(c => c.action);
+  assert.ok(order.indexOf('measure') < order.indexOf('reap') && order.indexOf('reap') < order.indexOf('live'), 'the baseline is taken before the stale-writer reap and the live probe');
+  assert.deepEqual(w.calls.find(c => c.action === 'measure').memoryPaths, ['/tmp'], 'the memory-backed folders the selection touches');
   assert.ok(result.estimateBytes >= approved.estimate.diskBytes);
   assert.deepEqual(w.alerts, [{ targetKey: 'application:1', ok: true, failedCount: 0, healthFailed: false, name: 'Nodus' }], 'one call: success resolves the cleanup alert and a passing health check resolves the health alert');
   assert.equal(w.audits.at(-1).action, 'STORAGE_CLEANUP_FINISHED');
@@ -222,6 +231,25 @@ test('a build already running refuses a project cleanup before anything is remov
   assert.equal(w.calls.filter(c => c.action === 'remove').length, 0);
 });
 
+test('a project cleanup checks health on the port the project declares (not always 3000)', async () => {
+  const items = [{ id: 'p1'.padEnd(16, '0'), category: 'temp', kind: 'directory', path: '/tmp/old-run', root: '/tmp', status: 'eligible', action: 'remove', location: 'guest', identity: { dev: 1, ino: 5, type: 'dir', mtimeMs: 1 }, allocatedBytes: 10, label: 'old-run' }];
+  const check = { ...nodusCheck({ target: { key: 'project:4', kind: 'project', id: 4, guest: 'm2-4' } }), items };
+  const w = world({ target: projectTarget({ webPort: 4173 }), check });
+  await w.service.requestCleanup({ targetKey: 'project:4', checkId: CHECK_ID, items: [items[0].id] });
+  await w.run();
+  assert.equal(row(w).result.health, 'passed');
+  assert.deepEqual(w.calls.filter(c => c.action === 'port' || c.action === 'health').map(c => c.port), [4173, 4173]);
+  // targets.js selects the declared port (and copes with a table that predates it).
+  const db2 = new DatabaseSync(':memory:');
+  db2.exec("CREATE TABLE mock2_projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, container_name TEXT, lifecycle TEXT NOT NULL DEFAULT 'active', repo_path TEXT NOT NULL, created_at TEXT, web_port INTEGER)");
+  db2.exec("INSERT INTO mock2_projects (id, name, container_name, repo_path, web_port) VALUES (4, 'Shop', 'm2-4', '/r', 4173), (5, 'Plain', 'm2-5', '/r', NULL)");
+  assert.equal(resolveTarget('project:4', { mock2Db: db2 }).webPort, 4173);
+  assert.equal(resolveTarget('project:5', { mock2Db: db2 }).webPort, null);
+  const old = new DatabaseSync(':memory:');
+  old.exec("CREATE TABLE mock2_projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, container_name TEXT, lifecycle TEXT NOT NULL DEFAULT 'active', repo_path TEXT NOT NULL, created_at TEXT); INSERT INTO mock2_projects (id, name, container_name, repo_path) VALUES (4, 'Shop', 'm2-4', '/r')");
+  assert.equal(resolveTarget('project:4', { mock2Db: old }).webPort, null);
+});
+
 test('an interrupted cleanup resumes: quarantine is finished, done items are not redone, a changed item is not removed', async () => {
   let clock = T0;
   const w = world({ now: () => clock });
@@ -279,6 +307,40 @@ test('little measured reclaim yields the settling note', async () => {
   assert.equal(result.reclaimed.settling, true);
   assert.ok(result.notes.includes(SETTLING_NOTE));
   assert.equal(w.state.measured, true, 'the guest is measured again after the settle wait');
+});
+
+test('memory and restore points are judged by their own figures: tmpfs freed, dataset returned, settling only when that figure lags', async () => {
+  // Only a tmpfs group: guest disk does not move, memory does.
+  const w = world(); w.state.usedAfter = w.state.used; w.state.memBefore = 2_000_000; w.state.memAfter = 1_000_000;
+  await request(w, { items: [ids.group] }); await w.run();
+  let result = row(w).result;
+  assert.equal(result.reclaimed.guestBytes, 0); assert.equal(result.reclaimed.memoryBytes, 1_000_000);
+  assert.equal(result.reclaimed.settling, false, 'memory freed is enough; no disk was expected back');
+  // Memory not freed yet (a process still holds the files): settling.
+  const m = world(); m.state.memBefore = 2_000_000; m.state.memAfter = 2_000_000;
+  await request(m, { items: [ids.group] }); await m.run();
+  assert.equal(row(m).result.reclaimed.memoryBytes, 0); assert.equal(row(m).result.reclaimed.settling, true);
+  // Only a restore point: judged by the dataset figure, not the guest disk.
+  const snap = world(); snap.state.usedAfter = snap.state.used;
+  await request(snap, { snapshots: [ids.snap1], acknowledgeSnapshotLoss: true }); await snap.run();
+  result = row(snap).result;
+  assert.equal(result.reclaimed.datasetBytes, 900_000_000); assert.equal(result.reclaimed.memoryBytes, null, 'nothing memory-backed was selected');
+  assert.equal(result.reclaimed.settling, false);
+  const slow = world(); slow.state.datasetAfter = slow.state.datasetBefore;
+  await request(slow, { snapshots: [ids.snap1], acknowledgeSnapshotLoss: true }); await slow.run();
+  assert.equal(row(slow).result.reclaimed.settling, true, 'the dataset has not returned the space yet');
+});
+
+test('an entry set aside as changed (.pp-cleanup-hold-*) is reported with its parked name, never as removed', async () => {
+  const w = world();
+  w.state.park = new Map([['/root/.cache/ms-playwright', '/root/.cache/.pp-cleanup-hold-cln_x-0']]);
+  await request(w, { items: [ids.cache, ids.dump] }); await w.run();
+  const result = row(w).result;
+  const skipped = result.skipped.find(x => x.id === ids.cache);
+  assert.deepEqual(skipped.parked, ['/root/.cache/.pp-cleanup-hold-cln_x-0']);
+  assert.equal(skipped.reason, PARKED_REASON);
+  assert.equal(result.removed.some(x => x.id === ids.cache), false);
+  assert.equal(row(w).status, 'partial');
 });
 
 test('a protected-now item is skipped, a mismatched or out-of-bounds selection is never acted on, and a finished row is returned as is', async () => {

@@ -129,7 +129,12 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   await store.updateCleanup(row.id, { status: 'running', jobId: job.id });
   const selection = Array.isArray(row.selection) ? row.selection : [];
   const save = (phase, current = null) => job.checkpoint(phase, { storageCleanup: true, resumable: true, cleanupId: row.id, done: [...done], current, parents: { guest: [...parents.guest], host: [...parents.host] }, results: acc, before, notes, startedAt });
-  const audit = entry => { try { deps.audit?.({ userId: null, targetKey: row.targetKey, ...entry }); } catch { /* the row is the record */ } };
+  // An audit failure never changes the result, but it is never silent: the
+  // job's own event log records it.
+  const audit = entry => {
+    try { deps.audit?.({ userId: null, targetKey: row.targetKey, ...entry }); }
+    catch (err) { try { job.event?.('audit_failed', `The audit entry ${entry.action} could not be written.`, { action: entry.action, error: String(err?.message || err).slice(0, 200) }); } catch { /* the cleanup row is the record */ } }
+  };
   // monitor.js: ok/failedCount post or resolve the cleanup alert; healthFailed
   // true posts the health alert, false resolves it, undefined leaves it.
   const alert = async outcome => { if (!deps.monitor?.postCleanupAlert) return; try { await deps.monitor.postCleanupAlert(row.targetKey, outcome, { name }); } catch { /* an alert never changes the result */ } };
@@ -173,7 +178,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   const finish = async (status, extra = {}) => {
     const result = {
       status, removed: acc.removed, skipped: acc.skipped, failed: acc.failed, health: 'not-checked', estimateBytes: null,
-      reclaimed: { guestBytes: null, datasetBytes: null, settling: false }, afterCheckId: null, remaining: null, notes, startedAt, finishedAt: iso(), ...extra,
+      reclaimed: { guestBytes: null, memoryBytes: null, datasetBytes: null, settling: false }, afterCheckId: null, remaining: null, notes, startedAt, finishedAt: iso(), ...extra,
     };
     await store.updateCleanup(row.id, { status, result, finishedAt: result.finishedAt });
     audit({ action: 'STORAGE_CLEANUP_FINISHED', details: { cleanupId: row.id, jobId: job.id, status, removed: acc.removed.length, skipped: acc.skipped.length, failed: acc.failed.length, health: result.health, reclaimedBytes: result.reclaimed?.guestBytes ?? null } });
@@ -192,7 +197,19 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     return finish('refused', { reason });
   }
 
-  // ── 2. stale writers, guest reachability ──
+  // ── 2. the baseline, then stale writers and guest reachability ──
+  // The reclaim baseline is taken before anything in the container is
+  // touched (reaping stale writers can itself free space). Memory-backed
+  // filesystems (tmpfs) the selection touches are measured on their own.
+  const memoryPaths = [...new Set(selection.filter(e => e.memoryBacked && e.location === 'guest').flatMap(e => (e.kind === 'group' ? (e.members || []).map(m => m?.path) : [e.path])).filter(x => typeof x === 'string' && x.startsWith('/')).map(x => path.dirname(x)))].slice(0, 20);
+  const measure = async () => {
+    try { return await guestProgram({ action: 'measure', ...(memoryPaths.length ? { memoryPaths } : {}) }, 60_000); }
+    catch (err) { if (['FENCED', 'CANCELLED'].includes(err?.code)) throw err; return null; }
+  };
+  if (!before) {
+    const base = await measure();
+    before = { guestUsedBytes: base?.ok ? base.fs?.usedBytes ?? null : null, datasetUsedBytes: await hostUsage(), memory: base?.ok && Array.isArray(base.memory) ? base.memory : [] };
+  }
   job.fence({ safe: true });
   const reap = await exec.guest(container, reapStaleWritersScript(attempt), { timeoutMs: 30_000 });
   const stale = parseStaleWriters(reap?.stdout);
@@ -217,7 +234,6 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   }
   if (guestUnavailable && !notes.includes(guestUnavailable)) notes.push(guestUnavailable);
   const live0 = liveInfo?.live || null;
-  if (!before) before = { guestUsedBytes: liveInfo?.fs?.usedBytes ?? null, datasetUsedBytes: await hostUsage() };
 
   // ── 3. the check it was approved from, and the target as the check saw it ──
   // Only a check document is accepted; anything else counts as no check, and
@@ -409,7 +425,8 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
         health = active && (code === 'none' || (code && Number(code) >= 200 && Number(code) < 400)) ? 'passed' : 'failed';
         if (health === 'failed') healthDetail = active ? `HEALTH_${code || 'NONE'}` : 'SERVICE_NOT_ACTIVE';
       } else if (target.kind === 'project') {
-        const webPort = Number(target.project?.web_port) || DEFAULT_WEB_PORT;
+        // The port the project declares (targets.js selects web_port), else the default.
+        const webPort = Number(target.webPort) || DEFAULT_WEB_PORT;
         const unit = parseUnitStatus((await guestScript(unitStatusScript(DEFAULT_UNIT), 30_000)).stdout);
         const port = unit.isActive ? parsePortProbe((await guestScript(portProbeScript(webPort, 10), 60_000)).stdout) : { responding: false };
         const probe = port.responding ? parseHealth((await guestScript(healthScript(webPort), 60_000)).stdout) : { healthy: false };
@@ -436,15 +453,26 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     }
   }
   if (changed && !cancelled) { await sleep(settleMs); job.fence({ safe: false }); }
-  const measured = !guestUnavailable && !cancelled ? await guestProgram({ action: 'measure' }, 60_000).catch(err => { if (err?.code === 'FENCED') throw err; return null; }) : null;
+  const measured = !guestUnavailable && !cancelled ? await measure() : null;
   const guestAfter = measured?.ok && measured.fs ? measured.fs.usedBytes : (afterCheck?.totals?.guest?.usedBytes ?? null);
   const datasetAfter = cancelled ? null : await hostUsage();
   // Other writers keep running during a cleanup, so "after" can exceed "before": report 0, never a negative reclaim.
   const delta = (was, now) => (was != null && now != null ? Math.max(0, was - now) : null);
-  const reclaimed = { guestBytes: delta(before?.guestUsedBytes, guestAfter), datasetBytes: delta(before?.datasetUsedBytes, datasetAfter), settling: false };
+  // Memory freed: per tmpfs mount measured both before and after, clamped at 0.
+  const memoryAfter = measured?.ok && Array.isArray(measured.memory) ? measured.memory : null;
+  const memoryPairs = memoryAfter ? (before?.memory || []).map(b => [b, memoryAfter.find(x => x.mount === b.mount)]).filter(([, x]) => x) : [];
+  const memoryBytes = memoryPairs.length ? memoryPairs.reduce((n, [b, x]) => n + Math.max(0, (Number(b.usedBytes) || 0) - (Number(x.usedBytes) || 0)), 0) : null;
+  // guestBytes: disk inside the container; memoryBytes: tmpfs; datasetBytes:
+  // the container's dataset on the host (what deleted snapshots return).
+  const reclaimed = { guestBytes: delta(before?.guestUsedBytes, guestAfter), memoryBytes, datasetBytes: delta(before?.datasetUsedBytes, datasetAfter), settling: false };
   const byEntry = new Map(selection.map(e => [e.id, e]));
-  const removedDisk = acc.removed.reduce((n, r) => { const e = byEntry.get(r.id); return e && e.action !== 'delete-snapshot' && e.action !== 'delete-export' && !e.memoryBacked && e.location === 'guest' ? n + (Number(r.bytes) || 0) : n; }, 0);
-  if (removedDisk > 0 && (reclaimed.guestBytes == null || reclaimed.guestBytes < removedDisk * 0.5)) { reclaimed.settling = true; notes.push(SETTLING_NOTE); }
+  const removedOf = pick => acc.removed.reduce((n, r) => { const e = byEntry.get(r.id); return e && pick(e) ? n + (Number(r.bytes) || 0) : n; }, 0);
+  const isFile = e => e.action !== 'delete-snapshot' && e.action !== 'delete-export' && e.location === 'guest';
+  // Each figure is judged against what was removed of its own kind.
+  const behind = (removed, got) => removed > 0 && (got == null || got < removed * 0.5);
+  if (behind(removedOf(e => isFile(e) && !e.memoryBacked), reclaimed.guestBytes)
+    || behind(removedOf(e => isFile(e) && e.memoryBacked), reclaimed.memoryBytes)
+    || behind(removedOf(e => e.action === 'delete-snapshot'), reclaimed.datasetBytes)) { reclaimed.settling = true; notes.push(SETTLING_NOTE); }
   const byKind = action => selection.filter(e => (action === 'items' ? e.action !== 'delete-snapshot' && e.action !== 'delete-export' : e.action === action)).map(e => e.id);
   const estimateBytes = check ? estimateSelection(check, { items: byKind('items'), snapshots: byKind('delete-snapshot'), exports: byKind('delete-export') }).bytes : null;
 

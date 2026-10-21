@@ -110,6 +110,7 @@ export function createBackendCleanupService({ storage, mainDb, logAudit, now = (
     monitor: { postCleanupAlert: (key, outcome, opts) => storage.postCleanupAlert(key, outcome, opts) },
     getJob: id => getJob(mainDb, id),
     listEvents: newestEvents(mainDb),
+    log: (...a) => console.error('[app-storage]', ...a),
   });
 }
 
@@ -152,14 +153,21 @@ function hostExec(argv, { timeoutMs = 120_000 } = {}) {
 }
 
 // The export store over the runner's own main DB (no db.js singleton here).
-export function runnerExportStore(mainDb) {
+export function runnerExportStore(mainDb, { log = (...a) => console.error(...a) } = {}) {
   return createExportStore({
     getDb: () => mainDb,
     runHost: (bin, args, opts) => hostExec([bin, ...args], opts),
     hostSh: (script, argv = [], opts = {}) => hostExec(['sh', '-c', script, 'sh', ...argv], { timeoutMs: 60000, ...opts }),
     exportsDir: async () => '/var/lib/proxypilot/mcp-exports',
     getSetting: key => { try { return mainDb.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value ?? null; } catch { return null; } },
-    logAudit: (userId, action, resourceType, resourceId, details, ip) => auditInto(mainDb, { resourceType })({ userId, action, targetKey: resourceId, details, ip }),
+    // The runner acts for no dashboard user: audit_log.user_id references
+    // users(id) (foreign keys are on in better-sqlite3), so the row carries
+    // NULL like other system audits and names the actor in its details. A
+    // failure is logged here; the export store itself would swallow it.
+    logAudit: (actor, action, resourceType, resourceId, details, ip) => {
+      try { auditInto(mainDb, { resourceType })({ userId: null, action, targetKey: resourceId, details: { ...(details || {}), actor: actor ?? 'system' }, ip }); }
+      catch (e) { log(`[app-storage] audit ${action} could not be written:`, e?.message || e); throw e; }
+    },
     hasBinary: async () => true,
   });
 }

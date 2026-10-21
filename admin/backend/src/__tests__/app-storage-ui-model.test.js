@@ -18,7 +18,7 @@ import {
 } from '../../../frontend/src/components/app-storage/app-storage-model.mjs';
 import { validatePolicy } from '../lib/app-storage/policy.js';
 import {
-  STATUS_LABELS, CATEGORY_LABELS, SNAPSHOT_WARNING, POLICY_SOURCE_LABELS, RULE_TEXT, TEXT, RULE_STATE_HINTS, POLICY_TEXT,
+  STATUS_LABELS, CATEGORY_LABELS, SNAPSHOT_WARNING, POLICY_SOURCE_LABELS, RULE_TEXT, TEXT, RULE_STATE_HINTS, POLICY_TEXT, SUB_LABELS, FIGURE_LABELS,
 } from '../../../frontend/src/components/app-storage/app-storage-text.js';
 import { nodusCheck, nodusPolicy, nodusEffects } from '../../../frontend/tests/fixtures/app-storage-fixture.mjs';
 
@@ -469,7 +469,8 @@ test('a pool on the host disk: figures named as the host\'s, no "not measured in
   assert.equal(figureLabel('incus-root-usage'), 'on disk, with snapshots');
   assert.equal(figureLabel('container-df'), 'files inside the container');
   assert.equal(figureLabel('shared-host-df'), "the host's shared disk, not this container's alone");
-  assert.equal(figureLabel('something-new', 'Server wording'), 'Server wording');
+  assert.equal(figureLabel('something-new'), null, 'no server wording (it names df, Incus or ZFS) for an unknown source');
+  assert.equal(h.containerUsedBytes, 2.1e9, "Used is the container's own figure on a shared host disk");
   assert.equal(figureLabel(undefined), null);
   assert.match(TEXT.sharedHostNotice, /not this container's alone/);
 });
@@ -482,4 +483,12 @@ test('several snapshots (not all) free at least their figures; new-project defau
   assert.ok(est.notes.some((n) => /several snapshots together/.test(n)));
   assert.equal(estimateSelection(three, selectItem(three, null, SNAP.id)).precision, 'about', 'one snapshot is an estimate');
   assert.equal(POLICY_TEXT.defaultsNewRecorded, 'These rules were turned on when the project was created (the documented defaults).');
+});
+
+test('new item kinds get a plain note; figure labels name no tools (WS1 §3, §4; review N4)', () => {
+  assert.deepEqual(Object.keys(SUB_LABELS).sort(), ['current', 'held', 'kept', 'pending', 'recovery-set', 'rollback-unknown', 'rotated', 'shared', 'unknown']);
+  assert.equal(SUB_LABELS.pending, 'Waiting for its validation result');
+  for (const label of [...Object.values(SUB_LABELS), ...Object.values(FIGURE_LABELS)]) {
+    assert.equal(/\b(ZFS|dataset|referenced|df|Incus)\b/i.test(label), false, label);
+  }
 });

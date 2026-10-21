@@ -57,6 +57,8 @@ function item(checkId, now, o) {
     // Like classify.js: a memory-backed temp item carries the memory hint.
     ...(o.hint || o.memoryBacked ? { hint: o.hint || 'Uses memory, not disk.' } : {}),
     ...(o.recoverableBytes != null ? { recoverableBytes: o.recoverableBytes } : {}),
+    ...(o.sub ? { sub: o.sub } : {}),
+    ...(o.sharedHost ? { sharedHost: true } : {}),
   };
 }
 
@@ -127,8 +129,8 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     I({ category: 'temp', label: 'nodus.service private files', path: '/tmp/systemd-private-62dc0f1e-nodus.service-Sj5Zwh', status: 'protected', reason: 'In use by a running process.', alloc: 8192, files: 1, memoryBacked: true, ageMs: 40 * 60000 }),
     I({ category: 'temp', label: 'nodus-w56-http.json', path: '/var/tmp/nodus-w56-http.json', kind: 'file', status: 'eligible', reason: 'Not changed for more than a day and nothing is using it.', alloc: 4096, logical: 1876, files: 1, ageMs: 11 * DAY }),
     I({ category: 'logs', label: 'System logs (journal)', path: '/var/log/journal', kind: 'journal', action: 'vacuum-journal', status: 'eligible', reason: 'Keeps the newest 256 MB of system logs.', alloc: 612e6, logical: 640e6, files: 14, precision: 'estimate', recoverableBytes: 356e6, ageMs: 10 * 60000 }),
-    I({ category: 'logs', label: 'nodus-image-e2e.log', path: '/var/log/nodus-image-e2e.log', kind: 'file', status: 'eligible', reason: 'A finished log nothing is writing to.', alloc: 45e3, logical: 43920, files: 1, ageMs: 16 * DAY }),
-    I({ category: 'logs', label: 'postgresql-17-main.log', path: '/var/log/postgresql/postgresql-17-main.log', kind: 'file', status: 'protected', reason: 'Being written now.', alloc: 660e3, logical: 657104, files: 1, ageMs: 60000 }),
+    I({ category: 'logs', label: 'syslog.2.gz', path: '/var/log/syslog.2.gz', kind: 'file', sub: 'rotated', status: 'eligible', reason: 'An old rotated log.', alloc: 45e3, logical: 43920, files: 1, ageMs: 16 * DAY }),
+    I({ category: 'logs', label: 'postgresql-17-main.log', path: '/var/log/postgresql/postgresql-17-main.log', kind: 'file', sub: 'current', status: 'protected', reason: 'Being written now.', alloc: 660e3, logical: 657104, files: 1, ageMs: 60000 }),
     I({ category: 'history', label: 'app-pre-deploy-62348a2a.sql', path: '/var/backups/proxypilot-db/app-pre-deploy-62348a2a.sql', kind: 'file', status: 'protected', reason: 'Recent database copy taken before a change.', alloc: 48e6, files: 1, ageMs: 3 * HOUR }),
     I({ category: 'history', label: 'app-pre-deploy-51e0a9b2.sql', path: '/var/backups/proxypilot-db/app-pre-deploy-51e0a9b2.sql', kind: 'file', status: 'protected', reason: 'Recent database copy taken before a change.', alloc: 47e6, files: 1, ageMs: DAY }),
     I({ category: 'history', label: 'app-pre-deploy-1f2e3d4c.sql', path: '/var/backups/proxypilot-db/app-pre-deploy-1f2e3d4c.sql', kind: 'file', status: 'eligible', reason: 'An older database copy taken before a change.', alloc: 46e6, files: 1, ageMs: 6 * DAY }),
@@ -138,6 +140,11 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     I({ category: 'exports', label: 'pp-nodus-20261019.tar.zst', path: null, kind: 'export', action: 'delete-export', location: 'host', status: 'eligible', reason: 'A downloadable copy of the whole container, ready to download.', alloc: 1.42e9, files: 1, ageMs: DAY, identity: { exportId: 7 } }),
     I({ category: 'other', label: '/opt/nodus-w48', path: '/opt/nodus-w48', status: 'investigate', reason: 'Not created by ProxyPilot’s release process.', hint: 'A leftover working copy: its .git link no longer resolves.', alloc: 31e6, logical: 58e6, files: 2210, ageMs: 12 * DAY }),
     I({ category: 'other', label: '/opt/nodus-w49', path: '/opt/nodus-w49', status: 'investigate', reason: 'Not created by ProxyPilot’s release process.', hint: 'A leftover working copy: its .git link no longer resolves.', alloc: 29e6, logical: 55e6, files: 2190, ageMs: 12 * DAY }),
+    // WS1 sub values (contract 2026-10-21 §3, §4): a set-aside entry, a
+    // release whose validation has not passed, a bundle no application name claims.
+    I({ category: 'other', label: '/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1', path: '/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1', sub: 'held', status: 'investigate', reason: 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.', alloc: 8192, files: 2, ageMs: 3 * HOUR }),
+    I({ category: 'releases', label: 'Release 7b7b7b7b (validation not passed)', path: '/opt/nodus-releases/7b7b7b7b00000000000000000000000000000000-p6-7b7b7b7b-1111-4111-8111-111111111111', kind: 'release', sub: 'pending', status: 'protected', reason: 'Its validation has not passed (it may still be running), so it is kept.', alloc: 488e6, logical: 900e6, files: 47800, ageMs: HOUR }),
+    I({ category: 'archives', label: 'Transfer copy bundle-k9x2', path: '/var/lib/proxypilot/application-release-transfers/bundle-k9x2', location: 'host', sub: 'shared', sharedHost: true, status: 'investigate', reason: 'A transfer copy no application name claims; it may belong to another application.', alloc: 21e6, files: 1, ageMs: 5 * DAY }),
     I({ category: 'other', label: '/var/lib/nodus-publication', path: '/var/lib/nodus-publication', status: 'investigate', reason: 'Not claimed by any rule.', alloc: 12e6, files: 340, ageMs: 6 * DAY }),
     I({ category: 'other', label: 'Not measured individually (operating system and other files)', path: null, kind: 'pseudo', status: 'investigate', reason: 'The rest of the used space; it is not attributed to a folder.', alloc: 238e6, files: 0, precision: 'estimate', ageMs: 0 }),
   ];
@@ -153,6 +160,8 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     totals: sharedHost ? {
       guest: { totalBytes: 1.9e12, usedBytes: 512e9, availableBytes: 1.39e12, precision: 'exact', shared: true, source: 'shared-host-df', label: "The host filesystem this container shares with other containers and the host itself; it is not this container's own use" },
       sharedHostFilesystem: true,
+      usageBytes: 2.1e9,
+      usageSource: 'incus-root-usage',
       limit: { bytes: null, source: null },
       dataset: null,
       memoryBacked: [{ mount: '/tmp', usedBytes: 1111255137 }],
@@ -216,7 +225,7 @@ export function nodusEffects() {
     { rule: 'caches', enabled: false, items: 0, bytes: 0, examples: [], note: 'No cache is older than 14 days yet.' },
     { rule: 'tempFiles', enabled: false, items: 4, bytes: 181.4e6, examples: ['nodus-embed-* (263 folders)', 'Abandoned browser download', 'playwright-transform-cache-0'] },
     { rule: 'testArtifacts', enabled: false, items: 0, bytes: 0, examples: [] },
-    { rule: 'logs', enabled: false, items: 2, bytes: 356e6, examples: ['System logs (journal)', 'nodus-image-e2e.log'] },
+    { rule: 'logs', enabled: false, items: 2, bytes: 356e6, examples: ['System logs (journal)', 'syslog.2.gz'] },
     { rule: 'history', enabled: false, items: 0, bytes: 0, examples: [], note: 'Nothing is older than 30 days yet.' },
   ];
 }

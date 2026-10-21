@@ -91,6 +91,15 @@ async function shot(page, name) {
   if (tag) await tag.evaluate((n) => n.remove());
 }
 
+
+// Words the page must not show (review N4 and the plain-language rule): tool
+// and filesystem names and the jargon the UI replaces.
+const JARGON = /\b(ZFS|dataset|referenced|df|Incus|eligible|inode|tmpfs|allocated|logical)\b/i;
+async function plainCheck(page, label) {
+  const text = await page.evaluate(() => [document.querySelector('main'), ...document.querySelectorAll('[role=dialog]')].filter(Boolean).map((n) => n.innerText).join('\n'));
+  const hits = text.split('\n').filter((line) => JARGON.test(line));
+  assert.deepEqual(hits, [], `${label}: words that are not plain language on screen`);
+}
 const summary = (page) => page.getByTestId('selection-summary').innerText();
 const review = (page) => page.getByRole('button', { name: 'Review cleanup' });
 async function expandAll(page) {
@@ -169,6 +178,7 @@ try {
     await nodusRow.getByText('3.6 GB of files in the container', { exact: false }).waitFor();
     await nodusRow.getByText('2.1 GB on disk and 181 MB in memory can be cleaned up', { exact: false }).waitFor();
     if (width >= 1024) await page.getByRole('columnheader', { name: 'Disk used now' }).waitFor();
+    await plainCheck(page, `overview ${width}`);
     ok(`${width}px: the overview says which "used" is which — disk with snapshots now, files in the container at the last check`);
     ok(`${width}px: overview "Request storage check" shows Checking… and polls GET /checks/:id until finished`);
 
@@ -195,6 +205,18 @@ try {
     for (const label of ['Abandoned browser download', 'tsx-989', 'nodus-embed-* (263 folders)']) {
       assert.equal(await page.locator(`[data-item="${byLabel(label).id}"]`).getByText('Uses memory, not disk', { exact: false }).count(), 1, `${label}: the memory note appears once`);
     }
+    const held = page.locator(`[data-item="${byLabel('/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1').id}"]`);
+    await held.getByText('Set aside by a cleanup', { exact: true }).waitFor();
+    await held.getByText('Needs a look', { exact: true }).waitFor();
+    assert.equal(await held.locator('input[type=checkbox]').count(), 0);
+    await page.locator(`[data-item="${byLabel('Release 7b7b7b7b (validation not passed)').id}"]`).getByText('Waiting for its validation result', { exact: true }).waitFor();
+    const sharedBundle = page.locator(`[data-item="${byLabel('Transfer copy bundle-k9x2').id}"]`);
+    await sharedBundle.getByText('Shared by all applications', { exact: true }).waitFor();
+    assert.equal(await sharedBundle.locator('input[type=checkbox]').count(), 0, 'a bundle no application claims cannot be selected here');
+    await page.locator('section[data-category="archives"]').getByText('21 MB shared by all applications, not counted here', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('syslog.2.gz').id}"]`).getByText('Old rotated copy', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('postgresql-17-main.log').id}"]`).getByText('Current log', { exact: true }).waitFor();
+    await plainCheck(page, `detail ${width}`);
     const tempSection = page.locator('section[data-category="temp"]');
     await tempSection.getByText('4.1 KB on disk', { exact: true }).waitFor();
     await tempSection.getByText('204 MB in memory', { exact: true }).waitFor();
@@ -329,6 +351,7 @@ try {
     assert.equal(await page.getByTestId('policy-changed').innerText(), 'Not changed here yet.');
     assert.equal(await page.getByText('No storage check has run yet').count(), 0, 'no nudge when a check exists');
     await shot(page, `rules-proposed-${width}`);
+    await plainCheck(page, `rules ${width}`);
     await caches.getByRole('button', { name: /Turn on/ }).click();
     await caches.getByText('On', { exact: true }).waitFor();
     assert.equal(world.state.policyPuts.length, 1);
@@ -356,8 +379,11 @@ try {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto(`${origin}/storage/applications?target=application:1`);
     await page.getByRole('heading', { name: 'Nodus', level: 1 }).waitFor();
-    await page.getByTestId('shared-host').getByText("Used and Available are that whole disk's figures, not this container's alone", { exact: false }).waitFor();
-    await page.getByText('Used on the shared host disk', { exact: true }).waitFor();
+    await page.getByTestId('shared-host').getByText("Available is that whole disk's figure, not this container's alone", { exact: false }).waitFor();
+    await page.getByText('Used by this container', { exact: true }).waitFor();
+    await page.getByText('2.1 GB', { exact: true }).first().waitFor();
+    await page.getByText('Available on the shared host disk', { exact: true }).waitFor();
+    await plainCheck(page, 'shared host');
     await expandAll(page);
     assert.equal(await page.getByText('Not measured individually', { exact: false }).count(), 0, 'no "not measured individually" remainder on a shared disk');
     for (const w of [360, 1280]) await layoutCheck(page, w, 'detail-shared-host');

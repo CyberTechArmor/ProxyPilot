@@ -385,9 +385,13 @@ export function estimateSelection(check, selection) {
   };
 }
 
-/** A figure's plain label by its source (WS1 FIGURE_SOURCES keys), else the server's own label. */
-export function figureLabel(source, serverLabel = null) {
-  return FIGURE_LABELS[source] || serverLabel || null;
+/**
+ * A figure's plain label by its source (WS1 FIGURE_SOURCES keys). The
+ * server's own labels name tools (df, Incus, ZFS), so an unknown source gets
+ * no label rather than those words (review N4).
+ */
+export function figureLabel(source) {
+  return FIGURE_LABELS[source] || null;
 }
 
 /** "about 1.4 GB" / "at least 1.4 GB of disk and 1.1 GB of memory". */
@@ -515,6 +519,9 @@ export function headerFigures(check) {
     unattributedBytes: t.unattributedBytes ?? null,
     // WS1 §6: on a dir/btrfs pool the container sees the host's shared disk.
     sharedHost: Boolean(t.sharedHostFilesystem || t.guest?.shared),
+    // The container's own figure on its pool (with snapshots); on a shared
+    // host disk it is the "Used" shown (review M10).
+    containerUsedBytes: t.usageBytes ?? null,
     usedSource: t.guest?.source ?? null,
     usedSourceLabel: t.guest?.label ?? null,
     onDiskSource: t.dataset?.source ?? null,

@@ -15,7 +15,7 @@ import {
   isSelected, needsAcknowledgement, selectAllEligible, selectAllSnapshots, selectCategory, selectedCount,
   selectionFor, selectionSummary, toggleItem,
 } from './app-storage-model.mjs';
-import { ALL_ELIGIBLE_SCOPE, KIND_LABELS, SNAPSHOT_ACK, SNAPSHOT_WARNING, TEXT } from './app-storage-text.js';
+import { ALL_ELIGIBLE_SCOPE, FIGURE_LABELS, KIND_LABELS, SNAPSHOT_ACK, SNAPSHOT_WARNING, SUB_LABELS, TEXT } from './app-storage-text.js';
 import { CategoryStatusChip, Figure, ItemStatusChip } from './parts.jsx';
 
 /* --------------------------------- header -------------------------------- */
@@ -48,8 +48,10 @@ export function CheckHeader({ target, check, running, onRequestCheck, now = Date
         {check && (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <Figure label={f.sharedHost ? TEXT.usedShared : TEXT.used} value={formatBytes(f.usedBytes)} hint={<><span>{f.sharedHost ? null : TEXT.usedHint}</span>{f.usedPct != null && !f.sharedHost && <CapacityBar pct={f.usedPct} className="mt-1" />}</>} />
-              <Figure label={TEXT.available} value={formatBytes(f.availableBytes)} />
+              {f.sharedHost && f.containerUsedBytes != null
+                ? <Figure label={TEXT.usedByContainer} value={formatBytes(f.containerUsedBytes)} hint={<span>{FIGURE_LABELS['incus-root-usage']}</span>} />
+                : <Figure label={f.sharedHost ? TEXT.usedShared : TEXT.used} value={formatBytes(f.usedBytes)} hint={<><span>{f.sharedHost ? null : TEXT.usedHint}</span>{f.usedPct != null && !f.sharedHost && <CapacityBar pct={f.usedPct} className="mt-1" />}</>} />}
+              <Figure label={f.sharedHost ? TEXT.availableShared : TEXT.available} value={formatBytes(f.availableBytes)} />
               <Figure label={TEXT.limit} value={f.limitBytes ? formatBytes(f.limitBytes) : TEXT.noLimit} />
               <Figure label={TEXT.snapshotsHold} value={f.snapshotsBytes != null ? formatBytes(f.snapshotsBytes) : '—'} hint={f.snapshotsBytes ? TEXT.snapshotsHoldHint : null} />
             </div>
@@ -121,6 +123,7 @@ export function ItemRow({ item, selected, onToggle, now = Date.now(), selectable
           <span className="text-sm font-medium break-words min-w-0">{item.label}</span>
           <ItemStatusChip status={item.status} />
           {item.memoryBacked && <Chip level="accent">{TEXT.usesMemory}</Chip>}
+          {SUB_LABELS[item.sub] && <Chip>{SUB_LABELS[item.sub]}</Chip>}
           {item.location === 'host' && <Chip>{TEXT.host}</Chip>}
         </div>
         {showPath && <p className="font-mono text-xs text-muted-foreground break-all">{item.path}</p>}

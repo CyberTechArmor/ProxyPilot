@@ -73,6 +73,20 @@ export const FIGURE_LABELS = {
   'monitor-sample': 'on disk, with snapshots (last 15-minute reading)',
 };
 
+// A short note for item `sub` values whose status alone does not say why
+// (WS1 contract 2026-10-21 §3, §4). Others need no chip.
+export const SUB_LABELS = {
+  pending: 'Waiting for its validation result',
+  'rollback-unknown': 'Kept until the previous release is known',
+  kept: 'Kept by the release rules',
+  unknown: 'Release not identified',
+  held: 'Set aside by a cleanup',
+  shared: 'Shared by all applications',
+  'recovery-set': 'Kept or removed together',
+  current: 'Current log',
+  rotated: 'Old rotated copy',
+};
+
 export const KIND_LABELS = {
   application: 'Application',
   project: 'Dev Studio project',
@@ -234,7 +248,9 @@ export const TEXT = {
   inMemoryShort: 'in memory',
   sharedHostShort: (size) => `${size} shared by all applications, not counted here`,
   usedShared: 'Used on the shared host disk',
-  sharedHostNotice: "This container's storage pool keeps its files on the host's own disk, shared with the host and other containers. Used and Available are that whole disk's figures, not this container's alone, and what this check did not measure one by one cannot be estimated.",
+  usedByContainer: 'Used by this container',
+  availableShared: 'Available on the shared host disk',
+  sharedHostNotice: "This container's storage pool keeps its files on the host's own disk, shared with the host and other containers. Available is that whole disk's figure, not this container's alone, and what this check did not measure one by one cannot be estimated.",
   forName: (name) => ` for ${name}`,
   ofName: (name) => ` of ${name}`,
   policyChip: {

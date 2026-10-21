@@ -71,6 +71,15 @@ async function expandAll(page) {
     await closed.first().click();
   }
 }
+
+// Words the page must not show (review N4 and the plain-language rule): tool
+// and filesystem names and the jargon the UI replaces.
+const JARGON = /\b(ZFS|dataset|referenced|df|Incus|eligible|inode|tmpfs|allocated|logical)\b/i;
+async function plainCheck(page, label) {
+  const text = await page.evaluate(() => [document.querySelector('main'), ...document.querySelectorAll('[role=dialog]')].filter(Boolean).map((n) => n.innerText).join('\n'));
+  const hits = text.split('\n').filter((line) => JARGON.test(line));
+  assert.deepEqual(hits, [], `${label}: words that are not plain language on screen`);
+}
 const summary = (page) => page.getByTestId('selection-summary').innerText();
 const has = (b, rel) => fs.existsSync(b.P(rel));
 
@@ -103,6 +112,7 @@ async function journey(width, { sweep }) {
     assert.ok(check && ['complete', 'partial'].includes(check.status), `the real check finished (${check?.status})`);
     const eligibleBytes = check.items.filter((i) => i.status === 'eligible' && !['snapshots', 'exports'].includes(i.category) && i.kind !== 'pseudo').reduce((n, i) => n + (i.allocatedBytes || 0), 0);
     await row.getByText(`${formatBytes(eligibleBytes)} can be cleaned up`, { exact: false }).waitFor();
+    await plainCheck(page, `real overview ${width}`);
     assert.equal(b.state.requests.filter((r) => r.path.endsWith('/checks')).length, 1);
     ok(`${width}px: "Request storage check" ran the real collector (${check.items.length} items, status ${check.status}) and the overview shows its result`);
     if (sweep) { for (const w of LAYOUT_WIDTHS) await layoutCheck(page, w, 'overview'); await page.setViewportSize({ width, height: 900 }); ok(`overview on real data: no horizontal scroll at ${LAYOUT_WIDTHS.join('/')} px`); }
@@ -135,7 +145,11 @@ async function journey(width, { sweep }) {
     }
     assert.equal(await summary(page), '0 selected');
     assert.equal(await page.getByRole('button', { name: 'Review cleanup' }).isDisabled(), true);
-    ok(`${width}px: the detail renders the real check — header figures, notes, ${check.categories.filter((c) => c.itemCount > 0).length} categories with their statuses, all ${check.items.length} items with status, reason and size; ${boxes} checkboxes, none preselected`);
+    await plainCheck(page, `real detail ${width}`);
+    const SUB_CHIPS = { pending: 'Waiting for its validation result', 'rollback-unknown': 'Kept until the previous release is known', kept: 'Kept by the release rules', unknown: 'Release not identified', held: 'Set aside by a cleanup', shared: 'Shared by all applications', 'recovery-set': 'Kept or removed together', current: 'Current log', rotated: 'Old rotated copy' };
+    const withSub = check.items.filter((it) => SUB_CHIPS[it.sub]);
+    for (const it of withSub) await page.locator(`[data-item="${it.id}"]`).getByText(SUB_CHIPS[it.sub], { exact: true }).waitFor();
+    ok(`${width}px: the detail renders the real check — header figures, notes, ${check.categories.filter((c) => c.itemCount > 0).length} categories with their statuses, all ${check.items.length} items with status, reason and size (${withSub.length} with a note for their kind: ${[...new Set(withSub.map((i) => i.sub))].join(', ')}); ${boxes} checkboxes, none preselected; no tool names or jargon on screen`);
     if (sweep) { for (const w of LAYOUT_WIDTHS) await layoutCheck(page, w, 'detail'); await page.setViewportSize({ width, height: 900 }); ok(`detail with every category open, on real data: no horizontal scroll at ${LAYOUT_WIDTHS.join('/')} px`); }
 
     /* ---------------- select → review → deselect one → Clean up → sudo → progress → result ---------------- */
@@ -182,6 +196,7 @@ async function journey(width, { sweep }) {
     const cleanup = await b.storage.cleanupService().getCleanup(cleanupId);
     assert.equal(cleanup.status, 'succeeded', JSON.stringify(cleanup.result));
     await result.getByText('Cleanup finished.', { exact: true }).waitFor();
+    await plainCheck(page, `real result ${width}`);
     const removed = result.getByRole('region', { name: 'Removed' });
     for (const it of [group, staging, snap]) await removed.getByText(it.label, { exact: true }).waitFor();
     assert.equal(await result.getByRole('region', { name: 'Skipped' }).count(), 0, 'nothing skipped');
@@ -249,6 +264,7 @@ async function journey(width, { sweep }) {
     const eff = before.effects.find((e) => e.rule === 'tempFiles');
     await temp.getByTestId('rule-effect').getByText(POLICY_TEXT.effect(eff.items, formatSize(eff.bytes, 'estimate')), { exact: false }).waitFor();
     if (effectNote(eff)) await temp.getByText(effectNote(eff)).waitFor();
+    await plainCheck(page, `real rules ${width}`);
     if (sweep) { for (const w of LAYOUT_WIDTHS) await layoutCheck(page, w, 'rules'); await page.setViewportSize({ width, height: 900 }); ok(`rules and alerts on real data: no horizontal scroll at ${LAYOUT_WIDTHS.join('/')} px`); }
     await temp.getByRole('button', { name: /Turn on/ }).click();
     await temp.getByText('On', { exact: true }).waitFor({ timeout: 10000 });

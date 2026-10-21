@@ -60,3 +60,23 @@ test('a restore record (previousSha equal to its own sha) falls back to the hist
   assert.equal(previousLiveFrom({ sha: 'nope' }, []), null);
   assert.equal(previousLiveFrom(live, [{ sha: S('a'), live: { releasePath: '../x', verifiedAt: '2026-10-01T00:00:00Z' } }]), null, 'a relative folder is not history');
 });
+
+test('a release rolled back FROM is never the previous one: live R5, rolled back to R4 → R3', () => {
+  const R = c => ({ sha: S(c), releasePath: rel(c) });
+  // R3 → R4 → R5, then a rollback job puts R4 back (previousSha R5, rollbackOf R5).
+  const rows = [
+    { sha: S('3'), live: { ...R('3'), previousSha: S('2'), verifiedAt: '2026-10-01T00:00:00Z' } },
+    { sha: S('4'), live: { ...R('4'), previousSha: S('5'), rollbackOf: S('5'), verifiedAt: '2026-10-05T00:00:00Z' } },
+    { sha: S('5'), live: { ...R('5'), previousSha: S('4'), verifiedAt: '2026-10-03T00:00:00Z' } },
+  ];
+  const live = rows[1].live;
+  assert.deepEqual(previousLiveFrom(live, rows), { sha: S('3'), path: rel('3') });
+  assert.deepEqual(previousLiveRelease(db({ live, rows }), 1), { sha: S('3'), path: rel('3') });
+  // An automatic restore after a failed deployment of R5 (R5 never recorded live) → R3 as well.
+  const restored = { ...R('4'), previousSha: S('4'), restored: true, rollbackOf: S('5'), verifiedAt: '2026-10-05T00:00:00Z' };
+  assert.deepEqual(previousLiveFrom(restored, [rows[0], { sha: S('4'), live: restored }]), { sha: S('3'), path: rel('3') });
+  // R5 fixed and deployed again later: it is live history again, so the next release's previous is R5.
+  const again = [...rows.slice(0, 2), { sha: S('5'), live: { ...R('5'), previousSha: S('4'), verifiedAt: '2026-10-07T00:00:00Z' } }];
+  const six = { ...R('6'), previousSha: S('5'), verifiedAt: '2026-10-09T00:00:00Z' };
+  assert.deepEqual(previousLiveFrom(six, [...again, { sha: S('6'), live: six }]), { sha: S('5'), path: rel('5') });
+});

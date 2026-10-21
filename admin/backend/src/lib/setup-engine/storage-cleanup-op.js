@@ -223,8 +223,8 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   const releaseRoot = target.kind === 'application' ? (target.profile?.releaseRoot || null) : null;
   // The release roles are decided in the guest (describeReleases) from the
   // live record, the deploy history and the passed validations.
-  let previousLive = null;
-  if (target.kind === 'application') { try { previousLive = deps.previousLive ? await deps.previousLive(target) : null; } catch { previousLive = null; } }
+  let previousLive;
+  if (target.kind === 'application' && deps.previousLive) { try { previousLive = (await deps.previousLive(target)) ?? null; } catch { previousLive = null; } }
   const relCtx = target.kind === 'application' ? releaseContextFromApplication(target, { root: releaseRoot, previousLive }) : { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] };
   const sourceDir = target.kind === 'application' ? target.profile?.sourceDir || null : null;
   let liveInfo = null;

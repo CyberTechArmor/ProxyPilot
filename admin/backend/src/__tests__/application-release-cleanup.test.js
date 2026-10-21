@@ -172,11 +172,33 @@ test('release context: the facts describeReleases decides from (recorded previou
   assert.deepEqual(releaseContextFromApplication(app, { root }), {
     previousSha: '2'.repeat(40), rollback: `${root}/prev`, previousLive: null, liveVerifiedAt: '2026-10-20T10:00:00Z',
     validated: [{ sha: '2'.repeat(40), path: `${root}/prev`, validatedAt: '2026-10-19T10:00:00Z' }, { sha: '3'.repeat(40), path: `${root}/waiting`, validatedAt: '2026-10-20T11:00:00Z' }],
-  }, 'failed validations and folders outside the release root are not passed on');
-  assert.deepEqual(releaseContextFromApplication({ live: null, candidates: [] }, { root }), { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] });
-  const history = releaseContextFromApplication({ live: { ...app.live, previousSha: null }, candidates: [] }, { root, previousLive: { sha: '2'.repeat(40), path: `${root}/prev` } });
-  assert.deepEqual(history.previousLive, { sha: '2'.repeat(40), path: `${root}/prev` });
-  assert.equal(releaseContextFromApplication(app, { root, previousLive: { sha: '2'.repeat(40), path: '/elsewhere/prev' } }).previousLive.path, null, 'a history folder outside the release root is not used');
+    pending: [`${root}/failed`],
+  }, 'without a history source the live record names the previous release; folders outside the release root are not passed on');
+  assert.deepEqual(releaseContextFromApplication({ live: null, candidates: [] }, { root }), { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [], pending: [] });
+  // A supplied history is the one answer, even against the live record's previousSha (a release rolled back from).
+  const history = releaseContextFromApplication(app, { root, previousLive: { sha: '6'.repeat(40), path: `${root}/before` } });
+  assert.deepEqual([history.previousSha, history.rollback, history.previousLive], ['6'.repeat(40), `${root}/before`, { sha: '6'.repeat(40), path: `${root}/before` }]);
+  const unknown = releaseContextFromApplication(app, { root, previousLive: null });
+  assert.deepEqual([unknown.previousSha, unknown.rollback, unknown.previousLive], [null, null, null], 'history says unknown: nothing is taken from the live record');
+  assert.equal(releaseContextFromApplication(app, { root, previousLive: { sha: '2'.repeat(40), path: '/elsewhere/prev' } }).rollback, `${root}/prev`, 'a history folder outside the release root is not used; the recorded folder is');
+});
+
+test('the cap removes the oldest releases outside the protected set; the release being validated, a waiting candidate and a validation without result are kept and not counted', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  // live (1), rollback = obsolete (3), the release being validated = candidate (2)
+  const waiting = f.create(6); fs.utimesSync(waiting, f.at(9), f.at(9));
+  const pending = f.create(7); fs.utimesSync(pending, f.at(8), f.at(8)); // sealed, its validation has no result yet
+  const old1 = f.create(4); fs.utimesSync(old1, f.at(0), f.at(0));
+  const old2 = f.create(5); fs.utimesSync(old2, f.at(1), f.at(1));
+  const facts = { retention: { keepReleases: 3 }, liveVerifiedAt: '2026-10-20T12:00:00Z', validated: [{ sha: '6'.repeat(40), path: waiting, validatedAt: '2026-10-20T13:00:00Z' }], pending: [pending] };
+  const d = describeReleases(fs, path, { ...f.a, ...facts });
+  assert.deepEqual([d.waiting, d.pending, d.rollback], [waiting, [pending], f.obsolete]);
+  const result = cleanupReleaseArtifacts(fs, path, { ...f.a, ...facts });
+  // keepReleases 3 counts live + rollback + the newest other one (old2); the oldest (old1) goes.
+  assert.equal(result.releasesRemoved, 1);
+  for (const kept of [f.live, f.obsolete, f.candidate, waiting, pending, old2]) assert.equal(fs.existsSync(kept), true, kept);
+  assert.equal(fs.existsSync(old1), false, 'the oldest release outside the protected set is the one removed');
+  assert.throws(() => removeSelectedRelease(fs, path, { ...f.a, ...facts, path: pending }, () => { throw new Error('must not remove'); }), /RELEASE_IS_CANDIDATE/);
 });
 
 test('a release containing the live application model data is never pruned', { skip: process.platform === 'win32' }, t => {

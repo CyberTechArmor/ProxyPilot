@@ -112,6 +112,10 @@ test('verifying the live release keeps its recorded previous release (rollback a
   const r = await runApplicationReleaseOperation({ kind: 'application_verify', params, ...f, sleep: async () => {} });
   assert.equal(r.outcome, 'live_verified');
   assert.equal(f.records.at(-1)[0], 'live'); assert.equal(f.records.at(-1)[2].previousSha, recordedBefore, 'carried forward, not dropped');
+  const r2 = fixture(); r2.state.target = r2.candidate.validation.releasePath;
+  r2.service.getApplication = async () => ({ live: { sha, releasePath: r2.state.target, previousSha: recordedBefore, rollbackOf: recordedBefore, verifiedAt: '2026-10-20T10:00:00Z' }, candidates: [] });
+  await runApplicationReleaseOperation({ kind: 'application_verify', params, ...r2, sleep: async () => {} });
+  assert.equal(r2.records.at(-1)[2].rollbackOf, recordedBefore, 'a rollback stays a rollback after verifying it');
   // A different release recorded live before (the switch happened outside a deployment): that one is the previous release.
   const g = fixture(); g.state.target = g.candidate.validation.releasePath;
   g.service.getApplication = async () => ({ live: { sha: '9'.repeat(40), releasePath: '/opt/nodus-releases/other', previousSha: null }, candidates: [] });
@@ -121,6 +125,20 @@ test('verifying the live release keeps its recorded previous release (rollback a
   const h = fixture(); h.state.target = h.candidate.validation.releasePath; h.service.getApplication = async () => ({ live: null, candidates: [] });
   await runApplicationReleaseOperation({ kind: 'application_verify', params, ...h, sleep: async () => {} });
   assert.equal(Object.hasOwn(h.records.at(-1)[2], 'previousSha'), false);
+});
+
+test('a rollback job records the release it rolled back from; a failed deployment restore names the failed one', async () => {
+  const f = fixture();
+  await runApplicationReleaseOperation({ kind: 'application_rollback', params, ...f, sleep: async () => {} });
+  const live = f.records.at(-1);
+  assert.equal(live[0], 'live'); assert.equal(live[2].sha, sha);
+  assert.equal(live[2].rollbackOf, f.state.previousSha, 'the release replaced by the rollback');
+  const g = fixture(); g.state.failHealth = true;
+  await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...g, sleep: async () => {} });
+  assert.equal(g.records.at(-1)[2].restored, true); assert.equal(g.records.at(-1)[2].rollbackOf, sha, 'the failed release is never the previous one');
+  const h = fixture();
+  await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...h, sleep: async () => {} });
+  assert.equal(Object.hasOwn(h.records.at(-1)[2], 'rollbackOf'), false, 'an ordinary deployment is not a rollback');
 });
 
 test('failed new health restores and verifies the recorded old release without touching service definitions', async () => {

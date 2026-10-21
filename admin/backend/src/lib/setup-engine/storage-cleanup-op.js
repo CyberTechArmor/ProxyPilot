@@ -58,6 +58,8 @@ const REASONS = Object.freeze({
   RELEASE_IS_CANDIDATE: 'Now protected: a validated release waiting to be deployed.',
   RELEASE_HOLDS_SHARED_DATA: 'Now protected: holds shared data that newer releases link to.',
   ROLLBACK_UNKNOWN: ROLLBACK_UNKNOWN_REASON,
+  CHANGED_DURING_REMOVAL: 'It changed while it was being removed, so the rest of it was left alone.',
+  NO_PROCFS: 'The container gives no safe way to remove files (/proc is not available), so nothing was removed.',
   NOT_A_SEALED_RELEASE: 'No longer a recognised release.',
   RELEASE_OUTSIDE_ROOT: 'Outside the release folder.',
   LIVE_RELEASE_CHANGED_DURING_CLEANUP: 'The live release changed during cleanup.',
@@ -70,6 +72,7 @@ const REASONS = Object.freeze({
   JOURNAL_VACUUM_FAILED: 'The system log could not be trimmed.',
   PROGRAM_RESULT_INVALID: 'The cleanup program did not return a result.',
 });
+export const PARKED_REASON = 'It changed while the cleanup ran, so it was set aside (not removed) under a name starting with .pp-cleanup-hold-; check it before removing it.';
 export const reasonFor = code => REASONS[code] || `Not removed (${String(code || 'unknown').slice(0, 60)}).`;
 
 function safeError(code, message) { const e = new Error(message); e.code = code; e.storageCleanupSafe = true; return e; }
@@ -268,14 +271,18 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     const refused = results.filter(r => r.status === 'refused');
     const failed = results.filter(r => r.status === 'failed');
     const total = results.length || 1;
+    // An entry renamed and then found not to be the checked one is parked
+    // under .pp-cleanup-hold-* (never removed); its name is reported.
+    const parked = results.map(r => r.parked).filter(x => typeof x === 'string' && x.startsWith('/')).slice(0, 20);
+    const held = parked.length ? { parked } : {};
     // Entries an interrupted attempt had already moved into quarantine
     // (finished above) count as removed, at their check-time size.
     const goneBytes = wasCurrent(e.id) && gone.length ? Math.round((e.allocatedBytes || 0) * gone.length / total) : 0;
     const bytes = removed.reduce((n, r) => n + (Number(r.bytes) || 0), 0) + goneBytes;
     const doneCount = removed.length + (wasCurrent(e.id) ? gone.length : 0);
-    if (failed.length) acc.failed.push({ id: e.id, label: e.label, error: `${reasonFor(failed[0].code)}${total > 1 ? ` (${failed.length} of ${total} could not be removed)` : ''}`, bytes });
-    else if (refused.length && !doneCount) acc.skipped.push({ id: e.id, label: e.label, reason: reasonFor(refused[0].code) });
-    else if (refused.length) acc.skipped.push({ id: e.id, label: e.label, reason: `${doneCount} of ${total} removed; the rest: ${reasonFor(refused[0].code)}`, bytes });
+    if (failed.length) acc.failed.push({ id: e.id, label: e.label, error: `${reasonFor(failed[0].code)}${total > 1 ? ` (${failed.length} of ${total} could not be removed)` : ''}`, bytes, ...held });
+    else if (refused.length && !doneCount) acc.skipped.push({ id: e.id, label: e.label, reason: parked.length ? PARKED_REASON : reasonFor(refused[0].code), ...held });
+    else if (refused.length) acc.skipped.push({ id: e.id, label: e.label, reason: `${doneCount} of ${total} removed; the rest: ${parked.length ? PARKED_REASON : reasonFor(refused[0].code)}`, bytes, ...held });
     else if (!doneCount) acc.skipped.push({ id: e.id, label: e.label, reason: 'It no longer exists.' });
     else acc.removed.push({ id: e.id, label: e.label, bytes, ...(goneBytes ? { precision: 'estimate' } : {}), ...(gone.length && !wasCurrent(e.id) ? { alreadyGone: gone.length } : {}) });
   };

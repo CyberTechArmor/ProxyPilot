@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { safeRemover, SAFE_REMOVE_SOURCE } from './safe-remove.js';
 
 export const APPLICATION_RELEASE_RETENTION = Object.freeze(JSON.parse(readFileSync(
   new URL('../mcp-policy/application-release-retention.json', import.meta.url), 'utf8',
@@ -79,7 +80,9 @@ export function releaseContextFromApplication(app, { root = null, previousLive =
 //
 // The functions below are SERIALIZED into the contained guest programs (the
 // release program in application-deploy-op.js and the storage cleanup
-// program), so they reference nothing outside their own parameters. All paths
+// program), so they reference nothing outside their own parameters except
+// safeRemover (safe-remove.js), which RELEASE_CLEANUP_SOURCE embeds first:
+// every removal goes through that one fd-relative remover. All paths
 // come from the saved profile, the owning job and the stored cleanup row; the
 // guest lease fences the whole operation.
 
@@ -184,6 +187,9 @@ export function cleanupReleaseArtifacts(fs, p, a) {
   if (!Number.isInteger(keepCount) || keepCount < 2 || keepCount > 20) refuse('INVALID_RELEASE_RETENTION');
   const stageRoot = p.join(d.root, '.staging');
   const out = { stagesRemoved: 0, bundlesRemoved: 0, releasesRemoved: 0, ...(d.rollbackUnknown ? { rollbackUnknown: true } : {}) };
+  // Workspaces are written by the service user while a build runs: removed
+  // only through the fd-relative remover, never by path.
+  const remover = safeRemover(fs, p);
   const attemptName = /^[a-f0-9-]{36}-[1-9][0-9]*(?:\.bundle)?$/;
   if (fs.existsSync(stageRoot)) {
     const stat = fs.lstatSync(stageRoot);
@@ -196,7 +202,7 @@ export function cleanupReleaseArtifacts(fs, p, a) {
       if (p.dirname(target) !== stageRoot || !fs.existsSync(target)) continue;
       const stat = fs.lstatSync(target);
       if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) continue;
-      fs.rmSync(target, { recursive: stat.isDirectory(), force: false });
+      remover.removePath(target);
       if (entry.endsWith('.bundle')) out.bundlesRemoved += 1; else out.stagesRemoved += 1;
     }
   }
@@ -213,7 +219,7 @@ export function cleanupReleaseArtifacts(fs, p, a) {
     if (keep.has(release.path)) continue;
     // Read back the live pointer immediately before each destructive command.
     if (fs.realpathSync(a.profile.sourceDir) !== d.live) refuse('LIVE_RELEASE_CHANGED_DURING_CLEANUP');
-    fs.rmSync(release.path, { recursive: true, force: false });
+    remover.removePath(release.path);
     out.releasesRemoved += 1;
   }
   return out;
@@ -223,8 +229,9 @@ export function cleanupReleaseArtifacts(fs, p, a) {
 // The user-selected removal of ONE release (a.path), with the same
 // predicates as the retention above: a recognised sealed release directly in
 // the root whose marker still names a.markerSha (when given), and not live,
-// rollback, candidate, waiting candidate or backing root as derived now. The live pointer is read back right before `remove`
-// (the caller's verified, non-following removal; plain rmSync otherwise).
+// rollback, candidate, waiting candidate or backing root as derived now. The
+// live pointer is read back right before `remove` (the caller's verified,
+// quarantining removal; the fd-relative remover otherwise).
 export function removeSelectedRelease(fs, p, a, remove) {
   const refuse = message => { throw new Error(message); };
   const d = describeReleases(fs, p, a);
@@ -240,10 +247,11 @@ export function removeSelectedRelease(fs, p, a, remove) {
   if (target === d.candidate || d.protect.has(target)) refuse('RELEASE_IS_CANDIDATE');
   if (d.backing.has(target)) refuse('RELEASE_HOLDS_SHARED_DATA');
   if (fs.realpathSync(a.profile.sourceDir) !== d.live) refuse('LIVE_RELEASE_CHANGED_DURING_CLEANUP');
-  const result = typeof remove === 'function' ? remove(target) : (fs.rmSync(target, { recursive: true, force: false }), {});
+  const result = typeof remove === 'function' ? remove(target) : safeRemover(fs, p).removePath(target);
   return { removed: target, ...(result || {}) };
 }
 
-// The guest-side source both programs embed, in dependency order.
-export const RELEASE_CLEANUP_SOURCE = [describeReleases, cleanupReleaseArtifacts, removeSelectedRelease]
-  .map(fn => `const ${fn.name}=${fn.toString()};`).join('\n');
+// The guest-side source both programs embed, in dependency order: the one
+// remover first, then the release functions that use it.
+export const RELEASE_CLEANUP_SOURCE = [SAFE_REMOVE_SOURCE, ...[describeReleases, cleanupReleaseArtifacts, removeSelectedRelease]
+  .map(fn => `const ${fn.name}=${fn.toString()};`)].join('\n');

@@ -24,6 +24,8 @@
 // environment. `safe.directory=*` is never used. Shared as source text so the
 // cleanup program can embed the same function (contract-changes.md).
 //   safeGit(cp, fs, repo, args) → { ok, stdout, asUid, reason }
+import { describeReleases } from '../setup-engine/application-release-cleanup.js';
+
 export const SAFE_GIT_ARGS = Object.freeze(['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.sshCommand=false', '-c', 'protocol.allow=never']);
 export const SAFE_GIT_ENV = Object.freeze({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat', LC_ALL: 'C' });
 export const SAFE_GIT_SOURCE = String.raw`function safeGit(cp,fs,repo,args){
@@ -38,6 +40,14 @@ export const SAFE_GIT_SOURCE = String.raw`function safeGit(cp,fs,repo,args){
   if(r.error||r.status!==0)return{ok:false,reason:'git refused or failed',asUid};
   return{ok:true,stdout:String(r.stdout||''),asUid};
 }`;
+
+// The release roles (live, rollback, waiting candidate, backing roots, kept
+// releases) are decided by describeReleases from application-release-cleanup.js,
+// the one definition the release job's retention and the storage cleanup run
+// too. It is embedded as source and runs here over a read-only view of fs
+// (every open is O_RDONLY|O_NOFOLLOW|O_NONBLOCK; it only lstats, reads link
+// targets and reads each 4 KiB release marker).
+export const DESCRIBE_RELEASES_SOURCE = `const describeReleases=${describeReleases.toString()};`;
 
 const SCAN_PROGRAM_SOURCE = String.raw`
 'use strict';
@@ -85,6 +95,13 @@ for(const raw of (Array.isArray(a.resolve)?a.resolve:[])){
   out.resolved[raw]={exists:!!s&&real!==null,isLink:!!s&&s.isSymbolicLink(),realpath:real,linkTarget:s&&s.isSymbolicLink()?safeReadlink(f):null};
 }
 function safeReadlink(f){try{return fs.readlinkSync(f)}catch(e){return null}}
+// Release roles: describeReleases (embedded below), never decided here.
+${DESCRIBE_RELEASES_SOURCE}
+if(a.releases&&typeof a.releases==='object'&&a.releases.profile){
+  const roFs=Object.assign(Object.create(fs),{openSync:function(f){return fs.openSync(f,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0)|(fs.constants.O_NONBLOCK||0))}});
+  try{const d=describeReleases(roFs,p,a.releases);out.releases={ok:true,root:d.root,live:d.live,rollback:d.rollback||null,rollbackUnknown:!!d.rollbackUnknown,waiting:d.waiting||null,backing:Array.from(d.backing).sort(),protect:Array.from(d.protect).sort(),sealed:d.sealed.map(function(r){return{path:r.path,sha:r.sha||null}})}}
+  catch(e){const m=String(e&&e.message||'');out.releases={ok:false,code:/^[A-Z_]{3,64}$/.test(m)?m:(e&&e.code==='ENOENT'?'RELEASE_ROOT_MISSING':'RELEASES_UNREADABLE')}}
+}
 // Open paths: /proc/<pid>/cwd and /proc/<pid>/fd/* link targets (ours excluded).
 const openAnc=new Set();
 if(a.procScan){

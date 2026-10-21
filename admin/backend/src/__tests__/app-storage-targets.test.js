@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { listTargets, resolveTarget, activityFor, parseTargetKey, guestBusy } from '../lib/app-storage/targets.js';
-import { databases, registerNodus, buildNodusGuest, makeRoot, cleanupRoot } from './helpers/app-storage-world.js';
+import { databases, registerNodus, buildNodusGuest, makeRoot, cleanupRoot, addDeployHistory, DEPLOY_HISTORY } from './helpers/app-storage-world.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const iso = (ms) => new Date(ms).toISOString();
@@ -105,4 +105,16 @@ test('an interrupted application job (recovery_required, not yet recovered) is s
   mainDb.prepare("UPDATE setup_jobs SET outcome = 'application_recovered' WHERE id = 'job-d'").run();
   const after = activityFor(target, { mainDb, now: NOW });
   assert.deepEqual([after.openJobs.length, after.activeAttempts.length, after.anyApplicationJobOpen, after.buildActive], [0, 0, false, false]);
+});
+
+test('an application target carries the previous release from the deploy history, and each candidate\'s own live record', (t) => {
+  const root = makeRoot(); t.after(() => cleanupRoot(root));
+  const { mock2Db } = databases();
+  const id = registerNodus(mock2Db, buildNodusGuest(root, NOW));
+  assert.equal(resolveTarget('application:1', { mock2Db }).previousLive, null, 'no history: unknown');
+  addDeployHistory(mock2Db, id, { now: NOW });
+  const app = resolveTarget('application:1', { mock2Db });
+  assert.deepEqual(app.previousLive, { ...DEPLOY_HISTORY });
+  const rb = app.candidates.find((c) => c.sha === DEPLOY_HISTORY.sha);
+  assert.equal(rb.live.releasePath, DEPLOY_HISTORY.path);
 });

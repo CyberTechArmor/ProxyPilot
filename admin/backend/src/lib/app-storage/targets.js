@@ -6,6 +6,7 @@
 
 import { createApplicationStore } from '../../mock2/application-store.js';
 import { APPLICATION_JOB_KINDS, applicationGuestName } from '../setup-engine/application-deploy-logic.js';
+import { previousLiveRelease } from './release-history.js';
 
 export const TARGET_KINDS = Object.freeze(['application', 'project']);
 const KEY_RE = /^(application|project):([1-9][0-9]{0,15})$/;
@@ -44,6 +45,10 @@ function safeJson(text) {
 
 function tableExists(db, name) {
   try { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name); } catch { return false; }
+}
+
+function columnExists(db, table, column) {
+  try { return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column); } catch { return false; }
 }
 
 function projectGuest(row) {
@@ -102,15 +107,25 @@ export function resolveTarget(key, { mock2Db }) {
         healthUrl: profile.healthUrl || null, preservePaths: profile.preservePaths || [], envFiles: profile.envFiles || [], revision: profile.revision || null,
       },
       live: app.live || null,
-      candidates: (app.candidates || []).map((c) => ({ sha: c.sha, checkpointAt: c.checkpointAt, validation: c.validation ? { passed: !!c.validation.passed, releasePath: c.validation.releasePath || null, validatedAt: c.validation.validatedAt || null, jobId: c.validation.jobId || null } : null })),
+      // Each candidate's own live record (its last time live), so the
+      // release roles can name the folder a previous release ran from.
+      candidates: (app.candidates || []).map((c) => ({ sha: c.sha, checkpointAt: c.checkpointAt, validation: c.validation ? { passed: !!c.validation.passed, releasePath: c.validation.releasePath || null, validatedAt: c.validation.validatedAt || null, jobId: c.validation.jobId || null } : null, live: c.live && typeof c.live === 'object' ? { releasePath: c.live.releasePath || null, verifiedAt: c.live.verifiedAt || null } : null })),
+      // The release that ran before the live one, from the deploy history
+      // (release-history.js); null when unknown.
+      previousLive: previousLiveRelease(mock2Db, id),
     };
   }
   if (!tableExists(mock2Db, 'mock2_projects')) throw notFound();
-  const row = mock2Db.prepare('SELECT id, name, container_name, lifecycle, repo_path, created_at FROM mock2_projects WHERE id = ?').get(id);
+  // web_port (migration 504) is the port the project's app serves on; the
+  // cleanup's health check probes it (an older table without it: the default).
+  const hasPort = columnExists(mock2Db, 'mock2_projects', 'web_port');
+  const row = mock2Db.prepare(`SELECT id, name, container_name, lifecycle, repo_path, created_at${hasPort ? ', web_port' : ''} FROM mock2_projects WHERE id = ?`).get(id);
   if (!row || (row.lifecycle === 'archived' && !row.container_name)) throw notFound();
+  const webPort = Number(row.web_port);
   return {
     key: targetKeyOf(kind, id), kind, id, name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle,
     createdAt: row.created_at || null, repoPath: row.repo_path || null, appDir: '/srv/app', repoMount: '/srv/repo.git',
+    webPort: Number.isInteger(webPort) && webPort > 0 && webPort < 65536 ? webPort : null,
   };
 }
 

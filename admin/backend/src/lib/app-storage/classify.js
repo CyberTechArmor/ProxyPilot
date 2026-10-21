@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { categoryLabel } from './categories.js';
 import { computeTotals, summarizeCategories, formatBytes } from './accounting.js';
 import { HOST_TRANSFER_ROOT } from './host-measures.js';
+import { releaseContextFromApplication, ROLLBACK_UNKNOWN_REASON } from '../setup-engine/application-release-cleanup.js';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -52,6 +53,7 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
   const tracked = [];
   const resolve = [];
   let service = null;
+  let releases = null;
   if (target.kind === 'application') {
     const p = target.profile || {};
     service = p.serviceName || null;
@@ -62,6 +64,10 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
     add('/usr', 0, 'os');
     add('/var/lib/dpkg', 0, 'os');
     if (p.releaseRoot) {
+      // The release roles are decided in the guest by describeReleases, the
+      // one definition the release job and the cleanup also run, from the
+      // records' facts (the previous release from the deploy history).
+      if (p.sourceDir) releases = { profile: { sourceDir: p.sourceDir, releaseRoot: p.releaseRoot, preservePaths: [...(p.preservePaths || [])], envFiles: [...(p.envFiles || [])] }, ...releaseContextFromApplication(target, { root: p.releaseRoot, previousLive: target.previousLive || null }) };
       add(p.releaseRoot, 1, 'release-root', { marker: true, breakdown: ['node_modules', 'release-evidence', 'test-results'] });
       add(`${p.releaseRoot}/.staging`, 1, 'staging');
       if (p.sourceDir) add(p.sourceDir, 0, 'live', { resolve: true, breakdown: ['node_modules', 'release-evidence', 'test-results'] });
@@ -100,7 +106,7 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
   add('/etc', 1, 'env-copy', { match: '^environment\\.pre-' });
   add('/run/mock2-deploy', 1, 'containment');
   for (const d of ['/opt', '/srv', '/home', '/var/lib']) add(d, 1, 'other', { gitLinks: true });
-  return { roots, resolve, tracked, service, statfs: ['/', '/tmp', '/var/tmp', '/run'], procScan: true, journal: true, budget, maxItems: 20_000, maxChildren: 5_000 };
+  return { roots, resolve, tracked, service, ...(releases ? { releases } : {}), statfs: ['/', '/tmp', '/var/tmp', '/run'], procScan: true, journal: true, budget, maxItems: 20_000, maxChildren: 5_000 };
 }
 
 /* -------------------------------- context --------------------------------- */
@@ -117,46 +123,54 @@ export function isSealedRelease(it) {
 /**
  * What must stay, derived from the target's records and the facts:
  * { liveRelease, rollbackRelease, waitingCandidate, backingRoots,
- *   activeAttempts, recoveryAttempts, buildActive, openRestoreJob,
- *   anyApplicationJobOpen, openJobIds }.
+ *   releasesKnown, releasesUnknown, rollbackUnknown, keptReleases,
+ *   sealedReleases, activeAttempts, recoveryAttempts, buildActive,
+ *   openRestoreJob, anyApplicationJobOpen, openJobIds }.
+ * The release roles come only from describeReleases' answer in the facts
+ * (facts.releases); without one, no release is cleanable and the live
+ * release and backing roots are named for the labels only.
  */
 export function buildContext({ target, activity = {}, facts = null } = {}) {
-  const ctx = { liveRelease: null, rollbackRelease: null, waitingCandidate: null, backingRoots: [], activeAttempts: [...(activity.activeAttempts || [])], recoveryAttempts: [...(activity.recoveryAttempts || [])], buildActive: !!activity.buildActive, openRestoreJob: !!activity.openRestoreJob, anyApplicationJobOpen: !!activity.anyApplicationJobOpen, openJobIds: [...(activity.openJobIds || [])] };
+  const ctx = { liveRelease: null, rollbackRelease: null, waitingCandidate: null, backingRoots: [], releasesKnown: false, releasesUnknown: null, rollbackUnknown: false, keptReleases: [], sealedReleases: [], activeAttempts: [...(activity.activeAttempts || [])], recoveryAttempts: [...(activity.recoveryAttempts || [])], buildActive: !!activity.buildActive, openRestoreJob: !!activity.openRestoreJob, anyApplicationJobOpen: !!activity.anyApplicationJobOpen, openJobIds: [...(activity.openJobIds || [])] };
   if (target?.kind !== 'application' || !facts) return ctx;
   const p = target.profile || {};
+  const rel = facts.releases;
+  if (rel && rel.ok === true) {
+    ctx.releasesKnown = true;
+    ctx.liveRelease = rel.live || null;
+    ctx.rollbackRelease = rel.rollback || null;
+    ctx.waitingCandidate = rel.waiting || null;
+    ctx.backingRoots = [...(rel.backing || [])].sort();
+    ctx.rollbackUnknown = !!rel.rollbackUnknown;
+    ctx.keptReleases = [...(rel.protect || [])];
+    ctx.sealedReleases = (rel.sealed || []).map((r) => r.path);
+    return ctx;
+  }
+  ctx.releasesUnknown = p.releaseRoot ? (rel?.code || 'NOT_DESCRIBED') : null;
   const live = p.sourceDir ? facts.resolved?.[p.sourceDir] : null;
   if (live?.exists && live.realpath) ctx.liveRelease = live.realpath;
   const releaseItems = itemsOfRole(facts, 'release-root');
   const root = releaseItems.length ? dirname(releaseItems[0].path) : (p.releaseRoot || null);
-  // Backing roots: the release-root child holding the real path of a preserved path or env file.
+  // Backing roots (labels only here): the release-root child holding the real path of a preserved path or env file.
   if (root) {
     const backing = new Set();
     for (const x of [...(p.preservePaths || []), ...(p.envFiles || [])]) {
       const real = facts.resolved?.[x]?.realpath;
       if (!real || !inside(root, real) || real === root) continue;
-      const top = `${root}/${real.slice(root.length + 1).split('/')[0]}`;
-      backing.add(top);
+      backing.add(`${root}/${real.slice(root.length + 1).split('/')[0]}`);
     }
     ctx.backingRoots = [...backing].sort();
   }
-  const sealed = releaseItems.filter(isSealedRelease);
-  // Waiting candidate: the newest validated release newer than the live verification, not live.
-  const liveAt = Date.parse(target.live?.verifiedAt || '') || null;
-  const waiting = (target.candidates || [])
-    .filter((c) => c.validation?.passed && c.validation.releasePath && c.validation.releasePath !== ctx.liveRelease)
-    .map((c) => ({ path: c.validation.releasePath, at: Date.parse(c.validation.validatedAt || c.checkpointAt || '') || 0 }))
-    .filter((c) => liveAt == null || c.at > liveAt)
-    .filter((c) => sealed.some((it) => it.path === c.path))
-    .sort((a, b) => b.at - a.at)[0];
-  if (waiting) ctx.waitingCandidate = waiting.path;
-  // Rollback: the release of live.previousSha, else the newest other sealed release.
-  const others = sealed.filter((it) => it.path !== ctx.liveRelease && it.path !== ctx.waitingCandidate);
-  const prev = target.live?.previousSha || null;
-  const bySha = prev ? others.find((it) => it.marker?.sha === prev) : null;
-  const newest = others.slice().sort((a, b) => Number(b.mtimeMs) - Number(a.mtimeMs))[0];
-  ctx.rollbackRelease = (bySha || newest)?.path || null;
   return ctx;
 }
+
+// Why the release roles are not known, in plain words (describeReleases' refusals).
+const RELEASES_UNKNOWN_REASONS = {
+  RETENTION_REQUIRES_SYMLINK_LAYOUT: 'The application does not run through a link into its release folder, so which release is which cannot be told; no release is cleaned up.',
+  UNSAFE_RETENTION_ROOT: 'The release folder is not owned by root or can be changed by other accounts, so no release is cleaned up.',
+  LIVE_RELEASE_OUTSIDE_ROOT: 'The application runs from outside its release folder, so which release is which cannot be told; no release is cleaned up.',
+};
+const releasesUnknownReason = (code) => RELEASES_UNKNOWN_REASONS[code] || 'Which release is which could not be worked out in the container, so no release is cleaned up.';
 
 /* ------------------------------ item building ----------------------------- */
 
@@ -315,7 +329,8 @@ function classifyGuestItem(it, root, env) {
 
 function classifyReleaseChild(it, { context }) {
   const name = it.name || basename(it.path);
-  const sealed = isSealedRelease(it);
+  // Sealed as describeReleases saw it when its answer is there (the same test).
+  const sealed = context.releasesKnown ? (context.sealedReleases || []).includes(it.path) : isSealedRelease(it);
   const sha8 = it.marker?.sha ? it.marker.sha.slice(0, 8) : name.slice(0, 8);
   if (it.path === context.liveRelease) {
     return { category: 'running_app', status: 'protected', kind: 'release', sub: 'live', label: `Release ${sha8} (running now)`, reason: 'The release the application is running now.', breakdown: breakdownOf(it), hint: 'Inside a sealed release; its parts are removed only with the whole release.', identity: { markerSha: it.marker?.sha || null } };
@@ -325,9 +340,14 @@ function classifyReleaseChild(it, { context }) {
   }
   if (it.type === 'link') return { category: 'other', status: 'investigate', reason: 'A link in the release folder (never followed).' };
   if (sealed) {
-    if (it.path === context.rollbackRelease) return { category: 'releases', status: 'protected', kind: 'release', sub: 'rollback', label: `Release ${sha8} (rollback)`, reason: 'Kept so you can roll back to the previous version.', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
-    if (it.path === context.waitingCandidate) return { category: 'releases', status: 'protected', kind: 'release', sub: 'candidate', label: `Release ${sha8} (waiting to deploy)`, reason: 'A validated release waiting to be deployed.', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
-    return { category: 'releases', status: 'eligible', kind: 'release', sub: 'sealed', action: 'remove-release', label: `Release ${sha8}`, reason: 'An older release that is no longer needed for rollback.', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
+    const release = { category: 'releases', kind: 'release', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
+    // Without describeReleases' answer nothing is decided here.
+    if (!context.releasesKnown) return { ...release, status: 'protected', sub: 'unknown', label: `Release ${sha8}`, reason: releasesUnknownReason(context.releasesUnknown) };
+    if (it.path === context.rollbackRelease) return { ...release, status: 'protected', sub: 'rollback', label: `Release ${sha8} (rollback)`, reason: 'Kept so you can roll back to the previous version.' };
+    if (it.path === context.waitingCandidate) return { ...release, status: 'protected', sub: 'candidate', label: `Release ${sha8} (waiting to deploy)`, reason: 'A validated release waiting to be deployed.' };
+    if (context.rollbackUnknown) return { ...release, status: 'protected', sub: 'rollback-unknown', label: `Release ${sha8}`, reason: ROLLBACK_UNKNOWN_REASON };
+    if ((context.keptReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'kept', label: `Release ${sha8}`, reason: 'Kept by the release process.' };
+    return { ...release, status: 'eligible', sub: 'sealed', action: 'remove-release', label: `Release ${sha8}`, reason: 'An older release that is no longer needed for rollback.' };
   }
   if (RELEASE_NAME_RE.test(name)) return { category: 'other', status: 'investigate', reason: 'Looks like a release but is not sealed by ProxyPilot (no valid release marker or unexpected owner), so it is left for you to look at.' };
   return { category: 'other', status: 'investigate', reason: "Not created by ProxyPilot's release process." };
@@ -633,6 +653,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
     notes.push(`Space held by snapshots${held ? ` (about ${formatBytes(held)})` : ''} is only returned after those snapshots are deleted.`);
     notes.push("Each snapshot's figure is the space only that snapshot holds. Space that several snapshots share is freed only when all of them are deleted, so the figures add up to less than the total held by snapshots.");
   }
+  if (env.context.rollbackUnknown) notes.push(ROLLBACK_UNKNOWN_REASON);
   if (facts?.budgetExceeded) notes.push('The measurement stopped at its time or size budget; figures marked "at least" are lower bounds.');
   if (facts?.truncatedItems) notes.push(`${facts.truncatedItems} entries were not listed one by one (too many); their space is in "Not measured individually".`);
   const omitted = (facts?.roots || []).reduce((s, r) => s + Number(r.omitted || 0), 0);

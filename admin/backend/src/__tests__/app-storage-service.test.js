@@ -18,7 +18,7 @@ function setup(t, { now = () => NOW } = {}) {
   const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
   const world = W.buildNodusGuest(root, NOW);
   const { mock2Db, mainDb } = W.databases();
-  W.registerNodus(mock2Db, world);
+  W.addDeployHistory(mock2Db, W.registerNodus(mock2Db, world), { now: NOW });
   mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (4, 'Shop', 'm2-4', 'active', '/var/lib/proxypilot/mock2/repos/4.git', '2026-10-01 10:00:00')").run();
   const exec = W.scriptedExec({ prefix: root, snapshots: [{ name: 'snap0', created_at: '2026-10-18T10:00:00Z' }], snapshotUsed: { snap0: 4e7 } });
   const guests = new Map([['pp-nodus', { status: 'Running', usedBytes: 2956918784 }], ['m2-4', { status: 'Stopped', usedBytes: null }]]);

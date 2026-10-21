@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, symlinkSync, linkSync, chmodSync, chownSync, readdirSync, lstatSync, rmdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SCAN_PROGRAM, scanArgv, scanScript, parseScanOutput, encodeScanInput } from '../lib/app-storage/scan-program.js';
+import { SCAN_PROGRAM, scanArgv, scanScript, parseScanOutput, encodeScanInput, DESCRIBE_RELEASES_SOURCE } from '../lib/app-storage/scan-program.js';
 import { makeRoot, cleanupRoot, holdOpen, age, DAY } from './helpers/app-storage-world.js';
 
 function scan(input, opts = {}) {
@@ -210,8 +210,16 @@ test('the guest script runs from / and says NO_NODE without Node.js; outputs are
   assert.equal(parseScanOutput({ code: 0, stdout: '{}', stdoutTruncated: true }).code, 'OUTPUT_TOO_LARGE');
   assert.ok(SCAN_PROGRAM.length < 100_000, 'the program fits in one argv entry');
   // No write primitive appears in the program.
-  const writes = SCAN_PROGRAM.match(/\bfs\.(write|append|rm|unlink|rename|mkdir|mkdtemp|chmod|chown|lchown|truncate|ftruncate|copyFile|cp|utimes|lutimes|symlink|link|open(?!Sync\(f,fs\.constants\.O_RDONLY))\w*/g) || [];
+  const WRITE_RE = /\bfs\.(write|append|rm|unlink|rename|mkdir|mkdtemp|chmod|chown|lchown|truncate|ftruncate|copyFile|cp|utimes|lutimes|symlink|link|open(?!Sync\(f,fs\.constants\.O_RDONLY))\w*/g;
+  // describeReleases (the shared release-role definition) is checked apart:
+  // it runs over the read-only fs view, and its one open is a 4 KiB marker read.
+  assert.ok(SCAN_PROGRAM.includes(DESCRIBE_RELEASES_SOURCE));
+  const writes = SCAN_PROGRAM.replace(DESCRIBE_RELEASES_SOURCE, '').match(WRITE_RE) || [];
   assert.deepEqual(writes, [], 'no filesystem write primitive appears in the program');
+  assert.deepEqual(DESCRIBE_RELEASES_SOURCE.match(WRITE_RE) || [], ['fs.openSync'], 'describeReleases only opens (the marker)');
+  assert.match(DESCRIBE_RELEASES_SOURCE, /fs\.openSync\(file, 'r'\)/);
+  assert.match(SCAN_PROGRAM, /describeReleases\(roFs,p,a\.releases\)/, 'it is given the read-only view');
+  assert.equal((SCAN_PROGRAM.match(/describeReleases\(/g) || []).length, 2, 'defined once, called once');
   assert.match(SCAN_PROGRAM, /fs\.openSync\(f,fs\.constants\.O_RDONLY\|\(fs\.constants\.O_NOFOLLOW\|\|0\)\|\(fs\.constants\.O_NONBLOCK\|\|0\)\)/, 'the one open is read-only, never follows a link and never blocks');
 });
 

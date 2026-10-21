@@ -60,6 +60,8 @@ export function createAppStorage({
     const d = defaultPolicyFor(target, { installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
     if (d.source !== 'defaults-new') return null;
     let saved;
+    // The policy listeners are not told: the stored rules are the defaults
+    // that were already in force, so no limit changes.
     try { saved = store.putPolicy(target.key, { policy: d.policy, source: 'defaults-new', updatedBy: null, expectedRevision: 0, proposedRules: [] }); } catch { return null; } // another writer was first
     const rulesOn = RULE_KEYS.filter((k) => d.policy.rules?.[k]?.enabled);
     try { audit?.({ action: 'STORAGE_POLICY_CHANGED', targetKey: target.key, detail: { origin: NEW_PROJECT_DEFAULTS_ORIGIN, source: 'defaults-new', revision: saved?.revision ?? 1, rulesOn } }); } catch (e) { logger?.error?.('[app-storage] audit of new-project defaults failed', e?.message || e); }

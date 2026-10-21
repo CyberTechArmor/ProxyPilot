@@ -55,6 +55,7 @@ export async function performCheck({ target, activity = {}, exec, policy = null,
       items: classified.items,
       context: {
         liveRelease: context.liveRelease, rollbackRelease: context.rollbackRelease, waitingCandidate: context.waitingCandidate,
+        rollbackUnknown: !!context.rollbackUnknown, releasesUnknown: context.releasesUnknown || null,
         backingRoots: context.backingRoots, activeAttempts: context.activeAttempts, recoveryAttempts: context.recoveryAttempts || [], buildActive: context.buildActive,
         openRestoreJob: context.openRestoreJob, reasons: [...(activity.reasons || [])],
       },

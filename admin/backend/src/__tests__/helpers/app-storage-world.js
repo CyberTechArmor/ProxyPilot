@@ -156,6 +156,17 @@ export function nodusTarget(world) {
 }
 
 /** Rewrite the collector's input into the prefix, run it, rewrite its output back. */
+// describeReleases' input under the prefix: every path it reads.
+function prefixReleases(r, P) {
+  return {
+    ...r,
+    profile: { ...r.profile, sourceDir: P(r.profile.sourceDir), releaseRoot: P(r.profile.releaseRoot), preservePaths: (r.profile.preservePaths || []).map(P), envFiles: (r.profile.envFiles || []).map(P) },
+    rollback: P(r.rollback),
+    previousLive: r.previousLive ? { ...r.previousLive, path: P(r.previousLive.path) } : null,
+    validated: (r.validated || []).map((v) => ({ ...v, path: P(v.path) })),
+  };
+}
+
 export function runScanUnder(prefix, input, { home = '/var/lib/nodus', viaShell = true } = {}) {
   const P = (x) => (typeof x === 'string' && x.startsWith('/') ? prefix + x : x);
   const data = {
@@ -165,6 +176,7 @@ export function runScanUnder(prefix, input, { home = '/var/lib/nodus', viaShell 
     tracked: (input.tracked || []).map((t) => ({ ...t, repo: P(t.repo) })),
     statfs: (input.statfs || []).map(P),
     service: null,
+    ...(input.releases ? { releases: prefixReleases(input.releases, P) } : {}),
   };
   const b64 = Buffer.from(JSON.stringify(data)).toString('base64');
   const r = viaShell
@@ -254,5 +266,19 @@ export function registerNodus(mock2Db, world, { createdAt = '2026-09-27T10:00:00
   }
   return id;
 }
+
+/**
+ * The deploy history of the fixture: the rollback release was live before
+ * the current one (its candidate row keeps that live record), while the live
+ * record itself names no previous release — as on the real Nodus. Without
+ * it, the previous release is unknown and no release is cleanable.
+ */
+export function addDeployHistory(mock2Db, applicationId, { now = Date.now() } = {}) {
+  mock2Db.prepare("INSERT INTO mock2_application_candidates (application_id, sha, profile_revision, profile_digest, tree_sha, checkpoint_at, hygiene_json, validation_json, live_json) VALUES (?, ?, 6, ?, ?, ?, '{}', ?, ?)")
+    .run(applicationId, ROLLBACK_SHA, 'd'.repeat(64), 'b'.repeat(40), new Date(now - 5 * DAY).toISOString(), JSON.stringify({ passed: true, releasePath: `${RELEASE_ROOT}/${ROLLBACK}` }), JSON.stringify({ sha: ROLLBACK_SHA, releasePath: `${RELEASE_ROOT}/${ROLLBACK}`, verifiedAt: new Date(now - 4 * DAY).toISOString() }));
+}
+
+/** The same history for a hand-built target (no database): what release-history.js would find. */
+export const DEPLOY_HISTORY = Object.freeze({ sha: ROLLBACK_SHA, path: `${RELEASE_ROOT}/${ROLLBACK}` });
 
 export function cleanupRoot(root) { try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ } }

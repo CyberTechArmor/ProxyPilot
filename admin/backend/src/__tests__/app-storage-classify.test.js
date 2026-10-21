@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { rmSync, mkdirSync } from 'node:fs';
 import { performCheck } from '../lib/app-storage/perform-check.js';
 import { classify, buildContext, scanPlanFor, namePattern, isSealedRelease, GROUP_THRESHOLD } from '../lib/app-storage/classify.js';
 import * as W from './helpers/app-storage-world.js';
@@ -15,7 +16,7 @@ const NOW = Date.parse('2026-10-20T23:00:00Z');
 const CHECK_ID = 'chk_00000000-0000-4000-8000-000000000001';
 const inside = (root, p) => p === root || p.startsWith(`${root}/`);
 
-async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {}, exports = [], mutate = null } = {}) {
+async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {}, exports = [], mutate = null, history = true } = {}) {
   const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
   const world = W.buildNodusGuest(root, NOW);
   if (mutate) mutate(root, world);
@@ -23,7 +24,8 @@ async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {},
   t.after(release);
   await new Promise((r) => setTimeout(r, 150));
   const exec = W.scriptedExec({ prefix: root, snapshots, snapshotUsed });
-  const result = await performCheck({ target: W.nodusTarget(world), activity, exec, policy: null, now: NOW, checkId: CHECK_ID, listExports: () => exports });
+  const target = { ...W.nodusTarget(world), previousLive: history ? { ...W.DEPLOY_HISTORY } : null };
+  const result = await performCheck({ target, activity, exec, policy: null, now: NOW, checkId: CHECK_ID, listExports: () => exports });
   const at = (p) => result.items.find((it) => it.path === p);
   const label = (re) => result.items.find((it) => re.test(it.label));
   return { result, at, label, root, world };
@@ -589,4 +591,53 @@ test('a staging attempt of an interrupted job that needs recovery is kept with t
   assert.deepEqual([r.at(`/opt/r/.staging/${A}`).status, r.at(`/opt/r/.staging/${A}`).reason], ['protected', 'Belongs to a build that was interrupted and still needs recovery.']);
   assert.deepEqual([r.at('/srv/app/test-results').status, r.at('/srv/app/test-results').reason], ['protected', 'A build was interrupted and still needs recovery.']);
   assert.deepEqual([r.at(`${TR}/bundle-app2-a1b2c3`).status, r.at(`${TR}/bundle-app2-a1b2c3`).reason], ['protected', 'An application build is running or waiting for recovery; transfer copies may be in use.']);
+});
+
+/* --------------- release roles: describeReleases is the only definition --------------- */
+
+test('the rollback is the release the deploy history says ran before, never the newest folder', async (t) => {
+  const R = W.RELEASE_ROOT;
+  // The older release's folder was touched last; the history names the other one.
+  const { at, result } = await nodusCheck(t, { mutate: (root) => W.age(`${root}${R}/${W.OLD}`, NOW - 60_000) });
+  assert.deepEqual([at(`${R}/${W.ROLLBACK}`).status, at(`${R}/${W.ROLLBACK}`).sub], ['protected', 'rollback']);
+  assert.deepEqual([at(`${R}/${W.OLD}`).status, at(`${R}/${W.OLD}`).action], ['eligible', 'remove-release']);
+  assert.equal(result.context.rollbackRelease, `${R}/${W.ROLLBACK}`);
+  assert.equal(result.context.rollbackUnknown, false);
+});
+
+test('when nothing records the previous release, every sealed release is kept with a plain reason', async (t) => {
+  const R = W.RELEASE_ROOT;
+  const { at, result } = await nodusCheck(t, { history: false });
+  for (const name of [W.OLD, W.ROLLBACK]) {
+    const it = at(`${R}/${name}`);
+    assert.deepEqual([it.status, it.sub, it.action], ['protected', 'rollback-unknown', null], name);
+    assert.equal(it.reason, 'The previous release could not be identified, so no release is removed until the next deployment records it.');
+  }
+  assert.equal(at(`${R}/${W.LIVE}`).sub, 'live');
+  assert.equal(at(`${R}/${W.CANDIDATE}`).sub, 'candidate');
+  assert.equal(result.items.filter((it) => it.category === 'releases' && it.status === 'eligible').length, 0);
+  assert.ok(result.notes.includes('The previous release could not be identified, so no release is removed until the next deployment records it.'));
+  assert.equal(result.context.rollbackUnknown, true);
+});
+
+test('when the release roles cannot be described (the application does not run through a link), no release is cleanable', async (t) => {
+  const R = W.RELEASE_ROOT;
+  const { at, result } = await nodusCheck(t, { mutate: (root) => {
+    // /opt/nodus becomes a real folder instead of the link into the release root.
+    rmSync(`${root}/opt/nodus`, { force: true }); mkdirSync(`${root}/opt/nodus`, { recursive: true });
+  } });
+  for (const name of [W.OLD, W.ROLLBACK, W.CANDIDATE]) {
+    const it = at(`${R}/${name}`);
+    assert.deepEqual([it.status, it.sub], ['protected', 'unknown'], name);
+    assert.equal(it.reason, 'The application does not run through a link into its release folder, so which release is which cannot be told; no release is cleaned up.');
+  }
+  assert.equal(result.items.filter((it) => it.category === 'releases' && it.status === 'eligible').length, 0);
+});
+
+test('facts without describeReleases\' answer never make a release cleanable', () => {
+  const name = 'a'.repeat(40) + '-p1-' + '0'.repeat(8) + '-0000-4000-8000-' + '0'.repeat(12);
+  const target = { ...appTarget, profile: { ...appTarget.profile, sourceDir: '/opt/app', releaseRoot: '/opt/r' } };
+  const r = run(target, facts([{ path: '/opt/r', depth: 1, role: 'release-root', marker: true }], [{ path: `/opt/r/${name}`, r: 0, marker: { present: true, sha: 'a'.repeat(40) } }]));
+  assert.deepEqual([r.at(`/opt/r/${name}`).status, r.at(`/opt/r/${name}`).sub], ['protected', 'unknown']);
+  assert.match(r.at(`/opt/r/${name}`).reason, /could not be worked out/);
 });

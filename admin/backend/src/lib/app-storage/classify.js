@@ -223,15 +223,22 @@ const tooYoung = (it, now, ms) => !Number.isFinite(it.newestMtimeMs) || it.newes
 
 /* -------------------------------- the rules ------------------------------- */
 
+export const HOLD_PREFIX = '.pp-cleanup-hold-';
+const HOLD_CLASS = { category: 'other', status: 'investigate', sub: 'held', reason: 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.' };
+
 function classifyGuestItem(it, root, env) {
   const { target, context, now, facts } = env;
   const role = root?.role;
   const svcUid = facts?.service?.uid;
   if (it.missing) return null;
+  // Never cleanable, whatever folder it sits in.
+  if ((it.name || basename(it.path)).startsWith(HOLD_PREFIX)) return HOLD_CLASS;
   switch (role) {
     case 'preserve': {
       const models = /model/i.test(root.declared || it.path) || /model/i.test(it.path);
-      return { category: 'data', status: 'protected', sub: models ? 'models' : 'data', reason: models ? 'Model files the application uses; kept across releases.' : 'Application data kept across releases.', hint: root.declared && root.declared !== it.path ? `Declared as ${root.declared}` : null };
+      // Labelled with the path the profile names; where it really lives is the detail.
+      const moved = root.declared && root.declared !== it.path;
+      return { category: 'data', status: 'protected', sub: models ? 'models' : 'data', label: moved ? root.declared : null, reason: models ? 'Model files the application uses; kept across releases.' : 'Application data kept across releases.', hint: moved ? `Stored at ${it.path} (the path above links there).` : null };
     }
     case 'env':
       return { category: 'data', status: 'protected', sub: 'settings', reason: 'Settings and secrets (contents are never read).' };
@@ -332,8 +339,8 @@ function classifyStaging(it, { context, now }) {
 
 function classifyTemp(it, { now }, svcUid) {
   const name = it.name || basename(it.path);
-  const memoryHint = it.memoryBacked ? 'Uses memory, not disk.' : null;
-  const base = { category: 'temp', hint: memoryHint };
+  // memoryBacked is on the item itself; the page shows it once.
+  const base = { category: 'temp' };
   if (/^systemd-private-/.test(name)) return { ...base, status: 'protected', reason: 'Private temporary space of a system service.' };
   if (/^\.[A-Za-z0-9]+-unix$/.test(name)) return { ...base, status: 'protected', reason: 'A system folder.' };
   if (it.type === 'other') return { ...base, status: 'protected', reason: it.special === 'socket' ? 'A system socket.' : 'A special file (pipe or device).' };
@@ -374,7 +381,7 @@ function classifyOther(it, { target }) {
   }
   if (it.path.startsWith('/var/lib/') && SYSTEM_VAR_LIB.has(name)) return { category: 'dependencies', status: 'protected', reason: 'Part of the operating system.' };
   let hint = null;
-  if (it.gitLink && it.gitLink.exists === false) hint = 'A leftover working copy: its .git link no longer resolves.';
+  if (it.gitLink && it.gitLink.exists === false) hint = `A leftover working copy: its Git link no longer resolves, so Git does not track it any more. To remove it by hand, open the container's terminal, look through it for anything you still need (ls -la ${it.path}), make sure no service runs from it (systemctl status shows each service's folder), then delete it with rm -r ${it.path}.`;
   else if (/\.old$/.test(name)) hint = 'An old backup file.';
   else if (it.type === 'link') hint = it.linkTargetExists === false ? 'A link whose target no longer exists (never followed).' : 'A link (never followed).';
   return { category: 'other', status: 'investigate', reason: 'Not recognised by any rule, so it is left for you to look at.', hint };
@@ -406,6 +413,7 @@ function historyItems(facts, roleItems, env) {
   for (const { it, root } of roleItems) {
     if (it.missing) continue;
     const name = it.name || basename(it.path);
+    if (name.startsWith(HOLD_PREFIX)) { out.push(fileItem(it, root, HOLD_CLASS)); continue; }
     const key = it.type === 'file' ? recoverySetKey(root.role, name) : null;
     if (!key) {
       if (root.role === 'db-dump' && it.type === 'file') out.push(fileItem(it, root, { category: 'data', status: 'protected', sub: 'database', reason: 'A database copy made on request.' }));
@@ -457,13 +465,14 @@ export function namePattern(name) {
   const m = /^(.+?)(\.[a-z]{1,5})$/.exec(stem);
   if (m && !/^\.[0-9]/.test(m[2])) { stem = m[1]; ext = m[2]; }
   const random = (tok) => /[0-9]/.test(tok) || (tok.length >= 5 && /[A-Z]/.test(tok.slice(1)) && /[a-z]/.test(tok));
-  let changed = false;
+  let sep = null;
   for (let i = 0; i < 8; i += 1) {
     const mm = /^(.+?)([-_.])([0-9A-Za-z]+)$/.exec(stem);
     if (!mm || !random(mm[3])) break;
-    stem = mm[1]; changed = true;
+    stem = mm[1]; sep = mm[2];
   }
-  return changed ? `${stem}-*${ext}` : null;
+  // The label keeps the separator the names really use (tmp.* for tmp.XXXX).
+  return sep ? `${stem}${sep}*${ext}` : null;
 }
 
 function groupTemp(items) {
@@ -483,16 +492,23 @@ function groupTemp(items) {
     const dirs = m.filter((x) => x.kind === 'directory').length;
     const noun = dirs === m.length ? 'folders' : dirs === 0 ? 'files' : 'entries';
     const reasons = [...new Set(m.map((x) => x.reason))];
+    // Members are grouped by status, so one pattern can give two groups: their
+    // labels say which is which instead of repeating each other.
+    const which = b.status === 'eligible' ? '' : b.status === 'protected' ? ', kept' : ', to look at';
     out.push({
       ...m[0],
       id: null,
       path: null,
-      label: `${b.parent === '/' ? '' : b.parent}/${b.pattern} (${m.length} ${noun})`,
+      label: `${b.parent === '/' ? '' : b.parent}/${b.pattern} (${m.length} ${noun}${which})`,
+      memberKind: noun,
       kind: 'group',
       reason: reasons.length === 1 ? reasons[0] : m[0].reason,
       logicalBytes: m.reduce((s, x) => s + x.logicalBytes, 0),
       allocatedBytes: m.reduce((s, x) => s + x.allocatedBytes, 0),
       files: m.reduce((s, x) => s + x.files, 0),
+      hardLinkedBytes: m.reduce((s, x) => s + (x.hardLinkedBytes || 0), 0),
+      sharedBytes: m.reduce((s, x) => s + (x.sharedBytes || 0), 0),
+      inaccessible: m.reduce((s, x) => s + (x.inaccessible || 0), 0),
       newestMtimeMs: Math.max(...m.map((x) => Number(x.newestMtimeMs) || 0)),
       precision: m.some((x) => x.precision === 'at-least') ? 'at-least' : 'exact',
       inUse: m.some((x) => x.inUse),
@@ -606,7 +622,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
   if (snaps.length) {
     const held = totals.dataset?.snapshotsBytes;
     notes.push(`Space held by snapshots${held ? ` (about ${formatBytes(held)})` : ''} is only returned after those snapshots are deleted.`);
-    notes.push("Each snapshot's figure counts only what that snapshot alone holds; blocks shared by several snapshots are counted in none of them, so the figures add up to less than the total held by snapshots.");
+    notes.push("Each snapshot's figure is the space only that snapshot holds. Space that several snapshots share is freed only when all of them are deleted, so the figures add up to less than the total held by snapshots.");
   }
   if (facts?.budgetExceeded) notes.push('The measurement stopped at its time or size budget; figures marked "at least" are lower bounds.');
   if (facts?.truncatedItems) notes.push(`${facts.truncatedItems} entries were not listed one by one (too many); their space is in "Not measured individually".`);
@@ -652,6 +668,7 @@ export function bundleOwner(name) {
 
 function transferClass(it, { target, context, now }) {
   const name = it.name || basename(it.path);
+  if (name.startsWith(HOLD_PREFIX)) return { ...HOLD_CLASS, location: 'host' };
   if (!/^bundle-/.test(name)) return { category: 'archives', status: 'investigate', location: 'host', reason: "Not created by ProxyPilot's release process." };
   const owner = bundleOwner(name);
   if (owner == null) return { category: 'archives', status: 'investigate', location: 'host', sub: 'shared', reason: "In the host's shared transfer folder; its name does not say which application left it, so it is not cleaned up from an application's page.", extra: { sharedHost: true } };

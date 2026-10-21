@@ -53,7 +53,9 @@ test('a Nodus-like guest: running app, rollback, waiting candidate and the share
   // Models are measured as data on their own and not inside the backing root.
   const models = at(`${R}/${W.ADOPTED}/voice/models`);
   assert.deepEqual([models.category, models.status, models.sub], ['data', 'protected', 'models']);
-  assert.equal(models.hint, 'Declared as /opt/nodus/voice/models');
+  // Labelled with the path the profile declares; where it really lives is the detail.
+  assert.equal(models.label, '/opt/nodus/voice/models');
+  assert.equal(models.hint, `Stored at ${R}/${W.ADOPTED}/voice/models (the path above links there).`);
   assert.ok(label(/^Release 3c932650 \(running now\)$/));
 });
 
@@ -69,7 +71,12 @@ test('preserve paths, env files, databases and the operating system are protecte
   assert.equal(at('/var/lib/apt').status, 'protected');
   const w48 = at('/opt/nodus-w48');
   assert.deepEqual([w48.category, w48.status], ['other', 'investigate']);
-  assert.equal(w48.hint, 'A leftover working copy: its .git link no longer resolves.');
+  assert.match(w48.hint, /^A leftover working copy: its Git link no longer resolves, so Git does not track it any more\./);
+  assert.match(w48.hint, /open the container's terminal/);
+  assert.match(w48.hint, /ls -la \/opt\/nodus-w48\)/);
+  assert.match(w48.hint, /systemctl status/);
+  assert.match(w48.hint, /rm -r \/opt\/nodus-w48\.$/);
+  assert.doesNotMatch(w48.hint, /\.git link/);
   assert.equal(at('/var/lib/nodus-publication').status, 'investigate');
   assert.equal(at(`${W.RELEASE_ROOT}/stray-notes.txt`).status, 'investigate');
   assert.equal(at('/var/backups/proxypilot-db/app-manual-20261001.sql').status, 'protected');
@@ -493,4 +500,72 @@ test('two applications: an attributed bundle is only its own application\'s; an 
   assert.equal(two.categories.find((c) => c.key === 'archives').allocatedBytes, 2000);
   const eligibleSum = [one, two].reduce((n, r) => n + r.categories.find((c) => c.key === 'archives').eligibleBytes, 0);
   assert.equal(eligibleSum, 3000, 'across the overview every bundle is counted once at most');
+});
+
+/* ------------------------- labels, hints and held items ------------------------- */
+
+test('a pattern split by status gives groups with their own labels and ids; the label keeps the real separator and says files or folders', () => {
+  const items = [];
+  for (let i = 0; i < GROUP_THRESHOLD; i += 1) items.push({ path: `/tmp/tmp.Ab${i}cD9`, r: 0, type: 'file' });
+  for (let i = 0; i < GROUP_THRESHOLD; i += 1) items.push({ path: `/tmp/tmp.Fr${i}eS9`, r: 0, type: 'file', newestMtimeMs: NOW - 60_000 });
+  const r = run(appTarget, facts([{ path: '/tmp', depth: 1, role: 'temp' }], items));
+  const groups = r.items.filter((it) => it.kind === 'group');
+  assert.equal(groups.length, 2);
+  const byStatus = Object.fromEntries(groups.map((g) => [g.status, g]));
+  assert.equal(byStatus.eligible.label, `/tmp/tmp.* (${GROUP_THRESHOLD} files)`);
+  assert.equal(byStatus.protected.label, `/tmp/tmp.* (${GROUP_THRESHOLD} files, kept)`);
+  assert.notEqual(groups[0].label, groups[1].label);
+  assert.notEqual(groups[0].id, groups[1].id, 'two groups never share an id');
+  assert.deepEqual(groups.map((g) => g.memberKind), ['files', 'files']);
+  assert.equal(namePattern('tmp.Ab12Cd'), 'tmp.*');
+  assert.equal(namePattern('pw_profile_Ab12Cd'), 'pw_profile_*');
+});
+
+test('a memory-backed temp item carries the flag once and no repeated hint', () => {
+  const r = run(appTarget, facts([{ path: '/tmp', depth: 1, role: 'temp' }], [{ path: '/tmp/build-cache', r: 0, memoryBacked: true }]));
+  const it = r.at('/tmp/build-cache');
+  assert.equal(it.memoryBacked, true);
+  assert.equal(it.hint, null);
+});
+
+test('files a cleanup set aside (.pp-cleanup-hold-*) always need a look, wherever they are', () => {
+  const HOLD = '.pp-cleanup-hold-cln_00000000-0000-4000-8000-000000000009-3';
+  const roots = [
+    { path: '/tmp', depth: 1, role: 'temp' },
+    { path: '/opt/r/.staging', depth: 1, role: 'staging' },
+    { path: '/opt/r', depth: 1, role: 'release-root' },
+    { path: '/var/backups/proxypilot-db', depth: 1, role: 'db-dump' },
+  ];
+  const f = facts(roots, [
+    { path: `/tmp/${HOLD}`, r: 0, uid: 989 },
+    { path: `/opt/r/.staging/${HOLD}`, r: 1 },
+    { path: `/opt/r/${HOLD}`, r: 2 },
+    { path: `/var/backups/proxypilot-db/${HOLD}`, r: 3, type: 'file' },
+  ], { service: { unit: 'app.service', user: 'app', uid: 989, home: '/var/lib/app' } });
+  const TR = '/var/lib/proxypilot/application-release-transfers';
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: TR, role: 'host-transfers' }], items: [{ path: `${TR}/${HOLD}`, r: 0, type: 'dir', mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const target = { ...appTarget, profile: { ...appTarget.profile, releaseRoot: '/opt/r' } };
+  const r = run(target, f, { host });
+  for (const p of [`/tmp/${HOLD}`, `/opt/r/.staging/${HOLD}`, `/opt/r/${HOLD}`, `/var/backups/proxypilot-db/${HOLD}`, `${TR}/${HOLD}`]) {
+    const it = r.at(p);
+    assert.ok(it, p);
+    assert.deepEqual([it.status, it.sub, it.action], ['investigate', 'held', null], p);
+    assert.equal(it.reason, 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.');
+  }
+  assert.equal(r.at(`${TR}/${HOLD}`).location, 'host');
+  // No policy selection ever picks one.
+  const every = JSON.parse(JSON.stringify(DEFAULT_POLICY));
+  for (const cfg of Object.values(every.rules)) if (cfg && typeof cfg === 'object') cfg.enabled = true;
+  const sel = policySelection({ items: r.items }, every, NOW);
+  const held = r.items.filter((it) => it.sub === 'held').map((it) => it.id);
+  assert.equal(held.length, 5);
+  assert.deepEqual(sel.items.filter((id) => held.includes(id)), []);
+});
+
+test('the snapshot note says in plain words why the figures add up to less', () => {
+  const host = { status: 'Running', running: true, unmeasured: [], exports: [], snapshots: [{ name: 's1', createdAt: new Date(NOW - W.DAY).toISOString(), usedBytes: 1000 }] };
+  const r = run(appTarget, facts([], []), { host });
+  const note = r.notes.find((n) => /figure/.test(n));
+  assert.equal(note, "Each snapshot's figure is the space only that snapshot holds. Space that several snapshots share is freed only when all of them are deleted, so the figures add up to less than the total held by snapshots.");
+  assert.doesNotMatch(r.notes.join(' '), /blocks/);
 });

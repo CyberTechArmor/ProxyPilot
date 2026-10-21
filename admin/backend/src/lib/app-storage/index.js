@@ -6,7 +6,7 @@
 // an install with Dev Studio enabled (mock2.db exists there).
 
 import { createStorageStore, readInstalledAt } from './store.js';
-import { listTargets, resolveTarget, activityFor, AppStorageError } from './targets.js';
+import { listTargets, resolveTarget, activityFor, existingTargetKeys, AppStorageError } from './targets.js';
 import { createCheckService } from './check-service.js';
 import { createAppStorageMonitor, createGuestLister, registerMonitor, unregisterMonitor } from './monitor.js';
 import { backendExec, exportsFor } from './host-measures.js';
@@ -39,14 +39,14 @@ export function createAppStorage({
   const resolve = (key) => resolveTarget(key, { mock2Db });
   const activity = (target, opts = {}) => activityFor(target, { mainDb, mock2Db, now: now(), ...opts });
   const limitOf = (targetKey) => {
-    try { return store.latestCheck(targetKey)?.result?.totals?.limit?.bytes ?? null; } catch { return null; }
+    try { return store.latestCheckSummary(targetKey)?.summary?.totals?.limit?.bytes ?? null; } catch { return null; }
   };
   const policyFor = (target) => {
     const r = resolvePolicy(target, { store, installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
     return { ...r, ...ruleStates(r.policy, r.source, r.stored ? r.proposedRules : null) };
   };
   const guestLister = listGuests || createGuestLister(executor, { now });
-  const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger });
+  const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger, knownTargetKeys: () => existingTargetKeys({ mock2Db }) });
   const checks = createCheckService({
     store, exec: executor, mainDb, now, resolveTarget: resolve, listTargets: list, activityFor: (t) => activity(t), policyFor,
     listExports: (guest) => exportsFor(mainDb, guest), listGuests: guestLister, alertsFor: (key) => monitor.alertsFor(key), logger,

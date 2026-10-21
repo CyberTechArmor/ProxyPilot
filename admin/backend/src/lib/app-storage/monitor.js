@@ -1,7 +1,8 @@
 // Per-application storage and growth alerts. Every 15 minutes
 // (PROXYPILOT_APP_STORAGE_MONITOR_CRON; PROXYPILOT_DISABLE_CRONS=1 turns it
 // off) one `incus list` gives each guest's root usage; a sample is recorded
-// for every target whose alerts are on (30 days kept), and:
+// for every target whose alerts are on (30 days kept; each run also applies
+// the store's retention limits and drops the rows of gone targets), and:
 //   appstorage:usage:<targetKey>   warning at the warning level, error at 1.5×;
 //                                  resolves below 95 % of it (hysteresis);
 //   appstorage:growth:<targetKey>  grew by the growth threshold within the window;
@@ -145,7 +146,7 @@ async function defaultNotifications() {
 const LEVEL_RANK = { info: 0, warning: 1, error: 2 };
 const rankOf = (level) => LEVEL_RANK[level] ?? 1;
 
-export function createAppStorageMonitor({ store, listTargets, listGuests, policyFor, notifications = null, now = () => Date.now(), logger = console } = {}) {
+export function createAppStorageMonitor({ store, listTargets, listGuests, policyFor, notifications = null, now = () => Date.now(), logger = console, knownTargetKeys = null } = {}) {
   const active = new Set();
   // The worst level the channels have heard about for each open alert.
   const delivered = new Map();
@@ -181,7 +182,8 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
       const guests = await listGuests();
       const nowMs = now();
       const at = new Date(nowMs).toISOString();
-      for (const t of listTargets()) {
+      const targets = listTargets();
+      for (const t of targets) {
         let pol;
         try { pol = policyFor(t)?.policy; } catch { pol = null; }
         const alerts = pol?.alerts;
@@ -204,11 +206,33 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
         else if (await clear(growthKey, 'growth fell below the threshold')) summary.resolved.push(growthKey);
       }
       await relayRunnerAlerts(summary);
+      await maintain(targets, summary);
       return summary;
     } catch (e) {
       logger?.error?.('[app-storage-monitor] runOnce failed', e?.message || e);
       return { ...summary, error: e?.message || String(e) };
     } finally { running = false; }
+  }
+
+  // The feature's own data stays within its limits: every run applies the
+  // retention limits to all targets, and, when the records can be read,
+  // drops the rows (and resolves the alerts) of applications and projects
+  // that are gone. Never fails the run.
+  async function maintain(targets, summary) {
+    try { summary.pruned = store.prune?.() || null; } catch (e) { logger?.error?.('[app-storage-monitor] prune failed', e?.message); }
+    if (typeof knownTargetKeys !== 'function') return;
+    try {
+      const known = knownTargetKeys();
+      if (!(known instanceof Set)) return;
+      const live = new Set(targets.map((t) => t.key));
+      // A listed target missing from the records means the two reads disagree: do nothing.
+      for (const k of live) if (!known.has(k)) return;
+      summary.dropped = store.dropGoneTargets?.({ live, known }) || null;
+      for (const key of [...active]) {
+        const k = parseAlertKey(key);
+        if (k && !live.has(k.targetKey) && await clear(key, 'the application or project is gone')) summary.resolved.push(key);
+      }
+    } catch (e) { logger?.error?.('[app-storage-monitor] cleanup of gone targets failed', e?.message); }
   }
 
   // The cleanup job runs in the host runner, which writes the bell row but

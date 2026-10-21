@@ -68,6 +68,21 @@ export function listTargets({ mock2Db }) {
   return out;
 }
 
+/**
+ * The keys of every application and project record that still exists,
+ * archived ones included, or null when the records cannot be read (then
+ * nothing is dropped).
+ */
+export function existingTargetKeys({ mock2Db }) {
+  try {
+    if (!tableExists(mock2Db, 'mock2_applications') || !tableExists(mock2Db, 'mock2_projects')) return null;
+    const keys = new Set();
+    for (const r of mock2Db.prepare('SELECT id FROM mock2_applications').all()) keys.add(targetKeyOf('application', r.id));
+    for (const r of mock2Db.prepare('SELECT id FROM mock2_projects').all()) keys.add(targetKeyOf('project', r.id));
+    return keys;
+  } catch { return null; }
+}
+
 /** The full target, with the layout knowledge classification needs. */
 export function resolveTarget(key, { mock2Db }) {
   const { kind, id } = parseTargetKey(key);

@@ -206,3 +206,36 @@ test('guest list parsing and the cached lister', async () => {
   t = 5000; await lister();
   assert.equal(calls, 4);
 });
+
+test('every run applies the retention limits and drops the rows and alerts of gone targets; an unreadable record list drops nothing', async () => {
+  const w = world();
+  const t0 = w.clock.now();
+  // A target that was deleted long ago: its samples were never pruned on insert again.
+  w.store.addSample('project:9', 5e9, t0 - 1000);
+  w.db.prepare('INSERT INTO mock2_storage_samples (target_key, sampled_at, used_bytes) VALUES (?, ?, ?)').run('project:9', new Date(t0 - 40 * 86_400_000).toISOString(), 5e9);
+  w.store.insertCheck({ id: 'chk_gone', targetKey: 'project:9' }); w.store.finishCheck('chk_gone', { status: 'complete', result: { n: 1 } });
+  w.store.putPolicy('project:9', { policy: { version: 1 } });
+  w.bell.post({ level: 'warning', title: 'old', source: 'app-storage', dedupe_key: 'appstorage:usage:project:9' });
+  let known = null;
+  const m = createAppStorageMonitor({ store: w.store, listTargets: () => [w.target], listGuests: async () => w.guests, policyFor: () => ({ policy: w.policy }), notifications: w.bell, now: w.clock.now, logger: null, knownTargetKeys: () => known });
+  await m.hydrate();
+  const first = await m.runOnce();
+  assert.equal(first.pruned.samples, 1, 'the 40-day-old sample of a target no longer sampled is pruned');
+  assert.ok(w.store.getCheck('chk_gone'), 'records unreadable: nothing is dropped');
+  assert.equal(w.bell.rows.get('appstorage:usage:project:9').dismissed, false);
+  known = new Set(['application:1']);
+  w.clock.advance(15 * 60_000);
+  const second = await m.runOnce();
+  assert.deepEqual(second.dropped, { checks: 1, samples: 1, cleanups: 0, policies: 1 });
+  assert.equal(w.store.getCheck('chk_gone'), null);
+  assert.equal(w.store.getPolicy('project:9'), null);
+  assert.equal(w.bell.rows.get('appstorage:usage:project:9').dismissed, true, 'the alert of a gone target is resolved');
+  assert.ok(second.resolved.includes('appstorage:usage:project:9'));
+  assert.equal(w.store.samplesSince('application:1', 0).length, 2, 'the live target keeps its samples');
+  // A listed target missing from the records means the reads disagree: nothing is dropped.
+  w.store.insertCheck({ id: 'chk_gone2', targetKey: 'project:9' }); w.store.finishCheck('chk_gone2', { status: 'complete', result: {} });
+  known = new Set(['project:4']);
+  const third = await m.runOnce();
+  assert.equal(third.dropped, undefined);
+  assert.ok(w.store.getCheck('chk_gone2'));
+});

@@ -160,3 +160,30 @@ test('the overview\'s "can be cleaned up" figure is disk only; memory-backed tem
   assert.equal(row.lastCheck.eligibleBytes, diskEligible);
   assert.equal(row.lastCheck.eligibleMemoryBytes, temp.eligibleMemoryBytes);
 });
+
+test('the overview and the policy limits read the stored summary, never a full check result', async (t) => {
+  const { s, mock2Db } = setup(t);
+  const done = await s.runCheck('application:1');
+  const expected = (await s.overview()).targets.find((x) => x.key === 'application:1').lastCheck;
+  // Count every read of a full result from here on.
+  let fullReads = 0;
+  const realPrepare = mock2Db.prepare.bind(mock2Db);
+  const seen = (row) => { if (row && typeof row === 'object' && row.result_json != null) fullReads += 1; return row; };
+  mock2Db.prepare = (sql) => {
+    const st = realPrepare(sql);
+    return new Proxy(st, { get(target, prop) {
+      if (prop === 'get') return (...a) => seen(target.get(...a));
+      if (prop === 'all') return (...a) => { const rows = target.all(...a); rows.forEach(seen); return rows; };
+      const v = target[prop]; return typeof v === 'function' ? v.bind(target) : v;
+    } });
+  };
+  t.after(() => { mock2Db.prepare = realPrepare; });
+  const o = await s.overview();
+  const nodus = o.targets.find((x) => x.key === 'application:1');
+  assert.equal(fullReads, 0, 'no full result is read');
+  assert.deepEqual(nodus.lastCheck, expected);
+  assert.equal(nodus.lastCheck.checkId, done.checkId);
+  assert.deepEqual(nodus.lastCheck.totals, done.totals);
+  await s.monitor.runOnce();
+  assert.equal(fullReads, 0, 'nor by the monitor');
+});

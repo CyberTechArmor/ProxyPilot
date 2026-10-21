@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { RELEASE_CLEANUP_SOURCE, resolveReleaseRetention, releaseContextFromApplication } from './application-release-cleanup.js';
+import { SAFE_GIT_SOURCE } from './safe-git.js';
 import { containedScript, parseContainment, reapStaleWritersScript, parseStaleWriters } from './guest-probes.js';
 
 import { APPLICATION_JOB_KINDS, applicationGuestName } from './application-deploy-logic.js';
@@ -20,14 +21,18 @@ function safeError(code, message) { const e = new Error(message); e.code = code;
 const GUEST_PROGRAM = String.raw`
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');
 ${RELEASE_CLEANUP_SOURCE}
+${SAFE_GIT_SOURCE}
 const a=JSON.parse(Buffer.from(process.argv[1],'base64').toString());
 function fail(code){process.stdout.write(JSON.stringify({ok:false,code}));process.exit(1)}
 function run(cmd,args,opts={}){const r=cp.spawnSync(cmd,args,{encoding:'utf8',maxBuffer:1024*1024,...opts});if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
+// Git over a work tree the service user wrote to: as its owner when that is
+// not root, never with the repository's fsmonitor, hooks or pager (safe-git.js).
+function git(dir,args){const r=safeGit(cp,fs,dir,args);if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
 function inside(root,x){return x===root||x.startsWith(root+'/')}
 function protectedPath(target){let at='/';for(const part of p.resolve(target).split('/').filter(Boolean)){at=p.join(at,part);if(!fs.existsSync(at))break;const s=fs.lstatSync(at);if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==0||(s.mode&0o022))fail('UNSAFE_RELEASE_DIRECTORY')}}
 function inventory(root){const rows=[];const excluded=[...a.profile.preservePaths,...a.profile.envFiles].filter(x=>inside(a.profile.sourceDir,x)).map(x=>p.relative(a.profile.sourceDir,x));function walk(dir,rel=''){for(const n of fs.readdirSync(dir).sort()){const r=rel?rel+'/'+n:n;if(r==='.git'||r==='.proxypilot-release.json'||excluded.some(x=>r===x||r.startsWith(x+'/')))continue;const f=p.join(dir,n),s=fs.lstatSync(f);if(s.isSymbolicLink()){if(!inside(root,fs.realpathSync(f)))fail('ARTIFACT_SYMLINK_ESCAPE');rows.push([r,'link',fs.readlinkSync(f)])}else if(s.isDirectory())walk(f,r);else if(s.isFile())rows.push([r,'file',crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')]);else fail('ARTIFACT_TYPE_UNSUPPORTED')}}walk(root);return crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex')}
 function freeze(root){for(const n of fs.readdirSync(root)){const f=p.join(root,n),s=fs.lstatSync(f);fs.lchownSync(f,0,0);if(s.isSymbolicLink())continue;if(s.isDirectory())freeze(f);fs.chmodSync(f,s.isDirectory()?0o755:((s.mode&0o111)?0o555:0o444))}fs.chownSync(root,0,0);fs.chmodSync(root,0o755)}
-function identity(root){let m;try{m=JSON.parse(fs.readFileSync(p.join(root,'.proxypilot-release.json'),'utf8'))}catch{m={sha:run('git',['-C',root,'rev-parse','HEAD'])}}if(!/^[a-f0-9]{40}$/.test(m.sha||''))fail('NO_RELEASE_IDENTITY');return m}
+function identity(root){let m;try{m=JSON.parse(fs.readFileSync(p.join(root,'.proxypilot-release.json'),'utf8'))}catch{m={sha:git(root,['rev-parse','HEAD'])}}if(!/^[a-f0-9]{40}$/.test(m.sha||''))fail('NO_RELEASE_IDENTITY');return m}
 function layout(){if(!a.profile.releaseRoot)fail('RELEASE_ROOT_REQUIRED');protectedPath(p.dirname(a.profile.sourceDir));protectedPath(a.profile.releaseRoot);const link=fs.lstatSync(a.profile.sourceDir);if(!link.isSymbolicLink())fail('SYMLINK_LAYOUT_REQUIRED');if(link.uid!==0)fail('UNSAFE_RELEASE_DIRECTORY');const target=fs.realpathSync(a.profile.sourceDir);const root=fs.realpathSync(a.profile.releaseRoot);if(!inside(root,target)||target===root)fail('RELEASE_OUTSIDE_ROOT');return {target,root,identity:identity(target)}}
 function service(){const unit=a.profile.serviceName;const loaded=run('systemctl',['show',unit,'--property=LoadState','--value']);if(loaded!=='loaded')fail('SERVICE_NOT_LOADED');const workingDir=run('systemctl',['show',unit,'--property=WorkingDirectory','--value']);const start=run('systemctl',['show',unit,'--property=ExecStart','--value']);if(workingDir!==a.profile.sourceDir&&!start.includes(a.profile.sourceDir+'/'))fail('SERVICE_LAYOUT_UNSUPPORTED');return {user:run('systemctl',['show',unit,'--property=User','--value'])||'root',group:run('systemctl',['show',unit,'--property=Group','--value'])||''}}
 let out={ok:true};
@@ -37,8 +42,8 @@ else if(a.action==='prepare'){protectedPath(a.root);fs.mkdirSync(a.root,{recursi
 else if(a.action==='stage'){
  if(fs.existsSync(a.stage)||fs.existsSync(a.release))fail('RELEASE_EXISTS');
  fs.chmodSync(a.bundle,0o600);
- fs.mkdirSync(a.stage,{recursive:true,mode:0o755});run('git',['clone','--no-checkout','--',a.bundle,a.stage]);run('git',['-C',a.stage,'checkout','--detach',a.sha]);
- if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
+ fs.mkdirSync(a.stage,{recursive:true,mode:0o755});run('git',['clone','--no-checkout','--',a.bundle,a.stage]);git(a.stage,['checkout','--detach',a.sha]);
+ if(git(a.stage,['rev-parse','HEAD'])!==a.sha||git(a.stage,['rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
  const pkg=JSON.parse(fs.readFileSync(p.join(a.stage,'package.json'),'utf8'));for(const n of a.scripts)if(typeof pkg.scripts?.[n]!=='string')fail('NAMED_SCRIPT_MISSING');
  // Builds run as the existing service identity; never invent an account.
  if(a.user!=='root')run('chown',['-R',a.user+(a.group?':'+a.group:''),'--',a.stage]);
@@ -64,12 +69,12 @@ else if(a.action==='seal'){
   for(const rel of trim){
    if(rel==='.cache'){
     const cache=p.join(a.stage,'.cache');
-    if(run('git',['-C',a.stage,'ls-files','--','.cache'])!=='')fail('TRACKED_BUILD_CACHE');
-    if(fs.existsSync(cache)){fs.rmSync(cache,{recursive:true,force:false});out.trim.removed.push(rel)}
+    if(git(a.stage,['ls-files','--','.cache'])!=='')fail('TRACKED_BUILD_CACHE');
+    if(fs.existsSync(cache)){safeRemover(fs,p).removePath(cache);out.trim.removed.push(rel)}
     continue;
    }
    if(typeof rel!=='string'||!/^[A-Za-z0-9._\/-]{1,200}$/.test(rel)||rel.startsWith('/')||rel.endsWith('/')||rel.split('/').some(s=>!s||s==='.'||s==='..'||s==='.git')){out.trim.kept.push({path:String(rel).slice(0,200),reason:'invalid'});continue}
-   if(run('git',['-C',a.stage,'ls-files','--',rel])!==''){out.trim.kept.push({path:rel,reason:'tracked'});continue}
+   if(git(a.stage,['ls-files','--',rel])!==''){out.trim.kept.push({path:rel,reason:'tracked'});continue}
    let at=a.stage,state='ok';
    for(const part of rel.split('/').slice(0,-1)){at=p.join(at,part);let s=null;try{s=fs.lstatSync(at)}catch(e){if(e.code!=='ENOENT')throw e}if(!s){state='absent';break}if(!s.isDirectory()||s.isSymbolicLink()){state='link';break}}
    if(state==='absent')continue;
@@ -77,23 +82,23 @@ else if(a.action==='seal'){
    const target=p.join(a.stage,rel);let st=null;try{st=fs.lstatSync(target)}catch(e){if(e.code!=='ENOENT')throw e}
    if(!st)continue;
    if(st.isSymbolicLink()){out.trim.kept.push({path:rel,reason:'link'});continue}
-   fs.rmSync(target,{recursive:true,force:false});out.trim.removed.push(rel);
+   safeRemover(fs,p).removePath(target);out.trim.removed.push(rel);
   }
  }
- if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
- if(run('git',['-C',a.stage,'status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
+ if(git(a.stage,['rev-parse','HEAD'])!==a.sha||git(a.stage,['rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
+ if(git(a.stage,['status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
  const artifactDigest=inventory(a.stage);const fd=fs.openSync(p.join(a.stage,'.proxypilot-release.json'),'wx',0o444);try{fs.writeFileSync(fd,JSON.stringify({...a.marker,artifactDigest}));fs.fsyncSync(fd)}finally{fs.closeSync(fd)}freeze(a.stage);const stageFd=fs.openSync(a.stage,'r');try{fs.fsyncSync(stageFd)}finally{fs.closeSync(stageFd)}fs.renameSync(a.stage,a.release);const parentFd=fs.openSync(p.dirname(a.release),'r');try{fs.fsyncSync(parentFd)}finally{fs.closeSync(parentFd)}out.artifactDigest=artifactDigest;
 }
 else if(a.action==='artifact'){
  const real=fs.realpathSync(a.release);if(real!==a.release)fail('RELEASE_PATH_CHANGED');const m=identity(real);
  if(m.sha!==a.sha||m.treeSha!==a.treeSha||m.profileDigest!==a.profileDigest||m.evidenceDigest!==a.evidenceDigest)fail('RELEASE_IDENTITY_MISMATCH');
  if(m.artifactDigest!==a.artifactDigest||m.artifactDigest!==inventory(real))fail('RELEASE_ARTIFACTS_CHANGED');
- if(run('git',['-C',real,'rev-parse','HEAD'])!==a.sha||run('git',['-C',real,'status','--porcelain','--untracked-files=no'])!=='')fail('RELEASE_SOURCE_CHANGED');out.marker=m;
+ if(git(real,['rev-parse','HEAD'])!==a.sha||git(real,['status','--porcelain','--untracked-files=no'])!=='')fail('RELEASE_SOURCE_CHANGED');out.marker=m;
 }
 else if(a.action==='links'){
  const paths=[...new Set([...a.profile.preservePaths,...a.profile.envFiles])].filter(x=>inside(a.profile.sourceDir,x));
  const rels=paths.map(x=>p.relative(a.profile.sourceDir,x));
- const tracked=run('git',['-C',a.release,'ls-files','-z']).split('\0').filter(Boolean);
+ const tracked=git(a.release,['ls-files','-z']).split('\0').filter(Boolean);
  for(const rel of rels){
    if(!rel||rel.startsWith('../')||rels.some(other=>other!==rel&&(rel.startsWith(other+'/')||other.startsWith(rel+'/'))))fail('PRESERVED_PATH_OVERLAP');
    if(tracked.some(t=>t===rel||t.startsWith(rel+'/')||rel.startsWith(t+'/')))fail('PRESERVED_SOURCE_COLLISION');

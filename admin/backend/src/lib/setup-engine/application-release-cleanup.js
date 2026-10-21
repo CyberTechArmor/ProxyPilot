@@ -226,7 +226,10 @@ export function cleanupReleaseArtifacts(fs, p, a) {
       if (p.dirname(target) !== stageRoot || !fs.existsSync(target)) continue;
       const stat = fs.lstatSync(target);
       if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) continue;
-      remover.removePath(target);
+      // One workspace that cannot be removed (too deep, a mount inside, it
+      // changed while removed) is reported and left; it never fails the job.
+      try { remover.removePath(target); }
+      catch (e) { (out.kept ||= []).push({ path: target, code: e.refusal || (e.code ? `FS_${e.code}` : 'REMOVE_FAILED') }); continue; }
       if (entry.endsWith('.bundle')) out.bundlesRemoved += 1; else out.stagesRemoved += 1;
     }
   }
@@ -243,7 +246,8 @@ export function cleanupReleaseArtifacts(fs, p, a) {
     if (keep.has(release.path)) continue;
     // Read back the live pointer immediately before each destructive command.
     if (fs.realpathSync(a.profile.sourceDir) !== d.live) refuse('LIVE_RELEASE_CHANGED_DURING_CLEANUP');
-    remover.removePath(release.path);
+    try { remover.removePath(release.path); }
+    catch (e) { (out.kept ||= []).push({ path: release.path, code: e.refusal || (e.code ? `FS_${e.code}` : 'REMOVE_FAILED') }); continue; }
     out.releasesRemoved += 1;
   }
   return out;

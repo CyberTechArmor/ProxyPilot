@@ -17,14 +17,15 @@ export function setSnapshotLimitsProvider(provider) { limitsProvider = typeof pr
 export function currentSnapshotLimits() { return limitsProvider ? limitsProvider() : SNAPSHOT_RETENTION; }
 // memoizeLimits(provider, { ttlMs, now }) → a provider that re-reads the
 // policy at most every ttlMs (default 30 s), with .invalidate() for a saved
-// policy. A provider that throws is not cached (the next use asks again).
+// policy. A provider that throws, or answers no usable limits ("unavailable"),
+// is not cached: the next use asks again.
 export function memoizeLimits(provider, { ttlMs = 30_000, now = () => Date.now() } = {}) {
   let value, at = -Infinity;
   const memo = () => {
     const t = now();
     if (t - at < ttlMs && t >= at) return value;
     const next = provider();
-    value = next; at = t;
+    if (next && typeof next === 'object' && !Array.isArray(next)) { value = next; at = t; }
     return next;
   };
   memo.invalidate = () => { at = -Infinity; value = undefined; };

@@ -113,6 +113,8 @@ test('snapshot limits are read at most every 30 s, at once after a saved policy,
   clock = 30_000; assert.deepEqual(memo(), { 'pp-shop': 2 });
   memo.invalidate(); assert.deepEqual(memo(), { 'pp-shop': 3 }, 'a saved policy applies to the next use');
   fail = true; memo.invalidate(); assert.throws(() => memo()); fail = false; assert.deepEqual(memo(), { 'pp-shop': 5 }, 'a failed read was not cached');
+  let answer = null; const unavailable = memoizeLimits(() => answer, { now: () => clock });
+  assert.equal(unavailable(), null); answer = { 'pp-shop': 9 }; assert.deepEqual(unavailable(), { 'pp-shop': 9 }, 'an unavailable answer is not cached either');
   // The backend's automation: the provider is memoised and dropped on every saved policy.
   let limitsReads = 0; const listeners = new Set();
   const storage = { effectiveSnapshotLimits: () => { limitsReads += 1; return { 'pp-shop': limitsReads }; }, onPolicyChange: fn => { listeners.add(fn); return () => listeners.delete(fn); } };

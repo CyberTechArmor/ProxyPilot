@@ -88,6 +88,8 @@ function removeOne(x,identity,roots,opts,state){
   if(!sameIdentity(st,identity))refuse('CHANGED_SINCE_CHECK');
   if(R.mountedAt(x))refuse('MOUNT_INSIDE');
   if(opts.checkInUse&&R.inUse(x))refuse('IN_USE');
+  // Too deep (or another filesystem inside): refused before the rename.
+  R.measureTreeAt(pfd,name,st.dev,st);
   let q,n;for(;;){n=counter++;q='.pp-cleanup-'+a.cleanupId+'-'+n;if(!R.existsAt(pfd,q))break}
   R.renameAt(pfd,name,q);
   let qs=null;try{qs=R.lstatAt(pfd,q)}catch(e){qs=null}
@@ -100,7 +102,14 @@ function removeOne(x,identity,roots,opts,state){
    refuse('CHANGED_SINCE_CHECK',parked?{parked}:null);
   }
   state.touched=true;
-  const r=R.removeTreeAt(pfd,q,st.dev,st);
+  let r;
+  try{r=R.removeTreeAt(pfd,q,st.dev,st)}
+  catch(e){
+   // A failure that will not go away by retrying (it grew too deep meanwhile)
+   // is set aside under the hold name, so no later resume retries it.
+   if(e&&e.refusal==='TOO_DEEP'){try{const h='.pp-cleanup-hold-'+a.cleanupId+'-'+n;R.renameAt(pfd,q,h);e.parked=p.join(parent,h)}catch(x){}}
+   throw e;
+  }
   fs.fsyncSync(pfd);
   return {status:'removed',bytes:r.bytes,entries:r.entries};
  }finally{R.close(pfd)}
@@ -152,8 +161,14 @@ try{
      const name=raw.toString();
      if(!pattern.test(name)||!Buffer.from(name).equals(raw))continue;
      const q=p.join(dir,name);
-     try{const st=R.lstatAt(dfd,raw);if(R.mountedAt(q))refuse('MOUNT_INSIDE');const r=R.removeTreeAt(dfd,raw,st.dev,st);fs.fsyncSync(dfd);removed.push({dir,name,bytes:r.bytes,entries:r.entries})}
-     catch(e){failed.push({dir,name,code:codeOf(e)})}
+     try{const st=R.lstatAt(dfd,raw);if(R.mountedAt(q))refuse('MOUNT_INSIDE');R.measureTreeAt(dfd,raw,st.dev,st);const r=R.removeTreeAt(dfd,raw,st.dev,st);fs.fsyncSync(dfd);removed.push({dir,name,bytes:r.bytes,entries:r.entries})}
+     catch(e){
+      // A failure that retrying cannot fix (too deep, a mount inside) is set
+      // aside under the hold name, reported, and not retried on every resume.
+      const code=codeOf(e);let parked=null;
+      if(code==='TOO_DEEP'||code==='MOUNT_INSIDE'){try{const h=name.replace(/^\.pp-cleanup-/,'.pp-cleanup-hold-');R.renameAt(dfd,raw,h);parked=p.join(dir,h)}catch(x){parked=null}}
+      failed.push({dir,name,code,...(parked?{parked}:{})});
+     }
     }
    }finally{R.close(dfd)}
   }

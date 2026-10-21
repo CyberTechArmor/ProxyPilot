@@ -22,11 +22,16 @@
 //   renameAt(dfd, from, to), listAt(dfd), close(fd), same(a, b)
 //   readFileAt(dfd, name, maxBytes)   a bounded read of a regular file,
 //                                never through a link
-//   removeTreeAt(dfd, name, dev, expect)   post-order removal of dfd/name:
-//                                links are unlinked, never followed; a child
-//                                on another device is MOUNT_INSIDE; a name
-//                                that changes under it is
+//   removeTreeAt(dfd, name, dev, expect)   post-order removal of dfd/name,
+//                                iterative (no recursion), at most 512
+//                                directories open (deeper, or out of file
+//                                descriptors: TOO_DEEP): links are unlinked,
+//                                never followed; a child on another device is
+//                                MOUNT_INSIDE; a name that changes under it is
 //                                CHANGED_DURING_REMOVAL → { bytes, entries }
+//                                (bytes: files whose last link went)
+//   measureTreeAt(...)           the same walk without removing (TOO_DEEP and
+//                                MOUNT_INSIDE before anything is changed)
 //   removePath(x)                removeTreeAt for one absolute path, nothing
 //                                mounted at or below it, parent fsynced
 //   freezeTree(dir)              the seal's freeze (root-owned, read-only),
@@ -42,6 +47,13 @@ export function safeRemover(fs, p) {
   const DIR = C.O_RDONLY | C.O_DIRECTORY;
   const DIR_NOFOLLOW = DIR | C.O_NOFOLLOW;
   const FRESH_MS = 2000;
+  // At most 512 directories open at once, and never more than the process's
+  // own open-file limit allows (with room for listing and the caller's fds).
+  let MAX_DEPTH = 512;
+  try {
+    const m = /^Max open files\s+(\d+)/m.exec(fs.readFileSync('/proc/self/limits', 'utf8'));
+    if (m) MAX_DEPTH = Math.max(16, Math.min(MAX_DEPTH, Number(m[1]) - 48));
+  } catch (e) { /* the default */ }
   const PROC_SUPER_MAGIC = 0x9fa0;
   const refuse = code => { const e = new Error(code); e.refusal = code; throw e; };
   const bytesOf = x => (Buffer.isBuffer(x) ? x : Buffer.from(String(x)));
@@ -106,30 +118,67 @@ export function safeRemover(fs, p) {
       return { stat, data: buffer.subarray(0, n) };
     } catch (e) { return null; } finally { if (fd !== null) close(fd); }
   }
-  // Post-order removal of dfd/name. `expect` (the stat the caller verified)
-  // must still be what the name is; a directory is entered by fd only after
-  // its fstat matches the lstat just taken, and removed only while the name
-  // still is that directory.
-  function removeTreeAt(dfd, name, dev, expect) {
-    const st = lstatAt(dfd, name);
-    if (expect && !same(st, expect)) refuse('CHANGED_DURING_REMOVAL');
-    let bytes = (st.blocks || 0) * 512, entries = 1;
-    if (st.isDirectory()) {
-      if (st.dev !== dev) refuse('MOUNT_INSIDE');
-      const cfd = openDirAt(dfd, name);
-      try {
-        const opened = fs.fstatSync(cfd);
-        if (opened.dev !== dev) refuse('MOUNT_INSIDE');
-        if (!same(opened, st)) refuse('CHANGED_DURING_REMOVAL');
-        for (const child of listAt(cfd)) { const r = removeTreeAt(cfd, child, dev, null); bytes += r.bytes; entries += r.entries; }
-      } finally { close(cfd); }
-      if (!same(lstatAt(dfd, name), st)) refuse('CHANGED_DURING_REMOVAL');
-      fs.rmdirSync(at(dfd, name));
-    } else {
-      fs.unlinkSync(at(dfd, name));
+  // Directories are walked iteratively (no recursion, so depth never
+  // overflows the stack) with at most MAX_DEPTH directories open; deeper, or
+  // out of file descriptors, is TOO_DEEP. Each directory is entered by fd
+  // only after its fstat matches the lstat just taken.
+  function enterAt(parentFd, name, st, dev, depth) {
+    if (st.dev !== dev) refuse('MOUNT_INSIDE');
+    if (depth >= MAX_DEPTH) refuse('TOO_DEEP');
+    let fd;
+    try { fd = openDirAt(parentFd, name); }
+    catch (e) { if (e.code === 'EMFILE' || e.code === 'ENFILE') refuse('TOO_DEEP'); throw e; }
+    try {
+      const opened = fs.fstatSync(fd);
+      if (opened.dev !== dev) refuse('MOUNT_INSIDE');
+      if (!same(opened, st)) refuse('CHANGED_DURING_REMOVAL');
+      return { parentFd, name, st, fd, names: listAt(fd), i: 0 };
+    } catch (e) { close(fd); throw e; }
+  }
+  // walkAt(dfd, name, dev, expect, remove) → { bytes, entries }. remove false
+  // only measures (and refuses TOO_DEEP / MOUNT_INSIDE before anything is
+  // changed); remove true is the post-order removal: links are unlinked,
+  // never followed; a directory is removed only while its name still is the
+  // directory just emptied. Bytes count a file only when its last link goes
+  // (a hard link elsewhere keeps the blocks).
+  function walkAt(dfd, name, dev, expect, remove) {
+    try { return walk(dfd, name, dev, expect, remove); }
+    catch (e) { if (e && (e.code === 'EMFILE' || e.code === 'ENFILE')) refuse('TOO_DEEP'); throw e; }
+  }
+  function walk(dfd, name, dev, expect, remove) {
+    const top = lstatAt(dfd, name);
+    if (expect && !same(top, expect)) refuse('CHANGED_DURING_REMOVAL');
+    const freed = st => (st.isDirectory() || st.nlink <= 1 ? (st.blocks || 0) * 512 : 0);
+    if (!top.isDirectory()) {
+      if (remove) fs.unlinkSync(at(dfd, name));
+      return { bytes: freed(top), entries: 1 };
     }
+    let bytes = 0, entries = 0;
+    const stack = [];
+    try {
+      stack.push(enterAt(dfd, name, top, dev, 0));
+      while (stack.length) {
+        const cur = stack[stack.length - 1];
+        if (cur.i < cur.names.length) {
+          const child = cur.names[cur.i++];
+          const st = lstatAt(cur.fd, child);
+          if (st.isDirectory()) { stack.push(enterAt(cur.fd, child, st, dev, stack.length)); continue; }
+          if (remove) fs.unlinkSync(at(cur.fd, child));
+          bytes += freed(st); entries += 1;
+          continue;
+        }
+        stack.pop(); close(cur.fd);
+        if (remove) {
+          if (!same(lstatAt(cur.parentFd, cur.name), cur.st)) refuse('CHANGED_DURING_REMOVAL');
+          fs.rmdirSync(at(cur.parentFd, cur.name));
+        }
+        bytes += freed(cur.st); entries += 1;
+      }
+    } finally { for (const f of stack) close(f.fd); }
     return { bytes, entries };
   }
+  const removeTreeAt = (dfd, name, dev, expect) => walkAt(dfd, name, dev, expect, true);
+  const measureTreeAt = (dfd, name, dev, expect) => walkAt(dfd, name, dev, expect, false);
   const unescapeMount = x => x.replace(/\\([0-7]{3})/g, (m, o) => String.fromCharCode(parseInt(o, 8)));
   let mountList = null, mountsAt = 0;
   function mounts() {
@@ -213,12 +262,13 @@ export function safeRemover(fs, p) {
     try {
       const name = p.basename(x);
       const st = lstatAt(pfd, name);
+      measureTreeAt(pfd, name, st.dev, st); // TOO_DEEP / MOUNT_INSIDE before anything is removed
       const r = removeTreeAt(pfd, name, st.dev, st);
       fs.fsyncSync(pfd);
       return r;
     } finally { close(pfd); }
   }
-  return { openDir, openDirAt, lstatAt, existsAt, renameAt, listAt, readFileAt, close, same, removeTreeAt, removePath, freezeTree, mountedAt, mountOf, inUse, refresh };
+  return { openDir, openDirAt, lstatAt, existsAt, renameAt, listAt, readFileAt, close, same, removeTreeAt, measureTreeAt, removePath, freezeTree, mountedAt, mountOf, inUse, refresh };
 }
 
 export const SAFE_REMOVE_SOURCE = `const safeRemover=${safeRemover.toString()};`;

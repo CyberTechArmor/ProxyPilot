@@ -60,6 +60,7 @@ const REASONS = Object.freeze({
   ROLLBACK_UNKNOWN: ROLLBACK_UNKNOWN_REASON,
   CHANGED_DURING_REMOVAL: 'It changed while it was being removed, so the rest of it was left alone.',
   NO_PROCFS: 'The container gives no safe way to remove files (/proc is not available), so nothing was removed.',
+  TOO_DEEP: 'This folder is nested too deeply to remove safely; remove it by hand.',
   NOT_A_SEALED_RELEASE: 'No longer a recognised release.',
   RELEASE_OUTSIDE_ROOT: 'Outside the release folder.',
   LIVE_RELEASE_CHANGED_DURING_CLEANUP: 'The live release changed during cleanup.',
@@ -269,15 +270,25 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
 
   // A resumed job first finishes the quarantine entries the interrupted
   // attempt left (only this cleanup's names, only in approved directories).
+  // → the entries that could not be finished ({ code, parked? }); one that
+  // retrying cannot fix is set aside by the program (parked), not retried.
   const finishQuarantine = async () => {
+    const stuck = [];
     for (const location of ['guest', 'host']) {
       const roots = [...new Set(selection.filter(e => e.location === location && e.action !== 'vacuum-journal' && e.action !== 'delete-snapshot' && e.action !== 'delete-export').flatMap(e => approvedRootsFor(e, pathTarget)))];
       if (!roots.length || (location === 'guest' && guestUnavailable)) continue;
       const data = { action: 'finish-quarantine', cleanupId: row.id, approvedRoots: roots, parents: [...parents[location]] };
       const out = location === 'host' ? await hostProgram(data, 600_000) : await guestProgram(data, 600_000);
       if (out.ok && out.removed?.length) notes.push(`Finished removing ${out.removed.length} item(s) an interrupted step had set aside.`);
-      if (out.ok && out.failed?.length) notes.push(`${out.failed.length} item(s) set aside by an interrupted step could not be removed yet.`);
+      if (out.ok && out.failed?.length) {
+        stuck.push(...out.failed);
+        const parkedOnes = out.failed.filter(f => f.parked);
+        notes.push(parkedOnes.length
+          ? `${parkedOnes.length} item(s) could not be removed and were set aside under a name starting with .pp-cleanup-hold-: ${parkedOnes.slice(0, 5).map(f => f.parked).join(', ')}.`
+          : `${out.failed.length} item(s) set aside by an interrupted step could not be removed yet.`);
+      }
     }
+    return stuck;
   };
 
   const recordRemoveResults = (e, out) => {
@@ -368,7 +379,18 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
 
   let cancelled = null;
   try {
-    if (resumed) await finishQuarantine();
+    if (resumed) {
+      // What the interrupted attempt set aside belongs to the item it was on.
+      // If it cannot be finished, that item failed (it is NOT counted as
+      // removed because its name is gone) and is not tried again.
+      const stuck = await finishQuarantine();
+      const current = prior?.current ? selection.find(x => x.id === prior.current) : null;
+      if (stuck.length && current && !done.has(current.id)) {
+        const parked = stuck.map(f => f.parked).filter(Boolean).slice(0, 20);
+        acc.failed.push({ id: current.id, label: current.label, error: reasonFor(stuck[0].code), ...(parked.length ? { parked } : {}) });
+        done.add(current.id);
+      }
+    }
     // ── 4–5. items, in the stored order (files data-farthest first, then snapshots, exports) ──
     for (const e of selection) {
       if (done.has(e.id)) continue;

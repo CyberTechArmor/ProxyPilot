@@ -49,7 +49,7 @@ function world({ target = nodusTarget(), check = nodusCheck(), activity = () => 
     }
     if (data.action === 'verify') return state.verify;
     if (data.action === 'vacuum-journal') return { ok: true, beforeBytes: 600_000_000, afterBytes: 268_435_456 };
-    if (data.action === 'finish-quarantine') return { ok: true, removed: [{ dir: data.parents[0], name: `.pp-cleanup-${data.cleanupId}-0`, bytes: 10 }], failed: [], skipped: [] };
+    if (data.action === 'finish-quarantine') return state.finishStuck ? { ok: true, removed: [], failed: [state.finishStuck], skipped: [] } : { ok: true, removed: [{ dir: data.parents[0], name: `.pp-cleanup-${data.cleanupId}-0`, bytes: 10 }], failed: [], skipped: [] };
     const entries = data.action === 'remove-release' ? [{ path: data.path }] : data.entries;
     return { ok: true, next: 1, results: entries.map(e => state.fail.has(e.path) ? { path: e.path, status: 'failed', code: 'FS_EACCES' } : state.park?.has(e.path) ? { path: e.path, status: 'refused', code: 'CHANGED_SINCE_CHECK', parked: state.park.get(e.path) } : state.refuse.has(e.path) ? { path: e.path, status: 'refused', code: state.refuse.get(e.path) } : { path: e.path, status: 'removed', bytes: 100, entries: 1 }) };
   };
@@ -341,6 +341,30 @@ test('an entry set aside as changed (.pp-cleanup-hold-*) is reported with its pa
   assert.equal(skipped.reason, PARKED_REASON);
   assert.equal(result.removed.some(x => x.id === ids.cache), false);
   assert.equal(row(w).status, 'partial');
+});
+
+test('a resumed cleanup whose set-aside item cannot be finished records that item as failed, never as removed', async () => {
+  let clock = T0;
+  const w = world({ now: () => clock });
+  await request(w, { items: [ids.group, ids.cache, ids.dump] });
+  w.state.throwOn = data => data.action === 'remove' && data.entries[0].path === '/root/.cache/ms-playwright';
+  const first = await w.run(RUNNER, () => clock);
+  assert.equal(first.r.status, 'fenced');
+  clock = T0 + 5 * 60_000;
+  runnerHeartbeat(w.db, { owner: RUNNER2, host: 'test', pid: 2, nowMs: clock });
+  reconcile({ db: w.db, owner: RUNNER2, nowMs: clock });
+  w.state.throwOn = null;
+  // The quarantined tree grew too deep meanwhile: the program sets it aside.
+  w.state.finishStuck = { dir: '/root/.cache', name: `.pp-cleanup-${CLEANUP_ID}-1`, code: 'TOO_DEEP', parked: `/root/.cache/.pp-cleanup-hold-${CLEANUP_ID}-1` };
+  const second = await w.run(RUNNER2, () => clock);
+  assert.equal(second.r.status, 'succeeded');
+  const result = row(w).result;
+  const failed = result.failed.find(x => x.id === ids.cache);
+  assert.equal(failed.error, 'This folder is nested too deeply to remove safely; remove it by hand.');
+  assert.deepEqual(failed.parked, [`/root/.cache/.pp-cleanup-hold-${CLEANUP_ID}-1`]);
+  assert.equal(result.removed.some(x => x.id === ids.cache), false, 'its name is gone, but it was not removed');
+  assert.equal(w.calls.filter(c => c.action === 'remove' && c.entries?.[0]?.path === '/root/.cache/ms-playwright').length, 1, 'not tried again after the resume');
+  assert.ok(result.notes.some(n => /pp-cleanup-hold-/.test(n)));
 });
 
 test('a protected-now item is skipped, a mismatched or out-of-bounds selection is never acted on, and a finished row is returned as is', async () => {

@@ -11,7 +11,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { BTN, CapacityBar, Checkbox, Chip, EmptyState, Notice } from '@/components/storage/shared';
 import {
   acknowledgeSnapshots, allEligibleIds, allSnapshotIds, canSelect, categoryRows, checkIsStale,
-  clearSelection, deselectCategory, formatAge, formatBytes, formatDateTime, formatSize, groupMembers, headerFigures,
+  clearSelection, deselectCategory, formatAge, formatBytes, formatDateTime, formatSize, groupMemberNoun, groupMembers, headerFigures, itemHint,
   isSelected, needsAcknowledgement, selectAllEligible, selectAllSnapshots, selectCategory, selectedCount,
   selectionFor, selectionSummary, toggleItem,
 } from './app-storage-model.mjs';
@@ -48,7 +48,7 @@ export function CheckHeader({ target, check, running, onRequestCheck, now = Date
         {check && (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <Figure label={TEXT.used} value={formatBytes(f.usedBytes)} hint={f.usedPct != null ? <CapacityBar pct={f.usedPct} className="mt-1" /> : null} />
+              <Figure label={TEXT.used} value={formatBytes(f.usedBytes)} hint={<><span>{TEXT.usedHint}</span>{f.usedPct != null && <CapacityBar pct={f.usedPct} className="mt-1" />}</>} />
               <Figure label={TEXT.available} value={formatBytes(f.availableBytes)} />
               <Figure label={TEXT.limit} value={f.limitBytes ? formatBytes(f.limitBytes) : TEXT.noLimit} />
               <Figure label={TEXT.snapshotsHold} value={f.snapshotsBytes != null ? formatBytes(f.snapshotsBytes) : '—'} hint={f.snapshotsBytes ? TEXT.snapshotsHoldHint : null} />
@@ -86,12 +86,13 @@ function GroupMembers({ item }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const { shown, total, hidden } = groupMembers(item);
+  const noun = groupMemberNoun(item);
   if (!total) return null;
   return (
     <div>
       <button type="button" className="min-h-[44px] inline-flex items-center gap-1 text-xs text-primary hover:underline" aria-expanded={open} aria-controls={id} onClick={() => setOpen((v) => !v)}>
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        {open ? TEXT.hideMembers : TEXT.showMembers(shown.length, total)}
+        {open ? TEXT.hideMembers(noun) : TEXT.showMembers(shown.length, total, noun)}
       </button>
       {open && (
         <div id={id} className="rounded border bg-muted/40 p-2 space-y-1">
@@ -123,7 +124,7 @@ export function ItemRow({ item, selected, onToggle, now = Date.now(), selectable
         </div>
         {showPath && <p className="font-mono text-xs text-muted-foreground break-all">{item.path}</p>}
         {item.reason && <p className="text-xs break-words">{item.reason}</p>}
-        {item.hint && <p className="text-xs text-muted-foreground break-words">{item.hint}</p>}
+        {itemHint(item) && <p className="text-xs text-muted-foreground break-words">{itemHint(item)}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span className="text-foreground font-medium">{formatSize(item.allocatedBytes, item.precision)} {TEXT.onDiskShort}</span>
           {item.logicalBytes != null && item.logicalBytes !== item.allocatedBytes && <span>{TEXT.fileSizesAddUp(formatBytes(item.logicalBytes))}</span>}

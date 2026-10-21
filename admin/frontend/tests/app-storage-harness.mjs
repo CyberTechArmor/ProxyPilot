@@ -12,10 +12,10 @@ import {
 
 export const USER = { id: 'storage-admin', username: 'admin', role: 'admin', permissions: [] };
 
-export function createWorld(now = Date.now()) {
+export function createWorld(now = Date.now(), { noCheck = false } = {}) {
   const state = {
     now,
-    latestCheck: nodusCheck(now),
+    latestCheck: noCheck ? null : nodusCheck(now),
     checkRequests: [],     // { key }
     checkPolls: new Map(), // checkId -> polls answered
     checkTargets: new Map(),
@@ -30,6 +30,8 @@ export function createWorld(now = Date.now()) {
     revision: 1,
     source: 'preserved',
     proposedRules: ['caches', 'tempFiles', 'testArtifacts', 'logs', 'history'],
+    policyUpdatedAt: null,
+    policyUpdatedBy: null,
     policyPuts: [],
     unexpected: [],
   };
@@ -81,13 +83,15 @@ export function createWorld(now = Date.now()) {
         state.cleanups = [{ id: CLEANUP_ID, status: 'queued', origin: 'user', scope: body.scope, createdAt: new Date(t).toISOString() }];
         return json(200, { changed: true, cleanupId: CLEANUP_ID, jobId: 'job-cleanup-1', estimate: { bytes: 0 } });
       }
-      if (sub === '/policy' && method === 'GET') return json(200, { ...policyResponse({ policy: state.policy, revision: state.revision, source: state.source }), proposedRules: state.proposedRules });
+      if (sub === '/policy' && method === 'GET') return json(200, { ...policyResponse({ policy: state.policy, revision: state.revision, source: state.source, updatedAt: state.policyUpdatedAt, updatedBy: state.policyUpdatedBy, checkId: state.latestCheck?.checkId ?? null }), proposedRules: state.proposedRules });
       if (sub === '/policy' && method === 'PUT') {
         state.policyPuts.push({ body, csrf: headers['x-csrf-token'] });
         if (body.expectedRevision !== state.revision) return json(409, { error: { code: 'POLICY_REVISION_CONFLICT', message: 'The rules changed.' } });
         state.policy = body.policy;
         state.revision += 1;
         state.source = 'edited';
+        state.policyUpdatedAt = new Date(t).toISOString();
+        state.policyUpdatedBy = '1';
         state.proposedRules = state.proposedRules.filter((r) => !body.policy.rules[r]?.enabled);
         return json(200, { policy: state.policy, revision: state.revision });
       }

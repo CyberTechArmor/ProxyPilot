@@ -163,7 +163,12 @@ try {
     assert.deepEqual(world.state.checkRequests.map((r) => r.key), ['project:7']);
     assert.equal(world.state.checkRequests[0].csrf, 'storage-csrf');
     assert.ok(world.state.checkPolls.get('chk_project-7-0') >= 2, 'GET /checks/:id polled until finished');
-    await scope.getByText('6.4 GB can be cleaned up').waitFor();
+    await scope.getByText('6.4 GB can be cleaned up', { exact: false }).waitFor();
+    const nodusRow = page.locator(width >= 1024 ? 'table [data-target="application:1"]' : 'main div[data-target="application:1"]');
+    await nodusRow.getByText('on disk, with snapshots').waitFor();
+    await nodusRow.getByText('3.6 GB of files in the container', { exact: false }).waitFor();
+    if (width >= 1024) await page.getByRole('columnheader', { name: 'Disk used now' }).waitFor();
+    ok(`${width}px: the overview says which "used" is which — disk with snapshots now, files in the container at the last check`);
     ok(`${width}px: overview "Request storage check" shows Checking… and polls GET /checks/:id until finished`);
 
     // Detail: nothing preselected, Review disabled at 0, protected items have no checkbox.
@@ -183,6 +188,15 @@ try {
     assert.ok(await page.locator(`[data-item="${byLabel('/opt/nodus-w48').id}"]`).getByText('A leftover working copy: its .git link no longer resolves.').isVisible());
     assert.equal(await summary(page), '0 selected');
     assert.equal(await review(page).isDisabled(), true, 'Review cleanup disabled at 0');
+    await page.getByText('Used by files', { exact: true }).waitFor();
+    await page.getByText('Files inside the container.', { exact: true }).waitFor();
+    await page.getByText('On disk, with snapshots:', { exact: false }).waitFor();
+    for (const label of ['Abandoned browser download', 'tsx-989', 'nodus-embed-* (263 folders)']) {
+      assert.equal(await page.locator(`[data-item="${byLabel(label).id}"]`).getByText('Uses memory, not disk', { exact: false }).count(), 1, `${label}: the memory note appears once`);
+    }
+    for (const sec of await page.locator('section[data-category]').all()) {
+      if (await sec.getByText('Some can be cleaned up', { exact: true }).count()) assert.ok(await sec.getByRole('button', { name: /Select all|Clear/ }).count(), 'a "Some can be cleaned up" category has something to select');
+    }
     ok(`${width}px: nothing preselected (${ALL_CHECKBOXES.length} checkboxes, all clear), protected / needs-a-look items have none, Review disabled at 0`);
 
     // Group members: first 50 of 263.
@@ -299,6 +313,9 @@ try {
     await page.locator('[data-rule="releases"]').getByText('On', { exact: true }).waitFor();
     await page.locator('[data-rule="tempFiles"]').getByText('Would remove 4 items, about 181 MB, now.', { exact: false }).waitFor();
     await page.getByTestId('alerts-summary').getByText('Warns above 10 GB, or when it grows by 2 GB within 24 hours.').waitFor();
+    await page.locator('[data-rule="snapshots"]').getByText('On: it runs whenever a snapshot is taken, and each time ProxyPilot starts.').waitFor();
+    assert.equal(await page.getByTestId('policy-changed').innerText(), 'Not changed here yet.');
+    assert.equal(await page.getByText('No storage check has run yet').count(), 0, 'no nudge when a check exists');
     await shot(page, `rules-proposed-${width}`);
     await caches.getByRole('button', { name: /Turn on/ }).click();
     await caches.getByText('On', { exact: true }).waitFor();
@@ -307,6 +324,7 @@ try {
     assert.equal(world.state.policyPuts[0].body.policy.rules.caches.enabled, true);
     assert.equal(world.state.policyPuts[0].body.policy.rules.tempFiles.enabled, false, 'other rules unchanged');
     await page.locator('[data-rule="tempFiles"]').getByText('Proposed', { exact: true }).waitFor();
+    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by user #1\.$/).waitFor();
     // An out-of-range value cannot be saved.
     const keep = page.locator('[data-rule="releases"]').getByLabel('Releases to keep (2 to 20)');
     await keep.fill('1');
@@ -316,6 +334,29 @@ try {
 
     assert.deepEqual(world.state.unexpected, [], 'no unexpected API calls');
     assert.deepEqual(errors, [], 'no page errors');
+    await context.close();
+  }
+
+  /* ------------------------ rules before any check ------------------------ */
+  {
+    const world = createWorld(NOW, { noCheck: true });
+    const { page, errors, context } = await newPage(world);
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(`${origin}/storage/applications?target=application:1&tab=rules`);
+    await page.getByTestId('policy-source').waitFor();
+    const nudge = page.getByTestId('policy-no-check');
+    await nudge.getByText('No storage check has run yet').waitFor();
+    await page.locator('[data-rule="tempFiles"]').getByText('No storage check yet, so what this rule would remove is not known.', { exact: false }).waitFor();
+    assert.equal(await page.locator('[data-rule="tempFiles"]').getByText('Nothing would be removed now.', { exact: false }).count(), 0, 'no invented effect without a check');
+    assert.equal(await page.locator('[data-rule="tempFiles"]').getByRole('button', { name: /Turn on/ }).isDisabled(), false, 'the nudge never blocks');
+    for (const w of [360, 375]) await layoutCheck(page, w, 'rules-no-check');
+    await page.setViewportSize({ width: 375, height: 812 });
+    await nudge.getByRole('button', { name: 'Request storage check' }).click();
+    await nudge.waitFor({ state: 'detached', timeout: 15000 });
+    await page.locator('[data-rule="tempFiles"]').getByText('Would remove 4 items', { exact: false }).waitFor();
+    assert.deepEqual(world.state.checkRequests.map((r) => r.key), ['application:1']);
+    assert.deepEqual(errors, []);
+    ok('375px: before any check, the rules tab says so and offers "Request storage check" (Turn on stays available); after the check the nudge goes and the real effects show');
     await context.close();
   }
 

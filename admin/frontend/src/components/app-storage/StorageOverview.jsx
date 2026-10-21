@@ -93,7 +93,7 @@ export default function StorageOverview({ data, running = {}, onRequestCheck, no
               return (
                 <tr key={t.key} className="align-top" data-target={t.key}>
                   <td className="p-3"><NameCell t={t} /></td>
-                  <td className="p-3 text-right font-mono text-xs whitespace-nowrap">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</td>
+                  <td className="p-3 text-right text-xs"><span className="font-mono whitespace-nowrap">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</span>{t.usage?.usedBytes != null && <div className="text-muted-foreground">{TEXT.usedNowHint}</div>}</td>
                   <td className="p-3 text-xs">
                     <span title={lc.title}>{lc.main}</span>
                     {lc.sub && <div className="text-muted-foreground break-words">{lc.sub}</div>}
@@ -120,7 +120,7 @@ export default function StorageOverview({ data, running = {}, onRequestCheck, no
               <CardContent className="p-4 space-y-3">
                 <NameCell t={t} />
                 <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                  <div className="min-w-0"><dt className="text-xs text-muted-foreground">{TEXT.colUsedNow}</dt><dd className="font-mono text-xs">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</dd></div>
+                  <div className="min-w-0"><dt className="text-xs text-muted-foreground">{TEXT.colUsedNow}</dt><dd className="text-xs"><span className="font-mono">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</span>{t.usage?.usedBytes != null && <span className="block text-muted-foreground">{TEXT.usedNowHint}</span>}</dd></div>
                   <div className="min-w-0"><dt className="text-xs text-muted-foreground">{TEXT.colLastCheck}</dt><dd className="text-xs break-words"><span title={lc.title}>{lc.main}</span>{lc.sub && <span className="block text-muted-foreground">{lc.sub}</span>}</dd></div>
                   <div className="min-w-0 sm:col-span-2"><dt className="text-xs text-muted-foreground">{TEXT.colAlerts}</dt><dd><Alerts alerts={t.alerts} /></dd></div>
                 </dl>

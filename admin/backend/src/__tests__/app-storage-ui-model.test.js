@@ -14,11 +14,11 @@ import {
   parseTargetKey, targetKeyOf, storageHref, headerFigures, ruleState, ruleForm, validateRuleForm, withRule,
   ruleFormChanged, alertsForm, validateAlertsForm, withAlerts, alertsFormChanged, gbToBytes, bytesToGb,
   effectFor, isCheckRunning, isCheckFinished, isCleanupFinished, NOTHING_SELECTED, ALL_ELIGIBLE_SCOPE,
-  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure,
+  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure, groupMemberNoun, itemHint,
 } from '../../../frontend/src/components/app-storage/app-storage-model.mjs';
 import { validatePolicy } from '../lib/app-storage/policy.js';
 import {
-  STATUS_LABELS, CATEGORY_LABELS, SNAPSHOT_WARNING, POLICY_SOURCE_LABELS, RULE_TEXT, TEXT,
+  STATUS_LABELS, CATEGORY_LABELS, SNAPSHOT_WARNING, POLICY_SOURCE_LABELS, RULE_TEXT, TEXT, RULE_STATE_HINTS, POLICY_TEXT,
 } from '../../../frontend/src/components/app-storage/app-storage-text.js';
 import { nodusCheck, nodusPolicy, nodusEffects } from '../../../frontend/tests/fixtures/app-storage-fixture.mjs';
 
@@ -383,4 +383,43 @@ test('effects notes that only restate the count are not repeated; job events are
   assert.equal(reclaimedFigure(-4096), 0);
   assert.equal(reclaimedFigure(65536), 65536);
   assert.equal(reclaimedFigure(null), null);
+});
+
+test('"Some can be cleaned up" only when a category has something that can be (review 12)', () => {
+  const protectedItem = { ...byLabel('/usr'), category: 'other' };
+  const look = byLabel('/opt/nodus-w48');
+  const mixedNothing = { checkId: 'chk_x', categories: [{ key: 'other', label: 'Other or unclassified', status: 'mixed' }], items: [protectedItem, look] };
+  assert.equal(categoryRows(mixedNothing).find((r) => r.key === 'other').status, 'investigate');
+  const mixedProtected = { checkId: 'chk_x', categories: [{ key: 'other', status: 'mixed' }], items: [protectedItem] };
+  assert.equal(categoryRows(mixedProtected)[0].status, 'protected');
+  assert.equal(categoryRows(check).find((r) => r.key === 'releases').status, 'mixed', 'a real mix keeps its status');
+});
+
+test('groups say files or folders from their members; the memory note is not repeated as a hint (review 18)', () => {
+  assert.equal(groupMemberNoun(byLabel('nodus-embed-* (263 folders)')), 'folders');
+  assert.equal(groupMemberNoun({ members: [{ kind: 'file' }, { kind: 'file' }] }), 'files');
+  assert.equal(groupMemberNoun({ members: [{ kind: 'file' }, { kind: 'directory' }] }), 'items');
+  assert.equal(groupMemberNoun({}), 'items');
+  assert.equal(TEXT.showMembers(6, 6, 'files'), 'Show all 6 files');
+  assert.equal(TEXT.showMembers(50, 263, 'folders'), 'Show 50 of 263 folders');
+  assert.equal(TEXT.hideMembers('files'), 'Hide files');
+  assert.equal(itemHint({ memoryBacked: true, hint: 'Uses memory, not disk.' }), null);
+  assert.equal(itemHint({ memoryBacked: false, hint: 'Tests download it again.' }), 'Tests download it again.');
+  assert.equal(itemHint({ memoryBacked: true, hint: 'A leftover download.' }), 'A leftover download.');
+});
+
+test('used figures are named by what they measure; rules say who changed them and when (review 17, 24, 28)', () => {
+  assert.equal(TEXT.colUsedNow, 'Disk used now');
+  assert.equal(TEXT.usedNowHint, 'on disk, with snapshots');
+  assert.equal(TEXT.usedSize('3.6 GB'), '3.6 GB of files in the container');
+  assert.equal(TEXT.used, 'Used by files');
+  assert.equal(TEXT.onDisk, 'On disk, with snapshots');
+  assert.equal(POLICY_TEXT.changed('5 minutes ago', 'Oct 21, 2026, 1:00 AM', '1'), 'Last changed 5 minutes ago (Oct 21, 2026, 1:00 AM) by user #1.');
+  assert.equal(POLICY_TEXT.changed('just now', 'x', null), 'Last changed just now (x).');
+  assert.match(POLICY_TEXT.noCheckNudge, /you can still turn a rule on/);
+  assert.equal(RULE_STATE_HINTS.on(RULE_TEXT.snapshots.when), 'On: it runs whenever a snapshot is taken, and each time ProxyPilot starts.');
+  assert.equal(RULE_STATE_HINTS.off(RULE_TEXT.releases.when), 'Turned off. Nothing runs. Once on, it runs during each release build.');
+  // No text promises a built-in minimum that keeps running when a rule is off (review HIGH 1).
+  const words = JSON.stringify([RULE_TEXT, POLICY_TEXT.description, Object.values(RULE_STATE_HINTS).map((f) => f('x'))]);
+  for (const w of ['floor', 'built-in', 'static']) assert.equal(new RegExp(w, 'i').test(words), false, w);
 });

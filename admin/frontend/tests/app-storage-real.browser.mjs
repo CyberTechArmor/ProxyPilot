@@ -144,6 +144,7 @@ async function journey(width, { sweep }) {
     const bundle = check.items.find((i) => i.path === `${RELEASE_ROOT}/.staging/${OLD_JOB}-1.bundle`);
     const snap = check.items.find((i) => i.kind === 'snapshot' && i.identity?.name === SNAP_OLD.name);
     for (const [name, it] of Object.entries({ group, staging, bundle, snap })) assert.ok(it && it.status === 'eligible', `${name} can be cleaned up in the real check`);
+    await page.locator(`[data-item="${group.id}"]`).getByRole('button', { name: `Show all ${group.memberCount} folders` }).waitFor();
     for (const it of [group, staging, bundle, snap]) await page.locator(`[data-item="${it.id}"] input[type=checkbox]`).check();
     assert.match(await summary(page), /^4 selected/);
     await page.getByText(SNAPSHOT_ACK).first().waitFor();
@@ -232,6 +233,8 @@ async function journey(width, { sweep }) {
     assert.equal(await page.getByTestId('policy-source').innerText(), "Kept from Nodus's existing settings");
     const before = b.storage.getPolicy('application:1');
     assert.ok(before.proposedRules.includes('tempFiles'));
+    assert.equal(await page.getByTestId('policy-changed').innerText(), 'Not changed here yet.');
+    assert.equal(await page.getByTestId('policy-no-check').count(), 0, 'a check exists, so no nudge');
     const temp = page.locator('[data-rule="tempFiles"]');
     await temp.getByText('Proposed', { exact: true }).waitFor();
     const eff = before.effects.find((e) => e.rule === 'tempFiles');
@@ -252,6 +255,8 @@ async function journey(width, { sweep }) {
     await page.locator('[data-rule="caches"]').getByText('Proposed', { exact: true }).waitFor();
     await temp.getByTestId('rule-effect').waitFor();
     assert.equal(await page.getByTestId('policy-source').innerText(), 'Changed by an administrator');
+    assert.ok(now.updatedAt && now.updatedBy === '1', 'the backend records who and when');
+    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by user #1\.$/).waitFor();
     ok(`${width}px: rules — Nodus's kept settings, the proposed "Temporary files" rule with its real effects preview; Turn on sent one PUT with expectedRevision ${before.revision}; the backend stored revision ${now.revision} and kept the other proposals proposed`);
 
     assert.deepEqual(errors, [], 'no page errors');

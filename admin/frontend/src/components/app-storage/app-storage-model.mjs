@@ -92,7 +92,7 @@ export function categoryRows(check) {
     return {
       key,
       label: s.label || CATEGORY_LABELS[key] || key,
-      status: s.status || (own.length ? summarizeStatus(own) : 'empty'),
+      status: displayStatus(s.status || (own.length ? summarizeStatus(own) : 'empty'), own),
       allocatedBytes: s.allocatedBytes ?? own.reduce((n, i) => n + bytesOf(i.allocatedBytes), 0),
       logicalBytes: s.logicalBytes ?? own.reduce((n, i) => n + bytesOf(i.logicalBytes), 0),
       count: s.count ?? own.reduce((n, i) => n + (Number(i.files) || 0), 0),
@@ -107,11 +107,38 @@ export function categoryRows(check) {
   });
 }
 
+// "Some can be cleaned up" only when something in the category can be;
+// a mix of protected and needs-a-look items reads "Needs a look".
+function displayStatus(status, items) {
+  if (status !== 'mixed' && status !== 'eligible') return status;
+  if (items.some(canSelect)) return status;
+  return items.some((i) => i.status === 'investigate') ? 'investigate' : 'protected';
+}
+
 function summarizeStatus(items) {
   const s = new Set(items.map((i) => i.status));
   if (s.size === 1) return [...s][0];
   if (s.has('eligible')) return 'mixed';
   return s.has('investigate') ? 'investigate' : 'protected';
+}
+
+/** 'files' | 'folders' | 'items' for a group, from its members' kind. */
+export function groupMemberNoun(item) {
+  const kinds = new Set((Array.isArray(item?.members) ? item.members : []).map((m) => m?.kind).filter(Boolean));
+  if (kinds.size === 1) {
+    const [k] = kinds;
+    if (k === 'file') return 'files';
+    if (k === 'directory' || k === 'dir') return 'folders';
+  }
+  return 'items';
+}
+
+/** An item's hint, unless it only repeats the "Uses memory, not disk" chip. */
+export function itemHint(item) {
+  const hint = typeof item?.hint === 'string' ? item.hint.trim() : '';
+  if (!hint) return null;
+  if (item.memoryBacked && /^uses memory, not disk\.?$/i.test(hint)) return null;
+  return hint;
 }
 
 /** Members of a group item: the first `limit` and how many more there are. */

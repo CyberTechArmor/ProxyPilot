@@ -51,7 +51,8 @@ function item(checkId, now, o) {
     identity: { dev: 64769, ino, mtimeMs, size: o.alloc, ...(o.identity || {}) },
     ...(o.members ? { members: o.members, memberCount: o.members.length } : {}),
     ...(o.breakdown ? { breakdown: o.breakdown } : {}),
-    ...(o.hint ? { hint: o.hint } : {}),
+    // Like classify.js: a memory-backed temp item carries the memory hint.
+    ...(o.hint || o.memoryBacked ? { hint: o.hint || 'Uses memory, not disk.' } : {}),
     ...(o.recoverableBytes != null ? { recoverableBytes: o.recoverableBytes } : {}),
   };
 }
@@ -86,8 +87,8 @@ function summarize(items) {
 export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 60000 } = {}) {
   const at = now - ageMs;
   const I = (o) => item(checkId, at, o);
-  const embedMembers = Array.from({ length: 263 }, (_, n) => ({ path: `/tmp/nodus-embed-${(0x1a2b3c + n * 7919).toString(36)}`, identity: { dev: 41, ino: 900000 + n, mtimeMs: at - 3 * DAY - n * HOUR } }));
-  const pulseMembers = Array.from({ length: 126 }, (_, n) => ({ path: `/tmp/pulse-${(0x5c6d7e + n * 104729).toString(36)}`, identity: { dev: 41, ino: 700000 + n, mtimeMs: at - 2 * DAY - n * HOUR } }));
+  const embedMembers = Array.from({ length: 263 }, (_, n) => ({ path: `/tmp/nodus-embed-${(0x1a2b3c + n * 7919).toString(36)}`, kind: 'directory', identity: { dev: 41, ino: 900000 + n, mtimeMs: at - 3 * DAY - n * HOUR } }));
+  const pulseMembers = Array.from({ length: 126 }, (_, n) => ({ path: `/tmp/pulse-${(0x5c6d7e + n * 104729).toString(36)}`, kind: 'directory', identity: { dev: 41, ino: 700000 + n, mtimeMs: at - 2 * DAY - n * HOUR } }));
   const items = [
     I({ category: 'running_app', label: 'Live release 3c932650', path: LIVE, kind: 'release', status: 'protected', reason: 'The release the application is running now.', alloc: 510e6, logical: 925e6, files: 48210, ageMs: 20 * 60000, hint: 'Inside a sealed release; removed only with the whole release.', breakdown: [{ label: 'node_modules', allocatedBytes: 402e6 }, { label: 'release-evidence', allocatedBytes: 1.3e6 }, { label: 'test-results', allocatedBytes: 1.1e6 }] }),
     I({ category: 'dependencies', label: '/usr', path: '/usr', status: 'protected', reason: 'Operating system and installed packages.', alloc: 890e6, logical: 1.62e9, files: 61234, ageMs: 9 * DAY }),
@@ -239,8 +240,8 @@ export function targetDetail(now = Date.now(), { check = nodusCheck(now), runnin
   };
 }
 
-export function policyResponse({ policy = nodusPolicy(), revision = 1, source = 'preserved' } = {}) {
-  return { policy, defaults: DEFAULT_POLICY, source, revision, effects: nodusEffects() };
+export function policyResponse({ policy = nodusPolicy(), revision = 1, source = 'preserved', updatedAt = null, updatedBy = null, checkId = CHECK_ID } = {}) {
+  return { policy, defaults: DEFAULT_POLICY, source, revision, updatedAt, updatedBy, checkId, effects: nodusEffects() };
 }
 
 /** GET /cleanups/:id for a finished cleanup of the requested ids: one skipped with its reason. */

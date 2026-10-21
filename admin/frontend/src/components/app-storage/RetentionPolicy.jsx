@@ -6,7 +6,7 @@
 // nothing runs until it is turned on.
 
 import { useCallback, useEffect, useId, useState } from 'react';
-import { Bell, Loader2, Power, PowerOff, Save } from 'lucide-react';
+import { Bell, Loader2, Power, PowerOff, Save, Search } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -15,10 +15,10 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { BTN, Checkbox, Chip, Notice } from '@/components/storage/shared';
 import {
-  RULE_FIELDS, RULE_KEYS, alertsForm, alertsFormChanged, effectFor, effectNote, formatBytes, formatSize, ruleForm, ruleFormChanged, ruleState,
+  RULE_FIELDS, RULE_KEYS, alertsForm, alertsFormChanged, effectFor, effectNote, formatAge, formatBytes, formatDateTime, formatSize, ruleForm, ruleFormChanged, ruleState,
   validateAlertsForm, validateRuleForm, withAlerts, withRule,
 } from './app-storage-model.mjs';
-import { ALERT_TEXT, POLICY_SOURCE_LABELS, POLICY_TEXT, RULE_STATE_HINTS, RULE_TEXT } from './app-storage-text.js';
+import { ALERT_TEXT, POLICY_SOURCE_LABELS, POLICY_TEXT, RULE_STATE_HINTS, RULE_TEXT, TEXT } from './app-storage-text.js';
 import { RuleStateChip, errorText } from './parts.jsx';
 
 const SOURCE_LEVEL = { 'defaults-new': 'ok', 'defaults-existing': 'warn', preserved: 'info', edited: 'muted' };
@@ -36,7 +36,8 @@ function NumberField({ id, label, value, onChange, error, disabled }) {
 
 const rangeText = (e) => (e === 'positive' ? POLICY_TEXT.positive : e?.gb ? POLICY_TEXT.gbRange(e.min, e.max) : e ? POLICY_TEXT.range(e.min, e.max) : null);
 
-function Effect({ effect, changed }) {
+function Effect({ effect, changed, noCheck }) {
+  if (noCheck) return <p className="rounded-md bg-muted/50 p-2 text-xs text-amber-600 dark:text-amber-400" data-testid="rule-effect">{POLICY_TEXT.effectNoCheck}</p>;
   if (!effect) return <p className="text-xs text-muted-foreground">{POLICY_TEXT.effectUnknown}</p>;
   return (
     <div className="rounded-md bg-muted/50 p-2 text-xs space-y-0.5" data-testid="rule-effect">
@@ -79,7 +80,7 @@ function RuleCard({ ruleKey, data, kind, busy, onSave }) {
         {ruleKey === 'releases' && Array.isArray(rule.trimBeforeSeal) && rule.trimBeforeSeal.length > 0 && (
           <p className="text-xs"><span className="text-muted-foreground">{text.trimBeforeSeal}:</span> <span className="font-mono break-words">{rule.trimBeforeSeal.join(', ')}</span></p>
         )}
-        <Effect effect={effectFor(data.effects, ruleKey)} changed={changed} />
+        <Effect effect={effectFor(data.effects, ruleKey)} changed={changed} noCheck={!data.checkId} />
         <div className="flex flex-col sm:flex-row gap-2">
           {rule.enabled ? (
             <Button type="button" variant="outline" className={BTN} disabled={Boolean(busy)} onClick={() => onSave(ruleKey, withRule(policy, ruleKey, null, false))}>
@@ -127,7 +128,7 @@ function AlertsCard({ data, busy, onSave }) {
   );
 }
 
-export default function RetentionPolicy({ target, client = api }) {
+export default function RetentionPolicy({ target, client = api, checkId = null, running = false, onRequestCheck = null }) {
   const { toast } = useToast();
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -136,7 +137,8 @@ export default function RetentionPolicy({ target, client = api }) {
   const load = useCallback(async () => {
     try { setData(await client.appStorage.policy(target.kind, target.id)); setError(''); } catch (err) { setError(errorText(err, POLICY_TEXT.loadFailed)); }
   }, [client, target.kind, target.id]);
-  useEffect(() => { load(); }, [load]);
+  // Reloaded when a new check finishes, so the effects follow the latest check.
+  useEffect(() => { load(); }, [load, checkId]);
 
   const save = async (what, policy) => {
     setBusy(what); setNotice(''); setError('');
@@ -162,7 +164,21 @@ export default function RetentionPolicy({ target, client = api }) {
           <Chip level={SOURCE_LEVEL[data.source] || 'muted'} className="whitespace-normal text-left self-start sm:self-auto" title={sourceLabel}><span data-testid="policy-source">{sourceLabel}</span></Chip>
         </div>
         <p className="text-xs text-muted-foreground max-w-3xl">{POLICY_TEXT.description}</p>
+        <p className="text-xs text-muted-foreground" data-testid="policy-changed">
+          {data.updatedAt ? POLICY_TEXT.changed(formatAge(data.updatedAt), formatDateTime(data.updatedAt), data.updatedBy) : POLICY_TEXT.neverChanged}
+        </p>
       </div>
+      {!data.checkId && (
+        <div data-testid="policy-no-check"><Notice level="warn">
+          <p className="font-medium">{POLICY_TEXT.noCheckTitle}</p>
+          <p>{POLICY_TEXT.noCheckNudge}</p>
+          {onRequestCheck && (
+            <Button type="button" variant="outline" className={`${BTN} mt-1`} disabled={running} onClick={onRequestCheck}>
+              {running ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Search className="h-4 w-4 mr-1.5" />}{running ? TEXT.checking : TEXT.requestCheck}
+            </Button>
+          )}
+        </Notice></div>
+      )}
       {error && <Notice level="error"><p>{error}</p></Notice>}
       {notice && <Notice level="warn"><p>{notice}</p></Notice>}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">

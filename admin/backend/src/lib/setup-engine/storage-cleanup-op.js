@@ -63,8 +63,8 @@ const REASONS = Object.freeze({
   UNSAFE_RETENTION_ROOT: 'The release folder is not in the expected safe layout.',
   RETENTION_REQUIRES_SYMLINK_LAYOUT: 'The release folder is not in the expected safe layout.',
   LIVE_RELEASE_OUTSIDE_ROOT: 'The release folder is not in the expected safe layout.',
-  NODE_MISSING: 'Node.js is not installed in this guest, so nothing inside it was removed.',
-  CONTAINMENT_UNAVAILABLE: 'The guest offers no process containment, so nothing inside it was removed.',
+  NODE_MISSING: 'Node.js is not installed in this container, so nothing inside it was removed.',
+  CONTAINMENT_UNAVAILABLE: 'The container offers no process containment, so nothing inside it was removed.',
   INVALID_JOURNAL_TARGET: 'No usable size limit was recorded for the system logs.',
   JOURNAL_VACUUM_FAILED: 'The system log could not be trimmed.',
   PROGRAM_RESULT_INVALID: 'The cleanup program did not return a result.',
@@ -110,7 +110,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   if (row.targetKey !== params.targetKey) throw safeError('CLEANUP_TARGET_MISMATCH', 'The cleanup record names another application; nothing was removed.');
   if (TERMINAL.has(row.status)) return { status: row.status, result: row.result, alreadyFinished: true };
   const target = await deps.resolveTarget(row.targetKey);
-  if (!target || target.guest !== job.app) throw safeError('GUEST_IDENTITY_MISMATCH', 'The cleanup record does not match the locked guest; nothing was removed.');
+  if (!target || target.guest !== job.app) throw safeError('GUEST_IDENTITY_MISMATCH', 'The cleanup record does not match the locked container; nothing was removed.');
   const container = target.guest;
   const name = target.name || container;
   const attempt = `${job.id}-${job.epoch || 1}`;
@@ -193,9 +193,9 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   const reap = await exec.guest(container, reapStaleWritersScript(attempt), { timeoutMs: 30_000 });
   const stale = parseStaleWriters(reap?.stdout);
   let guestUnavailable = null;
-  if (stale === null) guestUnavailable = 'The guest is not running, so nothing inside it was changed.';
+  if (stale === null) guestUnavailable = 'The container is not running, so nothing inside it was changed.';
   else if (stale > 0) {
-    const reason = 'A previous writer in this guest could not be stopped; nothing was removed.';
+    const reason = 'A previous writer in this container could not be stopped; nothing was removed.';
     skipRest(`Not started: ${reason}`);
     return finish(acc.removed.length || acc.failed.length ? 'partial' : 'refused', { reason });
   }
@@ -327,7 +327,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
     const view = await deps.exports.get(e.exportId);
     if (!view) return void (wasCurrent(e.id) ? acc.removed.push({ id: e.id, label: e.label, bytes: e.allocatedBytes || 0, precision: 'estimate' }) : acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy no longer exists.' }));
     // Export rows name the guest with or without its pp- prefix.
-    if (![container, container.replace(/^pp-/, '')].includes(view.container)) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy belongs to another guest.' });
+    if (![container, container.replace(/^pp-/, '')].includes(view.container)) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy belongs to another container.' });
     if (view.state !== 'ready') return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy is being prepared or did not complete.' });
     if (e.identity?.createdAt && view.created_at !== e.identity.createdAt) return void acc.skipped.push({ id: e.id, label: e.label, reason: 'This copy changed since the check.' });
     save('cleanup:export', e.id);
@@ -426,11 +426,9 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   const measured = !guestUnavailable && !cancelled ? await guestProgram({ action: 'measure' }, 60_000).catch(err => { if (err?.code === 'FENCED') throw err; return null; }) : null;
   const guestAfter = measured?.ok && measured.fs ? measured.fs.usedBytes : (afterCheck?.totals?.guest?.usedBytes ?? null);
   const datasetAfter = cancelled ? null : await hostUsage();
-  const reclaimed = {
-    guestBytes: before?.guestUsedBytes != null && guestAfter != null ? before.guestUsedBytes - guestAfter : null,
-    datasetBytes: before?.datasetUsedBytes != null && datasetAfter != null ? before.datasetUsedBytes - datasetAfter : null,
-    settling: false,
-  };
+  // Other writers keep running during a cleanup, so "after" can exceed "before": report 0, never a negative reclaim.
+  const delta = (was, now) => (was != null && now != null ? Math.max(0, was - now) : null);
+  const reclaimed = { guestBytes: delta(before?.guestUsedBytes, guestAfter), datasetBytes: delta(before?.datasetUsedBytes, datasetAfter), settling: false };
   const byEntry = new Map(selection.map(e => [e.id, e]));
   const removedDisk = acc.removed.reduce((n, r) => { const e = byEntry.get(r.id); return e && e.action !== 'delete-snapshot' && e.action !== 'delete-export' && !e.memoryBacked && e.location === 'guest' ? n + (Number(r.bytes) || 0) : n; }, 0);
   if (removedDisk > 0 && (reclaimed.guestBytes == null || reclaimed.guestBytes < removedDisk * 0.5)) { reclaimed.settling = true; notes.push(SETTLING_NOTE); }

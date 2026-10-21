@@ -28,16 +28,16 @@ export async function performCheck({ target, activity = {}, exec, policy = null,
   const startedAt = nowOf(now);
   const base = { version: CHECK_RESULT_VERSION, checkId, target: publicTarget(target), origin: CHECK_ORIGINS.includes(origin) ? origin : 'user', startedAt: iso(startedAt) };
   try {
-    if (!exec || typeof exec.host !== 'function' || typeof exec.guest !== 'function') throw Object.assign(new Error('No executor is available to measure this guest.'), { code: 'NO_EXECUTOR' });
+    if (!exec || typeof exec.host !== 'function' || typeof exec.guest !== 'function') throw Object.assign(new Error('No executor is available to measure this container.'), { code: 'NO_EXECUTOR' });
     const host = await measureHost({ target, exec, mainDb, listExports });
     let facts = null;
     const unmeasured = [];
     if (host.running) {
       const scan = await scanGuest({ target, exec, input: scanPlanFor(target, { budget }), timeoutMs: (budget.ms || 60_000) + 60_000 });
       if (scan.ok) facts = scan.facts;
-      else unmeasured.push({ area: 'guest files', reason: scan.reason });
+      else unmeasured.push({ area: 'container files', reason: scan.reason });
     } else if (host.status) {
-      unmeasured.push({ area: 'guest files', reason: `The guest is ${String(host.status).toLowerCase()}, so its files could not be measured` });
+      unmeasured.push({ area: 'container files', reason: `The container is ${String(host.status).toLowerCase()}, so its files could not be measured` });
     }
     const context = buildContext({ target, activity, facts });
     const classified = classify({ target, context, facts, host, policy, now: nowOf(now), checkId });
@@ -49,7 +49,7 @@ export async function performCheck({ target, activity = {}, exec, policy = null,
       ...base,
       status,
       finishedAt: iso(nowOf(now)),
-      ...(status === 'failed' ? { error: { code: 'GUEST_NOT_FOUND', message: 'The guest could not be found or read on this host, so nothing was measured.' } } : {}),
+      ...(status === 'failed' ? { error: { code: 'GUEST_NOT_FOUND', message: 'The container could not be found or read on this host, so nothing was measured.' } } : {}),
       totals: classified.totals,
       categories: classified.categories,
       items: classified.items,

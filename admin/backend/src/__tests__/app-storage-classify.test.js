@@ -342,12 +342,12 @@ test('a stopped guest, a guest without Node.js and an unknown guest are reported
   const world = W.buildNodusGuest(root, NOW);
   const stopped = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root, status: 'Stopped' }), now: NOW, checkId: CHECK_ID, listExports: () => [] });
   assert.equal(stopped.status, 'partial');
-  assert.deepEqual(stopped.unmeasured[0], { area: 'guest files', reason: 'The guest is stopped, so its files could not be measured' });
+  assert.deepEqual(stopped.unmeasured[0], { area: 'container files', reason: 'The container is stopped, so its files could not be measured' });
   assert.ok(stopped.items.some((it) => it.location === 'host'), 'host-side facts are still shown');
   assert.equal(stopped.items.some((it) => it.kind === 'pseudo'), false);
   const noNode = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root, noNode: true }), now: NOW, checkId: CHECK_ID, listExports: () => [] });
   assert.equal(noNode.status, 'partial');
-  assert.match(noNode.unmeasured[0].reason, /Node\.js is not installed in this guest/);
+  assert.match(noNode.unmeasured[0].reason, /Node\.js is not installed in this container/);
   const missing = await performCheck({ target: { ...W.nodusTarget(world), guest: 'pp-gone' }, exec: W.scriptedExec({ prefix: root }), now: NOW, checkId: CHECK_ID, listExports: () => [] });
   assert.equal(missing.status, 'failed');
   assert.equal(missing.error.code, 'GUEST_NOT_FOUND');

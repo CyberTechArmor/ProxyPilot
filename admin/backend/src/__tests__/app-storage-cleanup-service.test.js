@@ -73,7 +73,7 @@ test('ineligible ids, missing acknowledgement, unknown targets and other origins
   await assert.rejects(w.service.requestCleanup({ targetKey: 'application:1', checkId: CHECK_ID, items: [ids.live] }), err => {
     assert.equal(err.code, 'NOT_ELIGIBLE'); assert.equal(err.status, 409);
     assert.deepEqual(err.items.map(x => x.id), [ids.live], 'the offending ids and reasons travel as error.items');
-    assert.match(err.items[0].reason, /Not eligible/);
+    assert.ok(err.items[0].reason && !/^Not eligible/.test(err.items[0].reason), 'the item\'s own reason, no prefix');
     return true;
   });
   await expectError(w.service.requestCleanup({ targetKey: 'application:1', checkId: CHECK_ID, snapshots: [ids.snap1] }), 'SNAPSHOT_ACK_REQUIRED', 400);

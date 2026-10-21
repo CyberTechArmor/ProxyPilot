@@ -20,7 +20,7 @@ export const POLICY_VERSION = 1;
 export const RULE_KEYS = Object.freeze(['releases', 'snapshots', 'workspaces', 'caches', 'tempFiles', 'testArtifacts', 'logs', 'history']);
 export const RULES = Object.freeze({
   releases: { categories: ['releases'], label: 'Old releases', description: 'Keep the running release and the newest older ones; remove the rest after each validation.' },
-  snapshots: { categories: ['snapshots'], label: 'Snapshots', description: 'Keep the newest snapshots (restore points) of this guest and delete older ones.' },
+  snapshots: { categories: ['snapshots'], label: 'Snapshots', description: 'Keep the newest snapshots (restore points) of this container and delete older ones.' },
   workspaces: { categories: ['workspaces', 'archives'], label: 'Build workspaces', description: 'Remove build workspaces and transfer archives left behind by builds that have ended.' },
   caches: { categories: ['caches'], label: 'Caches', description: 'Remove downloaded caches that have not changed for a while; they are fetched again when needed.' },
   tempFiles: { categories: ['temp'], label: 'Temporary files', description: 'Remove temporary files nothing is using that have not changed for a while.' },

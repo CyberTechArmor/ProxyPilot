@@ -74,11 +74,11 @@ test('measureHost reports what it could not read instead of failing', async () =
   const exec = { host: async () => ({ code: 1, stdout: '' }), guest: async () => ({ code: 1, stdout: '' }) };
   const host = await measureHost({ target: { kind: 'project', guest: 'm2-4', repoPath: '/var/lib/proxypilot/mock2/repos/4.git' }, exec, mainDb: null });
   assert.equal(host.running, false);
-  assert.deepEqual(host.unmeasured.map((u) => u.area), ['guest', 'exports', 'host files']);
+  assert.deepEqual(host.unmeasured.map((u) => u.area), ['container', 'exports', 'host files']);
   const dirPool = scriptedExec({ prefix: '/nonexistent', guest: 'm2-4', driver: 'dir' });
   const h2 = await measureHost({ target: { kind: 'project', guest: 'm2-4', repoPath: '/nonexistent.git' }, exec: dirPool, listExports: () => [] });
   assert.equal(h2.dataset, null);
-  assert.match(h2.unmeasured.find((u) => u.area === 'dataset').reason, /uses dir, not ZFS/);
+  assert.match(h2.unmeasured.find((u) => u.area === 'disk figures').reason, /uses dir, not ZFS/);
   assert.deepEqual(hostScanPlan({ kind: 'project', repoPath: '/var/lib/proxypilot/mock2/repos/4.git' }).roots, [{ path: '/var/lib/proxypilot/mock2/repos/4.git', depth: 0, role: 'host-repo' }]);
   assert.deepEqual(hostScanPlan({ kind: 'project', repoPath: '/etc/../x.git' }).roots, [], 'an odd repo path is not measured');
   assert.equal(exportsFor(null, 'pp-x'), null);

@@ -53,7 +53,7 @@ export function usageAlert({ name, guest, targetKey, usedBytes, warnBytes, level
   return {
     key: alertKey('usage', targetKey), kind: 'usage', event: 'appstorage.usage', level,
     title: `${name} uses ${formatBytes(usedBytes)} of storage (warning level ${formatBytes(warnBytes)})`,
-    body: `${name} (guest ${guest}) is above its storage warning level. Run a storage check to see what can be cleaned up; nothing is removed automatically by this alert.`,
+    body: `${name} (container ${guest}) is above its storage warning level. Run a storage check to see what can be cleaned up; nothing is removed automatically by this alert.`,
   };
 }
 
@@ -61,7 +61,7 @@ export function growthAlert({ name, guest, targetKey, growth, windowHours }) {
   return {
     key: alertKey('growth', targetKey), kind: 'growth', event: 'appstorage.growth', level: 'warning',
     title: `${name} grew by ${formatBytes(growth)} in the last ${windowHours} hours`,
-    body: `${name} (guest ${guest}) grew quickly. Run a storage check to see what grew; nothing is removed automatically by this alert.`,
+    body: `${name} (container ${guest}) grew quickly. Run a storage check to see what grew; nothing is removed automatically by this alert.`,
   };
 }
 

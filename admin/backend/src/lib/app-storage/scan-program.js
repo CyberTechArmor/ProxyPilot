@@ -179,7 +179,7 @@ export function scanScript(data) {
 export function parseScanOutput(result) {
   const code = result?.code ?? result?.status;
   const stdout = String(result?.stdout || '');
-  if (/^NO_NODE\b/m.test(stdout) || code === 127) return { ok: false, code: 'NO_NODE', reason: 'Node.js is not installed in this guest, so its files could not be measured' };
+  if (/^NO_NODE\b/m.test(stdout) || code === 127) return { ok: false, code: 'NO_NODE', reason: 'Node.js is not installed in this container, so its files could not be measured' };
   if (result?.stdoutTruncated) return { ok: false, code: 'OUTPUT_TOO_LARGE', reason: 'The measurement was larger than the reader accepts; its files could not be listed' };
   if (code === 124 || result?.timedOut) return { ok: false, code: 'TIMEOUT', reason: 'Measuring the files took too long and was stopped' };
   let facts = null;

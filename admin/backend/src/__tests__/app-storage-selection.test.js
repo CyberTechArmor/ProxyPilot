@@ -84,8 +84,8 @@ test('protected, needs-a-look, unknown and wrong-list ids are refused with NOT_E
   try { validate({ items: [id('a5'), id('a6'), 'ffffffffffffffff', id('s1')], snapshots: [id('a3')], exports: [id('s2')], acknowledgeSnapshotLoss: true }); } catch (e) { error = e; }
   assert.equal(error.code, 'NOT_ELIGIBLE'); assert.equal(error.status, 409);
   const reasons = Object.fromEntries(error.details.items.map(x => [x.id, x.reason]));
-  assert.match(reasons[id('a5')], /Not eligible: The release the application is running now/);
-  assert.match(reasons[id('a6')], /Not eligible: Not created by ProxyPilot/);
+  assert.match(reasons[id('a5')], /^The release the application is running now/);
+  assert.match(reasons[id('a6')], /^Not created by ProxyPilot/);
   assert.equal(reasons.ffffffffffffffff, 'Not part of this storage check.');
   assert.match(reasons[id('s1')], /selected separately/);
   assert.match(reasons[id('a3')], /Only restore points/);

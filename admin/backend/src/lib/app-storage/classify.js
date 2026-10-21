@@ -526,7 +526,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
   if (facts && totals.unattributedBytes > 0) {
     items.push({
       id: null, category: 'other', label: 'Not measured individually (operating system and other files)', path: null, kind: 'pseudo', sub: null,
-      status: 'investigate', reason: 'The rest of what the guest uses: files outside the folders this check looks at.', hint: null,
+      status: 'investigate', reason: 'The rest of what the container uses: files outside the folders this check looks at.', hint: null,
       logicalBytes: null, allocatedBytes: totals.unattributedBytes, files: 0, newestMtimeMs: null, precision: 'estimate', memoryBacked: false,
       action: null, location: 'guest', root: null, identity: {}, inUse: false, dev: null, crossesDevice: false, sharedBytes: 0, inaccessible: 0,
     });
@@ -553,7 +553,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
   if (omitted) notes.push(`${omitted} entries in very large folders were not listed one by one; their space is in "Not measured individually".`);
   const inacc = items.reduce((s, it) => s + Number(it.inaccessible || 0), 0);
   if (inacc) notes.push(`${inacc} folders or files could not be read; their sizes are not included.`);
-  if (facts) notes.push('Allocated is the space the files take on disk (after compression); logical is their size.');
+  if (facts) notes.push('Space on disk is measured after compression; file sizes are before compression.');
   const categories = summarizeCategories(items);
   return { items, categories, totals, notes, unmeasured };
 }

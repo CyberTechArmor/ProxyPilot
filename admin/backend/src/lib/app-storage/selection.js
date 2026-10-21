@@ -117,7 +117,7 @@ export function validateCleanupRequest({ check, request = {}, target = null }) {
     if (want === 'file' && !isFileItem(item)) { bad.push({ id, label, reason: 'Restore points and copies are selected separately.' }); return null; }
     if (want === 'snapshot' && !isSnapshotItem(item)) { bad.push({ id, label, reason: 'Only restore points can be selected here.' }); return null; }
     if (want === 'export' && !isExportItem(item)) { bad.push({ id, label, reason: 'Only downloadable copies can be selected here.' }); return null; }
-    if (item.status !== 'eligible') { bad.push({ id, label, reason: item.reason ? `Not eligible: ${item.reason}` : 'This item cannot be cleaned up.' }); return null; }
+    if (item.status !== 'eligible') { bad.push({ id, label, reason: item.reason || 'This item cannot be cleaned up.' }); return null; }
     if (want === 'file') {
       if (!FILE_ACTIONS.includes(item.action)) { bad.push({ id, label, reason: 'This item has no cleanup action.' }); return null; }
       if (item.action !== 'vacuum-journal') {

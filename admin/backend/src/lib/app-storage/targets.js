@@ -65,7 +65,7 @@ export function listTargets({ mock2Db }) {
 /** The full target, with the layout knowledge classification needs. */
 export function resolveTarget(key, { mock2Db }) {
   const { kind, id } = parseTargetKey(key);
-  const notFound = () => new AppStorageError('TARGET_NOT_FOUND', kind === 'application' ? 'That application is not registered.' : 'That project does not exist or has no guest.', 404);
+  const notFound = () => new AppStorageError('TARGET_NOT_FOUND', kind === 'application' ? 'That application is not registered.' : 'That project does not exist or has no container.', 404);
   if (kind === 'application') {
     if (!tableExists(mock2Db, 'mock2_applications')) throw notFound();
     const row = mock2Db.prepare('SELECT id, target_id, name, created_at, imported_at FROM mock2_applications WHERE id = ?').get(id);
@@ -131,7 +131,7 @@ export function activityFor(target, { mainDb, mock2Db, now = Date.now(), exclude
       const expires = Date.parse(lock.lease_expires_at || '');
       if ((Number.isFinite(expires) && expires > nowMs) || lock.stale_since) {
         out.leaseHeld = { operation: lock.operation, jobId: lock.job_id || null, stale: !!lock.stale_since };
-        out.reasons.push(lock.stale_since ? 'The guest lease is held by an interrupted job that needs recovery.' : `The guest is busy (${lock.operation}).`);
+        out.reasons.push(lock.stale_since ? 'The container is held by an interrupted job that needs recovery.' : `The container is busy (${lock.operation}).`);
       }
     }
   }

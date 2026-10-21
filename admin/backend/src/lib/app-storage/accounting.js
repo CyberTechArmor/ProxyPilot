@@ -8,11 +8,11 @@ import { CATEGORIES, SEPARATE_CATEGORIES, worsePrecision } from './categories.js
 
 const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
-/** Decimal units, one decimal: 10.4 GB, 850 MB, 12 kB, 0 B. */
+/** Decimal units, one decimal: 10.4 GB, 850 MB, 12 KB, 0 B (the dashboard's spelling). */
 export function formatBytes(bytes) {
   const v = Number(bytes);
   if (!Number.isFinite(v) || v <= 0) return '0 B';
-  const units = ['B', 'kB', 'MB', 'GB', 'TB', 'PB'];
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   let i = 0; let x = v;
   while (x >= 1000 && i < units.length - 1) { x /= 1000; i += 1; }
   const s = i === 0 ? String(Math.round(x)) : x >= 100 ? String(Math.round(x)) : x.toFixed(1).replace(/\.0$/, '');

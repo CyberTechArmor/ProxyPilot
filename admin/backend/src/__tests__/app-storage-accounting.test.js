@@ -15,7 +15,7 @@ test('formatBytes uses decimal units with one decimal', () => {
   assert.equal(formatBytes(10.4e9), '10.4 GB');
   assert.equal(formatBytes(2e9), '2 GB');
   assert.equal(formatBytes(850e6), '850 MB');
-  assert.equal(formatBytes(12_345), '12.3 kB');
+  assert.equal(formatBytes(12_345), '12.3 KB');
   assert.equal(formatBytes(0), '0 B');
   assert.equal(formatBytes(null), '0 B');
 });

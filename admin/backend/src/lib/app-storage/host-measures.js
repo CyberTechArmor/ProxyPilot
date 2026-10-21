@@ -188,7 +188,7 @@ export async function measureHost({ target, exec, mainDb = null, listExports = n
   const out = { guest: target.guest, running: false, status: null, instanceType: null, pool: null, poolDriver: null, datasetName: null, dataset: null, limit: { bytes: null, source: null }, usageBytes: null, snapshots: [], exports: [], hostFiles: null, unmeasured };
   const instance = await readInstance(host, target.guest).catch(() => null);
   if (!instance) {
-    unmeasured.push({ area: 'guest', reason: 'The guest could not be found or read on this host' });
+    unmeasured.push({ area: 'container', reason: 'The container could not be found or read on this host' });
   } else {
     out.status = instance.status || null;
     out.running = String(instance.status || '').toLowerCase() === 'running';
@@ -202,9 +202,9 @@ export async function measureHost({ target, exec, mainDb = null, listExports = n
     if (pool?.driver === 'zfs' && pool.source) {
       out.datasetName = incusInstanceDataset(pool.source, { type: out.instanceType, name: target.guest });
       out.dataset = await readZfsDataset(host, out.datasetName).catch(() => null);
-      if (!out.dataset) unmeasured.push({ area: 'dataset', reason: 'The ZFS figures for this guest could not be read' });
+      if (!out.dataset) unmeasured.push({ area: 'disk figures', reason: 'The ZFS figures for this container could not be read' });
     } else {
-      unmeasured.push({ area: 'dataset', reason: pool ? `The guest's storage pool uses ${pool.driver || 'an unknown driver'}, not ZFS, so dataset and snapshot-held figures are not available` : 'The storage pool of this guest could not be read' });
+      unmeasured.push({ area: 'disk figures', reason: pool ? `The container's storage pool uses ${pool.driver || 'an unknown driver'}, not ZFS, so disk and snapshot figures are not available` : 'The storage pool of this container could not be read' });
     }
     out.limit = diskLimitOf({ instance, dataset: out.dataset });
     const volumeKind = out.instanceType === 'virtual-machine' ? 'virtual-machine' : 'container';

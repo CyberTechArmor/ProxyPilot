@@ -1,16 +1,18 @@
 // Application storage — the cleanup SELECTION, pure (DESIGN §3.1, §3.3).
 //
 // A cleanup request names item ids only; every path, identity and action
-// comes from the stored check. This module decides whether a request may be
-// approved against that check, copies the approved items out of it (the
-// cleanup row's selection), estimates what they hold, and names the
-// directories each item may be removed from (the cleanup program refuses
-// anything outside them). Nothing here reads a clock, a database or a disk.
+// comes from the stored check. This module decides whether the selected ids
+// may be cleaned up from that check, copies the approved items out of it (the
+// cleanup row's selection) and names the directories each item may be
+// removed from (the cleanup program refuses anything outside them). Whether
+// the check itself is fresh enough is check-service.js checkFreshness (one
+// implementation, also used by the route); what a selection holds is
+// accounting.js estimateSelection. Nothing here reads a clock, a database or
+// a disk.
 
 import path from 'node:path';
 
-export const CHECK_MAX_AGE_MS = 60 * 60 * 1000;
-export const MAX_IDS = 5000;
+export const MAX_IDS = 20_000;
 export const SCOPES = Object.freeze(['items', 'categories', 'all-eligible']);
 export const SEPARATE_CATEGORIES = Object.freeze(['snapshots', 'exports']);
 // Data-farthest first: what is most obviously regenerable goes first, so a
@@ -48,8 +50,6 @@ export const isSnapshotItem = item => item?.kind === 'snapshot' || item?.categor
 export const isExportItem = item => item?.kind === 'export' || item?.category === 'exports' || item?.action === 'delete-export';
 const isFileItem = item => !isSnapshotItem(item) && !isExportItem(item);
 const itemsOf = check => (Array.isArray(check?.items) ? check.items : []);
-const checkIdOf = check => check?.checkId ?? check?.id ?? null;
-const finishedAtOf = check => check?.finishedAt ?? check?.finished_at ?? check?.startedAt ?? check?.started_at ?? null;
 
 // scopeItemIds(check, { scope, categories }) → the ids a scope stands for.
 // "All eligible" is every eligible item outside Snapshots and Exports;
@@ -87,21 +87,6 @@ export function normalizeRequest(request = {}) {
   };
 }
 
-// checkFreshness({ check, latest, targetKey, now, maxAgeMs }) → null when the
-// check may be acted on, else the SelectionError. It must be the target's
-// latest finished (complete or partial) check and at most an hour old.
-export function checkFreshness({ check, latest = null, targetKey = null, now, maxAgeMs = CHECK_MAX_AGE_MS }) {
-  const when = finishedAtOf(check);
-  const stale = message => new SelectionError('CHECK_STALE', 409, message, { checkId: checkIdOf(check), checkedAt: when });
-  if (!check) return new SelectionError('CHECK_STALE', 409, 'Run a new storage check first; this check was not found.');
-  if (targetKey && check.target?.key && check.target.key !== targetKey) return stale('Run a new storage check first; this check belongs to another application.');
-  if (!['complete', 'partial'].includes(check.status)) return stale(check.status === 'running' ? 'Wait for the storage check to finish, then review it.' : 'Run a new storage check first; this one did not finish.');
-  const ms = Date.parse(when || '');
-  if (!Number.isFinite(ms) || now - ms > maxAgeMs || ms - now > 5 * 60 * 1000) return stale(`Run a new storage check first; this one is from ${when || 'an unknown time'}.`);
-  if (latest && checkIdOf(latest) !== checkIdOf(check)) return stale(`Run a new storage check first; this one is from ${when}.`);
-  return null;
-}
-
 function locationProblem(item) {
   if (!['guest', 'host'].includes(item.location)) return 'This item has no usable location.';
   const paths = item.kind === 'group' ? (Array.isArray(item.members) ? item.members.map(m => m?.path) : []) : [item.path];
@@ -110,17 +95,20 @@ function locationProblem(item) {
   return null;
 }
 
-// validateCleanupRequest({ check, latest, request, targetKey, now }) →
+// validateCleanupRequest({ check, request, target? }) — `check` is the check
+// result document, already found fresh by checkFreshness; with `target` the
+// location rules below (pathAllowed) are applied as well →
 //   { ok: true, empty: true, message }                    nothing selected
 //   { ok: true, empty: false, scope, items, snapshots, exports, acknowledgeSnapshotLoss }
-// or throws a SelectionError: INVALID_REQUEST 400, CHECK_STALE 409,
-// NOT_ELIGIBLE 409 (details.items: [{ id, reason }]), SNAPSHOT_ACK_REQUIRED 400.
-export function validateCleanupRequest({ check, latest = null, request = {}, targetKey = null, now, maxAgeMs = CHECK_MAX_AGE_MS }) {
+// or throws a SelectionError: INVALID_REQUEST 400, NOT_ELIGIBLE 409
+// (.items: [{ id, label, reason }]), SNAPSHOT_ACK_REQUIRED 400.
+export function validateCleanupRequest({ check, request = {}, target = null }) {
   const r = normalizeRequest(request);
   if (!r.items.length && !r.snapshots.length && !r.exports.length) return { ok: true, empty: true, message: NOTHING_SELECTED };
-  const stale = checkFreshness({ check, latest, targetKey, now, maxAgeMs });
-  if (stale) throw stale;
   const byId = new Map(itemsOf(check).map(item => [item.id, item]));
+  // The same location rules the cleanup job applies, so an approval never
+  // includes an item the job would then refuse.
+  const pathTarget = target ? pathTargetFor(target, check) : null;
   const bad = [];
   const pick = (ids, want) => ids.map(id => {
     const item = byId.get(id);
@@ -132,7 +120,10 @@ export function validateCleanupRequest({ check, latest = null, request = {}, tar
     if (item.status !== 'eligible') { bad.push({ id, label, reason: item.reason ? `Not eligible: ${item.reason}` : 'This item cannot be cleaned up.' }); return null; }
     if (want === 'file') {
       if (!FILE_ACTIONS.includes(item.action)) { bad.push({ id, label, reason: 'This item has no cleanup action.' }); return null; }
-      if (item.action !== 'vacuum-journal') { const problem = locationProblem(item); if (problem) { bad.push({ id, label, reason: problem }); return null; } }
+      if (item.action !== 'vacuum-journal') {
+        const problem = locationProblem(item) || (target ? pathProblem(item, pathTarget) : null);
+        if (problem) { bad.push({ id, label, reason: problem }); return null; }
+      }
     }
     if (want === 'snapshot' && (item.action !== 'delete-snapshot' || !SNAPSHOT_NAME_RE.test(String(snapshotNameOf(item) || '')) || typeof item.identity?.createdAt !== 'string')) { bad.push({ id, label, reason: 'This restore point is not identified well enough to delete.' }); return null; }
     if (want === 'export' && (item.action !== 'delete-export' || !Number.isInteger(Number(exportIdOf(item))))) { bad.push({ id, label, reason: 'This copy is not identified well enough to delete.' }); return null; }
@@ -158,7 +149,7 @@ const copy = value => (value == null ? value : JSON.parse(JSON.stringify(value))
 export function resolveSelection(validated) {
   const entry = item => ({
     id: item.id, category: item.category, label: item.label || item.path || item.id, kind: item.kind, action: item.action,
-    location: item.location || 'guest', path: item.path ?? null, identity: copy(item.identity) || null,
+    location: item.location || 'guest', path: item.path ?? null, root: item.root ?? null, identity: copy(item.identity) || null,
     ...(item.kind === 'group' ? { members: (item.members || []).map(m => ({ path: m.path, identity: copy(m.identity) || null })) } : {}),
     logicalBytes: Number(item.logicalBytes) || 0, allocatedBytes: Number(item.allocatedBytes) || 0,
     precision: item.precision || 'exact', memoryBacked: item.memoryBacked === true,
@@ -170,40 +161,11 @@ export function resolveSelection(validated) {
   return [...files, ...validated.snapshots.map(entry), ...validated.exports.map(entry)];
 }
 
-// selectionEstimate(entries, check) → what the selection should return,
-// always an estimate: deduped allocated bytes of file items (memory-backed
-// apart), the journal above its limit, each snapshot's own bytes (about the
-// dataset's snapshot total when every snapshot is selected) and export sizes.
-export function selectionEstimate(entries, check = null) {
-  const seen = new Set();
-  const out = { bytes: 0, diskBytes: 0, memoryBytes: 0, snapshotBytes: 0, exportBytes: 0, precision: 'estimate', notes: [] };
-  let snapshotCount = 0;
-  for (const e of entries) {
-    if (seen.has(e.id)) continue;
-    seen.add(e.id);
-    if (e.action === 'delete-snapshot') { out.snapshotBytes += e.allocatedBytes; snapshotCount += 1; continue; }
-    if (e.action === 'delete-export') { out.exportBytes += e.allocatedBytes || e.logicalBytes; continue; }
-    const bytes = e.action === 'vacuum-journal' ? (e.recoverableBytes ?? Math.max(0, e.allocatedBytes - (e.targetBytes || 0))) : e.allocatedBytes;
-    if (e.memoryBacked) out.memoryBytes += bytes; else out.diskBytes += bytes;
-  }
-  const allSnapshots = snapshotItemIds(check);
-  const held = Number(check?.totals?.dataset?.snapshotsBytes);
-  if (snapshotCount && allSnapshots.length && snapshotCount >= allSnapshots.length && Number.isFinite(held) && held > out.snapshotBytes) {
-    out.snapshotBytes = held;
-    out.notes.push('All snapshots are selected, so about all the space snapshots hold is returned.');
-  }
-  out.bytes = out.diskBytes + out.memoryBytes + out.snapshotBytes + out.exportBytes;
-  const fileSelected = entries.some(e => isFileItem(e));
-  const snapshotsHold = (Number.isFinite(held) && held > 0) || itemsOf(check).some(isSnapshotItem);
-  if (fileSelected && snapshotsHold && snapshotCount < Math.max(1, allSnapshots.length)) out.notes.push('Space held by snapshots is only returned after those snapshots are deleted.');
-  if (out.memoryBytes > 0) out.notes.push('Some selected items use memory, not disk; removing them frees memory.');
-  return out;
-}
-
 // ── where an item may be removed from ───────────────────────────────────
 
 const inside = (root, x) => x === root || x.startsWith(root === '/' ? '/' : `${root}/`);
 const releaseRootOf = target => (target?.kind === 'application' ? (target.profile?.releaseRoot || `/var/lib/proxypilot/application-releases/${target.id}`) : null);
+const appDirOf = target => (typeof target?.appDir === 'string' && path.isAbsolute(target.appDir) && path.normalize(target.appDir) === target.appDir && target.appDir !== '/' ? target.appDir : '/srv/app');
 const homesOf = target => {
   const homes = new Set(['/root']);
   for (const h of [target?.serviceHome, target?.serviceUser?.home, ...(Array.isArray(target?.homes) ? target.homes : [])]) {
@@ -228,7 +190,7 @@ export function removalRules(item, target) {
         if (m) { add(`${m[1]}/.npm`, ANY_NAME); add(`${m[1]}/.cache`, ANY_NAME); }
       }
       add('/var/cache/apt/archives', /\.deb$/);
-      if (target?.kind === 'project') add('/srv/app/.mock2', /^cache$/);
+      if (target?.kind === 'project') add(`${appDirOf(target)}/.mock2`, /^cache$/);
       break;
     case 'logs': add('/var/log', ANY_NAME, 2, { notUnder: ['/var/log/journal'] }); break;
     case 'history':
@@ -238,7 +200,7 @@ export function removalRules(item, target) {
       add('/run/mock2-deploy', /^[A-Za-z0-9-]{1,64}\.[A-Za-z0-9.]{1,40}$/);
       break;
     case 'test_reports':
-      if (target?.kind === 'project') { add('/srv/app', REPORT_RE); add('/srv/app/.mock2/evidence', ANY_NAME); }
+      if (target?.kind === 'project') { add(appDirOf(target), REPORT_RE); add(`${appDirOf(target)}/.mock2/evidence`, ANY_NAME); }
       else {
         const dir = typeof item?.path === 'string' ? path.dirname(item.path) : null;
         if (dir && dir !== '/' && dir.split('/').length >= 2 && !(releaseRoot && inside(releaseRoot, dir))) add(dir, REPORT_RE);
@@ -262,13 +224,15 @@ export function approvedRootsFor(item, target) { return [...new Set(removalRules
 // Paths no cleanup ever removes, nor removes a parent of: declared data and
 // settings, database directories, the live source pointer, a project's
 // state and source history.
-function protectedPaths(target) {
+function protectedPaths(target, item = null) {
   const out = [...DATABASE_DIRS];
   if (target?.kind === 'application') {
     for (const x of [...(target.profile?.preservePaths || []), ...(target.profile?.envFiles || [])]) if (typeof x === 'string' && path.isAbsolute(x)) out.push(path.normalize(x));
-    if (typeof target.profile?.sourceDir === 'string') out.push(target.profile.sourceDir);
+    // An application without a release layout runs from sourceDir itself;
+    // its untracked test reports (and nothing else in it) may go.
+    if (typeof target.profile?.sourceDir === 'string' && !(item?.category === 'test_reports' && !target.profile?.releaseRoot)) out.push(target.profile.sourceDir);
   }
-  if (target?.kind === 'project') out.push('/srv/app/state', '/srv/app/data', '/srv/repo.git');
+  if (target?.kind === 'project') { const app = appDirOf(target); out.push(`${app}/state`, `${app}/data`, target.repoMount || '/srv/repo.git'); }
   return out;
 }
 
@@ -282,7 +246,7 @@ function onePathAllowed(p, item, target, rules) {
   });
   if (!rule) return 'Outside the locations this cleanup may change.';
   const caches = item.category === 'caches';
-  for (const q of protectedPaths(target)) {
+  for (const q of protectedPaths(target, item)) {
     // A cache under the service user's home is allowed even when that home is
     // a preserved data path (DESIGN §2.3 rule 6); nothing else inside data.
     if (inside(q, p) && !(caches && homesOf(target).includes(q))) return 'Inside data or settings that are never cleaned up.';
@@ -300,4 +264,19 @@ export function pathAllowed(item, target) {
   if (!paths.length) return { ok: false, reason: 'This group has no members.' };
   for (const p of paths) { const reason = onePathAllowed(p, item, target, rules); if (reason) return { ok: false, reason }; }
   return { ok: true, roots: [...new Set(rules.map(r => r.dir))] };
+}
+
+const pathProblem = (item, target) => { const r = pathAllowed(item, target); return r.ok ? null : r.reason; };
+
+// pathTargetFor(target, check) → the target as the path rules see it: the
+// service user's home is the one the check's collector resolved (the scan
+// records it as guest.service.home), so caches under that home are told
+// apart from the preserved data around it. Used by the cleanup service at
+// approval and by the cleanup job before every removal.
+export function pathTargetFor(target, check) {
+  return {
+    ...target,
+    serviceHome: target?.serviceHome ?? check?.guest?.service?.home ?? check?.context?.serviceHome ?? null,
+    homes: target?.homes ?? check?.context?.homes ?? [],
+  };
 }

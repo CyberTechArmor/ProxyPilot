@@ -4,8 +4,11 @@
 // authorization) call requestCleanup; nothing else creates a cleanup.
 //
 //   createCleanupService({ store, getCheck, submitJob, resolveTarget,
-//     activityFor, now, audit, monitor, getJob?, estimate?, newId? })
+//     activityFor, now, audit, monitor, getJob?, listEvents?, newId? })
 //   → { requestCleanup, getCleanup, listCleanups }
+// `store` is store.js createStorageStore; `getCheck(id)` returns its check
+// row (store.getCheck); `monitor.postCleanupAlert(targetKey, outcome, opts)`
+// is monitor.js's.
 //
 // requestCleanup(...) → { changed: false, message }                  nothing selected
 //                     → { changed: true, cleanupId, jobId, estimate }
@@ -18,7 +21,12 @@
 // copied from the check; the request contributes ids and nothing else.
 
 import { randomUUID } from 'node:crypto';
-import { normalizeRequest, validateCleanupRequest, resolveSelection, selectionEstimate, SelectionError, NOTHING_SELECTED } from './selection.js';
+import { normalizeRequest, validateCleanupRequest, resolveSelection, SelectionError, NOTHING_SELECTED } from './selection.js';
+import { checkFreshness, checkView as checkDocOfRow } from './check-service.js';
+import { estimateSelection } from './accounting.js';
+import { cleanupRow, busyFrom } from './cleanup-rows.js';
+
+export { cleanupRow, busyFrom };
 
 export const TARGET_KEY_RE = /^(application|project):[1-9][0-9]*$/;
 export const ORIGINS = Object.freeze(['user', 'policy']);
@@ -34,58 +42,18 @@ const error = (code, status, message, details) => new CleanupError(code, status,
 const parse = v => { if (v == null) return null; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return null; } };
 const iso = ms => new Date(ms).toISOString();
 
-// A check may arrive as the result document or as a stored row.
+// A check as a stored row (store.getCheck) or already as its result document.
 export function checkView(x) {
   if (!x) return null;
   if (Array.isArray(x.items)) return x;
-  const result = parse(x.result_json ?? x.result);
-  if (result && Array.isArray(result.items)) return result;
-  return { checkId: x.id ?? x.checkId ?? null, status: x.status, startedAt: x.started_at ?? x.startedAt, finishedAt: x.finished_at ?? x.finishedAt, target: { key: x.target_key ?? x.targetKey }, items: [] };
-}
-
-// A cleanup row in either spelling → the camelCase view the API returns.
-export function cleanupRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id, targetKey: row.target_key ?? row.targetKey, checkId: row.check_id ?? row.checkId,
-    origin: row.origin, status: row.status, jobId: row.job_id ?? row.jobId ?? null, scope: row.scope ?? null,
-    selection: parse(row.selection_json ?? row.selection) || [], result: parse(row.result_json ?? row.result),
-    createdAt: row.created_at ?? row.createdAt, finishedAt: row.finished_at ?? row.finishedAt ?? null,
-    requestedBy: row.requested_by ?? row.requestedBy ?? null,
-  };
-}
-
-// busyFrom(activity) → the plain reason the target cannot be cleaned now, or
-// null. Anything the activity reports — an open job, a running build, a held
-// lease, any stated reason — counts: refuse rather than race it.
-export function busyFrom(activity) {
-  if (!activity) return null;
-  if (activity.buildActive === true) return 'A build is running.';
-  if (Array.isArray(activity.openJobs) && activity.openJobs.length) return `A ${activity.openJobs[0].kind || 'change'} is in progress.`;
-  if (activity.leaseHeld === true || activity.lease) return 'Another operation holds the application.';
-  if (Array.isArray(activity.reasons) && activity.reasons.length) return String(activity.reasons[0]);
-  return null;
+  return checkDocOfRow({ ...x, result: parse(x.result ?? x.result_json) });
 }
 
 export function createCleanupService({
   store, getCheck, submitJob, resolveTarget, activityFor, now = () => Date.now(), audit = () => {}, monitor = null,
-  getJob = null, listEvents = null, estimate = selectionEstimate, newId = () => `cln_${randomUUID()}`, log = () => {},
+  getJob = null, listEvents = null, newId = () => `cln_${randomUUID()}`, log = () => {},
 }) {
   const record = entry => { try { const r = audit(entry); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) { log('audit failed', e?.message || e); } };
-
-  async function latestFinished(targetKey) {
-    if (typeof store.listChecks === 'function') {
-      const rows = (await store.listChecks(targetKey, 20)) || [];
-      const finished = rows.map(checkView).filter(c => c && ['complete', 'partial'].includes(c.status));
-      finished.sort((a, b) => String(b.finishedAt || b.startedAt || '').localeCompare(String(a.finishedAt || a.startedAt || '')));
-      return finished[0] || null;
-    }
-    if (typeof store.latestCheck === 'function') {
-      const latest = checkView(await store.latestCheck(targetKey));
-      return latest && ['complete', 'partial'].includes(latest.status) ? latest : null;
-    }
-    return null;
-  }
 
   async function target(targetKey) {
     if (typeof targetKey !== 'string' || !TARGET_KEY_RE.test(targetKey)) throw error('TARGET_NOT_FOUND', 404, 'This application or project was not found.');
@@ -107,13 +75,18 @@ export function createCleanupService({
       return { changed: false, message: NOTHING_SELECTED };
     }
     const t = await target(targetKey);
-    const check = checkView(checkId ? await getCheck(checkId) : null);
-    const latest = await latestFinished(targetKey);
-    const validated = validateCleanupRequest({ check, latest, request, targetKey, now: now() });
+    // The same freshness rule the route applies, re-checked here (a policy
+    // cleanup never passes the route): the target's latest finished check,
+    // at most an hour old.
+    const row = checkId ? await getCheck(checkId) : null;
+    const stale = checkFreshness({ check: row, latest: await store.latestCheck(targetKey), targetKey, now: now() });
+    if (stale) throw stale;
+    const check = checkView(row);
+    const validated = validateCleanupRequest({ check, request, target: t });
     const busy = busyFrom(await activityFor(t));
     if (busy) throw error('GUEST_BUSY', 409, GUEST_BUSY_MESSAGE, { reason: busy });
     const selection = resolveSelection(validated);
-    const est = estimate(selection, check);
+    const est = estimateSelection(check, { items: validated.items.map(i => i.id), snapshots: validated.snapshots.map(i => i.id), exports: validated.exports.map(i => i.id) });
     const cleanupId = newId();
     await store.insertCleanup({ id: cleanupId, targetKey, checkId: check.checkId, origin, status: 'queued', scope: validated.scope, selection, createdAt: iso(now()), requestedBy: userId == null ? null : String(userId) });
     let sub;
@@ -159,7 +132,9 @@ export function createCleanupService({
     const finishedAt = job.finished_at || iso(now());
     await store.updateCleanup(row.id, { status: result.status, result, finishedAt });
     if (result.status === 'failed' && monitor?.postCleanupAlert && !recorded) {
-      try { await monitor.postCleanupAlert({ targetKey: row.targetKey, kind: 'cleanup', ok: false, cleanupId: row.id, title: 'Storage cleanup did not finish', body: result.reason }); } catch (e) { log('alert failed', e?.message || e); }
+      let name = row.targetKey;
+      try { name = (await resolveTarget(row.targetKey))?.name || name; } catch { /* the key names it */ }
+      try { await monitor.postCleanupAlert(row.targetKey, { ok: false, failedCount: 0 }, { name }); } catch (e) { log('alert failed', e?.message || e); }
     }
     return { ...row, status: result.status, result, finishedAt };
   }
@@ -189,7 +164,7 @@ export function createCleanupService({
 
   async function listCleanups(targetKey, limit = 10) {
     if (typeof targetKey !== 'string' || !TARGET_KEY_RE.test(targetKey)) return [];
-    const rows = ((await store.listCleanups(targetKey, Math.min(50, Math.max(1, Number(limit) || 10)))) || []).map(cleanupRow);
+    const rows = ((await store.listCleanups(targetKey, { limit: Math.min(50, Math.max(1, Number(limit) || 10)) })) || []).map(cleanupRow);
     const out = [];
     for (const row of rows) out.push(await publicView(await reconcile(row)));
     return out;

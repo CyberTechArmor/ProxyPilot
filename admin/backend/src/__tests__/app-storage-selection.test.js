@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  validateCleanupRequest, resolveSelection, selectionEstimate, scopeItemIds, snapshotItemIds, approvedRootsFor, pathAllowed,
-  checkFreshness, SelectionError, NOTHING_SELECTED, ALL_ELIGIBLE_SCOPE_TEXT, REMOVAL_ORDER,
+  validateCleanupRequest, resolveSelection, scopeItemIds, snapshotItemIds, approvedRootsFor, pathAllowed, pathTargetFor,
+  SelectionError, NOTHING_SELECTED, ALL_ELIGIBLE_SCOPE_TEXT, REMOVAL_ORDER,
 } from '../lib/app-storage/selection.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
@@ -31,12 +31,14 @@ function check(over = {}) {
     ...over,
   };
 }
-const validate = (request, over = {}) => validateCleanupRequest({ check: check(), latest: check(), targetKey: 'application:1', now: NOW, request, ...over });
+// Freshness of the check itself is check-service.js checkFreshness (tested
+// with the service); here the check is the fresh, latest one.
+const validate = (request, over = {}) => validateCleanupRequest({ check: check(), request, ...over });
 const rejects = (fn, code, status) => assert.throws(fn, err => { assert.ok(err instanceof SelectionError); assert.equal(err.code, code); assert.equal(err.status, status); return true; });
 
 test('none: an empty selection changes nothing, whatever the check', () => {
   assert.deepEqual(validate({ items: [], snapshots: [], exports: [] }), { ok: true, empty: true, message: NOTHING_SELECTED });
-  assert.deepEqual(validateCleanupRequest({ check: null, request: {}, now: NOW }), { ok: true, empty: true, message: NOTHING_SELECTED }, 'no check is needed to do nothing');
+  assert.deepEqual(validateCleanupRequest({ check: null, request: {} }), { ok: true, empty: true, message: NOTHING_SELECTED }, 'no check is needed to do nothing');
 });
 
 test('one: the stored entry is copied from the check, never from the request', () => {
@@ -77,17 +79,6 @@ test('deselect: an id the client dropped after review is simply absent', () => {
   assert.equal(resolveSelection(v).length, all.length - 1);
 });
 
-test('a stale, superseded, unfinished, foreign or missing check is refused with CHECK_STALE', () => {
-  rejects(() => validate({ items: [id('a3')] }, { now: NOW + 61 * 60 * 1000 }), 'CHECK_STALE', 409);
-  try { validate({ items: [id('a3')] }, { now: NOW + 61 * 60 * 1000 }); } catch (e) { assert.match(e.message, /Run a new storage check first; this one is from 2026-10-20T22:31:00Z\./); }
-  rejects(() => validate({ items: [id('a3')] }, { latest: check({ checkId: 'chk-2' }) }), 'CHECK_STALE', 409);
-  rejects(() => validate({ items: [id('a3')] }, { check: check({ status: 'running' }), latest: null }), 'CHECK_STALE', 409);
-  rejects(() => validate({ items: [id('a3')] }, { check: check({ status: 'failed' }), latest: null }), 'CHECK_STALE', 409);
-  rejects(() => validate({ items: [id('a3')] }, { targetKey: 'application:2' }), 'CHECK_STALE', 409);
-  rejects(() => validate({ items: [id('a3')] }, { check: null }), 'CHECK_STALE', 409);
-  assert.equal(checkFreshness({ check: check({ status: 'partial' }), latest: check({ status: 'partial' }), now: NOW }), null, 'a partial check may be acted on');
-});
-
 test('protected, needs-a-look, unknown and wrong-list ids are refused with NOT_ELIGIBLE and their reasons', () => {
   let error;
   try { validate({ items: [id('a5'), id('a6'), 'ffffffffffffffff', id('s1')], snapshots: [id('a3')], exports: [id('s2')], acknowledgeSnapshotLoss: true }); } catch (e) { error = e; }
@@ -114,21 +105,10 @@ test('snapshots require the explicit acknowledgement', () => {
 test('malformed requests are refused before anything is looked up', () => {
   rejects(() => validate({ items: 'all' }), 'INVALID_REQUEST', 400);
   rejects(() => validate({ items: [{ id: 'x' }] }), 'INVALID_REQUEST', 400);
+  rejects(() => validate({ items: Array.from({ length: 20_001 }, (_, i) => `id${i}`) }), 'INVALID_REQUEST', 400);
   rejects(() => validate({ items: ['../etc'] }), 'INVALID_REQUEST', 400);
   rejects(() => validate({ items: [id('a3')], scope: 'everything' }), 'INVALID_REQUEST', 400);
   rejects(() => validate({ snapshots: [id('s1')], acknowledgeSnapshotLoss: 'yes' }), 'INVALID_REQUEST', 400);
-});
-
-test('the estimate dedupes, keeps memory apart, and says when snapshots still hold space', () => {
-  const v = validate({ items: [id('a3'), id('a3'), id('a2'), id('a4')] });
-  const est = selectionEstimate(resolveSelection(v), check());
-  assert.equal(est.diskBytes, 300 + 200); assert.equal(est.memoryBytes, 10); assert.equal(est.precision, 'estimate');
-  assert.ok(est.notes.some(n => /only returned after those snapshots are deleted/.test(n)));
-  assert.ok(est.notes.some(n => /memory, not disk/.test(n)));
-  const all = selectionEstimate(resolveSelection(validate({ snapshots: [id('s1'), id('s2')], acknowledgeSnapshotLoss: true })), check());
-  assert.equal(all.snapshotBytes, 900, 'all snapshots selected: about the dataset snapshot total');
-  const one = selectionEstimate(resolveSelection(validate({ snapshots: [id('s1')], acknowledgeSnapshotLoss: true })), check());
-  assert.equal(one.snapshotBytes, 100);
 });
 
 test('approved roots follow the category; paths outside them, inside data, or of the wrong name are refused', () => {
@@ -168,4 +148,20 @@ test('approved roots follow the category; paths outside them, inside data, or of
   assert.equal(pathAllowed({ category: 'caches', path: '/srv/app/.mock2/cache' }, project).ok, true);
   assert.equal(pathAllowed({ category: 'test_reports', path: `${RELEASES}/x/test-results` }, target).ok, false, 'never inside a sealed release');
   assert.equal(pathAllowed({ category: 'test_reports', path: '/opt/nodus-w48/test-results' }, target).ok, true);
+  // A service-home cache: the home is the one the check's collector recorded
+  // (guest.service.home), never the item's own root.
+  const noHome = { ...target, serviceHome: null };
+  const svcCache = { category: 'caches', path: '/var/lib/svc/.npm/_cacache', root: '/var/lib/svc/.npm' };
+  assert.equal(pathAllowed(svcCache, noHome).ok, false, "the item's own root grants nothing");
+  assert.equal(pathAllowed(svcCache, pathTargetFor(noHome, { guest: { service: { home: '/var/lib/svc' } } })).ok, true, 'the home the check recorded');
+  assert.equal(pathTargetFor(target, { guest: { service: { home: '/var/lib/other' } } }).serviceHome, '/var/lib/nodus', "the target's own home wins");
+  for (const home of ['/', '/etc', 'var/lib/svc', '/var/lib/../etc']) assert.equal(pathAllowed({ category: 'caches', path: `${home.replace(/\/$/, '')}/.npm/x` }, pathTargetFor(noHome, { guest: { service: { home } } })).ok, false, home);
+  assert.equal(pathAllowed({ category: 'caches', path: '/var/lib/nodus/.cache/ms-playwright' }, pathTargetFor(noHome, { guest: { service: { home: '/var/lib/nodus' } } })).ok, true, 'a cache in a home that is preserved data');
+  assert.equal(pathAllowed({ category: 'caches', path: '/var/lib/nodus/.cache/ms-playwright' }, noHome).ok, false, 'not without the home');
+  // A project with its app elsewhere; an application without a release layout.
+  assert.equal(pathAllowed({ category: 'test_reports', path: '/opt/app/coverage' }, { ...project, appDir: '/opt/app' }).ok, true);
+  const plain = { key: 'application:2', kind: 'application', id: 2, guest: 'pp-shop', profile: { sourceDir: '/opt/shop', releaseRoot: null, preservePaths: ['/opt/shop/data'], envFiles: [] } };
+  assert.equal(pathAllowed({ category: 'test_reports', path: '/opt/shop/test-results' }, plain).ok, true, 'untracked reports inside a plain application directory');
+  assert.equal(pathAllowed({ category: 'temp', path: '/opt/shop/tmp' }, plain).ok, false);
+  assert.equal(pathAllowed({ category: 'test_reports', path: '/opt/shop/data/test-results' }, plain).ok, false, 'never inside declared data');
 });

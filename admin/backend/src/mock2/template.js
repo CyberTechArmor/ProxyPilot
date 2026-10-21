@@ -23,6 +23,7 @@ import { PLATFORM_VERSION_PATH, renderPlatformVersionFile } from './base-app-upg
 import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
+import { agentsMd, workMd, projectHandoffMd, tasksReadmeMd, TASKS_DIR } from './continuity-convention.js';
 import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
@@ -249,7 +250,10 @@ link + install script in every page head.
 // (mock2-core v0.2.0 `core/mock2/templates/repo/`, plus CPR v1.1's decision
 // ledger). Pure. Content mirrors the standards site; the platform-specific lines
 // say where ProxyPilot's own machinery (hash-chained records, the gate battery)
-// sits relative to the standard's files.
+// sits relative to the standard's files. The task-continuity convention
+// (continuity-convention.js: AGENTS.md, state/work.md, state/handoff.md,
+// state/tasks/README.md) rides here too, so a resumed session finds its
+// reading order and the per-task checkpoint format in every new repo.
 export function mock2StandardsSeedFiles(project) {
   const name = String(project?.name || 'Project').trim() || 'Project';
   return [
@@ -262,6 +266,9 @@ constitution and rules installed at user level on every developer machine) and
 **Continuous Production Readiness (CPR) v1.1**. This file only says what is specific
 to this project. Nothing in it blocks building or testing (constitution rule 0);
 production decisions live in \`state/production-checklist.md\`.
+
+Starting or resuming work? Read \`AGENTS.md\` first — the reading order, and where
+unfinished tasks are recorded (\`state/tasks/\`).
 
 The pinned guidance in \`.mock2/standards/\` governs current general workflow;
 start with \`constitution.md\` and load the applicable rules. Provenance records the
@@ -305,8 +312,13 @@ Same content as \`CLAUDE.md\` at the repo root; keep the two in sync. This repos
 follows the Mock2 standards installed at user level (https://mock2.fractionate.ai)
 and CPR v1.1. Nothing here blocks building or testing; production decisions live in
 \`state/production-checklist.md\`.
+
+Starting or resuming work? Read \`AGENTS.md\` first — the reading order, and where
+unfinished tasks are recorded (\`state/tasks/\`).
 `,
     },
+    // The entry point every tool and session reads first (task continuity).
+    { path: 'AGENTS.md', content: agentsMd(project) },
     {
       path: 'state/production-checklist.md',
       content: `# Production checklist
@@ -355,6 +367,12 @@ results, review findings, open items, proposals). The platform's hash-chained
 records in \`state/changes/\` are the audit spine; never delete either.
 `,
     },
+    // Task continuity: the plan + authorized scope, the project-level handoff,
+    // and the per-task checkpoint format (state/tasks/<task-id>/ is written by
+    // Flightdeck as tasks run — only the README is seeded).
+    { path: 'state/work.md', content: workMd(project) },
+    { path: 'state/handoff.md', content: projectHandoffMd(project) },
+    { path: `${TASKS_DIR}/README.md`, content: tasksReadmeMd() },
     {
       path: '.mock2/README.md',
       content: `# .mock2

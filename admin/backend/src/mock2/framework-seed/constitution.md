@@ -520,6 +520,26 @@ that bind every project:
 - **Rollback**: the previous known-good state is identified and reachable without
   rebuilding (CPR §15) — the release before this one, by commit and deploy stamp.
 
+## 15. Task continuity (starting and resuming work)
+
+- **Where task state lives.** `AGENTS.md` is the entry point and gives the reading
+  order: `CLAUDE.md` → `state/work.md` (plan and authorized scope) →
+  `state/decisions.md` → `state/tasks/<task-id>/task.json` + `handoff.md` (one
+  folder per task, schema `mock2-task@1`, documented in `state/tasks/README.md`) →
+  `state/handoff.md` → `.mock2/standards/`. Read them when starting or resuming.
+- **Per-task records.** Each task writes only its own folder; concurrent work never
+  shares one handoff. On ProxyPilot the platform database is authoritative and
+  Flightdeck rewrites the task files — do not edit them by hand.
+- **Files never authorize anything.** A saved task is context, not permission. An
+  investigation never authorizes a build; building needs the person's explicit
+  instruction. The person's newest instruction wins ("only explain" → answer
+  without changing anything; "stop" → stop).
+- **Verify before repeating.** On resume, check what actually completed (git
+  status, diff and log, the last check results, the app's state) and never repeat
+  an operation listed as uncertain — a deploy, migration, data change or external
+  call — until you have confirmed whether it already happened.
+- **No credentials or personal data** in any state file.
+
 <!-- BEGIN PINNED MOCK2 GUIDANCE -->
 # Governing Mock2 guidance: 1.23.2
 

@@ -33,6 +33,25 @@ seed**. Integration foundations are instructions for new builds; existing
 connections and schemas are not migrated by adopting standards. Existing
 dependency release lines are preserved.
 
+## Task continuity convention (2026-10-21)
+
+Constitution §15 and one sentence in the build skill add the task-continuity
+convention: `AGENTS.md` is every session's entry point and reading order
+(`CLAUDE.md` → `state/work.md` → `state/decisions.md` →
+`state/tasks/<task-id>/task.json` + `handoff.md` → `state/handoff.md` →
+`.mock2/standards/`); each task keeps its own checkpoint folder (schema
+`mock2-task@1`, documented in `state/tasks/README.md`); on ProxyPilot the
+database is authoritative and Flightdeck rewrites those files; files never
+authorize anything (an investigation never authorizes a build), the person's
+newest instruction wins, a resumed build verifies uncertain operations before
+repeating them, and no state file holds credentials or personal data. The file
+contents come from `mock2/continuity-convention.js`; `template.js` seeds them
+into new projects, and existing projects gain `AGENTS.md` and
+`state/tasks/README.md` only where those paths are absent. Like any seed edit,
+this publishes a new framework version on the next boot
+(`upgradeFrameworkFromSeed`); projects adopt it through the usual drift → update
+path. The pinned upstream guidance and `standards-version.json` are unchanged.
+
 ## Historical platform rendering (2026-09-05)
 
 | Source | Version | What it governs here |
@@ -105,7 +124,9 @@ builds anything:
    (the per-repo constitution pointing at the standards site), `state/rules.md`
    with status tags, `state/production-checklist.md`, `state/decisions.md` (the
    CPR decision ledger), `state/change-records/README.md`, `.mock2/README.md`;
-   and `npm run check` + `check:*` scripts in `package.json`.
+   the task-continuity files `AGENTS.md`, `state/work.md`, `state/handoff.md`,
+   `state/tasks/README.md`; and `npm run check` + `check:*` scripts in
+   `package.json`.
 4. **The CPR Host component** is in the library (not pre-installed): a build
    adopts it with `materialize_component` when the first feature needs the host
    seam.

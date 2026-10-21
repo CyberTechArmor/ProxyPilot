@@ -266,7 +266,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
       await hostFs.chmod(hostBundle, 0o600);
       // The transfer target and root are fixed by the immutable profile.
       await guest('prepare', { root });
-      if (retention) await guest('release_cleanup', { stage, bundle, release, sweepStages: retention.workspaces !== false, ...releaseContext }, 120000);
+      if (retention) { const swept = await guest('release_cleanup', { stage, bundle, release, sweepStages: retention.workspaces !== false, ...releaseContext }, 120000); if (swept.cleanup?.kept?.length) job.event?.('cleanup_incomplete', 'Some abandoned build workspaces could not be removed and were left in place; the build continues.', { kept: swept.cleanup.kept.slice(0, 20) }); }
       job.fence({ safe: true }); const r = await exec.host(['incus', 'file', 'push', hostBundle, `${container}${bundle}`], { timeoutMs: 120000 }); if (r.code !== 0) throw safeError('TRANSFER_FAILED', 'Git bundle transfer failed.');
       mark('stage'); const staged = await guest('stage', { stage, release, bundle, sha: candidate.sha, treeSha: candidate.treeSha, scripts, user: identity.user, group: identity.group }, 120000);
       const evidence = [];

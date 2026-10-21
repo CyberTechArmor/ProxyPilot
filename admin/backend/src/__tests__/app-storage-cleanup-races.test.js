@@ -37,7 +37,7 @@ test('a directory swapped for a link while its entries are listed: the protected
   const item = path.join(root, 'item');
   fs.mkdirSync(path.join(item, 'inner'), { recursive: true }); fs.writeFileSync(path.join(item, 'inner', 'junk'), 'x');
   const out = run({ action: 'remove', cleanupId: CLEANUP_ID, approvedRoots: [root], entries: [{ path: item, identity: identity(item) }], checkInUse: true },
-    { require: hook('race-swap-readdir.cjs'), env: { SWAP_DIR_SUFFIX: '/inner', SWAP_TARGET: protectedDir, SWAP_MARK: path.join(base, 'swapped') } });
+    { require: hook('race-swap-readdir.cjs'), env: { SWAP_DIR_SUFFIX: '/inner', SWAP_NTH: '2', SWAP_TARGET: protectedDir, SWAP_MARK: path.join(base, 'swapped') } });
   assert.equal(fs.existsSync(path.join(base, 'swapped')), true, 'the race happened');
   assert.equal(out.ok, true, JSON.stringify(out));
   assert.deepEqual(fs.readdirSync(protectedDir), ['canary'], 'nothing behind the link was removed');
@@ -118,12 +118,16 @@ test('the release job removes build workspaces through the same remover: a swapp
   const sourceDir = path.join(base, 'current'); fs.symlinkSync(live, sourceDir);
   const old = path.join(root, '.staging', '22222222-2222-4222-8222-222222222222-1'); fs.mkdirSync(path.join(old, 'inner'), { recursive: true }); fs.writeFileSync(path.join(old, 'inner', 'junk'), 'x');
   const data = { action: 'release_cleanup', profile: { releaseRoot: root, sourceDir, preservePaths: [], envFiles: [] }, retention: { keepReleases: 2 }, sweepStages: true, stage: path.join(root, '.staging', '33333333-3333-4333-8333-333333333333-1'), previousLive: null };
-  const r = spawnSync('sh', ['-c', `NODE_OPTIONS='--require ${hook('race-swap-readdir.cjs')}' ${applicationGuestScript(data).trim()}`], { encoding: 'utf8', env: { ...process.env, SWAP_DIR_SUFFIX: '/22222222-2222-4222-8222-222222222222-1/inner', SWAP_TARGET: protectedDir, SWAP_MARK: path.join(base, 'swapped') } });
+  const r = spawnSync('sh', ['-c', `NODE_OPTIONS='--require ${hook('race-swap-readdir.cjs')}' ${applicationGuestScript(data).trim()}`], { encoding: 'utf8', env: { ...process.env, SWAP_DIR_SUFFIX: '/22222222-2222-4222-8222-222222222222-1/inner', SWAP_NTH: '2', SWAP_TARGET: protectedDir, SWAP_MARK: path.join(base, 'swapped') } });
   assert.equal(fs.existsSync(path.join(base, 'swapped')), true, 'the race happened');
-  assert.equal(JSON.parse(r.stdout).ok, false, 'the cleanup stops rather than continue through the link');
   assert.equal(fs.readFileSync(path.join(protectedDir, 'data'), 'utf8'), 'keep');
   assert.deepEqual(fs.readdirSync(protectedDir), ['data']);
   assert.equal(fs.existsSync(live), true);
+  // The workspace that changed while it was removed is reported and left;
+  // the job goes on (one stuck folder never fails every later validation).
+  const answer = JSON.parse(r.stdout);
+  assert.equal(answer.ok, true, r.stdout);
+  assert.deepEqual(answer.cleanup.kept.map(k => [path.basename(k.path), k.code]), [['22222222-2222-4222-8222-222222222222-1', 'CHANGED_DURING_REMOVAL']]);
 });
 
 test('open files are re-read for every entry of a small batch: a process that starts working in a later entry keeps it', { skip }, t => {
@@ -198,4 +202,77 @@ test('a release marker swapped for a link between the look and the read is never
   const seen = (out.releases?.sealed || []).find(r => r.path === old);
   assert.notEqual(seen?.sha, 'f'.repeat(40), 'the forged marker behind the link is never read');
   assert.notEqual(out.releases?.rollback, old, 'so the forged sha never makes it the rollback release');
+});
+
+// A tree `depth` folders deep under dir/name, built without long paths.
+function deepTree(dir, name, depth) {
+  const top = path.join(dir, name); fs.mkdirSync(top, { recursive: true });
+  const r = spawnSync(process.execPath, ['-e', "const fs=require('fs');process.chdir(process.argv[1]);for(let i=0;i<Number(process.argv[2]);i++){fs.mkdirSync('d');process.chdir('d')}fs.writeFileSync('f','leaf')", top, String(depth)]);
+  assert.equal(r.status, 0, String(r.stderr));
+  return top;
+}
+const runLimited = (data, fdLimit) => {
+  const r = spawnSync('sh', ['-c', `ulimit -n ${fdLimit}; exec "$0" -e "$1" "$2"`, process.execPath, CLEANUP_PROGRAM, Buffer.from(JSON.stringify(data)).toString('base64')], { encoding: 'utf8', maxBuffer: 1 << 24 });
+  try { return JSON.parse(r.stdout); } catch { return { ok: false, raw: r.stdout, stderr: r.stderr }; }
+};
+// Node's own rmSync recurses (and overflows on these trees): rm -rf cleans up.
+function deepWorld(t) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-race-deep-'));
+  t.after(() => spawnSync('rm', ['-rf', '--', base]));
+  return base;
+}
+
+test('too deep to remove safely is a plain refusal before anything changes: depth 1500 under 256 file descriptors, and 12000 (which used to overflow the stack)', { skip }, t => {
+  const base = deepWorld(t);
+  const root = path.join(base, 'tmp'); fs.mkdirSync(root);
+  const a = deepTree(root, 'fd-bound', 1500);
+  const limited = runLimited({ action: 'remove', cleanupId: CLEANUP_ID, approvedRoots: [root], entries: [{ path: a, identity: identity(a) }] }, 256);
+  assert.deepEqual([limited.results?.[0]?.status, limited.results?.[0]?.code], ['refused', 'TOO_DEEP'], JSON.stringify(limited).slice(0, 300));
+  const b = deepTree(root, 'stack-bound', 12000);
+  const deep = run({ action: 'remove', cleanupId: CLEANUP_ID, approvedRoots: [root], entries: [{ path: b, identity: identity(b) }] });
+  assert.deepEqual([deep.results?.[0]?.status, deep.results?.[0]?.code], ['refused', 'TOO_DEEP'], JSON.stringify(deep).slice(0, 300));
+  assert.deepEqual(fs.readdirSync(root).sort(), ['fd-bound', 'stack-bound'], 'nothing was renamed or removed');
+  // Within the limit (here 256 descriptors less a reserve) the iterative walk removes it.
+  const c = deepTree(root, 'ok', 200);
+  const fine = runLimited({ action: 'remove', cleanupId: CLEANUP_ID, approvedRoots: [root], entries: [{ path: c, identity: identity(c) }] }, 256);
+  assert.equal(fine.results?.[0]?.status, 'removed', JSON.stringify(fine).slice(0, 300));
+  assert.equal(fs.existsSync(c), false);
+});
+
+test('a quarantined tree that cannot be finished is set aside once and reported, not retried on every resume', { skip }, t => {
+  const base = deepWorld(t);
+  const root = path.join(base, 'tmp'); fs.mkdirSync(root);
+  deepTree(root, `.pp-cleanup-${CLEANUP_ID}-0`, 1500);
+  const first = runLimited({ action: 'finish-quarantine', cleanupId: CLEANUP_ID, approvedRoots: [root] }, 256);
+  assert.equal(first.failed.length, 1); assert.equal(first.failed[0].code, 'TOO_DEEP');
+  assert.match(first.failed[0].parked, /\/\.pp-cleanup-hold-cln_[a-f0-9-]+-0$/);
+  const again = runLimited({ action: 'finish-quarantine', cleanupId: CLEANUP_ID, approvedRoots: [root] }, 256);
+  assert.deepEqual([again.removed.length, again.failed.length], [0, 0], 'the set-aside tree is not tried again');
+});
+
+test('the release job reports a workspace too deep to remove and goes on with the validation', { skip }, t => {
+  const base = deepWorld(t); fs.chmodSync(base, 0o755);
+  const root = path.join(base, 'releases'); fs.mkdirSync(path.join(root, '.staging'), { recursive: true, mode: 0o755 }); fs.chmodSync(root, 0o755); fs.chmodSync(path.join(root, '.staging'), 0o711);
+  const live = path.join(root, `${'1'.repeat(40)}-p1-11111111-1111-4111-8111-111111111111`); fs.mkdirSync(live); fs.writeFileSync(path.join(live, '.proxypilot-release.json'), JSON.stringify({ sha: '1'.repeat(40) }));
+  const sourceDir = path.join(base, 'current'); fs.symlinkSync(live, sourceDir);
+  deepTree(path.join(root, '.staging'), '22222222-2222-4222-8222-222222222222-1', 12000);
+  const data = { action: 'release_cleanup', profile: { releaseRoot: root, sourceDir, preservePaths: [], envFiles: [] }, retention: { keepReleases: 2 }, sweepStages: true, stage: path.join(root, '.staging', '33333333-3333-4333-8333-333333333333-1'), previousLive: null };
+  const r = spawnSync('sh', ['-c', applicationGuestScript(data)], { encoding: 'utf8' });
+  const answer = JSON.parse(r.stdout);
+  assert.equal(answer.ok, true, r.stdout);
+  assert.deepEqual(answer.cleanup.kept.map(k => k.code), ['TOO_DEEP']);
+});
+
+test('reclaimed bytes count a file only when its last link goes', { skip }, t => {
+  const base = world(t);
+  const root = path.join(base, 'tmp'); fs.mkdirSync(root);
+  const keeper = path.join(base, 'kept-elsewhere'); fs.writeFileSync(keeper, Buffer.alloc(64 * 1024, 1));
+  const item = path.join(root, 'item'); fs.mkdirSync(item);
+  fs.linkSync(keeper, path.join(item, 'hardlink')); fs.writeFileSync(path.join(item, 'own'), Buffer.alloc(32 * 1024, 2));
+  const blocks = f => fs.lstatSync(f).blocks * 512;
+  const expected = blocks(item) + blocks(path.join(item, 'own'));
+  const out = run({ action: 'remove', cleanupId: CLEANUP_ID, approvedRoots: [root], entries: [{ path: item, identity: identity(item) }] });
+  assert.equal(out.results[0].status, 'removed');
+  assert.equal(out.results[0].bytes, expected, 'the hard-linked file still holds its blocks elsewhere');
+  assert.equal(fs.readFileSync(keeper).length, 64 * 1024);
 });

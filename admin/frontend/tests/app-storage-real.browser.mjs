@@ -15,8 +15,8 @@ import { createServer } from 'vite';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { startRealBackend, USER, SNAP_OLD, SNAP_NEW } from './app-storage-real-harness.mjs';
 import { RELEASE_ROOT, LIVE, ROLLBACK, CANDIDATE, ADOPTED, OLD_JOB, ACTIVE_JOB } from '../../backend/src/__tests__/helpers/app-storage-world.js';
-import { formatBytes, formatSize, effectNote } from '../src/components/app-storage/app-storage-model.mjs';
-import { CATEGORY_STATUS_LABELS, STATUS_LABELS, SNAPSHOT_ACK, SNAPSHOT_WARNING, POLICY_TEXT } from '../src/components/app-storage/app-storage-text.js';
+import { formatBytes, formatSize, effectNote, reclaimedParts } from '../src/components/app-storage/app-storage-model.mjs';
+import { CATEGORY_STATUS_LABELS, STATUS_LABELS, SNAPSHOT_ACK, SNAPSHOT_WARNING, POLICY_TEXT, TEXT } from '../src/components/app-storage/app-storage-text.js';
 
 if (typeof process.getuid === 'function' && process.getuid() !== 0) {
   console.log('skipped: the real cleanup world needs root (as app-storage-cleanup-e2e.test.js)');
@@ -128,7 +128,7 @@ async function journey(width, { sweep }) {
       assert.equal(await el.count(), 1, `item ${it.label} is listed`);
       await el.getByText(it.reason, { exact: true }).waitFor();
       await el.getByText(STATUS_LABELS[it.status], { exact: true }).first().waitFor();
-      await el.getByText(`${formatSize(it.allocatedBytes, it.precision)} on disk`, { exact: false }).first().waitFor();
+      await el.getByText(`${formatSize(it.allocatedBytes, it.precision)} ${it.memoryBacked ? 'in memory' : 'on disk'}`, { exact: false }).first().waitFor();
       const selectable = it.status === 'eligible' && it.kind !== 'pseudo';
       assert.equal(await el.locator('input[type=checkbox]').count(), selectable ? 1 : 0, `${it.label}: checkbox only when it can be cleaned up`);
       if (selectable) { boxes += 1; assert.equal(await el.locator('input[type=checkbox]').isChecked(), false, `${it.label} not preselected`); }
@@ -189,9 +189,18 @@ async function journey(width, { sweep }) {
     await result.getByText('The application is running and answered its health check.').waitFor();
     const rem = cleanup.result.remaining.guest;
     await result.getByText(`${formatBytes(rem.usedBytes)} used, ${formatBytes(rem.availableBytes)} available`).waitFor();
-    const reclaimed = Math.max(0, cleanup.result.reclaimed.guestBytes);
     await result.getByTestId('health').waitFor();
-    await result.getByText(reclaimed ? formatBytes(reclaimed) : 'No change measured yet', { exact: true }).waitFor();
+    // The measured reclaim by kind: files on disk, and the pool with
+    // snapshots (a snapshot was deleted); memory only when /tmp was cleaned.
+    const parts = reclaimedParts(cleanup.result.reclaimed, { snapshotsDeleted: true });
+    assert.ok(parts.some((p) => p.key === 'pool'), 'the pool line is shown when a snapshot was deleted');
+    const box = result.getByTestId('reclaimed');
+    for (const p of parts) {
+      const line = box.locator('span.flex', { hasText: TEXT.reclaimedKinds[p.key] });
+      await line.waitFor();
+      await line.getByText(p.bytes ? formatBytes(p.bytes) : TEXT.noChangeYet, { exact: true }).waitFor();
+    }
+    assert.equal(await box.getByText('Memory (such as /tmp)').count(), cleanup.result.reclaimed.memoryBytes == null ? 0 : 1);
     await result.getByText(`Estimated before: ${formatBytes(cleanup.result.estimateBytes)}`).waitFor();
     await result.locator('details > summary').click();
     await result.getByText('Checking that the application is still healthy').waitFor();
@@ -199,7 +208,7 @@ async function journey(width, { sweep }) {
     await layoutCheck(page, width, 'result');
     if (sweep && width !== 360) await layoutCheck(page, 360, 'result');
     await page.setViewportSize({ width, height: 900 });
-    ok(`${width}px: the result shows the real outcome — removed (3), nothing skipped or failed, health passed, storage now, space reclaimed and the estimate, plain events`);
+    ok(`${width}px: the result shows the real outcome — removed (3), nothing skipped or failed, health passed, storage now, the measured reclaim by kind (${parts.map((p) => p.key).join(', ')}) and the estimate, plain events`);
 
     // The files are really gone; what was deselected or protected is untouched.
     for (const m of group.members) assert.equal(has(b, m.path), false, `${m.path} removed`);

@@ -26,12 +26,14 @@ function Parked({ paths }) {
   );
 }
 
+// One figure per kind that was cleaned; a kind that measured nothing yet says
+// so on its own line instead of hiding the others.
 function Reclaimed({ parts }) {
-  if (!parts.length || parts.every((p) => p.bytes === 0)) return TEXT.noChangeMeasured;
-  if (parts.length === 1) return formatBytes(parts[0].bytes);
+  if (!parts.length) return TEXT.noChangeMeasured;
+  if (parts.length === 1) return parts[0].bytes ? formatBytes(parts[0].bytes) : TEXT.noChangeMeasured;
   return (
     <span className="block space-y-0.5 text-sm font-normal">
-      {parts.map((p) => <span key={p.key} className="flex justify-between gap-3"><span className="text-muted-foreground">{TEXT.reclaimedKinds[p.key]}</span><span className="font-semibold">{formatBytes(p.bytes)}</span></span>)}
+      {parts.map((p) => <span key={p.key} className="flex justify-between gap-3"><span className="text-muted-foreground">{TEXT.reclaimedKinds[p.key]}</span><span className="font-semibold">{p.bytes ? formatBytes(p.bytes) : TEXT.noChangeYet}</span></span>)}
     </span>
   );
 }

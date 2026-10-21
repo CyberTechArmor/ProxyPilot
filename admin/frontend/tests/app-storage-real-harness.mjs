@@ -19,7 +19,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import {
-  makeRoot, buildNodusGuest, scriptedExec, databases, registerNodus, cleanupRoot,
+  makeRoot, buildNodusGuest, scriptedExec, databases, registerNodus, cleanupRoot, ROLLBACK, ROLLBACK_SHA, RELEASE_ROOT,
 } from '../../backend/src/__tests__/helpers/app-storage-world.js';
 import { unwrapContained } from '../../backend/src/__tests__/helpers/scripted-guest.js';
 import { registerAppStorageRoutes } from '../../backend/src/routes/app-storage.js';
@@ -104,7 +104,11 @@ export async function startRealBackend({ jobDelayMs = 2500 } = {}) {
   mainDb.exec(`CREATE TABLE audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE notifications (id TEXT PRIMARY KEY, level TEXT NOT NULL, title TEXT NOT NULL, body TEXT, source TEXT NOT NULL, source_id TEXT, dedupe_key TEXT, seen_count INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT, dismissed_at TEXT);
     CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);`);
-  registerNodus(mock2Db, world);
+  const appId = registerNodus(mock2Db, world);
+  // The deploy history, as app-storage-cleanup-e2e.test.js records it: the
+  // rollback release was live before the current one.
+  mock2Db.prepare("INSERT INTO mock2_application_candidates (application_id, sha, profile_revision, profile_digest, tree_sha, checkpoint_at, hygiene_json, validation_json, live_json) VALUES (?, ?, 6, ?, ?, ?, '{}', ?, ?)")
+    .run(appId, ROLLBACK_SHA, 'd'.repeat(64), 'b'.repeat(40), new Date(Date.now() - 5 * 86_400_000).toISOString(), JSON.stringify({ passed: true, releasePath: `${RELEASE_ROOT}/${ROLLBACK}` }), JSON.stringify({ sha: ROLLBACK_SHA, releasePath: `${RELEASE_ROOT}/${ROLLBACK}`, verifiedAt: new Date(Date.now() - 4 * 86_400_000).toISOString() }));
   // A ready prepared download of the guest (recorded under its short name, as lxc_exports does).
   const exportFile = path.join(root, 'exports', 'nodus-20261003.tar.zst');
   fs.mkdirSync(path.dirname(exportFile), { recursive: true });

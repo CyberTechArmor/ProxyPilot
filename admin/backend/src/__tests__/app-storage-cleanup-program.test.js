@@ -121,7 +121,11 @@ test('remove-release applies the release predicates and the identity check', { s
   const oldest = mk(1, 1), rollback = mk(2, 2), live = mk(3, 3);
   const sourceDir = path.join(f.parent, 'current'); fs.symlinkSync(live, sourceDir, 'dir');
   const profile = { releaseRoot, sourceDir, preservePaths: [], envFiles: [] };
-  const base = { action: 'remove-release', cleanupId: CLEANUP_ID, approvedRoots: [releaseRoot], profile };
+  // Without a recorded previous release or deploy history nothing is removed.
+  const unknown = run({ action: 'remove-release', cleanupId: CLEANUP_ID, approvedRoots: [releaseRoot], profile, path: oldest, identity: identity(oldest) });
+  assert.equal(unknown.results[0].status, 'refused'); assert.equal(unknown.results[0].code, 'ROLLBACK_UNKNOWN');
+  assert.equal(fs.existsSync(oldest), true);
+  const base = { action: 'remove-release', cleanupId: CLEANUP_ID, approvedRoots: [releaseRoot], profile, previousLive: { sha: '2'.repeat(40), path: rollback } };
   const refusedLive = run({ ...base, path: live, identity: identity(live) });
   assert.equal(refusedLive.results[0].code, 'RELEASE_IS_LIVE');
   assert.equal(run({ ...base, path: rollback, identity: identity(rollback) }).results[0].code, 'RELEASE_IS_ROLLBACK');
@@ -130,8 +134,9 @@ test('remove-release applies the release predicates and the identity check', { s
   assert.equal(fs.existsSync(oldest), false);
   for (const kept of [rollback, live]) assert.equal(fs.existsSync(kept), true);
   assert.equal(run({ ...base, path: oldest, identity: identity(rollback) }).results[0].status, 'gone');
-  const live2 = run({ action: 'live', sourceDir, profile, statfs: true });
-  assert.equal(live2.live, live); assert.equal(live2.releases.rollback, rollback);
+  const live2 = run({ action: 'live', sourceDir, profile, statfs: true, previousLive: base.previousLive });
+  assert.equal(live2.live, live); assert.equal(live2.releases.rollback, rollback); assert.equal(live2.releases.rollbackUnknown, false);
+  assert.equal(run({ action: 'live', sourceDir, profile }).releases.rollbackUnknown, true);
   assert.ok(live2.fs === null || live2.fs.totalBytes > 0);
 });
 

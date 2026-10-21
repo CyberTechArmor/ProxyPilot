@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cleanupReleaseArtifacts, removeSelectedRelease, describeReleases, APPLICATION_RELEASE_RETENTION, staticReleaseRetention, normalizeReleaseRetention, resolveReleaseRetention, releaseContextFromApplication } from '../lib/setup-engine/application-release-cleanup.js';
+import { cleanupReleaseArtifacts, removeSelectedRelease, describeReleases, ROLLBACK_UNKNOWN_REASON, APPLICATION_RELEASE_RETENTION, staticReleaseRetention, normalizeReleaseRetention, resolveReleaseRetention, releaseContextFromApplication } from '../lib/setup-engine/application-release-cleanup.js';
 import { applicationGuestScript, runApplicationReleaseOperation } from '../lib/setup-engine/application-deploy-op.js';
 
 const job = '11111111-1111-4111-8111-111111111111';
@@ -23,7 +23,8 @@ function fixture(t) {
   const stageRoot = path.join(root, '.staging'); fs.mkdirSync(stageRoot);
   const stage = path.join(stageRoot, job + '-1'), bundle = stage + '.bundle';
   fs.mkdirSync(stage); fs.writeFileSync(path.join(stage, 'test-output'), 'scratch'); fs.writeFileSync(bundle, 'source archive');
-  const a = { profile: { releaseRoot: root, sourceDir: source, preservePaths: [], envFiles: [] }, stage, bundle, release: candidate, retention: { keepReleases: 2 } };
+  // The deploy history names the obsolete release as the one live before.
+  const a = { profile: { releaseRoot: root, sourceDir: source, preservePaths: [], envFiles: [] }, stage, bundle, release: candidate, retention: { keepReleases: 2 }, previousLive: { sha: '3'.repeat(40), path: obsolete } };
   return { parent, root, live, candidate, obsolete, source, stageRoot, stage, bundle, a, create, at };
 }
 
@@ -68,22 +69,63 @@ test('the recorded previous release is the rollback even when it is not the newe
   assert.equal(fs.existsSync(f.obsolete), false, 'a newer but unrecorded release is the one counted out');
 });
 
-test('a waiting validated candidate (protect) is kept and not counted', { skip: process.platform === 'win32' }, t => {
+test('a waiting validated candidate (validated after the live release was recorded) is kept and not counted', { skip: process.platform === 'win32' }, t => {
   const f = fixture(t);
   const waiting = f.create(6); fs.utimesSync(waiting, f.at(4), f.at(4));
   const older = f.create(7); fs.utimesSync(older, f.at(0), f.at(0));
-  const result = cleanupReleaseArtifacts(fs, path, { ...f.a, protect: [waiting] });
+  const facts = { liveVerifiedAt: '2026-10-20T12:00:00Z', validated: [{ sha: '6'.repeat(40), path: waiting, validatedAt: '2026-10-20T13:00:00Z' }, { sha: '7'.repeat(40), path: older, validatedAt: '2026-10-20T11:00:00Z' }] };
+  const d = describeReleases(fs, path, { ...f.a, ...facts });
+  assert.equal(d.waiting, waiting, 'the one definition of the waiting candidate');
+  assert.equal(d.rollback, f.obsolete);
+  assert.equal(d.protect.has(waiting), true); assert.equal(d.protect.has(older), false, 'validated before the live release: not waiting');
+  const result = cleanupReleaseArtifacts(fs, path, { ...f.a, ...facts });
   assert.equal(result.releasesRemoved, 1);
   for (const target of [f.live, f.candidate, f.obsolete, waiting]) assert.equal(fs.existsSync(target), true);
   assert.equal(fs.existsSync(older), false);
-  const d = describeReleases(fs, path, { ...f.a, protect: [waiting] });
-  assert.equal(d.rollback, f.obsolete, 'the waiting candidate is never picked as the rollback release');
+  // An explicit protect list is still honoured.
+  const g = fixture(t); const kept = g.create(6); fs.utimesSync(kept, g.at(0), g.at(0));
+  assert.equal(cleanupReleaseArtifacts(fs, path, { ...g.a, protect: [kept] }).releasesRemoved, 0);
+});
+
+test('the previous release unknown (no previousSha, no deploy history): no release is removed and every sealed release is protected', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  const older = f.create(4); fs.utimesSync(older, f.at(0), f.at(0));
+  const a = { ...f.a, previousLive: null, previousSha: null };
+  const d = describeReleases(fs, path, a);
+  assert.equal(d.rollbackUnknown, true); assert.equal(d.rollback, null, 'never chosen by folder time');
+  for (const target of [f.candidate, f.obsolete, older]) assert.equal(d.protect.has(target), true, target);
+  const result = cleanupReleaseArtifacts(fs, path, a);
+  assert.deepEqual(result, { stagesRemoved: 1, bundlesRemoved: 1, releasesRemoved: 0, rollbackUnknown: true }, 'workspaces still go; releases stay');
+  for (const target of [f.live, f.candidate, f.obsolete, older]) assert.equal(fs.existsSync(target), true);
+  assert.throws(() => removeSelectedRelease(fs, path, { ...a, path: older }, () => { throw new Error('must not remove'); }), /ROLLBACK_UNKNOWN/);
+  assert.match(ROLLBACK_UNKNOWN_REASON, /could not be identified/);
+});
+
+test("previousSha null with deploy history: the history's release is the rollback, a newer never-deployed candidate is not", { skip: process.platform === 'win32' }, t => {
+  // B ran before the live D; C was validated (before D went live) and never deployed; C is newer than B.
+  const f = fixture(t);
+  const b = f.create(5); fs.utimesSync(b, f.at(0), f.at(0));
+  const c = f.create(6); fs.utimesSync(c, f.at(5), f.at(5));
+  fs.rmSync(f.obsolete, { recursive: true });
+  const facts = { previousSha: null, previousLive: { sha: '5'.repeat(40), path: b }, liveVerifiedAt: '2026-10-20T12:00:00Z', validated: [{ sha: '6'.repeat(40), path: c, validatedAt: '2026-10-20T11:00:00Z' }] };
+  const d = describeReleases(fs, path, { ...f.a, ...facts });
+  assert.equal(d.rollback, b); assert.equal(d.rollbackUnknown, false); assert.equal(d.waiting, null);
+  const result = cleanupReleaseArtifacts(fs, path, { ...f.a, ...facts });
+  assert.equal(result.releasesRemoved, 1);
+  assert.equal(fs.existsSync(b), true, 'the release that really ran before is kept');
+  assert.equal(fs.existsSync(c), false, 'the never-deployed candidate is not the rollback');
+  // History naming only the sha (its folder unknown) still identifies it.
+  const g = fixture(t); const b2 = g.create(5); fs.utimesSync(b2, g.at(0), g.at(0)); fs.rmSync(g.obsolete, { recursive: true });
+  assert.equal(describeReleases(fs, path, { ...g.a, previousLive: { sha: '5'.repeat(40), path: null } }).rollback, b2);
+  // History naming a release that is not sealed here (the adopted original): known, nothing to keep.
+  const h = fixture(t); const d3 = describeReleases(fs, path, { ...h.a, previousLive: { sha: '9'.repeat(40), path: null } });
+  assert.equal(d3.rollback, null); assert.equal(d3.rollbackUnknown, false);
 });
 
 test('removeSelectedRelease shares the predicates: live, rollback, candidate and backing roots refuse; an old release goes', { skip: process.platform === 'win32' }, t => {
   const f = fixture(t);
   const older = f.create(4); fs.utimesSync(older, f.at(0), f.at(0));
-  const base = { profile: f.a.profile, protect: [f.candidate] };
+  const base = { profile: f.a.profile, protect: [f.candidate], previousLive: f.a.previousLive };
   assert.throws(() => removeSelectedRelease(fs, path, { ...base, path: f.live }), /RELEASE_IS_LIVE/);
   assert.throws(() => removeSelectedRelease(fs, path, { ...base, path: f.obsolete }), /RELEASE_IS_ROLLBACK/);
   assert.throws(() => removeSelectedRelease(fs, path, { ...base, path: f.candidate }), /RELEASE_IS_CANDIDATE/);
@@ -116,7 +158,7 @@ test('effective release retention comes from a stored policy when one is supplie
   assert.equal((await resolveReleaseRetention(async () => ({ keepReleases: 2, trimBeforeSeal: ['.cache'], workspaces: { enabled: true, abandonedAfterHours: 1 }, source: 'static' }), 'nodus')).workspaces, true);
 });
 
-test('release context: the previous live release is the rollback and a newer validated candidate is protected', () => {
+test('release context: the facts describeReleases decides from (recorded previous release, deploy history, passed validations)', () => {
   const root = '/opt/app-releases';
   const app = {
     live: { sha: '1'.repeat(40), releasePath: `${root}/live`, previousSha: '2'.repeat(40), verifiedAt: '2026-10-20T10:00:00Z' },
@@ -127,8 +169,14 @@ test('release context: the previous live release is the rollback and a newer val
       { sha: '5'.repeat(40), checkpointAt: '2026-10-20T13:00:00Z', validation: { passed: true, releasePath: '/elsewhere/x' } },
     ],
   };
-  assert.deepEqual(releaseContextFromApplication(app, { root }), { previousSha: '2'.repeat(40), rollback: `${root}/prev`, protect: [`${root}/prev`, `${root}/waiting`] });
-  assert.deepEqual(releaseContextFromApplication({ live: null, candidates: [] }, { root }), { previousSha: null, rollback: null, protect: [] });
+  assert.deepEqual(releaseContextFromApplication(app, { root }), {
+    previousSha: '2'.repeat(40), rollback: `${root}/prev`, previousLive: null, liveVerifiedAt: '2026-10-20T10:00:00Z',
+    validated: [{ sha: '2'.repeat(40), path: `${root}/prev`, validatedAt: '2026-10-19T10:00:00Z' }, { sha: '3'.repeat(40), path: `${root}/waiting`, validatedAt: '2026-10-20T11:00:00Z' }],
+  }, 'failed validations and folders outside the release root are not passed on');
+  assert.deepEqual(releaseContextFromApplication({ live: null, candidates: [] }, { root }), { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] });
+  const history = releaseContextFromApplication({ live: { ...app.live, previousSha: null }, candidates: [] }, { root, previousLive: { sha: '2'.repeat(40), path: `${root}/prev` } });
+  assert.deepEqual(history.previousLive, { sha: '2'.repeat(40), path: `${root}/prev` });
+  assert.equal(releaseContextFromApplication(app, { root, previousLive: { sha: '2'.repeat(40), path: '/elsewhere/prev' } }).previousLive.path, null, 'a history folder outside the release root is not used');
 });
 
 test('a release containing the live application model data is never pruned', { skip: process.platform === 'win32' }, t => {
@@ -280,7 +328,15 @@ test('validation applies the stored policy, passes rollback/candidate protection
   assert.equal(cleanups[0].sweepStages, false, 'a disabled workspaces rule skips the sweep of other attempts');
   assert.equal(cleanups[0].previousSha, '2'.repeat(40));
   assert.equal(cleanups[0].rollback, '/opt/app-releases/prev');
-  assert.deepEqual(cleanups[0].protect, ['/opt/app-releases/prev']);
+  assert.equal(cleanups[0].liveVerifiedAt, '2026-10-20T10:00:00Z');
+  assert.equal(cleanups[0].protect, undefined, 'the guest decides the protected set (describeReleases)');
+  assert.equal(cleanups[0].previousLive, null, 'no release history supplied');
+  const withHistory = opFixture({ targetId: 'shop' });
+  await runApplicationReleaseOperation({ kind: 'application_validate', params: withHistory.params, exec: withHistory.exec, job: withHistory.job, service: withHistory.service, hostRoot: temp, releaseRetention: async () => ({ keepReleases: 2 }), releaseHistory: async id => (id === 1 ? { sha: '2'.repeat(40), path: '/opt/app-releases/prev' } : null) });
+  assert.deepEqual(withHistory.calls.find(c => c.action === 'release_cleanup').previousLive, { sha: '2'.repeat(40), path: '/opt/app-releases/prev' }, 'the deploy history reaches the guest');
+  const failing = opFixture({ targetId: 'shop' });
+  await runApplicationReleaseOperation({ kind: 'application_validate', params: failing.params, exec: failing.exec, job: failing.job, service: failing.service, hostRoot: temp, releaseRetention: async () => ({ keepReleases: 2 }), releaseHistory: async () => { throw new Error('db locked'); } });
+  assert.equal(failing.calls.find(c => c.action === 'release_cleanup').previousLive, null, 'an unreadable history is unknown, never guessed');
   assert.deepEqual(f.calls.find(c => c.action === 'seal').retention.trimBeforeSeal, ['.cache', 'coverage']);
 
   const nodus = opFixture({ targetId: 'nodus' });

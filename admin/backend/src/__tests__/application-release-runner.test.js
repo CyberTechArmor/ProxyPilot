@@ -105,6 +105,24 @@ test('deployment validates artifact then checkpoints before switching, and verif
   assert.equal(f.records.at(-1)[0], 'live'); assert.equal(f.records.at(-1)[2].sha, sha);
 });
 
+test('verifying the live release keeps its recorded previous release (rollback and retention still see it)', async () => {
+  const f = fixture(); f.state.target = f.candidate.validation.releasePath;
+  const recordedBefore = 'e'.repeat(40);
+  f.service.getApplication = async () => ({ live: { sha, releasePath: f.state.target, previousSha: recordedBefore, verifiedAt: '2026-10-20T10:00:00Z' }, candidates: [] });
+  const r = await runApplicationReleaseOperation({ kind: 'application_verify', params, ...f, sleep: async () => {} });
+  assert.equal(r.outcome, 'live_verified');
+  assert.equal(f.records.at(-1)[0], 'live'); assert.equal(f.records.at(-1)[2].previousSha, recordedBefore, 'carried forward, not dropped');
+  // A different release recorded live before (the switch happened outside a deployment): that one is the previous release.
+  const g = fixture(); g.state.target = g.candidate.validation.releasePath;
+  g.service.getApplication = async () => ({ live: { sha: '9'.repeat(40), releasePath: '/opt/nodus-releases/other', previousSha: null }, candidates: [] });
+  await runApplicationReleaseOperation({ kind: 'application_verify', params, ...g, sleep: async () => {} });
+  assert.equal(g.records.at(-1)[2].previousSha, '9'.repeat(40));
+  // No live record before: nothing to carry.
+  const h = fixture(); h.state.target = h.candidate.validation.releasePath; h.service.getApplication = async () => ({ live: null, candidates: [] });
+  await runApplicationReleaseOperation({ kind: 'application_verify', params, ...h, sleep: async () => {} });
+  assert.equal(Object.hasOwn(h.records.at(-1)[2], 'previousSha'), false);
+});
+
 test('failed new health restores and verifies the recorded old release without touching service definitions', async () => {
   const f = fixture(); f.state.failHealth = true;
   const r = await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...f, sleep: async () => {} });

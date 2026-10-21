@@ -78,6 +78,8 @@ export function createAppStorage({
     ...(performCheck ? { performCheck } : {}),
   });
   let cleanup = cleanupService || unavailableCleanupService(store);
+  // Told after every saved policy (the snapshot-limit memo is dropped then).
+  const policyListeners = new Set();
 
   function getPolicy(targetKey) {
     const target = resolve(targetKey);
@@ -100,6 +102,7 @@ export function createAppStorage({
     const changed = policyDiff(before.policy, policy);
     const proposedRules = proposedAfterEdit(before.proposedRules, policy);
     const row = store.putPolicy(target.key, { policy, source: 'edited', updatedBy: userId == null ? null : String(userId), expectedRevision, proposedRules });
+    for (const fn of policyListeners) { try { fn(target.key); } catch (e) { logger?.error?.('[app-storage] policy listener failed', e?.message || e); } }
     return { targetKey: target.key, policy: row.policy, revision: row.revision, source: row.source, proposedRules, changed, previousRevision: before.revision, previousSource: before.source };
   }
 
@@ -142,6 +145,7 @@ export function createAppStorage({
     postCleanupAlert: (targetKey, outcome, opts) => monitor.postCleanupAlert(targetKey, outcome, opts),
     cleanupService: () => cleanup,
     setCleanupService(svc) { cleanup = svc || unavailableCleanupService(store); },
+    onPolicyChange(fn) { policyListeners.add(fn); return () => policyListeners.delete(fn); },
     RULE_KEYS, DEFAULT_POLICY,
   };
 }

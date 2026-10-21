@@ -11,11 +11,11 @@ import { Card, CardContent } from '@/components/ui/card';
 import { BTN, CapacityBar, Checkbox, Chip, EmptyState, Notice } from '@/components/storage/shared';
 import {
   acknowledgeSnapshots, allEligibleIds, allSnapshotIds, canSelect, categoryRows, checkIsStale,
-  clearSelection, deselectCategory, formatAge, formatBytes, formatDateTime, formatSize, groupMembers, headerFigures,
+  clearSelection, deselectCategory, formatAge, formatBytes, formatDateTime, formatSize, groupMemberNoun, groupMembers, headerFigures, itemHint,
   isSelected, needsAcknowledgement, selectAllEligible, selectAllSnapshots, selectCategory, selectedCount,
   selectionFor, selectionSummary, toggleItem,
 } from './app-storage-model.mjs';
-import { ALL_ELIGIBLE_SCOPE, KIND_LABELS, SNAPSHOT_ACK, SNAPSHOT_WARNING, TEXT } from './app-storage-text.js';
+import { ALL_ELIGIBLE_SCOPE, FIGURE_LABELS, KIND_LABELS, SNAPSHOT_ACK, SNAPSHOT_WARNING, SUB_LABELS, TEXT } from './app-storage-text.js';
 import { CategoryStatusChip, Figure, ItemStatusChip } from './parts.jsx';
 
 /* --------------------------------- header -------------------------------- */
@@ -48,8 +48,10 @@ export function CheckHeader({ target, check, running, onRequestCheck, now = Date
         {check && (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <Figure label={TEXT.used} value={formatBytes(f.usedBytes)} hint={f.usedPct != null ? <CapacityBar pct={f.usedPct} className="mt-1" /> : null} />
-              <Figure label={TEXT.available} value={formatBytes(f.availableBytes)} />
+              {f.sharedHost && f.containerUsedBytes != null
+                ? <Figure label={TEXT.usedByContainer} value={formatBytes(f.containerUsedBytes)} hint={<span>{FIGURE_LABELS['incus-root-usage']}</span>} />
+                : <Figure label={f.sharedHost ? TEXT.usedShared : TEXT.used} value={formatBytes(f.usedBytes)} hint={<><span>{f.sharedHost ? null : TEXT.usedHint}</span>{f.usedPct != null && !f.sharedHost && <CapacityBar pct={f.usedPct} className="mt-1" />}</>} />}
+              <Figure label={f.sharedHost ? TEXT.availableShared : TEXT.available} value={formatBytes(f.availableBytes)} />
               <Figure label={TEXT.limit} value={f.limitBytes ? formatBytes(f.limitBytes) : TEXT.noLimit} />
               <Figure label={TEXT.snapshotsHold} value={f.snapshotsBytes != null ? formatBytes(f.snapshotsBytes) : '—'} hint={f.snapshotsBytes ? TEXT.snapshotsHoldHint : null} />
             </div>
@@ -57,6 +59,7 @@ export function CheckHeader({ target, check, running, onRequestCheck, now = Date
               <span><span className="text-muted-foreground">{TEXT.onDisk}:</span> {formatBytes(f.onDiskBytes)}</span>
               <span><span className="text-muted-foreground">{TEXT.fileSizes}:</span> {formatBytes(f.fileSizeBytes)}</span>
             </p>
+            {f.sharedHost && <div data-testid="shared-host"><Notice level="warn"><p>{TEXT.sharedHostNotice}</p></Notice></div>}
             {f.memoryBacked.map((m) => <Notice key={m.mount} level="info"><p>{TEXT.memoryBacked(m.mount, formatBytes(m.usedBytes))}</p></Notice>)}
             {check.status === 'partial' && <Notice level="warn"><p>{TEXT.checkPartial}</p></Notice>}
             {check.status === 'failed' && <Notice level="error"><p>{check.error?.message || TEXT.checkFailed}</p></Notice>}
@@ -86,12 +89,13 @@ function GroupMembers({ item }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const { shown, total, hidden } = groupMembers(item);
+  const noun = groupMemberNoun(item);
   if (!total) return null;
   return (
     <div>
       <button type="button" className="min-h-[44px] inline-flex items-center gap-1 text-xs text-primary hover:underline" aria-expanded={open} aria-controls={id} onClick={() => setOpen((v) => !v)}>
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        {open ? TEXT.hideMembers : TEXT.showMembers(shown.length, total)}
+        {open ? TEXT.hideMembers(noun) : TEXT.showMembers(shown.length, total, noun)}
       </button>
       {open && (
         <div id={id} className="rounded border bg-muted/40 p-2 space-y-1">
@@ -119,13 +123,14 @@ export function ItemRow({ item, selected, onToggle, now = Date.now(), selectable
           <span className="text-sm font-medium break-words min-w-0">{item.label}</span>
           <ItemStatusChip status={item.status} />
           {item.memoryBacked && <Chip level="accent">{TEXT.usesMemory}</Chip>}
+          {SUB_LABELS[item.sub] && <Chip>{SUB_LABELS[item.sub]}</Chip>}
           {item.location === 'host' && <Chip>{TEXT.host}</Chip>}
         </div>
         {showPath && <p className="font-mono text-xs text-muted-foreground break-all">{item.path}</p>}
         {item.reason && <p className="text-xs break-words">{item.reason}</p>}
-        {item.hint && <p className="text-xs text-muted-foreground break-words">{item.hint}</p>}
+        {itemHint(item) && <p className="text-xs text-muted-foreground break-words">{itemHint(item)}</p>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span className="text-foreground font-medium">{formatSize(item.allocatedBytes, item.precision)} {TEXT.onDiskShort}</span>
+          <span className="text-foreground font-medium">{formatSize(item.allocatedBytes, item.precision)} {item.memoryBacked ? TEXT.inMemoryShort : TEXT.onDiskShort}</span>
           {item.logicalBytes != null && item.logicalBytes !== item.allocatedBytes && <span>{TEXT.fileSizesAddUp(formatBytes(item.logicalBytes))}</span>}
           {item.recoverableBytes != null && <span>{TEXT.recoverable(formatBytes(item.recoverableBytes))}</span>}
           {item.files > 0 && <span>{TEXT.files(item.files)}</span>}
@@ -157,7 +162,9 @@ function CategorySection({ row, selection, onToggle, onSelectCategory, onClearCa
               <CategoryStatusChip status={row.status} />
             </span>
             <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
-              <span className="text-foreground">{formatSize(row.allocatedBytes, row.precision)} {TEXT.onDiskShort}</span>
+              {(row.allocatedBytes > 0 || !row.memoryBytes) && <span className="text-foreground">{formatSize(row.allocatedBytes, row.precision)} {TEXT.onDiskShort}</span>}
+              {row.memoryBytes > 0 && <span className="text-foreground">{formatBytes(row.memoryBytes)} {TEXT.inMemoryShort}</span>}
+              {row.sharedHostBytes > 0 && <span>{TEXT.sharedHostShort(formatBytes(row.sharedHostBytes))}</span>}
               <span>{TEXT.items(row.itemCount)}</span>
               {row.count > 0 && <span>{TEXT.files(row.count)}</span>}
               {row.newestMtimeMs ? <span title={formatDateTime(row.newestMtimeMs)}>{TEXT.lastModified} {formatAge(row.newestMtimeMs, now)}</span> : null}

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import { chromium } from '../../backend/node_modules/playwright-core/index.mjs';
 import { createWorld, USER } from './app-storage-harness.mjs';
-import { CHECK_ID, CLEANUP_ID, NEW_CHECK_ID, nodusCheck } from './fixtures/app-storage-fixture.mjs';
+import { CHECK_ID, CLEANUP_ID, NEW_CHECK_ID, PARKED_REASON, SETTLING_NOTE, nodusCheck } from './fixtures/app-storage-fixture.mjs';
 import { ALL_ELIGIBLE_SCOPE, SNAPSHOT_ACK, SNAPSHOT_WARNING } from '../src/components/app-storage/app-storage-text.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -91,6 +91,15 @@ async function shot(page, name) {
   if (tag) await tag.evaluate((n) => n.remove());
 }
 
+
+// Words the page must not show (review N4 and the plain-language rule): tool
+// and filesystem names and the jargon the UI replaces.
+const JARGON = /\b(ZFS|dataset|referenced|df|Incus|eligible|inode|tmpfs|allocated|logical)\b/i;
+async function plainCheck(page, label) {
+  const text = await page.evaluate(() => [document.querySelector('main'), ...document.querySelectorAll('[role=dialog]')].filter(Boolean).map((n) => n.innerText).join('\n'));
+  const hits = text.split('\n').filter((line) => JARGON.test(line));
+  assert.deepEqual(hits, [], `${label}: words that are not plain language on screen`);
+}
 const summary = (page) => page.getByTestId('selection-summary').innerText();
 const review = (page) => page.getByRole('button', { name: 'Review cleanup' });
 async function expandAll(page) {
@@ -163,7 +172,14 @@ try {
     assert.deepEqual(world.state.checkRequests.map((r) => r.key), ['project:7']);
     assert.equal(world.state.checkRequests[0].csrf, 'storage-csrf');
     assert.ok(world.state.checkPolls.get('chk_project-7-0') >= 2, 'GET /checks/:id polled until finished');
-    await scope.getByText('6.4 GB can be cleaned up').waitFor();
+    await scope.getByText('6.4 GB can be cleaned up', { exact: false }).waitFor();
+    const nodusRow = page.locator(width >= 1024 ? 'table [data-target="application:1"]' : 'main div[data-target="application:1"]');
+    await nodusRow.getByText('on disk, with snapshots').waitFor();
+    await nodusRow.getByText('3.6 GB of files in the container', { exact: false }).waitFor();
+    await nodusRow.getByText('2.1 GB on disk and 181 MB in memory can be cleaned up', { exact: false }).waitFor();
+    if (width >= 1024) await page.getByRole('columnheader', { name: 'Disk used now' }).waitFor();
+    await plainCheck(page, `overview ${width}`);
+    ok(`${width}px: the overview says which "used" is which — disk with snapshots now, files in the container at the last check`);
     ok(`${width}px: overview "Request storage check" shows Checking… and polls GET /checks/:id until finished`);
 
     // Detail: nothing preselected, Review disabled at 0, protected items have no checkbox.
@@ -183,6 +199,31 @@ try {
     assert.ok(await page.locator(`[data-item="${byLabel('/opt/nodus-w48').id}"]`).getByText('A leftover working copy: its .git link no longer resolves.').isVisible());
     assert.equal(await summary(page), '0 selected');
     assert.equal(await review(page).isDisabled(), true, 'Review cleanup disabled at 0');
+    await page.getByText('Used by files', { exact: true }).waitFor();
+    await page.getByText('Files inside the container.', { exact: true }).waitFor();
+    await page.getByText('On disk, with snapshots:', { exact: false }).waitFor();
+    for (const label of ['Abandoned browser download', 'tsx-989', 'nodus-embed-* (263 folders)']) {
+      assert.equal(await page.locator(`[data-item="${byLabel(label).id}"]`).getByText('Uses memory, not disk', { exact: false }).count(), 1, `${label}: the memory note appears once`);
+    }
+    const held = page.locator(`[data-item="${byLabel('/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1').id}"]`);
+    await held.getByText('Set aside by a cleanup', { exact: true }).waitFor();
+    await held.getByText('Needs a look', { exact: true }).waitFor();
+    assert.equal(await held.locator('input[type=checkbox]').count(), 0);
+    await page.locator(`[data-item="${byLabel('Release 7b7b7b7b (validation not passed)').id}"]`).getByText('Waiting for its validation result', { exact: true }).waitFor();
+    const sharedBundle = page.locator(`[data-item="${byLabel('Transfer copy bundle-k9x2').id}"]`);
+    await sharedBundle.getByText('Shared by all applications', { exact: true }).waitFor();
+    assert.equal(await sharedBundle.locator('input[type=checkbox]').count(), 0, 'a bundle no application claims cannot be selected here');
+    await page.locator('section[data-category="archives"]').getByText('21 MB shared by all applications, not counted here', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('syslog.2.gz').id}"]`).getByText('Old rotated copy', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('postgresql-17-main.log').id}"]`).getByText('Current log', { exact: true }).waitFor();
+    await plainCheck(page, `detail ${width}`);
+    const tempSection = page.locator('section[data-category="temp"]');
+    await tempSection.getByText('4.1 KB on disk', { exact: true }).waitFor();
+    await tempSection.getByText('204 MB in memory', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('Abandoned browser download').id}"]`).getByText('138 MB in memory', { exact: true }).waitFor();
+    for (const sec of await page.locator('section[data-category]').all()) {
+      if (await sec.getByText('Some can be cleaned up', { exact: true }).count()) assert.ok(await sec.getByRole('button', { name: /Select all|Clear/ }).count(), 'a "Some can be cleaned up" category has something to select');
+    }
     ok(`${width}px: nothing preselected (${ALL_CHECKBOXES.length} checkboxes, all clear), protected / needs-a-look items have none, Review disabled at 0`);
 
     // Group members: first 50 of 263.
@@ -263,10 +304,17 @@ try {
     assert.equal(new URL(page.url()).searchParams.get('cleanup'), CLEANUP_ID);
     const result = page.getByRole('dialog');
     await result.getByText('Cleanup finished, but some items were skipped or failed.').waitFor();
-    await result.getByRole('region', { name: 'Skipped' }).getByText('Changed since the check: it was modified after the storage check, so it was left alone.').waitFor();
+    const skippedRegion = result.getByRole('region', { name: 'Skipped' });
+    await skippedRegion.getByText(PARKED_REASON).waitFor();
+    await skippedRegion.getByText('Set aside as:').waitFor();
+    await skippedRegion.getByText(/\/opt\/nodus-releases\/\.pp-cleanup-hold-[a-f0-9]+-1$/).waitFor();
+    const reclaimedBox = result.getByTestId('reclaimed');
+    await reclaimedBox.getByText('Files on disk').waitFor();
+    await reclaimedBox.getByText('Pool space, with snapshots').waitFor();
+    assert.equal(await reclaimedBox.getByText('Memory (such as /tmp)').count(), 0, 'no memory line when nothing memory-backed was cleaned');
+    assert.equal(await result.getByText(SETTLING_NOTE).count(), 1, 'the settling note appears once');
     await result.getByRole('region', { name: 'Removed' }).getByText('pp-mcp-pre-resources-20261012-0912').waitFor();
     await result.getByText('The application is running and answered its health check.').waitFor();
-    await result.getByText('The filesystem may still be releasing space, or snapshots still hold it; check again in a few minutes.').waitFor();
     await result.getByText('Space reclaimed (measured)').waitFor();
     await result.getByText('Storage now').waitFor();
     await layoutCheck(page, width, 'result');
@@ -299,7 +347,11 @@ try {
     await page.locator('[data-rule="releases"]').getByText('On', { exact: true }).waitFor();
     await page.locator('[data-rule="tempFiles"]').getByText('Would remove 4 items, about 181 MB, now.', { exact: false }).waitFor();
     await page.getByTestId('alerts-summary').getByText('Warns above 10 GB, or when it grows by 2 GB within 24 hours.').waitFor();
+    await page.locator('[data-rule="snapshots"]').getByText('On: it runs whenever a snapshot is taken, and each time ProxyPilot starts.').waitFor();
+    assert.equal(await page.getByTestId('policy-changed').innerText(), 'Not changed here yet.');
+    assert.equal(await page.getByText('No storage check has run yet').count(), 0, 'no nudge when a check exists');
     await shot(page, `rules-proposed-${width}`);
+    await plainCheck(page, `rules ${width}`);
     await caches.getByRole('button', { name: /Turn on/ }).click();
     await caches.getByText('On', { exact: true }).waitFor();
     assert.equal(world.state.policyPuts.length, 1);
@@ -307,6 +359,7 @@ try {
     assert.equal(world.state.policyPuts[0].body.policy.rules.caches.enabled, true);
     assert.equal(world.state.policyPuts[0].body.policy.rules.tempFiles.enabled, false, 'other rules unchanged');
     await page.locator('[data-rule="tempFiles"]').getByText('Proposed', { exact: true }).waitFor();
+    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by user #1\.$/).waitFor();
     // An out-of-range value cannot be saved.
     const keep = page.locator('[data-rule="releases"]').getByLabel('Releases to keep (2 to 20)');
     await keep.fill('1');
@@ -316,6 +369,49 @@ try {
 
     assert.deepEqual(world.state.unexpected, [], 'no unexpected API calls');
     assert.deepEqual(errors, [], 'no page errors');
+    await context.close();
+  }
+
+  /* ------------------------ a pool on the host's own disk ------------------------ */
+  {
+    const world = createWorld(NOW, { sharedHost: true });
+    const { page, errors, context } = await newPage(world);
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(`${origin}/storage/applications?target=application:1`);
+    await page.getByRole('heading', { name: 'Nodus', level: 1 }).waitFor();
+    await page.getByTestId('shared-host').getByText("Available is that whole disk's figure, not this container's alone", { exact: false }).waitFor();
+    await page.getByText('Used by this container', { exact: true }).waitFor();
+    await page.getByText('2.1 GB', { exact: true }).first().waitFor();
+    await page.getByText('Available on the shared host disk', { exact: true }).waitFor();
+    await plainCheck(page, 'shared host');
+    await expandAll(page);
+    assert.equal(await page.getByText('Not measured individually', { exact: false }).count(), 0, 'no "not measured individually" remainder on a shared disk');
+    for (const w of [360, 1280]) await layoutCheck(page, w, 'detail-shared-host');
+    assert.deepEqual(errors, []);
+    ok('360/1280px: on a pool that shares the host disk, the page says the figures are the host\'s and shows no "not measured individually" remainder');
+    await context.close();
+  }
+
+  /* ------------------------ rules before any check ------------------------ */
+  {
+    const world = createWorld(NOW, { noCheck: true });
+    const { page, errors, context } = await newPage(world);
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(`${origin}/storage/applications?target=application:1&tab=rules`);
+    await page.getByTestId('policy-source').waitFor();
+    const nudge = page.getByTestId('policy-no-check');
+    await nudge.getByText('No storage check has run yet').waitFor();
+    await page.locator('[data-rule="tempFiles"]').getByText('No storage check yet, so what this rule would remove is not known.', { exact: false }).waitFor();
+    assert.equal(await page.locator('[data-rule="tempFiles"]').getByText('Nothing would be removed now.', { exact: false }).count(), 0, 'no invented effect without a check');
+    assert.equal(await page.locator('[data-rule="tempFiles"]').getByRole('button', { name: /Turn on/ }).isDisabled(), false, 'the nudge never blocks');
+    for (const w of [360, 375]) await layoutCheck(page, w, 'rules-no-check');
+    await page.setViewportSize({ width: 375, height: 812 });
+    await nudge.getByRole('button', { name: 'Request storage check' }).click();
+    await nudge.waitFor({ state: 'detached', timeout: 15000 });
+    await page.locator('[data-rule="tempFiles"]').getByText('Would remove 4 items', { exact: false }).waitFor();
+    assert.deepEqual(world.state.checkRequests.map((r) => r.key), ['application:1']);
+    assert.deepEqual(errors, []);
+    ok('375px: before any check, the rules tab says so and offers "Request storage check" (Turn on stays available); after the check the nudge goes and the real effects show');
     await context.close();
   }
 
@@ -352,8 +448,22 @@ try {
     await dialog.getByRole('button', { name: 'Clean up 1 item' }).waitFor();
     await layoutCheck(page, 360, 'review-refused');
     assert.equal(world.state.cleanupPosts.length, 0);
-    assert.deepEqual(errors, []);
     ok('360px: CHECK_STALE offers "Run a new check"; NOT_ELIGIBLE marks the refused item with its reason and removes it on request');
+    // Then a memory-backed item too: the result measures memory apart from disk.
+    refusal = null;
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await dialog.waitFor({ state: 'detached' });
+    await page.getByRole('checkbox', { name: 'Select Abandoned browser download' }).check();
+    await review(page).click();
+    await dialog.getByRole('button', { name: 'Clean up 2 items' }).click();
+    await dialog.getByText('Cleanup result').waitFor({ timeout: 15000 });
+    const box = dialog.getByTestId('reclaimed');
+    await box.getByText('Memory (such as /tmp)').waitFor();
+    await box.getByText('138 MB', { exact: true }).waitFor();
+    await box.getByText('Files on disk').waitFor();
+    await layoutCheck(page, 360, 'result-memory');
+    assert.deepEqual(errors, []);
+    ok('360px: cleaning a memory-backed item shows memory freed apart from files on disk');
     await context.close();
   }
 

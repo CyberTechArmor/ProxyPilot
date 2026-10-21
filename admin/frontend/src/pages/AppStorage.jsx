@@ -222,7 +222,7 @@ function TargetView({ target }) {
               <StorageCheckDetail check={check} selection={selection} onSelectionChange={setSelection} onReview={() => setReviewOpen(true)} running={running} onRequestCheck={requestCheck} />
             </TabsContent>
             <TabsContent value="rules" className="mt-4">
-              <RetentionPolicy target={t} />
+              <RetentionPolicy target={t} checkId={check?.checkId ?? null} running={running} onRequestCheck={requestCheck} />
             </TabsContent>
             <TabsContent value="history" className="mt-4">
               <h2 className="text-base font-semibold mb-3">{TEXT.pastCleanups}</h2>

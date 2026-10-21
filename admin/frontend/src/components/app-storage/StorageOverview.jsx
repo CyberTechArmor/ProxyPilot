@@ -8,7 +8,7 @@ import { Bell, ChevronRight, Loader2, PieChart, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { BTN, Chip, EmptyState } from '@/components/storage/shared';
-import { formatAge, formatBytes, formatDateTime } from './app-storage-model.mjs';
+import { figureLabel, formatAge, formatBytes, formatDateTime } from './app-storage-model.mjs';
 import { KIND_LABELS, POLICY_SOURCE_LABELS, TEXT } from './app-storage-text.js';
 
 const detailHref = (key) => `/storage/applications?target=${encodeURIComponent(key)}`;
@@ -17,10 +17,12 @@ function lastCheckText(t, now) {
   const c = t.lastCheck;
   if (!c) return { main: TEXT.neverChecked, sub: null };
   const used = c.totals?.guest?.usedBytes;
+  const shared = c.totals?.guest?.source === 'shared-host-df' || c.totals?.guest?.shared === true;
   return {
     main: `${formatAge(c.finishedAt, now)}`,
     title: formatDateTime(c.finishedAt),
-    sub: [used != null ? TEXT.usedSize(formatBytes(used)) : null, c.eligibleBytes ? TEXT.cleanableSize(formatBytes(c.eligibleBytes)) : null].filter(Boolean).join(' · ') || null,
+    sub: [used != null ? (shared ? TEXT.usedSizeShared(formatBytes(used)) : TEXT.usedSize(formatBytes(used))) : null,
+      c.eligibleBytes || c.eligibleMemoryBytes ? TEXT.cleanableSize(formatBytes(c.eligibleBytes || 0), c.eligibleMemoryBytes ? formatBytes(c.eligibleMemoryBytes) : null) : null].filter(Boolean).join(' · ') || null,
   };
 }
 
@@ -93,7 +95,7 @@ export default function StorageOverview({ data, running = {}, onRequestCheck, no
               return (
                 <tr key={t.key} className="align-top" data-target={t.key}>
                   <td className="p-3"><NameCell t={t} /></td>
-                  <td className="p-3 text-right font-mono text-xs whitespace-nowrap">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</td>
+                  <td className="p-3 text-right text-xs"><span className="font-mono whitespace-nowrap">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</span>{t.usage?.usedBytes != null && <div className="text-muted-foreground">{figureLabel(t.usage.source) || TEXT.usedNowHint}</div>}</td>
                   <td className="p-3 text-xs">
                     <span title={lc.title}>{lc.main}</span>
                     {lc.sub && <div className="text-muted-foreground break-words">{lc.sub}</div>}
@@ -120,7 +122,7 @@ export default function StorageOverview({ data, running = {}, onRequestCheck, no
               <CardContent className="p-4 space-y-3">
                 <NameCell t={t} />
                 <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                  <div className="min-w-0"><dt className="text-xs text-muted-foreground">{TEXT.colUsedNow}</dt><dd className="font-mono text-xs">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</dd></div>
+                  <div className="min-w-0"><dt className="text-xs text-muted-foreground">{TEXT.colUsedNow}</dt><dd className="text-xs"><span className="font-mono">{t.usage?.usedBytes != null ? formatBytes(t.usage.usedBytes) : TEXT.usageUnknown}</span>{t.usage?.usedBytes != null && <span className="block text-muted-foreground">{figureLabel(t.usage.source) || TEXT.usedNowHint}</span>}</dd></div>
                   <div className="min-w-0"><dt className="text-xs text-muted-foreground">{TEXT.colLastCheck}</dt><dd className="text-xs break-words"><span title={lc.title}>{lc.main}</span>{lc.sub && <span className="block text-muted-foreground">{lc.sub}</span>}</dd></div>
                   <div className="min-w-0 sm:col-span-2"><dt className="text-xs text-muted-foreground">{TEXT.colAlerts}</dt><dd><Alerts alerts={t.alerts} /></dd></div>
                 </dl>

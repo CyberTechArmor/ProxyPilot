@@ -19,6 +19,9 @@ export const PROJECT_KEY = 'project:7';
 export const CHECK_ID = 'chk_5b0f2c64-1d0e-4a7b-9c55-2e7f1a6b3c90';
 export const NEW_CHECK_ID = 'chk_8a1d4e20-6b3f-4c2a-8e11-9f0d7c5b2a41';
 export const CLEANUP_ID = 'cln_3e9a7c12-4f5b-4d6e-8a90-b1c2d3e4f5a6';
+// The cleanup job's own sentences (setup-engine/storage-cleanup-op.js).
+export const PARKED_REASON = 'It changed while the cleanup ran, so it was set aside (not removed) under a name starting with .pp-cleanup-hold-; check it before removing it.';
+export const SETTLING_NOTE = 'The filesystem may still be releasing space, or snapshots still hold it; check again in a few minutes.';
 
 const LIVE = '/opt/nodus-releases/3c932650511871784d485e98e1808b9e8b5c4fd5-p6-f3ec00f4-01ac-4fd0-a1bf-2e447ccc8709';
 const ROLLBACK = '/opt/nodus-releases/62a4fbff0c7d1e2a9b8c3d4e5f60718293a4b5c6-p6-b981f91d-8e7b-4e09-94cb-e93853de3d11';
@@ -51,8 +54,11 @@ function item(checkId, now, o) {
     identity: { dev: 64769, ino, mtimeMs, size: o.alloc, ...(o.identity || {}) },
     ...(o.members ? { members: o.members, memberCount: o.members.length } : {}),
     ...(o.breakdown ? { breakdown: o.breakdown } : {}),
-    ...(o.hint ? { hint: o.hint } : {}),
+    // Like classify.js: a memory-backed temp item carries the memory hint.
+    ...(o.hint || o.memoryBacked ? { hint: o.hint || 'Uses memory, not disk.' } : {}),
     ...(o.recoverableBytes != null ? { recoverableBytes: o.recoverableBytes } : {}),
+    ...(o.sub ? { sub: o.sub } : {}),
+    ...(o.sharedHost ? { sharedHost: true } : {}),
   };
 }
 
@@ -63,31 +69,39 @@ const LABELS = {
   snapshots: 'Snapshots (restore points)', exports: 'Exports (downloadable copies)', other: 'Other or unclassified',
 };
 
+// Category summaries as WS1 writes them since ws/check-fixes (contract
+// 2026-10-21 §5): disk and memory apart, host-wide shared items in neither,
+// "mixed" only when something can be cleaned up.
 function summarize(items) {
+  const sum = (list, k = 'allocatedBytes') => list.reduce((n, i) => n + (i[k] || 0), 0);
   return Object.keys(LABELS).map((key) => {
     const own = items.filter((i) => i.category === key);
+    const counted = own.filter((i) => !i.sharedHost);
     const eligible = own.filter((i) => i.status === 'eligible');
     const statuses = new Set(own.map((i) => i.status));
     const status = !own.length ? 'empty' : statuses.size === 1 ? [...statuses][0] : statuses.has('eligible') ? 'mixed' : statuses.has('investigate') ? 'investigate' : 'protected';
     return {
       key, label: LABELS[key], status,
-      logicalBytes: own.reduce((n, i) => n + i.logicalBytes, 0),
-      allocatedBytes: own.reduce((n, i) => n + i.allocatedBytes, 0),
+      logicalBytes: sum(counted.filter((i) => !i.memoryBacked), 'logicalBytes'),
+      allocatedBytes: sum(counted.filter((i) => !i.memoryBacked)),
+      memoryBytes: sum(counted.filter((i) => i.memoryBacked)),
+      sharedHostBytes: sum(own.filter((i) => i.sharedHost)),
       count: own.reduce((n, i) => n + i.files, 0),
       itemCount: own.length,
       eligibleCount: eligible.length,
-      eligibleBytes: eligible.reduce((n, i) => n + i.allocatedBytes, 0),
+      eligibleBytes: sum(eligible.filter((i) => !i.memoryBacked)),
+      eligibleMemoryBytes: sum(eligible.filter((i) => i.memoryBacked)),
       newestMtimeMs: own.reduce((m, i) => Math.max(m, i.newestMtimeMs), 0) || null,
       precision: own.some((i) => i.precision === 'at-least') ? 'at-least' : 'exact',
     };
   });
 }
 
-export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 60000 } = {}) {
+export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 60000, sharedHost = false } = {}) {
   const at = now - ageMs;
   const I = (o) => item(checkId, at, o);
-  const embedMembers = Array.from({ length: 263 }, (_, n) => ({ path: `/tmp/nodus-embed-${(0x1a2b3c + n * 7919).toString(36)}`, identity: { dev: 41, ino: 900000 + n, mtimeMs: at - 3 * DAY - n * HOUR } }));
-  const pulseMembers = Array.from({ length: 126 }, (_, n) => ({ path: `/tmp/pulse-${(0x5c6d7e + n * 104729).toString(36)}`, identity: { dev: 41, ino: 700000 + n, mtimeMs: at - 2 * DAY - n * HOUR } }));
+  const embedMembers = Array.from({ length: 263 }, (_, n) => ({ path: `/tmp/nodus-embed-${(0x1a2b3c + n * 7919).toString(36)}`, kind: 'directory', identity: { dev: 41, ino: 900000 + n, mtimeMs: at - 3 * DAY - n * HOUR } }));
+  const pulseMembers = Array.from({ length: 126 }, (_, n) => ({ path: `/tmp/pulse-${(0x5c6d7e + n * 104729).toString(36)}`, kind: 'directory', identity: { dev: 41, ino: 700000 + n, mtimeMs: at - 2 * DAY - n * HOUR } }));
   const items = [
     I({ category: 'running_app', label: 'Live release 3c932650', path: LIVE, kind: 'release', status: 'protected', reason: 'The release the application is running now.', alloc: 510e6, logical: 925e6, files: 48210, ageMs: 20 * 60000, hint: 'Inside a sealed release; removed only with the whole release.', breakdown: [{ label: 'node_modules', allocatedBytes: 402e6 }, { label: 'release-evidence', allocatedBytes: 1.3e6 }, { label: 'test-results', allocatedBytes: 1.1e6 }] }),
     I({ category: 'dependencies', label: '/usr', path: '/usr', status: 'protected', reason: 'Operating system and installed packages.', alloc: 890e6, logical: 1.62e9, files: 61234, ageMs: 9 * DAY }),
@@ -115,8 +129,8 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     I({ category: 'temp', label: 'nodus.service private files', path: '/tmp/systemd-private-62dc0f1e-nodus.service-Sj5Zwh', status: 'protected', reason: 'In use by a running process.', alloc: 8192, files: 1, memoryBacked: true, ageMs: 40 * 60000 }),
     I({ category: 'temp', label: 'nodus-w56-http.json', path: '/var/tmp/nodus-w56-http.json', kind: 'file', status: 'eligible', reason: 'Not changed for more than a day and nothing is using it.', alloc: 4096, logical: 1876, files: 1, ageMs: 11 * DAY }),
     I({ category: 'logs', label: 'System logs (journal)', path: '/var/log/journal', kind: 'journal', action: 'vacuum-journal', status: 'eligible', reason: 'Keeps the newest 256 MB of system logs.', alloc: 612e6, logical: 640e6, files: 14, precision: 'estimate', recoverableBytes: 356e6, ageMs: 10 * 60000 }),
-    I({ category: 'logs', label: 'nodus-image-e2e.log', path: '/var/log/nodus-image-e2e.log', kind: 'file', status: 'eligible', reason: 'A finished log nothing is writing to.', alloc: 45e3, logical: 43920, files: 1, ageMs: 16 * DAY }),
-    I({ category: 'logs', label: 'postgresql-17-main.log', path: '/var/log/postgresql/postgresql-17-main.log', kind: 'file', status: 'protected', reason: 'Being written now.', alloc: 660e3, logical: 657104, files: 1, ageMs: 60000 }),
+    I({ category: 'logs', label: 'syslog.2.gz', path: '/var/log/syslog.2.gz', kind: 'file', sub: 'rotated', status: 'eligible', reason: 'An old rotated log.', alloc: 45e3, logical: 43920, files: 1, ageMs: 16 * DAY }),
+    I({ category: 'logs', label: 'postgresql-17-main.log', path: '/var/log/postgresql/postgresql-17-main.log', kind: 'file', sub: 'current', status: 'protected', reason: 'Being written now.', alloc: 660e3, logical: 657104, files: 1, ageMs: 60000 }),
     I({ category: 'history', label: 'app-pre-deploy-62348a2a.sql', path: '/var/backups/proxypilot-db/app-pre-deploy-62348a2a.sql', kind: 'file', status: 'protected', reason: 'Recent database copy taken before a change.', alloc: 48e6, files: 1, ageMs: 3 * HOUR }),
     I({ category: 'history', label: 'app-pre-deploy-51e0a9b2.sql', path: '/var/backups/proxypilot-db/app-pre-deploy-51e0a9b2.sql', kind: 'file', status: 'protected', reason: 'Recent database copy taken before a change.', alloc: 47e6, files: 1, ageMs: DAY }),
     I({ category: 'history', label: 'app-pre-deploy-1f2e3d4c.sql', path: '/var/backups/proxypilot-db/app-pre-deploy-1f2e3d4c.sql', kind: 'file', status: 'eligible', reason: 'An older database copy taken before a change.', alloc: 46e6, files: 1, ageMs: 6 * DAY }),
@@ -126,6 +140,11 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     I({ category: 'exports', label: 'pp-nodus-20261019.tar.zst', path: null, kind: 'export', action: 'delete-export', location: 'host', status: 'eligible', reason: 'A downloadable copy of the whole container, ready to download.', alloc: 1.42e9, files: 1, ageMs: DAY, identity: { exportId: 7 } }),
     I({ category: 'other', label: '/opt/nodus-w48', path: '/opt/nodus-w48', status: 'investigate', reason: 'Not created by ProxyPilot’s release process.', hint: 'A leftover working copy: its .git link no longer resolves.', alloc: 31e6, logical: 58e6, files: 2210, ageMs: 12 * DAY }),
     I({ category: 'other', label: '/opt/nodus-w49', path: '/opt/nodus-w49', status: 'investigate', reason: 'Not created by ProxyPilot’s release process.', hint: 'A leftover working copy: its .git link no longer resolves.', alloc: 29e6, logical: 55e6, files: 2190, ageMs: 12 * DAY }),
+    // WS1 sub values (contract 2026-10-21 §3, §4): a set-aside entry, a
+    // release whose validation has not passed, a bundle no application name claims.
+    I({ category: 'other', label: '/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1', path: '/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1', sub: 'held', status: 'investigate', reason: 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.', alloc: 8192, files: 2, ageMs: 3 * HOUR }),
+    I({ category: 'releases', label: 'Release 7b7b7b7b (validation not passed)', path: '/opt/nodus-releases/7b7b7b7b00000000000000000000000000000000-p6-7b7b7b7b-1111-4111-8111-111111111111', kind: 'release', sub: 'pending', status: 'protected', reason: 'Its validation has not passed (it may still be running), so it is kept.', alloc: 488e6, logical: 900e6, files: 47800, ageMs: HOUR }),
+    I({ category: 'archives', label: 'Transfer copy bundle-k9x2', path: '/var/lib/proxypilot/application-release-transfers/bundle-k9x2', location: 'host', sub: 'shared', sharedHost: true, status: 'investigate', reason: 'A transfer copy no application name claims; it may belong to another application.', alloc: 21e6, files: 1, ageMs: 5 * DAY }),
     I({ category: 'other', label: '/var/lib/nodus-publication', path: '/var/lib/nodus-publication', status: 'investigate', reason: 'Not claimed by any rule.', alloc: 12e6, files: 340, ageMs: 6 * DAY }),
     I({ category: 'other', label: 'Not measured individually (operating system and other files)', path: null, kind: 'pseudo', status: 'investigate', reason: 'The rest of the used space; it is not attributed to a folder.', alloc: 238e6, files: 0, precision: 'estimate', ageMs: 0 }),
   ];
@@ -137,16 +156,29 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     status: 'complete',
     startedAt: new Date(at - 41000).toISOString(),
     finishedAt: new Date(at).toISOString(),
-    totals: {
-      guest: { totalBytes: 236422037504, usedBytes: 3.61e9, availableBytes: 232.81e9 },
-      limit: { bytes: 236223201280, source: 'root disk size' },
-      dataset: { usedBytes: 3.95e9, referencedBytes: 3.61e9, snapshotsBytes: 412e6, logicalUsedBytes: 7.4e9, compressRatio: 2.1 },
+    // WS1 §6 shape; `sharedHost` gives a dir-pool container (figures are the host's).
+    totals: sharedHost ? {
+      guest: { totalBytes: 1.9e12, usedBytes: 512e9, availableBytes: 1.39e12, precision: 'exact', shared: true, source: 'shared-host-df', label: "The host filesystem this container shares with other containers and the host itself; it is not this container's own use" },
+      sharedHostFilesystem: true,
+      usageBytes: 2.1e9,
+      usageSource: 'incus-root-usage',
+      limit: { bytes: null, source: null },
+      dataset: null,
+      memoryBacked: [{ mount: '/tmp', usedBytes: 1111255137 }],
+      measuredBytes: 3.37e9,
+      unattributedBytes: null,
+      unattributedPrecision: null,
+    } : {
+      guest: { totalBytes: 236422037504, usedBytes: 3.61e9, availableBytes: 232.81e9, precision: 'exact', shared: false, source: 'container-df' },
+      sharedHostFilesystem: false,
+      limit: { bytes: 236223201280, source: 'root-device' },
+      dataset: { usedBytes: 3.95e9, referencedBytes: 3.61e9, snapshotsBytes: 412e6, logicalUsedBytes: 7.4e9, compressRatio: 2.1, source: 'zfs-dataset' },
       memoryBacked: [{ mount: '/tmp', usedBytes: 1111255137 }],
       measuredBytes: 3.37e9,
       unattributedBytes: 238e6,
     },
-    categories: summarize(items),
-    items,
+    categories: summarize(sharedHost ? items.filter((i) => i.kind !== 'pseudo') : items),
+    items: sharedHost ? items.filter((i) => i.kind !== 'pseudo') : items,
     context: { liveRelease: LIVE, rollbackRelease: ROLLBACK, waitingCandidate: null, backingRoots: [BACKING], activeAttempts: [], buildActive: false },
     unmeasured: [{ area: 'Some folders under /tmp', reason: 'Some folders could not be read, so their size is at least what is shown.' }],
     notes: ['Files linked from several places are counted once.', 'Each snapshot’s size counts only what that snapshot holds by itself; space shared by several snapshots is in “Held by snapshots”.'],
@@ -193,9 +225,15 @@ export function nodusEffects() {
     { rule: 'caches', enabled: false, items: 0, bytes: 0, examples: [], note: 'No cache is older than 14 days yet.' },
     { rule: 'tempFiles', enabled: false, items: 4, bytes: 181.4e6, examples: ['nodus-embed-* (263 folders)', 'Abandoned browser download', 'playwright-transform-cache-0'] },
     { rule: 'testArtifacts', enabled: false, items: 0, bytes: 0, examples: [] },
-    { rule: 'logs', enabled: false, items: 2, bytes: 356e6, examples: ['System logs (journal)', 'nodus-image-e2e.log'] },
+    { rule: 'logs', enabled: false, items: 2, bytes: 356e6, examples: ['System logs (journal)', 'syslog.2.gz'] },
     { rule: 'history', enabled: false, items: 0, bytes: 0, examples: [], note: 'Nothing is older than 30 days yet.' },
   ];
+}
+
+// The overview's "can be cleaned up" figures (WS1 §7): disk and memory apart.
+function eligibleSplit(check) {
+  const el = check.items.filter((i) => i.status === 'eligible' && !['snapshots', 'exports'].includes(i.category) && i.kind !== 'pseudo');
+  return { eligibleBytes: el.filter((i) => !i.memoryBacked).reduce((n, i) => n + i.allocatedBytes, 0), eligibleMemoryBytes: el.filter((i) => i.memoryBacked).reduce((n, i) => n + i.allocatedBytes, 0) };
 }
 
 export function overview(now = Date.now(), { nodusRunning = null, nodusCheckId = CHECK_ID } = {}) {
@@ -205,8 +243,8 @@ export function overview(now = Date.now(), { nodusRunning = null, nodusCheckId =
     targets: [
       {
         key: NODUS_KEY, kind: 'application', id: 1, name: 'Nodus', guest: 'pp-nodus', guestStatus: 'Running',
-        usage: { usedBytes: 3.95e9, sampledAt: new Date(now - 4 * 60000).toISOString() },
-        lastCheck: { checkId: nodusCheckId, finishedAt: check.finishedAt, status: 'complete', totals: check.totals, eligibleBytes: 1.83e9 },
+        usage: { usedBytes: 3.95e9, sampledAt: new Date(now - 4 * 60000).toISOString(), source: 'incus-root-usage' },
+        lastCheck: { checkId: nodusCheckId, finishedAt: check.finishedAt, status: 'complete', totals: check.totals, ...eligibleSplit(check) },
         runningCheckId: nodusRunning,
         alerts: [],
         policy: { source: 'preserved', enabledRules: ['releases', 'snapshots', 'workspaces'], proposedRules: ['caches', 'tempFiles', 'testArtifacts', 'logs', 'history'] },
@@ -239,8 +277,8 @@ export function targetDetail(now = Date.now(), { check = nodusCheck(now), runnin
   };
 }
 
-export function policyResponse({ policy = nodusPolicy(), revision = 1, source = 'preserved' } = {}) {
-  return { policy, defaults: DEFAULT_POLICY, source, revision, effects: nodusEffects() };
+export function policyResponse({ policy = nodusPolicy(), revision = 1, source = 'preserved', updatedAt = null, updatedBy = null, checkId = CHECK_ID } = {}) {
+  return { policy, defaults: DEFAULT_POLICY, source, revision, updatedAt, updatedBy, checkId, effects: nodusEffects() };
 }
 
 /** GET /cleanups/:id for a finished cleanup of the requested ids: one skipped with its reason. */
@@ -248,8 +286,12 @@ export function cleanupResult(check, body, now = Date.now()) {
   const byId = new Map(check.items.map((i) => [i.id, i]));
   const chosen = [...body.items, ...body.snapshots, ...body.exports].map((id) => byId.get(id)).filter(Boolean);
   const [first, ...rest] = chosen;
-  const skipped = first ? [{ id: first.id, label: first.label, reason: 'Changed since the check: it was modified after the storage check, so it was left alone.' }] : [];
+  // Shaped like WS2's result (ws/storage-fixes 70929e70): a changed entry is
+  // set aside under .pp-cleanup-hold-* and named in `parked`.
+  const skipped = first ? [{ id: first.id, label: first.label, reason: PARKED_REASON, ...(first.path ? { parked: [`${first.path.replace(/\/[^/]+$/, '')}/.pp-cleanup-hold-${CLEANUP_ID.slice(4, 12)}-1`] } : {}) }] : [];
   const removed = rest.map((i) => ({ id: i.id, label: i.label, bytes: i.allocatedBytes }));
+  const memory = rest.filter((i) => i.memoryBacked);
+  const snaps = rest.filter((i) => i.kind === 'snapshot');
   const estimateBytes = chosen.reduce((n, i) => n + (i.recoverableBytes ?? i.allocatedBytes), 0);
   const reclaimed = Math.round(removed.reduce((n, i) => n + i.bytes, 0) * 0.4);
   return {
@@ -260,7 +302,13 @@ export function cleanupResult(check, body, now = Date.now()) {
       removed, skipped, failed: [],
       health: 'passed',
       estimateBytes,
-      reclaimed: { guestBytes: reclaimed, datasetBytes: Math.round(reclaimed * 0.9), settling: true },
+      reclaimed: {
+        guestBytes: reclaimed,
+        memoryBytes: memory.length ? memory.reduce((n, i) => n + i.allocatedBytes, 0) : null,
+        datasetBytes: Math.round(reclaimed * 0.9) + snaps.reduce((n, i) => n + i.allocatedBytes, 0),
+        settling: true,
+      },
+      notes: [SETTLING_NOTE],
       afterCheckId: NEW_CHECK_ID,
       remaining: { ...check.totals, guest: { ...check.totals.guest, usedBytes: check.totals.guest.usedBytes - reclaimed, availableBytes: check.totals.guest.availableBytes + reclaimed } },
     },

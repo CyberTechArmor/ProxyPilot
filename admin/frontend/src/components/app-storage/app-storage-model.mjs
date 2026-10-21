@@ -17,7 +17,7 @@
 //   builds no request at all.
 
 import {
-  ALL_ELIGIBLE_SCOPE, CATEGORY_LABELS, CATEGORY_ORDER, ESTIMATE_NOTES, NOTHING_SELECTED, ACK_REQUIRED,
+  ALL_ELIGIBLE_SCOPE, CATEGORY_LABELS, CATEGORY_ORDER, ESTIMATE_NOTES, NOTHING_SELECTED, ACK_REQUIRED, FIGURE_LABELS,
 } from './app-storage-text.js';
 
 export { ALL_ELIGIBLE_SCOPE, NOTHING_SELECTED };
@@ -81,24 +81,44 @@ const order = (key) => {
 };
 
 /** Categories in the fixed order with their items (largest first). */
+/**
+ * Categories in the fixed order with their items (largest first). Sizes are
+ * split by where they live (WS1, contract 2026-10-21 §5): `allocatedBytes`,
+ * `logicalBytes` and `eligibleBytes` are disk only; `memoryBytes` and
+ * `eligibleMemoryBytes` are memory-backed items (such as /tmp); a host-wide
+ * item shared by all applications (`sharedHost`) is counted in neither and
+ * shown as `sharedHostBytes`. A check without the split is split here from
+ * its items. On a pool that shares the host's disk the "not measured
+ * individually" remainder is left out (it is the host's, not this container's).
+ */
 export function categoryRows(check) {
-  const items = Array.isArray(check?.items) ? check.items : [];
+  const hidePseudo = Boolean(check?.totals?.sharedHostFilesystem);
+  const items = (Array.isArray(check?.items) ? check.items : []).filter((i) => !(hidePseudo && i?.kind === 'pseudo'));
   const summaries = new Map((Array.isArray(check?.categories) ? check.categories : []).map((c) => [c.key, c]));
   const keys = new Set([...summaries.keys(), ...items.map((i) => i.category)]);
+  const sum = (list, k = 'allocatedBytes') => list.reduce((n, i) => n + bytesOf(i[k]), 0);
   return [...keys].filter(Boolean).sort((a, b) => order(a) - order(b)).map((key) => {
     const own = items.filter((i) => i.category === key).sort((a, b) => bytesOf(b.allocatedBytes) - bytesOf(a.allocatedBytes));
     const s = summaries.get(key) ?? {};
     const eligible = own.filter(canSelect);
+    const split = s.memoryBytes != null;
+    const counted = own.filter((i) => !i.sharedHost);
+    const disk = counted.filter((i) => !i.memoryBacked);
+    const memory = counted.filter((i) => i.memoryBacked);
+    const pseudoHidden = hidePseudo && (s.itemCount ?? 0) > own.length;
     return {
       key,
       label: s.label || CATEGORY_LABELS[key] || key,
-      status: s.status || (own.length ? summarizeStatus(own) : 'empty'),
-      allocatedBytes: s.allocatedBytes ?? own.reduce((n, i) => n + bytesOf(i.allocatedBytes), 0),
-      logicalBytes: s.logicalBytes ?? own.reduce((n, i) => n + bytesOf(i.logicalBytes), 0),
+      status: displayStatus(s.status || (own.length ? summarizeStatus(own) : 'empty'), own),
+      allocatedBytes: split ? bytesOf(s.allocatedBytes) : sum(disk),
+      logicalBytes: split ? bytesOf(s.logicalBytes) : sum(disk, 'logicalBytes'),
+      memoryBytes: split ? bytesOf(s.memoryBytes) : sum(memory),
+      sharedHostBytes: s.sharedHostBytes != null ? bytesOf(s.sharedHostBytes) : sum(own.filter((i) => i.sharedHost)),
       count: s.count ?? own.reduce((n, i) => n + (Number(i.files) || 0), 0),
-      itemCount: s.itemCount ?? own.length,
+      itemCount: pseudoHidden || s.itemCount == null ? own.length : s.itemCount,
       eligibleCount: eligible.length,
-      eligibleBytes: s.eligibleBytes ?? eligible.reduce((n, i) => n + bytesOf(i.allocatedBytes), 0),
+      eligibleBytes: split ? bytesOf(s.eligibleBytes) : sum(eligible.filter((i) => !i.memoryBacked)),
+      eligibleMemoryBytes: s.eligibleMemoryBytes != null ? bytesOf(s.eligibleMemoryBytes) : sum(eligible.filter((i) => i.memoryBacked)),
       newestMtimeMs: s.newestMtimeMs ?? (own.reduce((m, i) => Math.max(m, Number(i.newestMtimeMs) || 0), 0) || null),
       precision: s.precision ?? (own.some((i) => i.precision === 'at-least') ? 'at-least' : 'exact'),
       separate: SEPARATE_CATEGORIES.has(key),
@@ -107,11 +127,42 @@ export function categoryRows(check) {
   });
 }
 
+// "Some can be cleaned up" only when something in the category can be;
+// a mix of protected and needs-a-look items reads "Needs a look".
+function displayStatus(status, items) {
+  if (status !== 'mixed' && status !== 'eligible') return status;
+  if (items.some(canSelect)) return status;
+  return items.some((i) => i.status === 'investigate') ? 'investigate' : 'protected';
+}
+
 function summarizeStatus(items) {
   const s = new Set(items.map((i) => i.status));
   if (s.size === 1) return [...s][0];
   if (s.has('eligible')) return 'mixed';
   return s.has('investigate') ? 'investigate' : 'protected';
+}
+
+/**
+ * 'files' | 'folders' | 'entries' for a group: the check's own `memberKind`
+ * (WS1, ws/check-fixes f7807cb6) when present, else from its members' kind.
+ */
+export function groupMemberNoun(item) {
+  if (['files', 'folders', 'entries'].includes(item?.memberKind)) return item.memberKind;
+  const kinds = new Set((Array.isArray(item?.members) ? item.members : []).map((m) => m?.kind).filter(Boolean));
+  if (kinds.size === 1) {
+    const [k] = kinds;
+    if (k === 'file') return 'files';
+    if (k === 'directory' || k === 'dir') return 'folders';
+  }
+  return 'entries';
+}
+
+/** An item's hint, unless it only repeats the "Uses memory, not disk" chip. */
+export function itemHint(item) {
+  const hint = typeof item?.hint === 'string' ? item.hint.trim() : '';
+  if (!hint) return null;
+  if (item.memoryBacked && /^uses memory, not disk\.?$/i.test(hint)) return null;
+  return hint;
 }
 
 /** Members of a group item: the first `limit` and how many more there are. */
@@ -312,13 +363,18 @@ export function estimateSelection(check, selection) {
   const allSnapshots = snapshotsInCheck.length > 0 && snapshotsInCheck.every((id) => sel.snapshots.includes(id));
   const held = bytesOf(check?.totals?.dataset?.snapshotsBytes);
   if (allSnapshots && held > snapshotBytes) { snapshotBytes = held; estimate = true; }
-  if (sel.snapshots.length) estimate = true;
+  // Several snapshots (not all) free at least their own figures together:
+  // space they share is in none of them (review 16, WS1 §8).
+  const snapshotsTogether = sel.snapshots.length >= 2 && !allSnapshots;
+  if (snapshotsTogether) atLeast = true;
+  else if (sel.snapshots.length) estimate = true;
   for (const id of sel.exports) exportBytes += recoverableBytes(itemById(check, id));
   diskBytes += snapshotBytes + exportBytes;
   const notes = [];
   const anySnapshotsInCheck = (check?.items || []).some((i) => listOf(i) === 'snapshots');
   if (sel.items.length && anySnapshotsInCheck && !allSnapshots) notes.push(ESTIMATE_NOTES.snapshotsHold);
   if (allSnapshots && sel.snapshots.length) notes.push(ESTIMATE_NOTES.allSnapshots);
+  if (snapshotsTogether) notes.push(ESTIMATE_NOTES.snapshotsTogether);
   if (memoryBytes > 0) notes.push(ESTIMATE_NOTES.memory(formatBytes(memoryBytes)));
   if (atLeast) notes.push(ESTIMATE_NOTES.partial);
   if (journal) notes.push(ESTIMATE_NOTES.journal);
@@ -327,6 +383,15 @@ export function estimateSelection(check, selection) {
     precision: atLeast && !estimate ? 'at-least' : 'about',
     notes,
   };
+}
+
+/**
+ * A figure's plain label by its source (WS1 FIGURE_SOURCES keys). The
+ * server's own labels name tools (df, Incus, ZFS), so an unknown source gets
+ * no label rather than those words (review N4).
+ */
+export function figureLabel(source) {
+  return FIGURE_LABELS[source] || null;
 }
 
 /** "about 1.4 GB" / "at least 1.4 GB of disk and 1.1 GB of memory". */
@@ -409,6 +474,26 @@ export function cleanupEvents(job) {
     .slice(-20);
 }
 
+/**
+ * The measured reclaim by kind (WS2's result: reclaimed.guestBytes = files on
+ * disk in the container, memoryBytes = memory-backed folders such as /tmp,
+ * null when none was cleaned; datasetBytes = the pool, which is where
+ * deleted snapshots show). → [{ key: 'disk'|'memory'|'pool', bytes }]
+ * Memory is listed when it was measured; the pool when snapshots were
+ * deleted or it moved.
+ */
+export function reclaimedParts(reclaimed, { snapshotsDeleted = false } = {}) {
+  const r = reclaimed || {};
+  const parts = [];
+  const disk = reclaimedFigure(r.guestBytes);
+  if (disk != null) parts.push({ key: 'disk', bytes: disk });
+  const memory = reclaimedFigure(r.memoryBytes);
+  if (memory != null) parts.push({ key: 'memory', bytes: memory });
+  const pool = reclaimedFigure(r.datasetBytes);
+  if (pool != null && (pool > 0 || snapshotsDeleted)) parts.push({ key: 'pool', bytes: pool });
+  return parts;
+}
+
 /** Space reclaimed as measured: a negative or missing figure is reported as no change measured yet. */
 export function reclaimedFigure(bytes) {
   if (bytes == null || !Number.isFinite(Number(bytes))) return null;
@@ -432,6 +517,14 @@ export function headerFigures(check) {
     snapshotsBytes: t.dataset?.snapshotsBytes ?? null,
     memoryBacked: Array.isArray(t.memoryBacked) ? t.memoryBacked.filter((m) => m && m.mount) : [],
     unattributedBytes: t.unattributedBytes ?? null,
+    // WS1 §6: on a dir/btrfs pool the container sees the host's shared disk.
+    sharedHost: Boolean(t.sharedHostFilesystem || t.guest?.shared),
+    // The container's own figure on its pool (with snapshots); on a shared
+    // host disk it is the "Used" shown (review M10).
+    containerUsedBytes: t.usageBytes ?? null,
+    usedSource: t.guest?.source ?? null,
+    usedSourceLabel: t.guest?.label ?? null,
+    onDiskSource: t.dataset?.source ?? null,
     usedPct: t.guest?.usedBytes != null && (t.limit?.bytes || t.guest?.totalBytes)
       ? Math.round((100 * t.guest.usedBytes) / (t.limit?.bytes || t.guest.totalBytes)) : null,
   };

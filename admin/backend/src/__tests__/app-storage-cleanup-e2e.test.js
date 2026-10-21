@@ -49,7 +49,7 @@ function worldExec(root) {
       if (/STALE_WRITERS:/.test(raw) && !/printf '%s'/.test(raw)) return { code: 0, stdout: 'STALE_WRITERS:0\n' };
       if (/printf '%s' '[A-Za-z0-9+/=]+' \| base64 -d/.test(raw)) {
         const data = JSON.parse(Buffer.from(unwrapContained(raw).match(/ '([A-Za-z0-9+/=]+)'\n$/)[1], 'base64').toString());
-        if (data.action === 'verify') { state.verify.push(data); return { code: 0, stdout: JSON.stringify({ ok: true, target: data.expected, sha: data.sha }), stderr: 'CONTAINMENT:systemd e2e\n' }; }
+        if (data.action === 'verify') { state.verify.push(data); if (state.verifyFail) return { code: 1, stdout: JSON.stringify({ ok: false, code: 'HEALTH_FAILED' }), stderr: 'CONTAINMENT:systemd e2e\n' }; return { code: 0, stdout: JSON.stringify({ ok: true, target: data.expected, sha: data.sha }), stderr: 'CONTAINMENT:systemd e2e\n' }; }
         return runProgram(data, root);
       }
       // The storage check's collector. WS1's world runs it with `service: null`
@@ -115,7 +115,7 @@ async function setup(t, { history = true } = {}) {
     return { job: getJob(mainDb, job.id), r };
   };
   const P = rel => path.join(root, rel.replace(/^\//, ''));
-  return { root, world, mock2Db, mainDb, storage, check, find, runJob, P, state, dispatched, bell };
+  return { root, world, mock2Db, mainDb, storage, check, find, runJob, P, state, dispatched, bell, exec };
 }
 
 const quarantined = dir => { const out = []; const walk = d => { for (const n of fs.readdirSync(d)) { const f = path.join(d, n); if (n.startsWith('.pp-cleanup-')) out.push(f); const s = fs.lstatSync(f); if (s.isDirectory() && !s.isSymbolicLink()) walk(f); } }; walk(dir); return out; };
@@ -221,18 +221,30 @@ test('end to end: without a recorded previous release or deploy history, no rele
   assert.equal(fs.existsSync(w.P(`${RELEASE_ROOT}/${OLD}/.proxypilot-release.json`)), true);
 });
 
-test('a cleanup alert the host runner posts is delivered once by the backend monitor', { skip }, async t => {
+test('an alert the host runner posts is delivered by the backend monitor exactly once, also after a backend restart', { skip }, async t => {
   const w = await setup(t);
-  const runnerSide = cleanupDepsFor({ mainDb: w.mainDb, mock2Db: w.mock2Db, bell: w.bell });
-  await runnerSide.monitor.postCleanupAlert('application:1', { ok: false, failedCount: 2, healthFailed: true }, { name: 'Nodus' });
-  const open = w.mainDb.prepare("SELECT dedupe_key, level FROM notifications WHERE dismissed_at IS NULL AND dedupe_key LIKE 'appstorage:%' ORDER BY dedupe_key").all();
-  assert.deepEqual(open.map(r => r.dedupe_key), ['appstorage:cleanup:application:1', 'appstorage:health:application:1']);
+  // The cleanup's health check fails in the runner: it posts the health
+  // alert to the bell but cannot deliver it, and keeps it with the row.
+  w.state.verifyFail = true;
+  const cache = w.find(it => it.path === '/var/lib/nodus/.cache/ms-playwright', "the service user's browser cache");
+  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: [cache.id], origin: 'user', userId: 'admin' });
+  await w.runJob();
+  const row = w.storage.store.getCleanup(approved.cleanupId);
+  assert.equal(row.result.health, 'failed');
+  assert.deepEqual(row.result.alertsUndelivered.map(m => m.event), ['appstorage.health']);
   assert.equal(w.dispatched.length, 0, 'the runner writes the bell row only');
-  await w.storage.monitor.runOnce();
-  assert.deepEqual(w.dispatched.map(m => m.event).sort(), ['appstorage.cleanup', 'appstorage.health']);
-  await w.storage.monitor.runOnce();
-  assert.equal(w.dispatched.length, 2, 'delivered once, not every round');
-  await runnerSide.monitor.postCleanupAlert('application:1', { ok: true, failedCount: 0, healthFailed: false }, { name: 'Nodus' });
-  await w.storage.monitor.runOnce();
-  assert.equal(w.storage.monitor.active.has('appstorage:cleanup:application:1'), false, 'a runner-resolved alert leaves the active set');
+  // The backend restarts before its monitor runs: a new instance hydrates its
+  // active set from the bell (the alert is already there) and runs a pass.
+  const restarted = createAppStorage({ mock2Db: w.mock2Db, mainDb: w.mainDb, exec: w.exec, notifications: { ...w.bell, dispatch: m => { w.dispatched.push(m); } }, logger: { error() {}, log() {} } });
+  await restarted.monitor.hydrate();
+  await restarted.monitor.runOnce();
+  assert.deepEqual(w.dispatched.map(m => [m.event, m.dedupe_key]), [['appstorage.health', 'appstorage:health:application:1']], 'delivered once after the restart');
+  assert.ok(w.storage.store.getCleanup(approved.cleanupId).result.alertDispatchedAt);
+  await restarted.monitor.runOnce();
+  assert.equal(w.dispatched.length, 1, 'a second pass delivers nothing');
+  // A later run whose health check passes resolves it (in the runner); it leaves the active set.
+  await cleanupDepsFor({ mainDb: w.mainDb, mock2Db: w.mock2Db, bell: w.bell }).monitor.postCleanupAlert('application:1', { ok: true, failedCount: 0, healthFailed: false }, { name: 'Nodus' });
+  await restarted.monitor.runOnce();
+  assert.equal(restarted.monitor.active.has('appstorage:health:application:1'), false);
+  assert.equal(w.dispatched.length, 1);
 });

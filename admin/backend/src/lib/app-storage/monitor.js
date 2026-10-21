@@ -105,12 +105,17 @@ export function createGuestLister(exec, { ttlMs = 60_000, now = () => Date.now()
 export async function postCleanupAlert(targetKey, { ok = true, failedCount = 0, healthFailed = undefined } = {}, { name = null, notifications = null } = {}) {
   const n = notifications || await defaultNotifications();
   const label = name || targetKey;
-  const out = { posted: [], resolved: [] };
+  // undelivered: new alerts posted where nothing can deliver them (the host
+  // runner has no delivery channels). The caller keeps them with the cleanup
+  // row; the backend monitor delivers them (deliverRunnerAlerts).
+  const out = { posted: [], resolved: [], undelivered: [] };
   const isActive = (key) => { try { return (n.list?.({ limit: 500 }) || []).some((row) => row.dedupe_key === key); } catch { return false; } };
   const raise = async (alert) => {
     const isNew = !isActive(alert.key);
     try { n.post({ level: alert.level, title: alert.title, body: alert.body, source: SOURCE, source_id: targetKey, dedupe_key: alert.key }); } catch { /* best effort */ }
-    if (isNew) { try { await n.dispatch?.({ event: alert.event, level: alert.level, title: alert.title, body: alert.body, link: linkFor(targetKey), dedupe_key: alert.key }); } catch { /* best effort */ } }
+    const message = { event: alert.event, level: alert.level, title: alert.title, body: alert.body, link: linkFor(targetKey), dedupe_key: alert.key };
+    if (isNew && typeof n.dispatch === 'function') { try { await n.dispatch(message); } catch { /* best effort */ } }
+    else if (isNew) out.undelivered.push(message);
     out.posted.push(alert.key);
   };
   const clear = (key, reason) => { try { if (n.resolve(key, { reason })) out.resolved.push(key); } catch { /* best effort */ } };
@@ -191,7 +196,7 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
         if (gr.raise) { await raise(growthAlert({ name: t.name, guest: t.guest, targetKey: t.key, growth: gr.growth, windowHours }), t.key); summary.raised.push(growthKey); }
         else if (await clear(growthKey, 'growth fell below the threshold')) summary.resolved.push(growthKey);
       }
-      await relayRunnerAlerts(summary);
+      await deliverRunnerAlerts(summary);
       return summary;
     } catch (e) {
       logger?.error?.('[app-storage-monitor] runOnce failed', e?.message || e);
@@ -201,23 +206,32 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
 
   // The cleanup job runs in the host runner, which writes the bell row but
   // cannot reach the delivery channels (they need the backend's database
-  // connection and keys). A cleanup or health alert in the bell that this
-  // monitor did not raise is delivered once here; one the runner resolved
-  // leaves the active set.
-  async function relayRunnerAlerts(summary) {
+  // connection and keys). It keeps the alerts it could not deliver with the
+  // cleanup row (result.alertsUndelivered); each pass of this monitor —
+  // the first one after a restart included — delivers every such alert that
+  // is still open, exactly once, and records result.alertDispatchedAt on the
+  // row (delivered, then recorded: a crash in between delivers it again
+  // rather than never). Bell rows the runner resolved leave the active set.
+  async function deliverRunnerAlerts(summary) {
     const bell = await n();
     let rows = [];
     try { rows = bell.list?.({ limit: 1000 }) || []; } catch { return; }
-    const open = new Set();
-    for (const row of rows) {
-      const k = parseAlertKey(row?.dedupe_key);
-      if (!k || !['cleanup', 'health'].includes(k.kind)) continue;
-      open.add(row.dedupe_key);
-      if (active.has(row.dedupe_key)) continue;
-      active.add(row.dedupe_key);
-      try { await bell.dispatch?.({ event: `appstorage.${k.kind}`, level: row.level, title: row.title, body: row.body, link: linkFor(k.targetKey), dedupe_key: row.dedupe_key }); } catch (e) { logger?.error?.('[app-storage-monitor] dispatch failed', e?.message); }
-      summary.relayed = [...(summary.relayed || []), row.dedupe_key];
+    const open = new Set(rows.map((r) => r?.dedupe_key).filter((k) => { const a = parseAlertKey(k); return a && ['cleanup', 'health'].includes(a.kind); }));
+    for (const t of listTargets()) {
+      let cleanups = [];
+      try { cleanups = store.listCleanups(t.key, { limit: 20 }) || []; } catch { cleanups = []; }
+      for (const c of cleanups) {
+        const pending = Array.isArray(c?.result?.alertsUndelivered) ? c.result.alertsUndelivered : [];
+        if (!pending.length || c.result.alertDispatchedAt) continue;
+        for (const m of pending) {
+          if (!m || !open.has(m.dedupe_key)) continue; // resolved meanwhile: nothing to deliver
+          try { await bell.dispatch?.({ event: m.event, level: m.level, title: m.title, body: m.body, link: m.link, dedupe_key: m.dedupe_key }); } catch (e) { logger?.error?.('[app-storage-monitor] dispatch failed', e?.message); }
+          summary.relayed = [...(summary.relayed || []), m.dedupe_key];
+        }
+        try { store.updateCleanup(c.id, { result: { ...c.result, alertDispatchedAt: new Date(now()).toISOString() } }); } catch (e) { logger?.error?.('[app-storage-monitor] could not record the delivery', e?.message); }
+      }
     }
+    for (const key of open) active.add(key);
     for (const key of [...active]) { const k = parseAlertKey(key); if (k && ['cleanup', 'health'].includes(k.kind) && !open.has(key)) active.delete(key); }
   }
 

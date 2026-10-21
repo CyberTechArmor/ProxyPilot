@@ -137,7 +137,7 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   };
   // monitor.js: ok/failedCount post or resolve the cleanup alert; healthFailed
   // true posts the health alert, false resolves it, undefined leaves it.
-  const alert = async outcome => { if (!deps.monitor?.postCleanupAlert) return; try { await deps.monitor.postCleanupAlert(row.targetKey, outcome, { name }); } catch { /* an alert never changes the result */ } };
+  const alert = async outcome => { if (!deps.monitor?.postCleanupAlert) return null; try { return await deps.monitor.postCleanupAlert(row.targetKey, outcome, { name }); } catch { return null; /* an alert never changes the result */ } };
 
   // ── executors ──
   const guestProgram = async (data, timeoutMs = 600_000) => {
@@ -486,7 +486,14 @@ export async function runStorageCleanupOperation({ params, exec, job, prior = nu
   // Failures post the cleanup alert and a clean run resolves it; a failed
   // health check posts the health alert and a passing one resolves it. A
   // cancelled run neither posts nor resolves anything.
-  if (!cancelled) await alert({ ok: status !== 'failed' && !acc.failed.length, failedCount: acc.failed.length, healthFailed: health === 'failed' ? true : health === 'passed' ? false : undefined });
+  if (!cancelled) {
+    const posted = await alert({ ok: status !== 'failed' && !acc.failed.length, failedCount: acc.failed.length, healthFailed: health === 'failed' ? true : health === 'passed' ? false : undefined });
+    // Alerts this process could not deliver (the host runner has no delivery
+    // channels) stay with the row; the backend monitor delivers them once.
+    if (posted?.undelivered?.length) {
+      try { await store.updateCleanup(row.id, { result: { ...out.result, alertsUndelivered: posted.undelivered } }); } catch { /* the bell row is still there */ }
+    }
+  }
   if (cancelled) throw cancelled;
   return out;
 }

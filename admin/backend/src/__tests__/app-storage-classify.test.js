@@ -161,10 +161,10 @@ test('while a build runs, caches and test output are protected', async (t) => {
 
 test('host transfer leftovers: eligible when no application job is open anywhere, else protected', async (t) => {
   const a = await nodusCheck(t);
-  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').status, 'eligible');
-  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').location, 'host');
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3').status, 'eligible');
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3').location, 'host');
   const b = await nodusCheck(t, { activity: { anyApplicationJobOpen: true } });
-  assert.equal(b.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').status, 'protected');
+  assert.equal(b.at('/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3').status, 'protected');
 });
 
 test('snapshots and exports are separate items; protected while a restore runs or an export is being prepared', async (t) => {
@@ -391,9 +391,9 @@ test('a walk cut by its budget, or with unreadable parts, has an unknown age: Ne
 test('project check results and host transfer bundles cut by the budget are not eligible either', () => {
   const p = run(projTarget, facts([{ path: '/srv/app/.mock2/evidence', depth: 1, role: 'evidence' }], [{ path: '/srv/app/.mock2/evidence/run-old', r: 0, partial: true }]));
   assert.equal(p.at('/srv/app/.mock2/evidence/run-old').status, 'investigate');
-  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: '/var/lib/proxypilot/application-release-transfers', role: 'host-transfers' }], items: [{ path: '/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3', r: 0, type: 'dir', partial: true, mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: '/var/lib/proxypilot/application-release-transfers', role: 'host-transfers' }], items: [{ path: '/var/lib/proxypilot/application-release-transfers/bundle-app2-a1b2c3', r: 0, type: 'dir', partial: true, mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
   const a = run(appTarget, facts([], []), { host });
-  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').status, 'investigate');
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-app2-a1b2c3').status, 'investigate');
 });
 
 test('on real files, a check cut by its budget makes nothing eligible through an age rule', async (t) => {
@@ -462,4 +462,35 @@ test('history: dumps stay together with the environment copies of the same job; 
   // The automatic history rule removes whole old sets only.
   const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
   assert.deepEqual(sel.items.map((id) => r.items.find((x) => x.id === id).setJob).sort(), ['D1', 'D2', 'D3']);
+});
+
+/* ---- review finding 9: host transfer bundles belong to the application their name names ---- */
+
+test('two applications: an attributed bundle is only its own application\'s; an unattributed one is shared and counted by neither', () => {
+  const TR = '/var/lib/proxypilot/application-release-transfers';
+  const old = NOW - 30 * W.DAY;
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: TR, role: 'host-transfers' }], items: [
+    { path: `${TR}/bundle-app1-Xy12Ab`, r: 0, type: 'dir', allocatedBytes: 1000, mtimeMs: old, newestMtimeMs: old },
+    { path: `${TR}/bundle-app2-Zz99Qq`, r: 0, type: 'dir', allocatedBytes: 2000, mtimeMs: old, newestMtimeMs: old },
+    { path: `${TR}/bundle-a1b2c3`, r: 0, type: 'dir', allocatedBytes: 4000, mtimeMs: old, newestMtimeMs: old },
+  ] } };
+  const app1 = { ...appTarget, key: 'application:1', id: 1 };
+  const app2 = { ...appTarget, key: 'application:2', id: 2 };
+  const one = run(app1, facts([], []), { host });
+  const two = run(app2, facts([], []), { host });
+  assert.equal(one.at(`${TR}/bundle-app1-Xy12Ab`).status, 'eligible');
+  assert.equal(one.at(`${TR}/bundle-app2-Zz99Qq`), undefined, 'another application\'s bundle is not listed');
+  assert.equal(two.at(`${TR}/bundle-app2-Zz99Qq`).status, 'eligible');
+  assert.equal(two.at(`${TR}/bundle-app1-Xy12Ab`), undefined);
+  for (const r of [one, two]) {
+    const shared = r.at(`${TR}/bundle-a1b2c3`);
+    assert.deepEqual([shared.status, shared.sub, shared.sharedHost, shared.action], ['investigate', 'shared', true, null]);
+    assert.match(shared.reason, /does not say which application left it/);
+    const archives = r.categories.find((c) => c.key === 'archives');
+    assert.equal(archives.sharedHostBytes, 4000);
+  }
+  assert.equal(one.categories.find((c) => c.key === 'archives').allocatedBytes, 1000, 'the shared bundle is in no application\'s total');
+  assert.equal(two.categories.find((c) => c.key === 'archives').allocatedBytes, 2000);
+  const eligibleSum = [one, two].reduce((n, r) => n + r.categories.find((c) => c.key === 'archives').eligibleBytes, 0);
+  assert.equal(eligibleSum, 3000, 'across the overview every bundle is counted once at most');
 });

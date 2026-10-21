@@ -87,8 +87,11 @@ export function summarizeCategories(items) {
     }
     const eligible = list.filter((it) => it.status === 'eligible');
     // Disk figures are disk only: memory-backed (tmpfs) items are counted apart.
-    const disk = list.filter((it) => !it.memoryBacked);
-    const memory = list.filter((it) => it.memoryBacked);
+    // A host-wide shared item (a transfer bundle no application name claims) is
+    // listed but belongs to no single application: kept out of the totals.
+    const own = list.filter((it) => !it.sharedHost);
+    const disk = own.filter((it) => !it.memoryBacked);
+    const memory = own.filter((it) => it.memoryBacked);
     return {
       key: c.key,
       label: c.label,
@@ -96,6 +99,7 @@ export function summarizeCategories(items) {
       logicalBytes: disk.reduce((s, it) => s + n(it.logicalBytes), 0),
       allocatedBytes: disk.reduce((s, it) => s + n(it.allocatedBytes), 0),
       memoryBytes: memory.reduce((s, it) => s + n(it.allocatedBytes), 0),
+      sharedHostBytes: list.filter((it) => it.sharedHost).reduce((s, it) => s + n(it.allocatedBytes), 0),
       count: list.reduce((s, it) => s + (it.kind === 'group' ? n(it.memberCount) : ['snapshot', 'export', 'journal', 'pseudo'].includes(it.kind) ? 1 : Math.max(1, n(it.files))), 0),
       itemCount: list.length,
       eligibleCount: eligible.length,

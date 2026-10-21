@@ -550,7 +550,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
   for (const it of host?.hostFiles?.items || []) {
     if (it.missing) continue;
     const root = hostRoots[it.r] || {};
-    if (root.role === 'host-transfers') items.push(fileItem(it, root, ageGuard(transferClass(it, env), it, root.role)));
+    if (root.role === 'host-transfers') { const cls = ageGuard(transferClass(it, env), it, root.role); if (cls) items.push(fileItem(it, root, cls)); }
     else if (root.role === 'host-repo') items.push(fileItem(it, root, { category: 'data', status: 'protected', location: 'host', reason: "The project's source history, kept by ProxyPilot (on the host)." }));
   }
   // Snapshots and exports: separate selections.
@@ -637,13 +637,28 @@ function journalItem(it, root, facts, policy) {
   };
 }
 
-function transferClass(it, { context, now }) {
+// Host transfer bundles live in ONE host-wide folder. A bundle belongs to an
+// application only when its name says so (bundle-app<id>-…); another
+// application's bundle is not listed at all, and a bundle whose name names no
+// application is listed as shared (Needs a look, never cleanable from an
+// application's page, kept out of the category totals so no application —
+// and no overview — counts it as its own).
+export const ATTRIBUTED_BUNDLE_RE = /^bundle-app([1-9][0-9]{0,15})-[A-Za-z0-9]{1,40}$/;
+export function bundleOwner(name) {
+  const m = ATTRIBUTED_BUNDLE_RE.exec(String(name || ''));
+  return m ? Number(m[1]) : null;
+}
+
+function transferClass(it, { target, context, now }) {
   const name = it.name || basename(it.path);
   if (!/^bundle-/.test(name)) return { category: 'archives', status: 'investigate', location: 'host', reason: "Not created by ProxyPilot's release process." };
+  const owner = bundleOwner(name);
+  if (owner == null) return { category: 'archives', status: 'investigate', location: 'host', sub: 'shared', reason: "In the host's shared transfer folder; its name does not say which application left it, so it is not cleaned up from an application's page.", extra: { sharedHost: true } };
+  if (target.kind !== 'application' || owner !== Number(target.id)) return null;
   if (it.type === 'link') return { category: 'archives', status: 'investigate', location: 'host', reason: 'A link (never followed).' };
   if (context.anyApplicationJobOpen) return { category: 'archives', status: 'protected', location: 'host', reason: 'An application build is running; transfer copies may be in use.' };
   if (tooYoung(it, now, WORKSPACE_MIN_AGE_MS)) return { category: 'archives', status: 'protected', location: 'host', reason: 'Changed in the last hour.' };
-  return { category: 'archives', status: 'eligible', location: 'host', reason: 'A transfer copy left by an interrupted build.' };
+  return { category: 'archives', status: 'eligible', location: 'host', reason: 'A transfer copy left by an interrupted build of this application.' };
 }
 
 /** The scan roots on the host that classification knows (for WS2's approved roots). */

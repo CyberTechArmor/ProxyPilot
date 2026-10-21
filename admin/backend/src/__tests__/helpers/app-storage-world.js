@@ -136,8 +136,8 @@ export function buildNodusGuest(root, now = Date.now()) {
   file(root, 'var/cache/apt/archives/nodejs_22.deb', 9000);
   file(root, 'var/cache/apt/archives/lock', 0);
   // Host side: a transfer bundle left by an interrupted build.
-  file(root, 'host/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3/source.bundle', 5000);
-  age(join(root, 'host/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3'), now - 4 * 3_600_000);
+  file(root, 'host/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3/source.bundle', 5000);
+  age(join(root, 'host/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3'), now - 4 * 3_600_000);
 
   const profile = {
     sourceDir: '/opt/nodus', releaseRoot: RELEASE_ROOT, serviceName: 'nodus.service', healthUrl: 'http://127.0.0.1:3000/ready',

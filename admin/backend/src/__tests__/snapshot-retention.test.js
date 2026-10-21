@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { snapshotRetentionPlan, retentionEventGuest, enforceSnapshotRetention, startSnapshotRetention, SNAPSHOT_RETENTION } from '../lib/snapshot-retention.js';
+import { snapshotRetentionPlan, retentionEventGuest, enforceSnapshotRetention, startSnapshotRetention, SNAPSHOT_RETENTION, setSnapshotLimitsProvider, currentSnapshotLimits } from '../lib/snapshot-retention.js';
 import { createSnapshotWithFallback } from '../lib/setup-engine/restore-snapshot-op.js';
 
 const snapshot = (name, day) => ({ name, created_at: `2026-10-${String(day).padStart(2, '0')}T12:00:00.123456789Z` });
@@ -185,5 +185,70 @@ test('event stream reconnect reconciles snapshots created while disconnected', a
   await flush();
   assert.equal(children.length, 2);
   assert.equal(instance.snapshots.length, 3);
+  stop();
+});
+
+test('snapshot limits may be a function, re-read on every use: a policy change applies to the next snapshot', async () => {
+  const instance = inventory();
+  const { host } = hostFor(instance);
+  let limits = { 'pp-nodus': 3 };
+  let reads = 0;
+  const getter = () => { reads += 1; return limits; };
+  const first = await createSnapshotWithFallback(host, instance.name, 'fourth', { limits: getter });
+  assert.deepEqual(first.retention.deleted, ['oldest']);
+  limits = { 'pp-nodus': 2 };
+  const second = await createSnapshotWithFallback(host, instance.name, 'fifth', { limits: getter });
+  assert.deepEqual(second.retention.deleted, ['second', 'third']);
+  assert.deepEqual(instance.snapshots.map(row => row.name), ['fourth', 'fifth']);
+  assert.ok(reads >= 4, 'the getter is consulted on each use, not captured once');
+  limits = {};
+  const third = await createSnapshotWithFallback(host, instance.name, 'sixth', { limits: getter });
+  assert.equal(third.retention.skipped, true, 'a rule turned off prunes nothing');
+  assert.equal(instance.snapshots.length, 3);
+});
+
+test('an installed provider feeds the default limits; a failing provider prunes nothing; no provider means the static file', async () => {
+  try {
+    setSnapshotLimitsProvider(() => ({ 'pp-shop': 1 }));
+    const shop = { name: 'pp-shop', snapshots: [snapshot('a', 1), snapshot('b', 2)] };
+    const { host } = hostFor(shop);
+    const r = await createSnapshotWithFallback(host, 'pp-shop', 'c');
+    assert.deepEqual(r.retention.deleted, ['a', 'b']);
+    assert.equal(retentionEventGuest({ type: 'lifecycle', metadata: { action: 'instance-snapshot-created', source: '/1.0/instances/pp-shop/snapshots/c' } }), 'pp-shop');
+    setSnapshotLimitsProvider(() => { throw new Error('policy store unavailable'); });
+    const nodus = inventory();
+    const { host: nhost, calls } = hostFor(nodus);
+    const failed = await createSnapshotWithFallback(nhost, nodus.name, 'fourth');
+    assert.equal(failed.ok, true); assert.equal(failed.retention.skipped, true);
+    assert.match(failed.retention.reason, /unavailable/);
+    assert.equal(calls.some(argv => argv[2] === 'delete'), false);
+  } finally { setSnapshotLimitsProvider(null); }
+  assert.deepEqual(currentSnapshotLimits(), { 'pp-nodus': 3 });
+});
+
+test('the event listener reads the limits getter per event and reconcile() applies a newly limited guest at once', async () => {
+  const shop = { name: 'pp-shop', snapshots: [snapshot('a', 1), snapshot('b', 2), snapshot('c', 3)] };
+  const child = fakeMonitor();
+  const removals = [];
+  let limits = {};
+  const stop = startSnapshotRetention({
+    spawnMonitor: () => child,
+    listInstance: async () => structuredClone(shop),
+    deleteSnapshot: async (guest, row) => { removals.push(row.name); shop.snapshots = shop.snapshots.filter(x => x.name !== row.name); return { ok: true }; },
+    limits: () => limits,
+    schedule: (fn, ms) => ({ fn, ms }), cancel: () => {}, log: () => {},
+  });
+  await flush();
+  child.stdout.write(JSON.stringify({ type: 'lifecycle', metadata: { action: 'instance-snapshot-created', source: '/1.0/instances/pp-shop/snapshots/c' } }) + '\n');
+  await flush();
+  assert.equal(removals.length, 0, 'an unlimited guest is untouched');
+  limits = { 'pp-shop': 2 };
+  stop.reconcile();
+  await flush();
+  assert.deepEqual(removals, ['a']);
+  limits = { 'pp-shop': 1 };
+  child.stdout.write(JSON.stringify({ type: 'lifecycle', metadata: { action: 'instance-snapshot-created', source: '/1.0/instances/pp-shop/snapshots/c' } }) + '\n');
+  await flush();
+  assert.deepEqual(removals, ['a', 'b']);
   stop();
 });

@@ -807,6 +807,10 @@ if (mock2Gate.enabled) {
         audit: (req, action, targetKey, detail) => logAudit(req.user?.id ?? null, action, 'app_storage', String(targetKey), detail, req.ip),
       });
       app.use('/api/app-storage', authenticateToken, blockPendingRole, appStorageRouter);
+      // The cleanup service (requestCleanup/getCleanup/listCleanups): cleanups
+      // run as storage_cleanup jobs on the host runner.
+      const { createBackendCleanupService } = await import('./lib/app-storage/cleanup-deps.js');
+      appStorage.setCleanupService(createBackendCleanupService({ storage: appStorage, mainDb: getDb(), logAudit }));
       // Every 15 minutes (PROXYPILOT_APP_STORAGE_MONITOR_CRON); off with PROXYPILOT_DISABLE_CRONS=1.
       appStorageLib.startAppStorageMonitor({ storage: appStorage })
         .catch((err) => console.error('[app-storage] monitor failed to start:', err?.message || err));
@@ -1047,6 +1051,17 @@ server.listen(PORT, '0.0.0.0', () => {
     },
   });
   process.once('exit', stopSnapshotRetention);
+  // Application storage: enabled storage-policy snapshot rules feed the limits
+  // above (re-read on every use), and the retention scheduler runs the
+  // periodic cleanup rules — over the same shared instance the routes use
+  // (its check service and cleanup service). Without Dev Studio there is no
+  // mock2.db (none is created here) and the static snapshot file stays in force.
+  if (mock2Gate.enabled) {
+    Promise.all([import('./lib/app-storage/index.js'), import('./lib/app-storage/cleanup-deps.js')])
+      .then(async ([lib, deps]) => deps.startAppStorageAutomation({ storage: await lib.getAppStorage(), reconcileSnapshots: stopSnapshotRetention.reconcile, log: (...a) => console.log(...a) }))
+      .then((stop) => process.once('exit', stop))
+      .catch((err) => console.error('[app-storage] retention automation did not start:', err?.message || err));
+  }
   console.log(`Environment: ${process.env.NODE_ENV}`);
   console.log(`Frontend path: ${FRONTEND_PATH}`);
 

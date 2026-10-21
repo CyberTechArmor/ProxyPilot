@@ -5,6 +5,23 @@ export const SNAPSHOT_RETENTION = Object.freeze(JSON.parse(
   readFileSync(new URL('./mcp-policy/snapshot-retention.json', import.meta.url), 'utf8'),
 ).guests);
 
+// The limits in force. A process (the backend, the host runner) installs a
+// provider that merges the enabled storage-policy snapshot rules with the
+// static file (app-storage effectiveSnapshotLimits); without one the static
+// file applies, exactly as before. `limits` arguments below accept a plain
+// object or a function, and a function is re-read on EVERY use, so a policy
+// change applies to the next snapshot without a restart. A provider that
+// fails yields no limits: nothing is pruned rather than a guessed count.
+let limitsProvider = null;
+export function setSnapshotLimitsProvider(provider) { limitsProvider = typeof provider === 'function' ? provider : null; }
+export function currentSnapshotLimits() { return limitsProvider ? limitsProvider() : SNAPSHOT_RETENTION; }
+export function readLimits(limits = currentSnapshotLimits) {
+  let value;
+  try { value = typeof limits === 'function' ? limits() : limits; } catch { return { limits: {}, unavailable: true }; }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { limits: {}, unavailable: true };
+  return { limits: value, unavailable: false };
+}
+
 // Incus timestamps have nanosecond precision; Date.parse alone loses the
 // ordering of snapshots taken within the same millisecond.
 function creationTime(value) {
@@ -30,7 +47,7 @@ export function snapshotRetentionPlan(instance, keep) {
   return snapshots.slice(0, excess).map(({ time, ...snapshot }) => snapshot);
 }
 
-export function retentionEventGuest(event, limits = SNAPSHOT_RETENTION) {
+export function retentionEventGuest(event, limits = currentSnapshotLimits) {
   if (event?.type !== 'lifecycle' || !['instance-snapshot-created', 'instance-snapshot-renamed', 'instance-restored'].includes(event.metadata?.action)) return null;
   let source;
   try { source = new URL(event.metadata.source, 'http://incus.local'); } catch { return null; }
@@ -39,7 +56,7 @@ export function retentionEventGuest(event, limits = SNAPSHOT_RETENTION) {
   if (!match) return null;
   let name;
   try { name = decodeURIComponent(match[1]); } catch { return null; }
-  return Object.hasOwn(limits, name) ? name : null;
+  return Object.hasOwn(readLimits(limits).limits, name) ? name : null;
 }
 
 export async function readRetentionInstance(host, name) {
@@ -52,15 +69,19 @@ export async function readRetentionInstance(host, name) {
 
 // Called inside the creating setup job, using its fenced host executor. A
 // failed creation never reaches here, and every delete is read back as gone.
-export async function enforceSnapshotRetention(host, name, { createdSnapshot = null, limits = SNAPSHOT_RETENTION } = {}) {
-  if (!Object.hasOwn(limits, name)) return { ok: true, skipped: true, deleted: [] };
+export async function enforceSnapshotRetention(host, name, { createdSnapshot = null, limits = currentSnapshotLimits } = {}) {
+  const first = readLimits(limits);
+  if (!Object.hasOwn(first.limits, name)) return { ok: true, skipped: true, deleted: [], ...(first.unavailable ? { reason: 'retention limits unavailable; nothing was pruned' } : {}) };
   const deleted = [];
   try {
     for (let attempts = 0; attempts < 1000; attempts += 1) {
       const instance = await readRetentionInstance(host, name);
       if (createdSnapshot && !instance?.snapshots?.some(snapshot => snapshot.name === createdSnapshot)) throw new Error('the newly created snapshot could not be verified');
-      const oldest = snapshotRetentionPlan(instance, limits[name])[0];
-      if (!oldest) return { ok: true, keep: limits[name], deleted };
+      // Re-read every round: a rule turned off mid-way stops further pruning.
+      const now = readLimits(limits).limits;
+      if (!Object.hasOwn(now, name)) return { ok: true, skipped: true, deleted };
+      const oldest = snapshotRetentionPlan(instance, now[name])[0];
+      if (!oldest) return { ok: true, keep: now[name], deleted };
       if (oldest.name === createdSnapshot) throw new Error('the newly created snapshot is outside the newest retained set');
       const result = await host(['incus', 'snapshot', 'delete', name, oldest.name], { timeoutMs: 5 * 60_000 });
       if (result.code !== 0) throw new Error(`could not prune snapshot ${oldest.name}`);
@@ -77,7 +98,8 @@ export async function enforceSnapshotRetention(host, name, { createdSnapshot = n
 // Events cover direct Incus/API callers too. Deletes go through the ordinary
 // setup engine, bound to the snapshot's timestamp. A busy guest is retried;
 // its lease is never bypassed, including during a restore of an old snapshot.
-export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnapshot, limits = SNAPSHOT_RETENTION, log = console.error, schedule = setTimeout, cancel = clearTimeout }) {
+export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnapshot, limits = currentSnapshotLimits, log = console.error, schedule = setTimeout, cancel = clearTimeout }) {
+  const current = () => readLimits(limits).limits;
   let stopped = false;
   let monitor = null;
   let lines = null;
@@ -98,7 +120,9 @@ export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnaps
       for (let attempts = 0; !stopped && attempts < 1000; attempts += 1) {
         const instance = await listInstance(name);
         if (stopped || !instance) return;
-        const oldest = snapshotRetentionPlan(instance, limits[name])[0];
+        const keep = current()[name];
+        if (keep === undefined) return;
+        const oldest = snapshotRetentionPlan(instance, keep)[0];
         if (!oldest) return;
         const result = await deleteSnapshot(name, oldest);
         if (!result?.ok) {
@@ -108,7 +132,7 @@ export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnaps
         }
         const after = await listInstance(name);
         if (!after || after.snapshots.some(snapshot => snapshot.name === oldest.name)) throw new Error('snapshot deletion was not verified');
-        log('[snapshot-retention] pruned oldest snapshot', { guest: name, snapshot: oldest.name, keep: limits[name] });
+        log('[snapshot-retention] pruned oldest snapshot', { guest: name, snapshot: oldest.name, keep });
       }
       if (!stopped) retry(name, 1000);
     } catch {
@@ -120,7 +144,7 @@ export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnaps
     }
   };
   const enqueue = name => {
-    if (stopped || !Object.hasOwn(limits, name)) return;
+    if (stopped || !Object.hasOwn(current(), name)) return;
     if (running.has(name)) { pending.add(name); return; }
     void drain(name);
   };
@@ -147,11 +171,12 @@ export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnaps
       lines = createInterface({ input: child.stdout });
       lines.on('line', line => {
         if (!line.trim() || line.length > 1024 * 1024) return;
-        try { const name = retentionEventGuest(JSON.parse(line), limits); if (name) enqueue(name); } catch { /* Ignore non-event output; never interpret it as instructions. */ }
+        try { const name = retentionEventGuest(JSON.parse(line), current); if (name) enqueue(name); } catch { /* Ignore non-event output; never interpret it as instructions. */ }
       });
       // Incus does not replay missed events. Reconcile on boot/reconnection.
-      for (const name of Object.keys(limits)) enqueue(name);
-      log('[snapshot-retention] event listener started', { guests: limits });
+      const guests = current();
+      for (const name of Object.keys(guests)) enqueue(name);
+      log('[snapshot-retention] event listener started', { guests });
     } catch {
       log('[snapshot-retention] event listener unavailable; retrying');
       reconnect = schedule(() => { reconnect = null; connect(); }, 3000);
@@ -159,7 +184,7 @@ export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnaps
     }
   };
   connect();
-  return () => {
+  const stop = () => {
     stopped = true;
     if (reconnect !== null) cancel(reconnect);
     for (const timer of retries.values()) cancel(timer);
@@ -168,4 +193,9 @@ export function startSnapshotRetention({ spawnMonitor, listInstance, deleteSnaps
     monitor?.kill();
     monitor = null;
   };
+  // A policy that newly limits a guest is applied at once, not at the next
+  // event for that guest: the caller asks for a reconcile of every guest in
+  // the limits now in force.
+  stop.reconcile = () => { for (const name of Object.keys(current())) enqueue(name); };
+  return stop;
 }

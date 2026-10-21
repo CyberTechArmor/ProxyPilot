@@ -135,9 +135,21 @@ export async function setupRunnerCommand(action, opts = {}, globalOpts = {}, dep
         .then(m => m.getApplicationReleaseService({ dbPath: path.join(path.dirname(o.install.dbPath), 'mock2.db') }));
       return applicationServicePromise;
     });
+    // Application storage (release retention from the storage policy, the
+    // storage cleanup job's dependencies): over this runner's own databases.
+    let appStoragePromise;
+    const appStorage = deps.appStorage !== undefined ? deps.appStorage : (() => {
+      if (!appStoragePromise) appStoragePromise = import('../../../admin/backend/src/lib/app-storage/cleanup-deps.js')
+        .then(m => m.runnerAppStorage({ mainDb: db, mock2DbPath: path.join(path.dirname(o.install.dbPath), 'mock2.db'), log: json ? () => {} : deps.log }));
+      return appStoragePromise;
+    });
+    if ((action === 'serve' || action === 'once') && typeof appStorage === 'function') {
+      // Snapshot jobs this runner executes honour enabled policy limits.
+      try { await (await appStorage()).installSnapshotLimits(); } catch (e) { (json ? () => {} : deps.log)('snapshot limits stay on the static file:', e?.message || e); }
+    }
     const runDeps = {
       db, owner: o.owner, exec: deps.exec, log: json ? () => {} : deps.log, nowMs: deps.nowMs,
-      applicationService,
+      applicationService, appStorage,
       // A guest setup's init script is an input file next to the database
       // (setup-inputs.js), read by reference and verified by digest.
       inputsDir: deps.inputsDir || setupInputsDir(o.install.dbPath),

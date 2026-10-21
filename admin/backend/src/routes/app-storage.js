@@ -27,9 +27,11 @@ const CleanupBody = z.object({
   acknowledgeSnapshotLoss: z.boolean().default(false),
   scope: z.enum(['items', 'categories', 'all-eligible']).default('items'),
 }).strict();
+// expectedRevision is the revision the editor read (0 = nothing stored yet);
+// it is required, so a lost update is always detected (409 POLICY_CHANGED).
 const PolicyBody = z.object({
   policy: z.record(z.any()),
-  expectedRevision: z.number().int().min(0).optional(),
+  expectedRevision: z.number({ required_error: 'is required (the revision you read; 0 when none is stored)', invalid_type_error: 'must be a whole number' }).int().min(0),
 }).strict();
 
 const fail = (code, message, status) => Object.assign(new Error(message), { code, status });
@@ -51,7 +53,7 @@ function cleanupView(c) {
   return { id: c.id, targetKey: c.targetKey, checkId: c.checkId, status: c.status, origin: c.origin, scope: c.scope, selection, result: c.result ?? null, job: c.job ?? null, jobId: c.jobId ?? null, createdAt: c.createdAt, finishedAt: c.finishedAt ?? null };
 }
 
-export function registerAppStorageRoutes(router, { storage, cleanupService = null, requireAdmin, requireSudo, audit = () => {}, now = () => Date.now() } = {}) {
+export function registerAppStorageRoutes(router, { storage, cleanupService = null, requireAdmin, requireSudo, audit = () => {}, now = () => Date.now(), log = (...a) => console.error(...a) } = {}) {
   for (const [name, fn] of Object.entries({ storage, requireAdmin, requireSudo })) {
     if (typeof fn !== 'function' && !(name === 'storage' && fn && typeof fn === 'object')) throw new TypeError(`${name} dependency is required`);
   }
@@ -61,12 +63,19 @@ export function registerAppStorageRoutes(router, { storage, cleanupService = nul
     const c = typeof cleanupService === 'function' ? cleanupService() : cleanupService;
     return c || s?.cleanupService?.() || unavailableCleanupService(s?.store || null);
   };
+  // Only a typed error (one that carries its own HTTP status, written to be
+  // shown) reaches the caller with its code and message. Anything else — a
+  // database error such as SQLITE_BUSY, a file error, a bug — is a 500 with a
+  // generic message; its detail goes to the server log only.
   const wrap = (fn) => async (req, res, next) => {
     try { await fn(req, res); } catch (error) {
       if (res.headersSent) return next(error);
-      const status = Number.isInteger(error?.status) ? error.status : error?.code ? 400 : 500;
-      const message = status === 500 && !error?.code ? 'The storage request failed.' : (error?.message || 'The storage request failed.');
-      res.status(status).json({ error: { code: error?.code || 'APP_STORAGE_FAILED', message, ...(error?.issues ? { issues: error.issues } : {}), ...(error?.ids ? { ids: error.ids } : {}), ...(error?.items ? { items: error.items } : {}) } });
+      const typed = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 && typeof error?.code === 'string';
+      if (!typed) {
+        try { log('[app-storage] request failed', req?.method || '', req?.path || req?.originalUrl || '', error?.code || '', error?.message || error); } catch { /* never fail on logging */ }
+        return res.status(500).json({ error: { code: 'APP_STORAGE_FAILED', message: 'The storage request failed.' } });
+      }
+      res.status(error.status).json({ error: { code: error.code, message: error.message || 'The storage request failed.', ...(error?.issues ? { issues: error.issues } : {}), ...(error?.ids ? { ids: error.ids } : {}), ...(error?.items ? { items: error.items } : {}) } });
     }
   };
   const keyOf = (req) => {

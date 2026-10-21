@@ -7,6 +7,9 @@ import assert from 'node:assert/strict';
 import { createAppStorage, unavailableCleanupService } from '../lib/app-storage/index.js';
 import { checkFreshness, CHECK_MAX_AGE_MS, RUNNING_CHECK_STALE_MS } from '../lib/app-storage/check-service.js';
 import * as W from './helpers/app-storage-world.js';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 function bell() { const rows = []; return { rows, post: (n) => rows.push(n), resolve: () => false, list: () => rows.map((r) => ({ dedupe_key: r.dedupe_key, level: r.level, title: r.title })), dispatch: async () => {} }; }
@@ -132,4 +135,26 @@ test('target detail and the cleanup stand-in', async (t) => {
   const est = s.estimateSelection(check.checkId, { items: [old.id] });
   assert.equal(est.count, 1);
   assert.equal(est.bytes, old.allocatedBytes);
+});
+
+test('the overview\'s "can be cleaned up" figure is disk only; memory-backed temp files are counted apart', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  mkdirSync(join(root, 'tmp'));
+  if (spawnSync('mount', ['-t', 'tmpfs', '-o', 'size=64m', 'none', join(root, 'tmp')]).status !== 0) { t.skip('mounting a tmpfs is not permitted here'); return; }
+  t.after(() => spawnSync('umount', [join(root, 'tmp')]));
+  const world = W.buildNodusGuest(root, NOW);
+  const { mock2Db, mainDb } = W.databases();
+  W.registerNodus(mock2Db, world);
+  const s = createAppStorage({ mock2Db, mainDb, exec: W.scriptedExec({ prefix: root }), now: () => NOW, notifications: bell(), listGuests: async () => new Map(), logger: null });
+  const check = await s.runCheck('application:1');
+  const temp = check.categories.find((c) => c.key === 'temp');
+  const memTemp = check.items.filter((it) => it.category === 'temp' && it.memoryBacked);
+  assert.ok(memTemp.length > 0, '/tmp is memory-backed in this fixture');
+  assert.equal(temp.memoryBytes, memTemp.reduce((n, it) => n + it.allocatedBytes, 0));
+  assert.equal(temp.allocatedBytes, check.items.filter((it) => it.category === 'temp' && !it.memoryBacked).reduce((n, it) => n + it.allocatedBytes, 0), 'only /var/tmp is on disk');
+  assert.ok(temp.eligibleMemoryBytes > 0);
+  const row = (await s.overview()).targets.find((x) => x.key === 'application:1');
+  const diskEligible = check.items.filter((it) => it.status === 'eligible' && !it.memoryBacked && !['snapshots', 'exports'].includes(it.category)).reduce((n, it) => n + (it.kind === 'journal' ? it.recoverableBytes : it.allocatedBytes), 0);
+  assert.equal(row.lastCheck.eligibleBytes, diskEligible);
+  assert.equal(row.lastCheck.eligibleMemoryBytes, temp.eligibleMemoryBytes);
 });

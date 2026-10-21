@@ -142,3 +142,19 @@ test('hard links: the collector records hard-linked bytes per item and the estim
   assert.ok(est.notes.some((n) => /hard links/.test(n)));
   assert.equal(estimateSelection({ items: [item({ id: 'y', allocatedBytes: 5000 })] }, { items: ['y'] }).precision, 'exact');
 });
+
+/* ---- review findings 8 and 12 ---- */
+
+test('categories keep disk and memory apart; "mixed" only when something can be cleaned up', () => {
+  const cats = Object.fromEntries(summarizeCategories([
+    item({ category: 'temp', allocatedBytes: 100, logicalBytes: 90 }),
+    item({ category: 'temp', allocatedBytes: 50, logicalBytes: 40, memoryBacked: true }),
+    item({ category: 'temp', status: 'protected', allocatedBytes: 20, memoryBacked: true }),
+    item({ category: 'other', status: 'protected' }), item({ category: 'other', status: 'investigate' }),
+    item({ category: 'data', status: 'protected' }), item({ category: 'data', status: 'eligible' }),
+  ]).map((c) => [c.key, c]));
+  assert.deepEqual([cats.temp.allocatedBytes, cats.temp.logicalBytes, cats.temp.memoryBytes], [100, 90, 70], 'tmpfs is not counted as disk');
+  assert.deepEqual([cats.temp.eligibleBytes, cats.temp.eligibleMemoryBytes, cats.temp.eligibleCount], [100, 50, 2]);
+  assert.equal(cats.other.status, 'investigate', 'protected and needs-a-look, nothing cleanable');
+  assert.equal(cats.data.status, 'mixed');
+});

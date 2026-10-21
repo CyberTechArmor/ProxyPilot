@@ -63,11 +63,14 @@ export function computeTotals({ facts = null, host = null, items = [] } = {}) {
   };
 }
 
+// 'mixed' only when something in it can be cleaned up; protected and
+// needs-a-look together read as needing a look.
 function categoryStatus(items) {
   if (!items.length) return 'empty';
   const set = new Set(items.map((it) => it.status));
   if (set.size === 1) return items[0].status;
-  return 'mixed';
+  if (set.has('eligible')) return 'mixed';
+  return set.has('investigate') ? 'investigate' : 'protected';
 }
 
 const eligibleBytesOf = (it) => (it.kind === 'journal' ? n(it.recoverableBytes) : n(it.allocatedBytes));
@@ -83,16 +86,21 @@ export function summarizeCategories(items) {
       if (Number.isFinite(it.newestMtimeMs) && (newest == null || it.newestMtimeMs > newest)) newest = it.newestMtimeMs;
     }
     const eligible = list.filter((it) => it.status === 'eligible');
+    // Disk figures are disk only: memory-backed (tmpfs) items are counted apart.
+    const disk = list.filter((it) => !it.memoryBacked);
+    const memory = list.filter((it) => it.memoryBacked);
     return {
       key: c.key,
       label: c.label,
       status: categoryStatus(list),
-      logicalBytes: list.reduce((s, it) => s + n(it.logicalBytes), 0),
-      allocatedBytes: list.reduce((s, it) => s + n(it.allocatedBytes), 0),
+      logicalBytes: disk.reduce((s, it) => s + n(it.logicalBytes), 0),
+      allocatedBytes: disk.reduce((s, it) => s + n(it.allocatedBytes), 0),
+      memoryBytes: memory.reduce((s, it) => s + n(it.allocatedBytes), 0),
       count: list.reduce((s, it) => s + (it.kind === 'group' ? n(it.memberCount) : ['snapshot', 'export', 'journal', 'pseudo'].includes(it.kind) ? 1 : Math.max(1, n(it.files))), 0),
       itemCount: list.length,
       eligibleCount: eligible.length,
-      eligibleBytes: eligible.reduce((s, it) => s + eligibleBytesOf(it), 0),
+      eligibleBytes: eligible.filter((it) => !it.memoryBacked).reduce((s, it) => s + eligibleBytesOf(it), 0),
+      eligibleMemoryBytes: eligible.filter((it) => it.memoryBacked).reduce((s, it) => s + eligibleBytesOf(it), 0),
       newestMtimeMs: newest,
       precision,
       separate: SEPARATE_CATEGORIES.includes(c.key),

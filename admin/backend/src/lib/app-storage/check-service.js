@@ -41,8 +41,13 @@ export function checkView(row) {
   };
 }
 
+/** What can be cleaned up from the files, on disk only (snapshots and exports apart). */
 export function eligibleBytesOf(result) {
   return (result?.categories || []).filter((c) => !SEPARATE_CATEGORIES.includes(c.key)).reduce((s, c) => s + Number(c.eligibleBytes || 0), 0);
+}
+/** The same for memory-backed (tmpfs) files: memory, not disk. */
+export function eligibleMemoryBytesOf(result) {
+  return (result?.categories || []).filter((c) => !SEPARATE_CATEGORIES.includes(c.key)).reduce((s, c) => s + Number(c.eligibleMemoryBytes || 0), 0);
 }
 
 export function createCheckService({
@@ -129,7 +134,7 @@ export function createCheckService({
         key: t.key, kind: t.kind, id: t.id, name: t.name, guest: t.guest,
         guestStatus: g?.status || null,
         usage: g?.usedBytes != null ? { usedBytes: g.usedBytes, sampledAt: guests.checkedAt || checkedAt } : sample ? { usedBytes: sample.usedBytes, sampledAt: sample.sampledAt } : null,
-        lastCheck: last ? { checkId: last.id, finishedAt: last.finishedAt, status: last.status, totals: last.result?.totals || null, eligibleBytes: eligibleBytesOf(last.result) } : null,
+        lastCheck: last ? { checkId: last.id, finishedAt: last.finishedAt, status: last.status, totals: last.result?.totals || null, eligibleBytes: eligibleBytesOf(last.result), eligibleMemoryBytes: eligibleMemoryBytesOf(last.result) } : null,
         runningCheckId: running?.id || null,
         alerts: (alertsFor(t.key) || []).map((a) => ({ key: a.key, level: a.level, title: a.title })),
         policy: pol ? { source: pol.source, enabledRules: pol.enabledRules || [], proposedRules: pol.proposedRules || [] } : null,

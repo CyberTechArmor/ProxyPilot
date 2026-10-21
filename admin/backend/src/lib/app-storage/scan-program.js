@@ -16,6 +16,29 @@
 // with its target string and whether that target exists), never descends into
 // another filesystem, and never writes anything.
 
+// Git inside a guest repository the service user may own: never as root over
+// someone else's repository (git then runs as the repository's owner), with
+// every configuration that can run a command switched off on the command line
+// (command-line -c wins over the repository's own .git/config), no system or
+// global configuration, no pager, no prompts, no hooks and a clean
+// environment. `safe.directory=*` is never used. Shared as source text so the
+// cleanup program can embed the same function (contract-changes.md).
+//   safeGit(cp, fs, repo, args) → { ok, stdout, asUid, reason }
+export const SAFE_GIT_ARGS = Object.freeze(['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.sshCommand=false', '-c', 'protocol.allow=never']);
+export const SAFE_GIT_ENV = Object.freeze({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat', LC_ALL: 'C' });
+export const SAFE_GIT_SOURCE = String.raw`function safeGit(cp,fs,repo,args){
+  let st=null;try{st=fs.lstatSync(repo)}catch(e){st=null}
+  if(!st||!st.isDirectory()||st.isSymbolicLink())return{ok:false,reason:'not a directory'};
+  const env=Object.assign({PATH:process.env.PATH||'/usr/local/bin:/usr/bin:/bin',HOME:'/nonexistent'},${JSON.stringify(SAFE_GIT_ENV)});
+  const opts={encoding:'utf8',maxBuffer:8*1024*1024,timeout:20000,stdio:['ignore','pipe','pipe'],cwd:'/',env};
+  const amRoot=typeof process.getuid==='function'&&process.getuid()===0;
+  let asUid=null;
+  if(st.uid!==0){if(!amRoot&&typeof process.getuid==='function'&&process.getuid()!==st.uid)return{ok:false,reason:'owned by another account'};if(amRoot){opts.uid=st.uid;opts.gid=st.gid;asUid=st.uid}}
+  let r;try{r=cp.spawnSync('git',${JSON.stringify(SAFE_GIT_ARGS)}.concat(['-C',repo],args),opts)}catch(e){return{ok:false,reason:'git could not start'}}
+  if(r.error||r.status!==0)return{ok:false,reason:'git refused or failed',asUid};
+  return{ok:true,stdout:String(r.stdout||''),asUid};
+}`;
+
 const SCAN_PROGRAM_SOURCE = String.raw`
 'use strict';
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process');
@@ -29,6 +52,7 @@ const out={ok:true,node:process.version,pid:process.pid,startedAt:t0,items:[],ro
 function lst(f){try{return fs.lstatSync(f)}catch(e){return null}}
 function note(e){if(out.errors.length<20)out.errors.push(String(e&&e.code||e&&e.message||e).slice(0,120))}
 function run(cmd,args,opts){try{const r=cp.spawnSync(cmd,args,Object.assign({encoding:'utf8',maxBuffer:8*1024*1024,timeout:20000,stdio:['ignore','pipe','pipe']},opts||{}));return r.status===0?String(r.stdout||''):null}catch(e){return null}}
+${SAFE_GIT_SOURCE}
 function unescapeMount(s){return s.replace(/\\([0-7]{3})/g,function(m,o){return String.fromCharCode(parseInt(o,8))})}
 // /proc/mounts: which filesystem each path is on (fstype only; never mount contents).
 const mounts=[];
@@ -75,8 +99,8 @@ if(a.journal){const j=run('journalctl',['--disk-usage']);const m=j&&/take up ([0
 // Tracked test: which of these paths git tracks (nothing is checked out or written).
 for(const t of (Array.isArray(a.tracked)?a.tracked:[])){
   if(!t||!absOk(t.repo)||!Array.isArray(t.paths))continue;const paths=t.paths.filter(function(x){return typeof x==='string'&&x&&!x.startsWith('/')&&!x.split('/').includes('..')}).slice(0,100);
-  const r=run('git',['-c','safe.directory=*','-C',t.repo,'ls-files','-z','--'].concat(paths),{env:Object.assign({},process.env,{GIT_OPTIONAL_LOCKS:'0'})});
-  out.tracked[t.repo]=r==null?{ok:false,paths:[]}:{ok:true,paths:r.split('\0').filter(Boolean).slice(0,5000)};
+  const g=safeGit(cp,fs,t.repo,['ls-files','-z','--'].concat(paths));
+  out.tracked[t.repo]=g.ok?{ok:true,paths:g.stdout.split('\0').filter(Boolean).slice(0,5000),...(g.asUid!=null?{asUid:g.asUid}:{})}:{ok:false,paths:[],reason:g.reason};
 }
 // Items: each depth-0 root is one item; each child of a depth-1 root is one item.
 const roots=(Array.isArray(a.roots)?a.roots:[]).map(function(r,i){const path=expand(r.path);return Object.assign({},r,{i:i,declared:r.path,path:path})});
@@ -98,7 +122,9 @@ for(const r of roots){
   else addItem({path:path,r:r.i,declared:path!==r.path?r.path:undefined});
 }
 const seen=new Set();
-function readSmall(f){const s=lst(f);if(!s||!s.isFile()||s.size>MARKER_MAX)return null;let fd;try{fd=fs.openSync(f,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0));const b=Buffer.alloc(s.size);fs.readSync(fd,b,0,s.size,0);return b.toString('utf8')}catch(e){return null}finally{if(fd!==undefined)try{fs.closeSync(fd)}catch(e){}}}
+// Never blocks on a FIFO swapped in after the lstat (O_NONBLOCK), never follows a link (O_NOFOLLOW),
+// and reads only what fstat proves is a regular file of at most 4 KiB.
+function readSmall(f){const s=lst(f);if(!s||!s.isFile()||s.size>MARKER_MAX)return null;let fd;try{fd=fs.openSync(f,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0)|(fs.constants.O_NONBLOCK||0));const st=fs.fstatSync(fd);if(!st.isFile()||st.size>MARKER_MAX||st.ino!==s.ino||st.dev!==s.dev)return null;const b=Buffer.alloc(st.size);const n=st.size?fs.readSync(fd,b,0,st.size,0):0;return b.subarray(0,n).toString('utf8')}catch(e){return null}finally{if(fd!==undefined)try{fs.closeSync(fd)}catch(e){}}}
 const HEX40=/^[a-f0-9]{40}$/,HEX64=/^[a-f0-9]{64}$/;
 function measure(it,r){
   const st=lst(it.path);if(!st){it.missing=true;return}

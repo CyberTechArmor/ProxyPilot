@@ -6,7 +6,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { RELEASE_CLEANUP_SOURCE, resolveReleaseRetention, releaseContextFromApplication } from './application-release-cleanup.js';
-import { containedScript, parseContainment, reapStaleWritersScript, parseStaleWriters } from './guest-probes.js';
+import { SAFE_GIT_SOURCE } from './safe-git.js';
+import { containedScript, parseContainment, reapStaleWritersScript, reapAttemptScriptsScript, parseStaleWriters } from './guest-probes.js';
 
 import { APPLICATION_JOB_KINDS, applicationGuestName } from './application-deploy-logic.js';
 export { APPLICATION_JOB_KINDS, applicationGuestName, validateApplicationJob } from './application-deploy-logic.js';
@@ -20,14 +21,36 @@ function safeError(code, message) { const e = new Error(message); e.code = code;
 const GUEST_PROGRAM = String.raw`
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');
 ${RELEASE_CLEANUP_SOURCE}
+${SAFE_GIT_SOURCE}
 const a=JSON.parse(Buffer.from(process.argv[1],'base64').toString());
 function fail(code){process.stdout.write(JSON.stringify({ok:false,code}));process.exit(1)}
 function run(cmd,args,opts={}){const r=cp.spawnSync(cmd,args,{encoding:'utf8',maxBuffer:1024*1024,...opts});if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
+// Read-only git (safe-git.js): never as root — as the tree's non-root owner,
+// else nobody — and never with the repository's fsmonitor, hooks, pager,
+// attributes file or ssh command. Only the stage's checkout into root's own
+// fresh clone runs as root (gitRoot).
+function git(dir,args){const r=safeGit(cp,fs,dir,args,{timeout:300000});if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
+function gitRoot(dir,args){const r=safeGit(cp,fs,dir,args,{timeout:300000,asRoot:true});if(r.status!==0)fail('COMMAND_FAILED');return String(r.stdout||'').trim()}
+// The build runs as the service user with .git kept root-owned: the seal
+// checks it is still the directory the stage made, root-owned, with no
+// group or other write on it or its control files.
+function gitMetadataUnchanged(stage,identity){
+ const g=p.join(stage,'.git');let st=null;try{st=fs.lstatSync(g)}catch(e){st=null}
+ if(!st&&!identity)return; // no repository and none recorded: the identity checks below refuse later
+ if(!st||!st.isDirectory()||st.isSymbolicLink()||st.uid!==0||(st.mode&0o022))fail('GIT_METADATA_CHANGED');
+ if(identity&&(st.dev!==Number(identity.dev)||st.ino!==Number(identity.ino)))fail('GIT_METADATA_CHANGED');
+ for(const n of ['config','commondir','gitdir','HEAD','info','info/attributes','info/exclude','hooks']){let s=null;try{s=fs.lstatSync(p.join(g,n))}catch(e){continue}if(s.isSymbolicLink()||s.uid!==0||(s.mode&0o022))fail('GIT_METADATA_CHANGED')}
+}
+// For the pre-seal trim: whether Git tracks rel — true, false, or null when
+// that cannot be told safely (then nothing is removed).
+function tracked(dir,rel){const r=safeGit(cp,fs,dir,['ls-files','--',rel],{timeout:300000});if(r.status!==0)return null;return String(r.stdout||'').trim()!==''}
 function inside(root,x){return x===root||x.startsWith(root+'/')}
 function protectedPath(target){let at='/';for(const part of p.resolve(target).split('/').filter(Boolean)){at=p.join(at,part);if(!fs.existsSync(at))break;const s=fs.lstatSync(at);if(!s.isDirectory()||s.isSymbolicLink()||s.uid!==0||(s.mode&0o022))fail('UNSAFE_RELEASE_DIRECTORY')}}
 function inventory(root){const rows=[];const excluded=[...a.profile.preservePaths,...a.profile.envFiles].filter(x=>inside(a.profile.sourceDir,x)).map(x=>p.relative(a.profile.sourceDir,x));function walk(dir,rel=''){for(const n of fs.readdirSync(dir).sort()){const r=rel?rel+'/'+n:n;if(r==='.git'||r==='.proxypilot-release.json'||excluded.some(x=>r===x||r.startsWith(x+'/')))continue;const f=p.join(dir,n),s=fs.lstatSync(f);if(s.isSymbolicLink()){if(!inside(root,fs.realpathSync(f)))fail('ARTIFACT_SYMLINK_ESCAPE');rows.push([r,'link',fs.readlinkSync(f)])}else if(s.isDirectory())walk(f,r);else if(s.isFile())rows.push([r,'file',crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex')]);else fail('ARTIFACT_TYPE_UNSUPPORTED')}}walk(root);return crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex')}
-function freeze(root){for(const n of fs.readdirSync(root)){const f=p.join(root,n),s=fs.lstatSync(f);fs.lchownSync(f,0,0);if(s.isSymbolicLink())continue;if(s.isDirectory())freeze(f);fs.chmodSync(f,s.isDirectory()?0o755:((s.mode&0o111)?0o555:0o444))}fs.chownSync(root,0,0);fs.chmodSync(root,0o755)}
-function identity(root){let m;try{m=JSON.parse(fs.readFileSync(p.join(root,'.proxypilot-release.json'),'utf8'))}catch{m={sha:run('git',['-C',root,'rev-parse','HEAD'])}}if(!/^[a-f0-9]{40}$/.test(m.sha||''))fail('NO_RELEASE_IDENTITY');return m}
+// The tree the service user built is frozen by the fd-relative walker
+// (safe-remove.js): a link swapped in mid-freeze is never followed.
+function freeze(root){safeRemover(fs,p).freezeTree(root)}
+function identity(root){let m;try{m=JSON.parse(fs.readFileSync(p.join(root,'.proxypilot-release.json'),'utf8'))}catch{m={sha:git(root,['rev-parse','HEAD'])}}if(!/^[a-f0-9]{40}$/.test(m.sha||''))fail('NO_RELEASE_IDENTITY');return m}
 function layout(){if(!a.profile.releaseRoot)fail('RELEASE_ROOT_REQUIRED');protectedPath(p.dirname(a.profile.sourceDir));protectedPath(a.profile.releaseRoot);const link=fs.lstatSync(a.profile.sourceDir);if(!link.isSymbolicLink())fail('SYMLINK_LAYOUT_REQUIRED');if(link.uid!==0)fail('UNSAFE_RELEASE_DIRECTORY');const target=fs.realpathSync(a.profile.sourceDir);const root=fs.realpathSync(a.profile.releaseRoot);if(!inside(root,target)||target===root)fail('RELEASE_OUTSIDE_ROOT');return {target,root,identity:identity(target)}}
 function service(){const unit=a.profile.serviceName;const loaded=run('systemctl',['show',unit,'--property=LoadState','--value']);if(loaded!=='loaded')fail('SERVICE_NOT_LOADED');const workingDir=run('systemctl',['show',unit,'--property=WorkingDirectory','--value']);const start=run('systemctl',['show',unit,'--property=ExecStart','--value']);if(workingDir!==a.profile.sourceDir&&!start.includes(a.profile.sourceDir+'/'))fail('SERVICE_LAYOUT_UNSUPPORTED');return {user:run('systemctl',['show',unit,'--property=User','--value'])||'root',group:run('systemctl',['show',unit,'--property=Group','--value'])||''}}
 let out={ok:true};
@@ -37,21 +60,30 @@ else if(a.action==='prepare'){protectedPath(a.root);fs.mkdirSync(a.root,{recursi
 else if(a.action==='stage'){
  if(fs.existsSync(a.stage)||fs.existsSync(a.release))fail('RELEASE_EXISTS');
  fs.chmodSync(a.bundle,0o600);
- fs.mkdirSync(a.stage,{recursive:true,mode:0o755});run('git',['clone','--no-checkout','--',a.bundle,a.stage]);run('git',['-C',a.stage,'checkout','--detach',a.sha]);
- if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
+ fs.mkdirSync(a.stage,{recursive:true,mode:0o755});run('git',['-c','core.hooksPath=/dev/null','clone','--no-checkout','--',a.bundle,a.stage]);gitRoot(a.stage,['checkout','--detach',a.sha]);
+ if(git(a.stage,['rev-parse','HEAD'])!==a.sha||git(a.stage,['rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
  const pkg=JSON.parse(fs.readFileSync(p.join(a.stage,'package.json'),'utf8'));for(const n of a.scripts)if(typeof pkg.scripts?.[n]!=='string')fail('NAMED_SCRIPT_MISSING');
  // Builds run as the existing service identity; never invent an account.
- if(a.user!=='root')run('chown',['-R',a.user+(a.group?':'+a.group:''),'--',a.stage]);
+ // The work tree is handed over, .git is not: it stays root-owned and not
+ // writable by the service user, and the seal checks it is the same one.
+ const gitDir=p.join(a.stage,'.git');const gst=fs.lstatSync(gitDir);if(!gst.isDirectory()||gst.isSymbolicLink())fail('SOURCE_IDENTITY_MISMATCH');
+ fs.chmodSync(gitDir,0o755);out.gitIdentity={dev:gst.dev,ino:gst.ino};
+ if(a.user!=='root'){const owner=a.user+(a.group?':'+a.group:'');for(const n of fs.readdirSync(a.stage)){if(n==='.git')continue;run('chown',['-R',owner,'--',p.join(a.stage,n)])}run('chown',[owner,'--',a.stage])}
  if(a.user!=='root'){const access=cp.spawnSync('runuser',['-u',a.user,'--','test','-r',p.join(a.stage,'package.json')],{stdio:'ignore'});if(access.status!==0)fail('SERVICE_USER_CANNOT_READ_RELEASE')}
 }
 else if(a.action==='script'){
- const args=['run',a.script];const r=cp.spawnSync(a.user==='root'?'npm':'runuser',a.user==='root'?args:['-u',a.user,'--','npm',...args],{cwd:a.stage,stdio:'ignore',timeout:a.timeout});
+ // .git is root-owned: the build's own git (git describe, rev-parse) is told
+ // this exact work tree is safe (command-line scope, not the repository's).
+ const gitEnv={...process.env,GIT_CONFIG_COUNT:'2',GIT_CONFIG_KEY_0:'safe.directory',GIT_CONFIG_VALUE_0:a.stage,GIT_CONFIG_KEY_1:'safe.directory',GIT_CONFIG_VALUE_1:p.join(a.stage,'.git')};
+ const args=['run',a.script];const r=cp.spawnSync(a.user==='root'?'npm':'runuser',a.user==='root'?args:['-u',a.user,'--','npm',...args],{cwd:a.stage,stdio:'ignore',timeout:a.timeout,env:gitEnv});
  out={ok:r.status===0,code:r.status===0?'SCRIPT_PASSED':'SCRIPT_FAILED'};if(!out.ok){process.stdout.write(JSON.stringify(out));process.exit(1)}
 }
 else if(a.action==='release_cleanup'){out.cleanup=cleanupReleaseArtifacts(fs,p,a);}
 else if(a.action==='seal'){
- // Builds run as the service user. Reclaim the tree before root-owned Git
- // integrity checks; leave Git's repository ownership protection enabled.
+ // Builds run as the service user. The repository metadata must be the
+ // root-owned .git the stage made; then reclaim the tree before the Git
+ // integrity checks (which run unprivileged, safe-git.js).
+ gitMetadataUnchanged(a.stage,a.gitIdentity);
  freeze(a.stage);
  // Generated build output is discarded BEFORE the artifact digest exists; a
  // sealed artifact is never edited. A tracked .cache refuses (as it always
@@ -64,12 +96,16 @@ else if(a.action==='seal'){
   for(const rel of trim){
    if(rel==='.cache'){
     const cache=p.join(a.stage,'.cache');
-    if(run('git',['-C',a.stage,'ls-files','--','.cache'])!=='')fail('TRACKED_BUILD_CACHE');
-    if(fs.existsSync(cache)){fs.rmSync(cache,{recursive:true,force:false});out.trim.removed.push(rel)}
+    const t=tracked(a.stage,'.cache');
+    if(t===true)fail('TRACKED_BUILD_CACHE');
+    if(t===null){if(fs.existsSync(cache))out.trim.kept.push({path:rel,reason:'unknown'});continue}
+    if(fs.existsSync(cache)){safeRemover(fs,p).removePath(cache);out.trim.removed.push(rel)}
     continue;
    }
    if(typeof rel!=='string'||!/^[A-Za-z0-9._\/-]{1,200}$/.test(rel)||rel.startsWith('/')||rel.endsWith('/')||rel.split('/').some(s=>!s||s==='.'||s==='..'||s==='.git')){out.trim.kept.push({path:String(rel).slice(0,200),reason:'invalid'});continue}
-   if(run('git',['-C',a.stage,'ls-files','--',rel])!==''){out.trim.kept.push({path:rel,reason:'tracked'});continue}
+   const t=tracked(a.stage,rel);
+   if(t===null){out.trim.kept.push({path:rel,reason:'unknown'});continue}
+   if(t){out.trim.kept.push({path:rel,reason:'tracked'});continue}
    let at=a.stage,state='ok';
    for(const part of rel.split('/').slice(0,-1)){at=p.join(at,part);let s=null;try{s=fs.lstatSync(at)}catch(e){if(e.code!=='ENOENT')throw e}if(!s){state='absent';break}if(!s.isDirectory()||s.isSymbolicLink()){state='link';break}}
    if(state==='absent')continue;
@@ -77,23 +113,23 @@ else if(a.action==='seal'){
    const target=p.join(a.stage,rel);let st=null;try{st=fs.lstatSync(target)}catch(e){if(e.code!=='ENOENT')throw e}
    if(!st)continue;
    if(st.isSymbolicLink()){out.trim.kept.push({path:rel,reason:'link'});continue}
-   fs.rmSync(target,{recursive:true,force:false});out.trim.removed.push(rel);
+   safeRemover(fs,p).removePath(target);out.trim.removed.push(rel);
   }
  }
- if(run('git',['-C',a.stage,'rev-parse','HEAD'])!==a.sha||run('git',['-C',a.stage,'rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
- if(run('git',['-C',a.stage,'status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
+ if(git(a.stage,['rev-parse','HEAD'])!==a.sha||git(a.stage,['rev-parse','HEAD^{tree}'])!==a.treeSha)fail('SOURCE_IDENTITY_MISMATCH');
+ if(git(a.stage,['status','--porcelain','--untracked-files=no'])!=='')fail('TRACKED_SOURCE_MODIFIED');
  const artifactDigest=inventory(a.stage);const fd=fs.openSync(p.join(a.stage,'.proxypilot-release.json'),'wx',0o444);try{fs.writeFileSync(fd,JSON.stringify({...a.marker,artifactDigest}));fs.fsyncSync(fd)}finally{fs.closeSync(fd)}freeze(a.stage);const stageFd=fs.openSync(a.stage,'r');try{fs.fsyncSync(stageFd)}finally{fs.closeSync(stageFd)}fs.renameSync(a.stage,a.release);const parentFd=fs.openSync(p.dirname(a.release),'r');try{fs.fsyncSync(parentFd)}finally{fs.closeSync(parentFd)}out.artifactDigest=artifactDigest;
 }
 else if(a.action==='artifact'){
  const real=fs.realpathSync(a.release);if(real!==a.release)fail('RELEASE_PATH_CHANGED');const m=identity(real);
  if(m.sha!==a.sha||m.treeSha!==a.treeSha||m.profileDigest!==a.profileDigest||m.evidenceDigest!==a.evidenceDigest)fail('RELEASE_IDENTITY_MISMATCH');
  if(m.artifactDigest!==a.artifactDigest||m.artifactDigest!==inventory(real))fail('RELEASE_ARTIFACTS_CHANGED');
- if(run('git',['-C',real,'rev-parse','HEAD'])!==a.sha||run('git',['-C',real,'status','--porcelain','--untracked-files=no'])!=='')fail('RELEASE_SOURCE_CHANGED');out.marker=m;
+ if(git(real,['rev-parse','HEAD'])!==a.sha||git(real,['status','--porcelain','--untracked-files=no'])!=='')fail('RELEASE_SOURCE_CHANGED');out.marker=m;
 }
 else if(a.action==='links'){
  const paths=[...new Set([...a.profile.preservePaths,...a.profile.envFiles])].filter(x=>inside(a.profile.sourceDir,x));
  const rels=paths.map(x=>p.relative(a.profile.sourceDir,x));
- const tracked=run('git',['-C',a.release,'ls-files','-z']).split('\0').filter(Boolean);
+ const tracked=git(a.release,['ls-files','-z']).split('\0').filter(Boolean);
  for(const rel of rels){
    if(!rel||rel.startsWith('../')||rels.some(other=>other!==rel&&(rel.startsWith(other+'/')||other.startsWith(rel+'/'))))fail('PRESERVED_PATH_OVERLAP');
    if(tracked.some(t=>t===rel||t.startsWith(rel+'/')||rel.startsWith(t+'/')))fail('PRESERVED_SOURCE_COLLISION');
@@ -124,10 +160,15 @@ process.stdout.write(JSON.stringify(out));
 }catch(e){fail(e.code==='ENOENT'?'REQUIRED_PATH_MISSING':'GUEST_OPERATION_FAILED')}
 `;
 
+// Guest refusals that have a plain explanation of their own.
+const PLAIN_GUEST_FAILURES = Object.freeze({
+  GIT_METADATA_CHANGED: "The repository's git metadata changed during the build, so this release was not sealed.",
+});
+
 function guestScript(data) { return `node -e ${quote(GUEST_PROGRAM)} ${quote(Buffer.from(JSON.stringify(data)).toString('base64'))}\n`; }
 export { guestScript as applicationGuestScript };
 
-export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, releaseRetention = null, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+export async function runApplicationReleaseOperation({ kind, params, exec, job, prior = null, service, releaseRetention = null, releaseHistory = null, hostFs = fs, hostRoot = '/var/lib/proxypilot/application-release-transfers', sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
   if (typeof service === 'function') service = await service();
   if (!service) { const m = await import('../../mock2/application-releases.js'); service = await m.getApplicationReleaseService(); }
   const reference = { sha: params.sha, profileRevision: params.profileRevision, profileDigest: params.profileDigest };
@@ -143,11 +184,17 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   if (job.app !== container) throw safeError('GUEST_IDENTITY_MISMATCH', 'The saved profile does not match the locked application guest.');
   if (profile.digest !== params.profileDigest || profile.revision !== params.profileRevision || candidate.sha !== params.sha || candidate.treeSha !== params.treeSha) throw safeError('PROFILE_CHANGED', 'Saved application profile or candidate changed; create a new job.');
   const root = profile.releaseRoot || `/var/lib/proxypilot/application-releases/${params.applicationId}`;
-  // The recorded rollback release and the validated candidate waiting to be
-  // deployed are kept by retention; the guest re-derives the rest itself.
-  let releaseContext = { previousSha: null, rollback: null, protect: [] };
+  // The facts the guest decides the release roles from (describeReleases):
+  // the recorded previous release, the deploy history's previous release
+  // (releaseHistory → lib/app-storage/release-history.js) and the passed
+  // validations. With none of them the guest removes no release at all.
+  let releaseContext = { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] };
   if (retention && typeof service.getApplication === 'function') {
-    try { releaseContext = releaseContextFromApplication(await service.getApplication(params.applicationId), { root }); } catch { /* the guest falls back to the release markers */ }
+    // No history source: the live record's own previousSha (undefined). A
+    // source that fails: unknown (null), so no release is removed.
+    let previousLive;
+    if (typeof releaseHistory === 'function') { try { previousLive = (await releaseHistory(params.applicationId)) ?? null; } catch { previousLive = null; } }
+    try { releaseContext = releaseContextFromApplication(await service.getApplication(params.applicationId), { root, previousLive }); } catch { /* no context: the guest removes no release */ }
   }
   const validation = candidate.validation || prepared.validation;
   const release = kind === 'application_validate' ? `${root}/${candidate.sha}-p${profile.revision}-${job.id}` : validation?.releasePath;
@@ -159,7 +206,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     job.fence({ safe: !disruptive });
     if (parseContainment(r?.stderr)?.kind === 'none') throw safeError('CONTAINMENT_UNAVAILABLE', 'Application scripts require guest process containment.');
     let answer; try { answer = JSON.parse(String(r?.stdout || '').trim()); } catch { throw safeError('GUEST_RESULT_INVALID', 'The application operation did not return a valid bounded result.'); }
-    if (r.code !== 0 || !answer.ok) throw safeError(answer.code || 'GUEST_FAILED', `Application operation ${action} failed (${answer.code || 'unknown'}). Existing logs and data were not returned.`);
+    if (r.code !== 0 || !answer.ok) throw safeError(answer.code || 'GUEST_FAILED', PLAIN_GUEST_FAILURES[answer.code] || `Application operation ${action} failed (${answer.code || 'unknown'}). Existing logs and data were not returned.`);
     return answer;
   };
   const mark = (phase, data = {}) => { job.fence({ safe: !disruptive }); job.checkpoint(phase, { applicationRelease: true, resumable: false, disruptive, ...data }); job.event?.('step', phase); };
@@ -175,7 +222,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     if (observed.target !== prior.previousTarget) await guest('switch', { expected: prior.nextTarget, target: prior.previousTarget, jobId: attempt });
     else { const restarted = await exec.guest(container, containedScript(attempt, `systemctl restart ${quote(profile.serviceName)}\n`), { timeoutMs: 90000 }); if (restarted.code !== 0) throw safeError('RECOVERY_FAILED', 'The existing application service could not restart.'); }
     const proof = await verify(prior.previousTarget, prior.previousSha, prior.previousArtifactDigest);
-    await service.recordLive(params.applicationId, { sha: prior.previousSha, profileDigest: profile.digest, jobId: job.id, releasePath: prior.previousTarget, previousSha: prior.previousSha, evidenceDigest: digest(proof), restored: true });
+    await service.recordLive(params.applicationId, { sha: prior.previousSha, profileDigest: profile.digest, jobId: job.id, releasePath: prior.previousTarget, previousSha: prior.previousSha, evidenceDigest: digest(proof), restored: true, ...(/^[a-f0-9]{40}$/.test(prior.nextSha || '') && prior.nextSha !== prior.previousSha ? { rollbackOf: prior.nextSha } : {}) });
     mark('interrupted_release_recovered', { disruptive: false });
     return { ok: false, recovered: true, outcome: 'interrupted_release_rolled_back', verification: proof };
   }
@@ -196,7 +243,11 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     let transfer; let guestCleaned = false;
     try {
       await hostFs.mkdir(hostRoot, { recursive: true, mode: 0o700 });
-      transfer = await hostFs.mkdtemp(path.join(hostRoot, 'bundle-'));
+      // The transfer copy names its application (bundle-app<id>-<random>), so
+      // the storage check attributes it to this application only.
+      const appId = Number(params.applicationId);
+      if (!Number.isInteger(appId) || appId < 1) throw safeError('INVALID_REFERENCE', 'The application reference is not valid.');
+      transfer = await hostFs.mkdtemp(path.join(hostRoot, `bundle-app${appId}-`));
       const hostBundle = path.join(transfer, 'source.bundle');
       const transferRepo = path.join(transfer, 'source.git');
       mark('bundle');
@@ -215,13 +266,21 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
       await hostFs.chmod(hostBundle, 0o600);
       // The transfer target and root are fixed by the immutable profile.
       await guest('prepare', { root });
-      if (retention) await guest('release_cleanup', { stage, bundle, release, sweepStages: retention.workspaces !== false, ...releaseContext }, 120000);
+      if (retention) { const swept = await guest('release_cleanup', { stage, bundle, release, sweepStages: retention.workspaces !== false, ...releaseContext }, 120000); if (swept.cleanup?.kept?.length) job.event?.('cleanup_incomplete', 'Some abandoned build workspaces could not be removed and were left in place; the build continues.', { kept: swept.cleanup.kept.slice(0, 20) }); }
       job.fence({ safe: true }); const r = await exec.host(['incus', 'file', 'push', hostBundle, `${container}${bundle}`], { timeoutMs: 120000 }); if (r.code !== 0) throw safeError('TRANSFER_FAILED', 'Git bundle transfer failed.');
-      mark('stage'); await guest('stage', { stage, release, bundle, sha: candidate.sha, treeSha: candidate.treeSha, scripts, user: identity.user, group: identity.group }, 120000);
+      mark('stage'); const staged = await guest('stage', { stage, release, bundle, sha: candidate.sha, treeSha: candidate.treeSha, scripts, user: identity.user, group: identity.group }, 120000);
       const evidence = [];
       for (const script of scripts) { mark(`script:${script}`); await guest('script', { stage, script, user: identity.user, timeout: 600000 }, 620000); evidence.push({ script, passed: true }); }
       const evidenceDigest = digest({ sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidence });
-      const sealed = await guest('seal', { stage, release, sha: candidate.sha, treeSha: candidate.treeSha, marker: { sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest } });
+      // No process the build started may outlive it into the seal: every
+      // scope and cgroup this attempt's scripts ran in is killed and counted
+      // (guest-probes.js reapAttemptScriptsScript, the same containment the
+      // stale-writer reap uses for earlier attempts).
+      mark('stop_build_processes');
+      job.fence({ safe: true });
+      const leftovers = await exec.guest(container, reapAttemptScriptsScript(attempt), { timeoutMs: 30000 });
+      if (parseStaleWriters(leftovers?.stdout) !== 0) throw safeError('BUILD_PROCESS_ALIVE', 'A process the build started could not be stopped, so this release was not sealed.');
+      const sealed = await guest('seal', { stage, release, sha: candidate.sha, treeSha: candidate.treeSha, gitIdentity: staged?.gitIdentity || null, marker: { sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest } });
       if (sealed.trim && (sealed.trim.removed?.length || sealed.trim.kept?.length)) job.event?.('trim', sealed.trim.kept?.length ? 'Generated build output removed before sealing; some entries were kept' : 'Generated build output removed before sealing', sealed.trim);
       if (retention) { const cleaned = await guest('release_cleanup', { stage, bundle, release, ...releaseContext }, 120000); guestCleaned = true; job.event?.('cleanup', 'Release retention applied', cleaned.cleanup); }
       job.fence({ safe: true }); await service.recordValidation(params.applicationId, candidate.sha, { profileDigest: profile.digest, treeSha: candidate.treeSha, passed: true, evidenceDigest, artifactDigest: sealed.artifactDigest, jobId: job.id, releasePath: release });
@@ -237,7 +296,18 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   mark('inspect'); const previous = await guest('inspect', { strict: true });
   if (!validation?.passed || !/^[a-f0-9]{64}$/.test(validation.artifactDigest || '') || validation.profileDigest !== profile.digest || validation.treeSha !== candidate.treeSha || typeof release !== 'string' || !release.startsWith(`${root}/${candidate.sha}-p${profile.revision}-`) || release.includes('/../')) throw safeError('VALIDATION_REQUIRED', 'This exact candidate, profile and release artifact need successful validation.');
   await guest('artifact', { release, sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest: validation.evidenceDigest, artifactDigest: validation.artifactDigest });
-  if (kind === 'application_verify') { const proof = await verify(release, candidate.sha, validation.artifactDigest); await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, evidenceDigest: digest(proof) }); return { ok: true, outcome: 'live_verified', verification: proof }; }
+  if (kind === 'application_verify') {
+    const proof = await verify(release, candidate.sha, validation.artifactDigest);
+    // Verifying what is live must not forget which release ran before it:
+    // the same release keeps its recorded previous release; a different one
+    // (live changed outside a deployment) had the recorded one before it.
+    const before = typeof service.getApplication === 'function' ? (await service.getApplication(params.applicationId))?.live || null : null;
+    const same = before?.sha === candidate.sha;
+    const previousSha = same ? (before.previousSha && before.previousSha !== candidate.sha ? before.previousSha : null) : (/^[a-f0-9]{40}$/.test(before?.sha || '') ? before.sha : null);
+    const rollbackOf = same && /^[a-f0-9]{40}$/.test(before.rollbackOf || '') ? before.rollbackOf : null;
+    await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, ...(previousSha ? { previousSha } : {}), ...(rollbackOf ? { rollbackOf } : {}), evidenceDigest: digest(proof) });
+    return { ok: true, outcome: 'live_verified', verification: proof };
+  }
   if (previous.target === release) { const proof = await verify(release, candidate.sha, validation.artifactDigest); return { ok: true, outcome: 'already_live', verification: proof }; }
   // Shared paths are attached only after validation. Scripts do not receive
   // production env files or shared data during the build/test phase.
@@ -253,7 +323,10 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   try {
     await guest('switch', { expected: previous.target, target: release, jobId: attempt });
     const proof = await verify(release, candidate.sha, validation.artifactDigest);
-    job.fence(); await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, previousSha: previous.identity.sha, evidenceDigest: digest(proof) });
+    // A rollback job records the release it rolled back FROM, so the deploy
+    // history never takes that one for the release live before this one.
+    const rolledBack = kind === 'application_rollback' && /^[a-f0-9]{40}$/.test(previous.identity.sha || '') && previous.identity.sha !== candidate.sha ? { rollbackOf: previous.identity.sha } : {};
+    job.fence(); await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, previousSha: previous.identity.sha, ...rolledBack, evidenceDigest: digest(proof) });
     disruptive = false; mark('live_verified', recovery);
     return { ok: true, outcome: 'live_verified', verification: proof };
   } catch (e) {
@@ -263,7 +336,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     if (current.target === release) await guest('switch', { expected: release, target: previous.target, jobId: attempt });
     else if (current.target !== previous.target) throw safeError('LIVE_TARGET_CHANGED', 'The live target changed during rollback; manual inspection is required.');
     const proof = await verify(previous.target, previous.identity.sha, previous.identity.artifactDigest);
-    await service.recordLive(params.applicationId, { sha: previous.identity.sha, profileDigest: profile.digest, jobId: job.id, releasePath: previous.target, previousSha: previous.identity.sha, evidenceDigest: digest(proof), restored: true });
+    await service.recordLive(params.applicationId, { sha: previous.identity.sha, profileDigest: profile.digest, jobId: job.id, releasePath: previous.target, previousSha: previous.identity.sha, evidenceDigest: digest(proof), restored: true, ...(candidate.sha !== previous.identity.sha ? { rollbackOf: candidate.sha } : {}) });
     disruptive = false; mark('rolled_back', recovery);
     return { ok: false, recovered: true, outcome: 'release_failed_rolled_back', verification: proof };
   }

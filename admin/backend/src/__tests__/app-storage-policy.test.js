@@ -1,8 +1,10 @@
 // Retention policies: the document and its validation, the defaults for new
 // targets, existing targets (every destructive rule a proposal) and Nodus
 // (its existing settings preserved), the effective release and snapshot
-// retention the existing mechanisms read (the static JSON stays the floor; a
-// proposal never takes effect), and the two pure views over a check.
+// retention the existing mechanisms read (a stored policy decides, a rule
+// turned off runs nothing; the static JSON applies only without a stored
+// policy or without a readable mock2.db; a proposal never takes effect), and
+// the two pure views over a check.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +14,9 @@ import {
 } from '../lib/app-storage/policy.js';
 import { createStorageStore } from '../lib/app-storage/store.js';
 import { databases, registerNodus } from './helpers/app-storage-world.js';
+import { startSnapshotRetention } from '../lib/snapshot-retention.js';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const DAY = 86_400_000;
@@ -42,21 +47,24 @@ test('Nodus is preserved: 2 releases with the .cache trim, 3 snapshots, workspac
   assert.doesNotThrow(() => validatePolicy(policy));
 });
 
-test('existing targets get every destructive rule as a proposal; new targets get every rule on', () => {
+test('existing targets get every destructive rule as a proposal; only new Dev Studio projects get every rule on', () => {
   const existing = defaultPolicyFor(oldApp, { installedAt: INSTALLED, diskLimitBytes: 50e9 });
   assert.equal(existing.source, 'defaults-existing');
   assert.ok(RULE_KEYS.every((k) => existing.policy.rules[k].enabled === false));
   assert.equal(existing.policy.alerts.enabled, true, 'alerts only notify, so they are on');
   assert.equal(existing.policy.alerts.warnBytes, 40e9, '80 % of a known disk limit');
-  const fresh = defaultPolicyFor(newApp, { installedAt: INSTALLED });
-  assert.equal(fresh.source, 'defaults-new');
+  const fresh = defaultPolicyFor(newProject, { installedAt: INSTALLED });
+  assert.equal(fresh.source, 'defaults-new', 'SQLite datetime text is read as UTC');
   assert.ok(RULE_KEYS.every((k) => fresh.policy.rules[k].enabled === true));
   assert.deepEqual(fresh.policy.rules.releases.trimBeforeSeal, [...NEW_TRIM_BEFORE_SEAL]);
   assert.equal(fresh.policy.alerts.warnBytes, 20e9, '20 GB when the limit is unknown');
-  assert.equal(defaultPolicyFor(newProject, { installedAt: INSTALLED }).source, 'defaults-new', 'SQLite datetime text is read as UTC');
-  assert.equal(defaultPolicyFor({ ...newApp, createdAt: null }, { installedAt: INSTALLED }).source, 'defaults-existing', 'unknown age counts as existing');
-  assert.equal(defaultPolicyFor(newApp, { installedAt: null }).source, 'defaults-existing', 'without the install mark nothing is new');
+  assert.equal(defaultPolicyFor({ ...newProject, createdAt: null }, { installedAt: INSTALLED }).source, 'defaults-existing', 'unknown age counts as existing');
+  assert.equal(defaultPolicyFor(newProject, { installedAt: null }).source, 'defaults-existing', 'without the install mark nothing is new');
   assert.equal(isNewTarget(newApp, INSTALLED), true);
+  const registered = defaultPolicyFor(newApp, { installedAt: INSTALLED });
+  assert.equal(registered.source, 'defaults-existing', 'a registered application always starts with proposals, however recently it was registered');
+  assert.ok(RULE_KEYS.every((k) => registered.policy.rules[k].enabled === false));
+  assert.deepEqual(ruleStates(registered.policy, registered.source).proposedRules, RULE_KEYS);
   assert.equal(defaultPolicyFor({ key: 'project:2', kind: 'project', guest: 'pp-nodus' }, { installedAt: INSTALLED }).policy.rules.snapshots.keep, 3, 'a guest in the snapshot file is preserved too');
 });
 
@@ -90,42 +98,86 @@ test('resolvePolicy: a stored valid row wins; an invalid stored row falls back t
   assert.equal(broken.source, 'defaults-existing');
 });
 
-test('effective release retention: the policy when its rule is on, else the static entry, else none — a proposal never applies', () => {
+test('effective release retention: a stored policy decides (off is off); the static entry only without one or without a readable DB', () => {
   const { mock2Db } = databases({ installedAt: INSTALLED });
   registerNodus(mock2Db, null);
   registerNodus(mock2Db, null, { targetId: 'legacy', name: 'Legacy', createdAt: '2026-08-01T10:00:00.000Z' });
   registerNodus(mock2Db, null, { targetId: 'fresh', name: 'Fresh', createdAt: '2026-10-21T08:00:00.000Z' });
   const store = createStorageStore(mock2Db);
-  assert.deepEqual(effectiveReleaseRetention('nodus', { mock2Db }), { keepReleases: 2, trimBeforeSeal: ['.cache'], workspaces: { enabled: true, abandonedAfterHours: 1 }, source: 'policy' });
+  const STATIC = { keepReleases: 2, trimBeforeSeal: ['.cache'], workspaces: { enabled: true, abandonedAfterHours: 1 }, source: 'static' };
+  assert.deepEqual(effectiveReleaseRetention('nodus', { mock2Db }), STATIC, 'no stored policy yet: the static file (Nodus\'s seed)');
   assert.equal(effectiveReleaseRetention('legacy', { mock2Db }), null, 'an existing target\'s proposal does nothing');
-  assert.deepEqual(effectiveReleaseRetention('fresh', { mock2Db }).trimBeforeSeal, [...NEW_TRIM_BEFORE_SEAL]);
-  // Turning Nodus's rule off leaves the static file in force (it is the floor).
+  assert.equal(effectiveReleaseRetention('fresh', { mock2Db }), null, 'an application registered after installation starts with proposals too');
+  // Saving Nodus's preserved settings as they are: the policy decides, same numbers.
+  store.putPolicy('application:1', { policy: clone(defaultPolicyFor(nodus, { installedAt: INSTALLED }).policy) });
+  assert.deepEqual(effectiveReleaseRetention('nodus', { mock2Db }), { ...STATIC, source: 'policy' });
+  // Turning Nodus's rule off really stops it: nothing runs, the static file does not come back.
   const off = clone(defaultPolicyFor(nodus, { installedAt: INSTALLED }).policy); off.rules.releases.enabled = false;
   store.putPolicy('application:1', { policy: off });
-  assert.deepEqual(effectiveReleaseRetention('nodus', { mock2Db }), { keepReleases: 2, trimBeforeSeal: ['.cache'], workspaces: { enabled: true, abandonedAfterHours: 1 }, source: 'static' });
+  assert.equal(effectiveReleaseRetention('nodus', { mock2Db }), null);
   // Turning the legacy proposal on makes it effective, with the edited numbers.
   const on = clone(defaultPolicyFor(oldApp, { installedAt: INSTALLED }).policy); on.rules.releases = { enabled: true, keepReleases: 4, trimBeforeSeal: [] }; on.rules.workspaces.enabled = false;
   store.putPolicy('application:2', { policy: on });
   assert.deepEqual(effectiveReleaseRetention('legacy', { mock2Db }), { keepReleases: 4, trimBeforeSeal: [], workspaces: { enabled: false, abandonedAfterHours: 1 }, source: 'policy' });
-  // Without mock2.db (or an unknown target) the static file decides.
-  assert.equal(effectiveReleaseRetention('nodus', {}).source, 'static');
+  // Without mock2.db, or when it cannot be read, the static file decides (fail-safe).
+  assert.deepEqual(effectiveReleaseRetention('nodus', {}), STATIC);
+  const unreadable = { prepare() { throw new Error('SQLITE_CANTOPEN'); } };
+  assert.deepEqual(effectiveReleaseRetention('nodus', { mock2Db: unreadable }), STATIC);
+  assert.equal(effectiveReleaseRetention('legacy', { mock2Db: unreadable }), null);
   assert.equal(effectiveReleaseRetention('unknown', { mock2Db }), null);
+  // A stored row that does not validate counts as no stored policy.
+  mock2Db.prepare("UPDATE mock2_storage_policies SET policy_json = '{\"version\":1}' WHERE target_key = 'application:1'").run();
+  assert.deepEqual(effectiveReleaseRetention('nodus', { mock2Db }), STATIC);
 });
 
-test('effective snapshot limits: enabled snapshot rules ∪ the static file; proposals never appear', () => {
+test('effective snapshot limits: a stored policy decides (off is off); defaults otherwise; the static file without a readable DB', () => {
   const { mock2Db } = databases({ installedAt: INSTALLED });
   registerNodus(mock2Db, null);
   registerNodus(mock2Db, null, { targetId: 'legacy', name: 'Legacy', createdAt: '2026-08-01T10:00:00.000Z' });
+  registerNodus(mock2Db, null, { targetId: 'crm', name: 'Legacy CRM', createdAt: '2026-10-21T08:00:00.000Z' });
   mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (9, 'Fresh', 'm2-9', 'active', '/x/9.git', '2026-10-21 08:00:00')").run();
-  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db }) }, { 'pp-nodus': 3, 'm2-9': 3 });
+  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db }) }, { 'pp-nodus': 3, 'm2-9': 3 }, 'an application registered after installation is not limited');
   const store = createStorageStore(mock2Db);
   const on = clone(defaultPolicyFor(oldApp, { installedAt: INSTALLED }).policy); on.rules.snapshots = { enabled: true, keep: 5 };
   store.putPolicy('application:2', { policy: on });
   const off = clone(defaultPolicyFor(nodus, { installedAt: INSTALLED }).policy); off.rules.snapshots.enabled = false;
   store.putPolicy('application:1', { policy: off });
-  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db }) }, { 'pp-legacy': 5, 'm2-9': 3, 'pp-nodus': 3 });
+  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db }) }, { 'pp-legacy': 5, 'm2-9': 3 }, 'Nodus turned off is not limited any more');
+  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db, staticLimits: { 'pp-nodus': 3, 'pp-other': 4 } }) }, { 'pp-legacy': 5, 'm2-9': 3, 'pp-other': 4 }, 'a static guest that is no target still applies');
   assert.deepEqual({ ...effectiveSnapshotLimits({}) }, { 'pp-nodus': 3 });
+  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db: { prepare() { throw new Error('locked'); } } }) }, { 'pp-nodus': 3 }, 'unreadable mock2.db: the static file');
+  mock2Db.exec('DROP TABLE mock2_storage_policies');
+  assert.deepEqual({ ...effectiveSnapshotLimits({ mock2Db }) }, { 'pp-nodus': 3 }, 'no policy table: the static file');
   assert.ok(Object.isFrozen(effectiveSnapshotLimits({ mock2Db })));
+});
+
+test('the boot reconcile prunes nothing for a newly registered application, and stops pruning Nodus once its rule is off', async () => {
+  const { mock2Db } = databases({ installedAt: INSTALLED });
+  registerNodus(mock2Db, null);
+  registerNodus(mock2Db, null, { targetId: 'crm', name: 'Legacy CRM', createdAt: '2026-10-21T08:00:00.000Z' });
+  const snaps = (n) => Array.from({ length: n }, (_, i) => ({ name: `s${i}`, created_at: `2026-10-0${i + 1}T00:00:00Z` }));
+  const inventory = { 'pp-nodus': snaps(5), 'pp-crm': snaps(5) };
+  const deleted = [];
+  const run = async () => {
+    const monitor = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill() {} });
+    const stop = startSnapshotRetention({
+      spawnMonitor: () => monitor,
+      listInstance: async (name) => ({ name, snapshots: inventory[name] }),
+      deleteSnapshot: async (name, snap) => { deleted.push(`${name}/${snap.name}`); inventory[name] = inventory[name].filter((x) => x.name !== snap.name); return { ok: true }; },
+      limits: () => effectiveSnapshotLimits({ mock2Db }), log: () => {}, schedule: () => null, cancel: () => {},
+    });
+    stop.reconcile();
+    await new Promise((r) => setTimeout(r, 50));
+    stop();
+  };
+  await run();
+  assert.deepEqual(deleted, ['pp-nodus/s0', 'pp-nodus/s1'], 'Nodus keeps its 3; the registered application is untouched');
+  const off = clone(defaultPolicyFor(nodus, { installedAt: INSTALLED }).policy); off.rules.snapshots.enabled = false;
+  createStorageStore(mock2Db).putPolicy('application:1', { policy: off });
+  inventory['pp-nodus'] = snaps(5);
+  deleted.length = 0;
+  await run();
+  assert.deepEqual(deleted, [], 'turned off: nothing is pruned');
 });
 
 const it = (o) => ({ id: o.id, label: o.id, category: 'temp', status: 'eligible', kind: 'directory', allocatedBytes: 10, newestMtimeMs: NOW - 30 * DAY, ...o });
@@ -200,4 +252,55 @@ test('policyDiff names exactly what changed (for the audit)', () => {
   b.rules.caches.enabled = false; b.rules.releases.trimBeforeSeal = ['.cache', 'coverage']; b.alerts.warnBytes = 11e9;
   assert.deepEqual(policyDiff(a, b), { 'rules.releases.trimBeforeSeal': [['.cache'], ['.cache', 'coverage']], 'rules.caches.enabled': [true, false], 'alerts.warnBytes': [20e9, 11e9] });
   assert.deepEqual(policyDiff(a, a), {});
+});
+
+/* ---- H2 (Mock2 standard): NEW = created empty by the host; a clone is existing ---- */
+
+test('a project the host created empty after installation gets the defaults; a cloned one gets the rules as proposals', async () => {
+  const { listTargets, resolveTarget } = await import('../lib/app-storage/targets.js');
+  const { recordNewProjectDefaults } = await import('../lib/app-storage/policy.js');
+  const { mock2Db } = databases({ installedAt: '2026-10-20T22:00:00.000Z' });
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (11, 'Empty', 'm2-11', 'active', '/x/11.git', '2026-10-20 22:30:00')").run();
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (12, 'Clone of 4', 'm2-12', 'active', '/x/12.git', '2026-10-20 22:31:00')").run();
+  // What createProject writes, in the same transaction, for a clone (mock2/projects.js).
+  mock2Db.prepare("INSERT INTO mock2_settings (key, value, updated_at) VALUES ('project_origin.12', ?, '2026-10-20T22:31:00Z')").run(JSON.stringify({ kind: 'clone', sourceProjectId: 4, mode: 'fresh' }));
+  const listed = Object.fromEntries(listTargets({ mock2Db }).map((t) => [t.key, t]));
+  assert.equal(listed['project:11'].origin, null);
+  assert.deepEqual(listed['project:12'].origin, { kind: 'clone', sourceProjectId: 4 });
+  assert.deepEqual(resolveTarget('project:12', { mock2Db }).origin, { kind: 'clone', sourceProjectId: 4 });
+  const empty = defaultPolicyFor(resolveTarget('project:11', { mock2Db }), { installedAt: '2026-10-20T22:00:00.000Z' });
+  const clone = defaultPolicyFor(resolveTarget('project:12', { mock2Db }), { installedAt: '2026-10-20T22:00:00.000Z' });
+  assert.equal(empty.source, 'defaults-new');
+  assert.ok(RULE_KEYS.every((k) => empty.policy.rules[k].enabled), 'every rule on');
+  assert.equal(clone.source, 'defaults-existing');
+  assert.ok(RULE_KEYS.every((k) => !clone.policy.rules[k].enabled), 'every rule a proposal');
+  assert.deepEqual(ruleStates(clone.policy, clone.source).proposedRules, RULE_KEYS);
+  // Nothing records a clone's defaults, and it gets no snapshot limit.
+  const audits = [];
+  assert.equal(recordNewProjectDefaults(resolveTarget('project:12', { mock2Db }), { mock2Db, audit: (e) => audits.push(e) }), null);
+  assert.equal(audits.length, 0);
+  const limits = effectiveSnapshotLimits({ mock2Db, mainDb: null, staticLimits: {} });
+  assert.equal(limits['m2-11'], 3);
+  assert.equal('m2-12' in limits, false, 'a clone prunes no snapshots until someone turns the rule on');
+});
+
+test('both clone paths (dashboard route and clone_project) record the origin with the project row', async () => {
+  const { readFileSync } = await import('node:fs');
+  const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const projects = read('../mock2/projects.js');
+  assert.match(projects, /export function createProject\(\{[^}]*origin = null \}\)/);
+  // Written inside createProject's transaction, before it returns.
+  const body = projects.slice(projects.indexOf('export function createProject('), projects.indexOf('const id = tx();'));
+  assert.match(body, /INSERT OR REPLACE INTO mock2_settings[\s\S]*PROJECT_ORIGIN_KEY_PREFIX/);
+  assert.match(projects, /PROJECT_ORIGIN_KEY_PREFIX = 'project_origin\.'/);
+  for (const [file, anchor] of [['../mock2/routes.js', 'MOCK2_PROJECT_CLONE'], ['../routes/mcp.js', 'async function toolCloneProject']]) {
+    const src = read(file);
+    const at = src.indexOf(anchor);
+    const region = file.endsWith('mcp.js') ? src.slice(at, at + 2000) : src.slice(at - 2500, at);
+    assert.match(region, /origin: \{ kind: 'clone', sourceProjectId: source\.id, mode \}/, file);
+  }
+  // The from-scratch paths do not.
+  const mcp = read('../routes/mcp.js');
+  const create = mcp.slice(mcp.indexOf('---- create_project'), mcp.indexOf('async function toolCloneProject'));
+  assert.equal(/origin:/.test(create), false, 'create_project makes an empty project');
 });

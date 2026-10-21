@@ -103,3 +103,42 @@ test('one round at a time', async () => {
   assert.deepEqual(await s.runOnce(), { skipped: 'already running', targets: [] });
   release(); await first;
 });
+
+test('snapshot limits are read at most every 30 s, at once after a saved policy, and a failing read is never cached', async () => {
+  const { memoizeLimits, currentSnapshotLimits, setSnapshotLimitsProvider } = await import('../lib/snapshot-retention.js');
+  const { startAppStorageAutomation } = await import('../lib/app-storage/cleanup-deps.js');
+  let clock = 0, reads = 0, fail = false;
+  const memo = memoizeLimits(() => { reads += 1; if (fail) throw new Error('locked'); return { 'pp-shop': reads }; }, { now: () => clock });
+  assert.deepEqual(memo(), { 'pp-shop': 1 }); clock = 29_999; assert.deepEqual(memo(), { 'pp-shop': 1 }); assert.equal(reads, 1);
+  clock = 30_000; assert.deepEqual(memo(), { 'pp-shop': 2 });
+  memo.invalidate(); assert.deepEqual(memo(), { 'pp-shop': 3 }, 'a saved policy applies to the next use');
+  fail = true; memo.invalidate(); assert.throws(() => memo()); fail = false; assert.deepEqual(memo(), { 'pp-shop': 5 }, 'a failed read was not cached');
+  let answer = null; const unavailable = memoizeLimits(() => answer, { now: () => clock });
+  assert.equal(unavailable(), null); answer = { 'pp-shop': 9 }; assert.deepEqual(unavailable(), { 'pp-shop': 9 }, 'an unavailable answer is not cached either');
+  // The backend's automation: the provider is memoised and dropped on every saved policy.
+  let limitsReads = 0; const listeners = new Set();
+  const storage = { effectiveSnapshotLimits: () => { limitsReads += 1; return { 'pp-shop': limitsReads }; }, onPolicyChange: fn => { listeners.add(fn); return () => listeners.delete(fn); } };
+  const stop = startAppStorageAutomation({ storage, env: { PROXYPILOT_DISABLE_CRONS: '1' }, log: () => {} });
+  try {
+    assert.deepEqual(currentSnapshotLimits(), { 'pp-shop': 1 }); assert.deepEqual(currentSnapshotLimits(), { 'pp-shop': 1 }); assert.equal(limitsReads, 1);
+    for (const fn of listeners) fn('application:1');
+    assert.deepEqual(currentSnapshotLimits(), { 'pp-shop': 2 });
+  } finally { stop(); }
+  assert.equal(listeners.size, 0, 'stopping unsubscribes');
+  setSnapshotLimitsProvider(null);
+});
+
+test('saving a policy through the shared instance tells its listeners (the snapshot-limit memo is dropped)', async () => {
+  const W = await import('./helpers/app-storage-world.js');
+  const { createAppStorage } = await import('../lib/app-storage/index.js');
+  const { mock2Db, mainDb } = W.databases();
+  W.registerNodus(mock2Db, null);
+  const s = createAppStorage({ mock2Db, mainDb, exec: { guest: async () => ({ code: 1 }), host: async () => ({ code: 1 }) }, notifications: { post() {}, resolve() { return false; }, list: () => [], dispatch: async () => {} }, listGuests: async () => new Map(), logger: null });
+  const heard = []; const off = s.onPolicyChange(key => heard.push(key));
+  const p = s.getPolicy('application:1');
+  const next = JSON.parse(JSON.stringify(p.policy)); next.rules.caches.enabled = true;
+  s.putPolicy('application:1', next, { expectedRevision: p.revision });
+  assert.deepEqual(heard, ['application:1']);
+  off(); next.rules.caches.enabled = false; s.putPolicy('application:1', next, { expectedRevision: p.revision + 1 });
+  assert.equal(heard.length, 1, 'an unsubscribed listener hears nothing');
+});

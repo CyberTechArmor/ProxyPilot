@@ -15,7 +15,11 @@ test('readVolumeUsedBytes runs `incus query …/state` as argv and returns used 
   assert.deepEqual(calls[0][0], ['incus', 'query', '/1.0/storage-pools/Storage/volumes/container/pp-nodus/snapshots/s1/state']);
   assert.equal(calls[0][1].timeoutMs, 5000);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"used":"99"}' }) }), 99);
-  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":0}}' }) }), null);
+  // 0 is a real figure: a fresh snapshot holds nothing of its own yet.
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":0}}' }) }), 0);
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":"0"}}' }) }), 0);
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{"used":-1}}' }) }), null);
+  assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: '{"usage":{}}' }) }), null);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 1, stdout: '' }) }), null);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => ({ code: 0, stdout: 'not json' }) }), null);
   assert.equal(await readVolumeUsedBytes('Storage', 'x', { host: async () => { throw new Error('boom'); } }), null);
@@ -66,7 +70,7 @@ test('measureHost: dataset, limit, per-snapshot bytes, exports and the host tran
   assert.deepEqual(host.snapshots.map((s) => [s.name, s.usedBytes]), [['snap0', 40_000_000], ['snap1', null]]);
   assert.deepEqual(host.exports.map((e) => [e.id, e.state, e.bytes]), [[1, 'ready', 1200]]);
   assert.deepEqual(host.unmeasured, []);
-  assert.deepEqual(host.hostFiles.items.map((i) => i.path), [`${HOST_TRANSFER_ROOT}/bundle-a1b2c3`]);
+  assert.deepEqual(host.hostFiles.items.map((i) => i.path), [`${HOST_TRANSFER_ROOT}/bundle-app1-a1b2c3`]);
   assert.equal(exec.calls.filter((c) => c[0] === 'guest').length, 0, 'host facts never enter the guest');
 });
 

@@ -92,7 +92,13 @@ export function mintUniqueSlug(parentDomainId, rand = () => randomBytes(4).toStr
 // from ever being reused, even if the project is later deleted. lifecycle
 // starts at 'provisioning'; the provisioning job flips it to 'active' or
 // 'failed_provisioning'.
-export function createProject({ name, description, parentDomainId, slug, customDomain, repoPathFor, containerNameFor, createdBy }) {
+// origin: how a project that did not start empty arrived, e.g.
+// { kind: 'clone', sourceProjectId, mode }. Recorded in the same transaction
+// as the row (mock2_settings `project_origin.<id>`), so nothing can see the
+// project before its origin: application storage treats a cloned project as
+// an existing application (its cleanup rules start as proposals).
+export const PROJECT_ORIGIN_KEY_PREFIX = 'project_origin.';
+export function createProject({ name, description, parentDomainId, slug, customDomain, repoPathFor, containerNameFor, createdBy, origin = null }) {
   const db = getMock2Db();
   const tx = db.transaction(() => {
     // repo_path is NOT NULL and set-once; seed empty, then fix up with the id.
@@ -118,6 +124,10 @@ export function createProject({ name, description, parentDomainId, slug, customD
         INSERT INTO mock2_slug_history (parent_domain_id, slug, project_id, active_until, rotated_by, created_at)
         VALUES (?, ?, ?, NULL, ?, ?)
       `).run(parentDomainId, slug, id, createdBy ?? null, nowIso());
+    }
+    if (origin && typeof origin === 'object') {
+      db.prepare('INSERT OR REPLACE INTO mock2_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)')
+        .run(`${PROJECT_ORIGIN_KEY_PREFIX}${id}`, JSON.stringify(origin), nowIso(), Number.isInteger(Number(createdBy)) ? Number(createdBy) : null);
     }
     return id;
   });

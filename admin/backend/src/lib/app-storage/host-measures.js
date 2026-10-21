@@ -52,7 +52,8 @@ export async function readVolumeUsedBytes(pool, volumePath, { host = defaultHost
     if (codeOf(r) !== 0) return null;
     const state = JSON.parse(r.stdout || '{}');
     const used = state?.usage?.used ?? state?.used ?? null;
-    if (typeof used === 'number' && used > 0) return used;
+    // 0 is a real figure (a fresh snapshot holds nothing of its own yet).
+    if (typeof used === 'number' && Number.isFinite(used) && used >= 0) return used;
     if (typeof used === 'string' && /^\d+$/.test(used)) return parseInt(used, 10);
     return null;
   } catch {

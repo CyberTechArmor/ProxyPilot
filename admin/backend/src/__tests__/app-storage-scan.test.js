@@ -7,9 +7,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, symlinkSync, linkSync, chmodSync, chownSync, readdirSync, lstatSync, rmdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, symlinkSync, linkSync, chmodSync, chownSync, readdirSync, lstatSync, rmdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SCAN_PROGRAM, scanArgv, scanScript, parseScanOutput, encodeScanInput } from '../lib/app-storage/scan-program.js';
+import { SCAN_PROGRAM, scanArgv, scanScript, parseScanOutput, encodeScanInput, DESCRIBE_RELEASES_SOURCE, SCAN_GIT_ARGS, readOnlyFs } from '../lib/app-storage/scan-program.js';
+import { SAFE_GIT_SOURCE } from '../lib/setup-engine/safe-git.js';
+import { SAFE_REMOVE_SOURCE, safeRemover } from '../lib/setup-engine/safe-remove.js';
+import * as nodeFs from 'node:fs';
+import * as nodePath from 'node:path';
+
+// Read-only git runs as the guest's nobody over a root-owned repository.
+const NOBODY = (() => { try { const f = readFileSync('/etc/passwd', 'utf8').split('\n').find((l) => l.startsWith('nobody:'))?.split(':'); return f ? Number(f[2]) : 65534; } catch { return 65534; } })();
 import { makeRoot, cleanupRoot, holdOpen, age, DAY } from './helpers/app-storage-world.js';
 
 function scan(input, opts = {}) {
@@ -179,6 +186,7 @@ test('match filters children, maxChildren caps a huge folder, tracked paths come
   const root = makeRoot(); t.after(() => cleanupRoot(root));
   for (const n of ['unit.service', 'unit.service.pre-job1', 'other.pre-job2']) write(join(root, 'sys', n), 10);
   for (let i = 0; i < 12; i += 1) write(join(root, `many/f${i}`), 1);
+  chmodSync(root, 0o755); // read-only git runs unprivileged: it must be able to read the repository
   const repo = join(root, 'repo');
   mkdirSync(repo);
   execFileSync('git', ['init', '-q', repo]);
@@ -191,7 +199,7 @@ test('match filters children, maxChildren caps a huge folder, tracked paths come
   assert.equal(names.includes('unit.service'), false);
   assert.equal(facts.roots[1].children, 5);
   assert.equal(facts.roots[1].omitted, 7);
-  assert.deepEqual(facts.tracked[repo], { ok: true, paths: ['coverage/keep.json'] });
+  assert.deepEqual(facts.tracked[repo], { ok: true, paths: ['coverage/keep.json'], ...(process.getuid?.() === 0 ? { asUid: NOBODY } : {}) });
 });
 
 test('the guest script runs from / and says NO_NODE without Node.js; outputs are parsed safely', () => {
@@ -210,9 +218,21 @@ test('the guest script runs from / and says NO_NODE without Node.js; outputs are
   assert.equal(parseScanOutput({ code: 0, stdout: '{}', stdoutTruncated: true }).code, 'OUTPUT_TOO_LARGE');
   assert.ok(SCAN_PROGRAM.length < 100_000, 'the program fits in one argv entry');
   // No write primitive appears in the program.
-  const writes = SCAN_PROGRAM.match(/\bfs\.(write|append|rm|unlink|rename|mkdir|mkdtemp|chmod|chown|lchown|truncate|ftruncate|copyFile|cp|utimes|lutimes|symlink|link|open(?!Sync\(f,fs\.constants\.O_RDONLY))\w*/g) || [];
-  assert.deepEqual(writes, [], 'no filesystem write primitive appears in the program');
-  assert.match(SCAN_PROGRAM, /fs\.openSync\(f,fs\.constants\.O_RDONLY\|\(fs\.constants\.O_NOFOLLOW\|\|0\)\)/, 'the one open is read-only and does not follow links');
+  const WRITE_RE = /\bfs\.(write|append|rm|unlink|rename|mkdir|mkdtemp|chmod|chown|lchown|truncate|ftruncate|copyFile|cp|utimes|lutimes|symlink|link|open(?!Sync\(f,fs\.constants\.O_RDONLY))\w*/g;
+  // The shared pieces are checked apart: describeReleases and the fd walker it
+  // reads markers with (safe-remove.js, which also holds the remover) only
+  // ever get the read-only view, which refuses every write (tested below).
+  const READ_ONLY_FS_SOURCE = `const readOnlyFs=${readOnlyFs.toString()};`;
+  for (const part of [DESCRIBE_RELEASES_SOURCE, SAFE_REMOVE_SOURCE, READ_ONLY_FS_SOURCE, SAFE_GIT_SOURCE]) assert.ok(SCAN_PROGRAM.includes(part));
+  const own = [DESCRIBE_RELEASES_SOURCE, SAFE_REMOVE_SOURCE, READ_ONLY_FS_SOURCE].reduce((x, part) => x.replace(part, ''), SCAN_PROGRAM);
+  assert.deepEqual(own.match(WRITE_RE) || [], [], 'no filesystem write primitive appears in the program\'s own code');
+  assert.deepEqual(SAFE_GIT_SOURCE.match(WRITE_RE) || [], [], 'safe git writes nothing');
+  assert.match(own, /describeReleases\(roFs,p,a\.releases\)/, 'describeReleases is given the read-only view');
+  assert.match(own, /const roFs=readOnlyFs\(fs\);/);
+  assert.equal((SCAN_PROGRAM.match(/describeReleases\(/g) || []).length, 2, 'defined once, called once');
+  assert.equal((own.match(/safeRemover\(/g) || []).length, 0, 'the program itself never builds the remover');
+  assert.match(DESCRIBE_RELEASES_SOURCE, /safeRemover\(fs, p\)/, 'describeReleases builds it over the fs it was given');
+  assert.match(SCAN_PROGRAM, /fs\.openSync\(f,fs\.constants\.O_RDONLY\|\(fs\.constants\.O_NOFOLLOW\|\|0\)\|\(fs\.constants\.O_NONBLOCK\|\|0\)\)/, 'the one open is read-only, never follows a link and never blocks');
 });
 
 test('statfs and the journal size are reported', () => {
@@ -230,4 +250,115 @@ test('an unprivileged root in a /run-like folder: directories that vanish mid-wa
   const facts = scan({ roots: [{ path: join(root, 'gone'), depth: 0 }, { path: join(root, 'gone'), depth: 1 }] });
   assert.equal(facts.items.length, 0);
   assert.equal(facts.roots[0].exists, false);
+});
+
+/* ---- git in a repository the service user may own (review finding 3) ---- */
+
+function fsmonitorRepo(root, owner = null) {
+  // The reviewer's proof of concept: a repository whose core.fsmonitor runs a command.
+  const repo = join(root, 'app');
+  mkdirSync(repo, { recursive: true });
+  execFileSync('git', ['init', '-q', repo]);
+  write(join(repo, 'coverage/keep.json'), 10);
+  execFileSync('git', ['-C', repo, 'add', 'coverage/keep.json']);
+  const marker = join(root, 'PWNED');
+  execFileSync('git', ['-C', repo, 'config', 'core.fsmonitor', `touch ${marker}; echo`]);
+  if (owner != null) execFileSync('chown', ['-R', `${owner}:${owner}`, repo]);
+  return { repo, marker };
+}
+
+test('the tracked-path test never runs the repository\'s core.fsmonitor (root-owned repository)', (t) => {
+  const root = makeRoot(); t.after(() => cleanupRoot(root));
+  chmodSync(root, 0o755);
+  const { repo, marker } = fsmonitorRepo(root);
+  const facts = scan({ roots: [], tracked: [{ repo, paths: ['coverage', 'test-results'] }] });
+  assert.equal(existsSync(marker), false, 'the planted command did not run');
+  assert.deepEqual(facts.tracked[repo], { ok: true, paths: ['coverage/keep.json'], ...(process.getuid?.() === 0 ? { asUid: NOBODY } : {}) }, 'never as root: as nobody');
+});
+
+test('the scan runs one git command, ls-files over the index, through the one shared safe git', () => {
+  assert.deepEqual([...SCAN_GIT_ARGS], ['ls-files', '-z', '--'], 'no -m/-d/-o/--eol: the index only, no work-tree contents');
+  const own = SCAN_PROGRAM.replace(SAFE_GIT_SOURCE, '');
+  assert.equal((own.match(/safeGit\(/g) || []).length, 1, 'one call');
+  assert.match(own, /safeGit\(cp,fs,t\.repo,\["ls-files","-z","--"\]\.concat\(paths\)\)/);
+  assert.equal(/spawnSync\('git'|run\('git'|\bexecFile/.test(own), false, 'git is started nowhere else');
+  assert.equal(SCAN_PROGRAM.includes('safe.directory=*'), false);
+  assert.equal(SCAN_PROGRAM.includes('function safeGit(cp,fs,repo,args)'), false, 'the scan\'s own copy is gone');
+});
+
+test('a repository owned by another account is read as that account, never as root with safe.directory=*', (t) => {
+  if (process.getuid?.() !== 0) { t.skip('needs root to switch to the owner'); return; }
+  const root = makeRoot(); t.after(() => cleanupRoot(root));
+  chmodSync(root, 0o755);
+  const { repo, marker } = fsmonitorRepo(root, 65534);
+  // A git wrapper first on PATH records who runs it and with what, then runs the real git.
+  const bin = join(root, 'bin'); mkdirSync(bin);
+  const log = join(root, 'git.log'); writeFileSync(log, ''); chmodSync(log, 0o666);
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf 'uid=%s args=%s home=%s global=%s\\n' "$(id -u)" "$*" "$HOME" "$GIT_CONFIG_GLOBAL" >> ${log}\nexec ${realGit} "$@"\n`, { mode: 0o755 });
+  const facts = scan({ roots: [], tracked: [{ repo, paths: ['coverage'] }] }, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(existsSync(marker), false, 'the planted command did not run');
+  assert.deepEqual(facts.tracked[repo], { ok: true, paths: ['coverage/keep.json'], asUid: 65534 });
+  const line = readFileSync(log, 'utf8').trim();
+  assert.match(line, /^uid=65534 /, 'git ran as the repository owner');
+  assert.match(line, /--no-pager --no-optional-locks -c core\.fsmonitor=false -c core\.hooksPath=\/dev\/null -c core\.attributesFile=\/dev\/null -c core\.sshCommand=false -c protocol\.allow=never/);
+  assert.match(line, /global=\/dev\/null/);
+  assert.ok(line.includes(`-c safe.directory=${repo} `), 'only the exact repository is declared safe');
+  assert.equal(line.includes('safe.directory=*'), false);
+});
+
+test('a repository that is a link, or git that refuses, leaves tracking unknown rather than guessing', (t) => {
+  const root = makeRoot(); t.after(() => cleanupRoot(root));
+  const { repo } = fsmonitorRepo(root);
+  symlinkSync(repo, join(root, 'link-to-app'));
+  write(join(root, 'not-a-repo/x'), 1);
+  const facts = scan({ roots: [], tracked: [{ repo: join(root, 'link-to-app'), paths: ['coverage'] }, { repo: join(root, 'not-a-repo'), paths: ['coverage'] }] });
+  assert.deepEqual(facts.tracked[join(root, 'link-to-app')], { ok: false, paths: [], reason: 'a link' });
+  assert.equal(facts.tracked[join(root, 'not-a-repo')].ok, false);
+});
+
+test('readSmall never blocks on a FIFO and reads only regular files (marker and .git link)', (t) => {
+  const root = makeRoot(); t.after(() => cleanupRoot(root));
+  const rel = join(root, 'releases/' + 'a'.repeat(40) + '-p1-' + '0'.repeat(8) + '-0000-4000-8000-' + '0'.repeat(12));
+  mkdirSync(rel, { recursive: true });
+  execFileSync('mkfifo', [join(rel, '.proxypilot-release.json')]);
+  mkdirSync(join(root, 'work/w1'), { recursive: true });
+  execFileSync('mkfifo', [join(root, 'work/w1/.git')]);
+  const started = Date.now();
+  const facts = scan({ roots: [{ path: join(root, 'releases'), depth: 1, marker: true }, { path: join(root, 'work'), depth: 1, gitLinks: true }] }, { timeout: 15_000 });
+  assert.ok(Date.now() - started < 10_000, 'the scan did not hang');
+  const items = byPath(facts);
+  assert.deepEqual(items.get(rel).marker, { present: false, unsafe: true });
+  assert.equal(items.get(join(root, 'work/w1')).gitLink, undefined);
+  assert.match(SCAN_PROGRAM, /O_NONBLOCK/);
+  assert.match(SCAN_PROGRAM, /fs\.fstatSync\(fd\)/);
+});
+
+test('the read-only fs view the shared release helpers get refuses every write, and the remover over it changes nothing', (t) => {
+  const root = makeRoot(); t.after(() => cleanupRoot(root));
+  write(join(root, 'keep/file.txt'), 10);
+  const v = readOnlyFs(nodeFs);
+  const C = nodeFs.constants;
+  for (const [op, call] of [
+    ['unlinkSync', () => v.unlinkSync(join(root, 'keep/file.txt'))],
+    ['renameSync', () => v.renameSync(join(root, 'keep'), join(root, 'moved'))],
+    ['rmdirSync', () => v.rmdirSync(join(root, 'keep'))],
+    ['writeFileSync', () => v.writeFileSync(join(root, 'new.txt'), 'x')],
+    ['mkdirSync', () => v.mkdirSync(join(root, 'new'))],
+    ['chmodSync', () => v.chmodSync(join(root, 'keep'), 0o777)],
+    ['lchownSync', () => v.lchownSync(join(root, 'keep'), 1, 1)],
+    ['open for writing', () => v.openSync(join(root, 'new.txt'), 'w')],
+    ['open O_WRONLY', () => v.openSync(join(root, 'keep/file.txt'), C.O_WRONLY)],
+    ['open O_CREAT', () => v.openSync(join(root, 'x'), C.O_RDONLY | C.O_CREAT)],
+    ['readFileSync outside /proc', () => v.readFileSync('/etc/hostname')],
+  ]) assert.throws(call, (e) => e.code === 'EROFS', op);
+  assert.equal(existsSync(join(root, 'new.txt')), false);
+  // Reads work, and every open is O_NOFOLLOW: a link is not followed.
+  const fd = v.openSync(join(root, 'keep/file.txt'), 'r'); assert.equal(v.fstatSync(fd).size, 10); v.closeSync(fd);
+  symlinkSync(join(root, 'keep/file.txt'), join(root, 'link'));
+  assert.throws(() => v.openSync(join(root, 'link'), C.O_RDONLY), /ELOOP/);
+  assert.ok(String(v.readFileSync('/proc/self/status', 'utf8')).includes('Pid:'));
+  // The shared remover, built over the view, cannot remove anything.
+  assert.throws(() => safeRemover(v, nodePath).removePath(join(root, 'keep')));
+  assert.equal(existsSync(join(root, 'keep/file.txt')), true, 'untouched');
 });

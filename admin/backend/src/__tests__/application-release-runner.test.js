@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { APPLICATION_JOB_KINDS, applicationGuestScript, runApplicationReleaseOperation, validateApplicationJob } from '../lib/setup-engine/application-deploy-op.js';
 import { ensureSetupEngineSchema, getJob, claimNextJob, readLock, createJob, checkpoint, acquireLock, recordJobOutcome, markLockStale } from '../lib/setup-engine/store.js';
 import { submitApplicationReleaseJob, listApplicationReleaseJobs } from '../lib/setup-engine/backend.js';
+import { reapAttemptScriptsScript } from '../lib/setup-engine/guest-probes.js';
 import { executeJob, reconcile } from '../lib/setup-engine/executor.js';
 import { ownerIdentity, redact, validateRunnerJob } from '../lib/setup-engine/logic.js';
 
@@ -87,6 +88,20 @@ test('validation stages exact Git bundle, executes named scripts, seals artifact
   assert.ok(f.calls.some(c => c.host?.[0] === 'git' && c.host.includes(candidateRef())));
   assert.equal(f.calls.some(c => c.host?.includes('--all')), false);
   assert.ok(f.calls.some(c => c.host?.[0] === 'incus' && c.host.at(-1).startsWith('pp-nodus/')));
+  // The build's leftover processes are stopped after the last script and before the seal.
+  const steps = f.calls.map(c => c.checkpoint || c.action);
+  assert.ok(steps.lastIndexOf('script') < steps.indexOf('stop_build_processes') && steps.indexOf('stop_build_processes') < steps.indexOf('seal'));
+});
+
+test('a build process that cannot be stopped keeps the release from being sealed', async t => {
+  const f = fixture(), temp = await fs.mkdtemp(path.join(os.tmpdir(), 'app-host-')); t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const guest = f.exec.guest;
+  f.exec.guest = async (c, script) => (String(script).includes(': reap_attempt_scripts') ? { code: 0, stdout: 'STALE_WRITERS:1\n' } : guest(c, script));
+  await assert.rejects(runApplicationReleaseOperation({ kind: 'application_validate', params, ...f, hostRoot: temp }), { code: 'BUILD_PROCESS_ALIVE' });
+  assert.equal(f.calls.some(c => c.action === 'seal'), false);
+  const script = reapAttemptScriptsScript('job-1-1');
+  assert.match(script, /\$RUN\/\$CUR\.units/); assert.match(script, /cgroup\.kill/); assert.match(script, /STALE_WRITERS:\$n/);
+  assert.throws(() => reapAttemptScriptsScript('job; rm -rf /'), /plain identifier/);
 });
 
 function candidateRef() { return 'refs/heads/release'; }
@@ -103,6 +118,42 @@ test('deployment validates artifact then checkpoints before switching, and verif
   const order = f.calls.map(c => c.action || c.checkpoint);
   assert.ok(order.indexOf('artifact') < order.indexOf('promoting')); assert.ok(order.indexOf('promoting') < order.indexOf('switch'));
   assert.equal(f.records.at(-1)[0], 'live'); assert.equal(f.records.at(-1)[2].sha, sha);
+});
+
+test('verifying the live release keeps its recorded previous release (rollback and retention still see it)', async () => {
+  const f = fixture(); f.state.target = f.candidate.validation.releasePath;
+  const recordedBefore = 'e'.repeat(40);
+  f.service.getApplication = async () => ({ live: { sha, releasePath: f.state.target, previousSha: recordedBefore, verifiedAt: '2026-10-20T10:00:00Z' }, candidates: [] });
+  const r = await runApplicationReleaseOperation({ kind: 'application_verify', params, ...f, sleep: async () => {} });
+  assert.equal(r.outcome, 'live_verified');
+  assert.equal(f.records.at(-1)[0], 'live'); assert.equal(f.records.at(-1)[2].previousSha, recordedBefore, 'carried forward, not dropped');
+  const r2 = fixture(); r2.state.target = r2.candidate.validation.releasePath;
+  r2.service.getApplication = async () => ({ live: { sha, releasePath: r2.state.target, previousSha: recordedBefore, rollbackOf: recordedBefore, verifiedAt: '2026-10-20T10:00:00Z' }, candidates: [] });
+  await runApplicationReleaseOperation({ kind: 'application_verify', params, ...r2, sleep: async () => {} });
+  assert.equal(r2.records.at(-1)[2].rollbackOf, recordedBefore, 'a rollback stays a rollback after verifying it');
+  // A different release recorded live before (the switch happened outside a deployment): that one is the previous release.
+  const g = fixture(); g.state.target = g.candidate.validation.releasePath;
+  g.service.getApplication = async () => ({ live: { sha: '9'.repeat(40), releasePath: '/opt/nodus-releases/other', previousSha: null }, candidates: [] });
+  await runApplicationReleaseOperation({ kind: 'application_verify', params, ...g, sleep: async () => {} });
+  assert.equal(g.records.at(-1)[2].previousSha, '9'.repeat(40));
+  // No live record before: nothing to carry.
+  const h = fixture(); h.state.target = h.candidate.validation.releasePath; h.service.getApplication = async () => ({ live: null, candidates: [] });
+  await runApplicationReleaseOperation({ kind: 'application_verify', params, ...h, sleep: async () => {} });
+  assert.equal(Object.hasOwn(h.records.at(-1)[2], 'previousSha'), false);
+});
+
+test('a rollback job records the release it rolled back from; a failed deployment restore names the failed one', async () => {
+  const f = fixture();
+  await runApplicationReleaseOperation({ kind: 'application_rollback', params, ...f, sleep: async () => {} });
+  const live = f.records.at(-1);
+  assert.equal(live[0], 'live'); assert.equal(live[2].sha, sha);
+  assert.equal(live[2].rollbackOf, f.state.previousSha, 'the release replaced by the rollback');
+  const g = fixture(); g.state.failHealth = true;
+  await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...g, sleep: async () => {} });
+  assert.equal(g.records.at(-1)[2].restored, true); assert.equal(g.records.at(-1)[2].rollbackOf, sha, 'the failed release is never the previous one');
+  const h = fixture();
+  await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...h, sleep: async () => {} });
+  assert.equal(Object.hasOwn(h.records.at(-1)[2], 'rollbackOf'), false, 'an ordinary deployment is not a rollback');
 });
 
 test('failed new health restores and verifies the recorded old release without touching service definitions', async () => {
@@ -185,7 +236,7 @@ test('wrong guest identity and foreign recovery reference cannot borrow another 
 });
 
 test('real guest sealing detects changed generated artifact bytes, not merely a matching Git SHA', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(),'app-seal-')); t.after(() => fs.rm(root,{recursive:true,force:true}));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(),'app-seal-')); t.after(() => fs.rm(root,{recursive:true,force:true})); await fs.chmod(root,0o755); // read-only git runs unprivileged
   const stage = path.join(root,'stage'), release = path.join(root,'release'); await fs.mkdir(stage);
   execFileSync('git',['init','-q',stage]); await fs.writeFile(path.join(stage,'app.js'),'source'); execFileSync('git',['-C',stage,'add','app.js']); execFileSync('git',['-C',stage,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);
   const exactSha=execFileSync('git',['-C',stage,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),exactTree=execFileSync('git',['-C',stage,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim();
@@ -207,7 +258,8 @@ test('non-root service can build, then transfer the validated tree to root for s
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'app-nonroot-')); t.after(()=>fs.rm(root,{recursive:true,force:true}));await fs.chmod(root,0o755);
   const repo=path.join(root,'repo'),stageRoot=path.join(root,'.staging'),stage=path.join(stageRoot,'job'),release=path.join(root,'release'),bundle=path.join(stageRoot,'source.bundle');
   await fs.mkdir(repo);await fs.mkdir(stageRoot,{mode:0o711});
-  await fs.writeFile(path.join(repo,'package.json'),JSON.stringify({name:'fixture',version:'1.0.0',scripts:{check:'node -e "require(\'fs\').writeFileSync(\'built.txt\',\'nonroot passed\')"'}}));
+  // A normal build: it reads git (git describe) although .git stays root-owned.
+  await fs.writeFile(path.join(repo,'package.json'),JSON.stringify({name:'fixture',version:'1.0.0',scripts:{check:'git describe --always > described.txt && node -e "require(\'fs\').writeFileSync(\'built.txt\',\'nonroot passed\')"'}}));
   execFileSync('git',['init','-q',repo]);execFileSync('git',['-C',repo,'add','package.json']);execFileSync('git',['-C',repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);
   const exactSha=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),exactTree=execFileSync('git',['-C',repo,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim();
   execFileSync('git',['-C',repo,'bundle','create',bundle,'HEAD']);await fs.chmod(bundle,0o600);
@@ -216,15 +268,44 @@ test('non-root service can build, then transfer the validated tree to root for s
   const staged=run({action:'stage',profile,stage,release,bundle,sha:exactSha,treeSha:exactTree,scripts:['check'],user:'nobody',group:''});assert.equal(staged.status,0,staged.stdout);
   const checked=run({action:'script',profile,stage,script:'check',user:'nobody',timeout:10000});assert.equal(checked.status,0,checked.stdout);
   assert.equal(await fs.readFile(path.join(stage,'built.txt'),'utf8'),'nonroot passed');assert.equal((await fs.stat(bundle)).mode&0o777,0o600);
+  assert.equal((await fs.readFile(path.join(stage,'described.txt'),'utf8')).trim(),exactSha.slice(0,7),'git works for the build with .git read-only to it');
   assert.notEqual((await fs.stat(stage)).uid,0);
+  const gitStat=await fs.stat(path.join(stage,'.git'));assert.equal(gitStat.uid,0,'.git is not handed to the service user');assert.equal(gitStat.mode&0o022,0);
+  const gitIdentity=JSON.parse(staged.stdout).gitIdentity;assert.deepEqual(gitIdentity,{dev:gitStat.dev,ino:gitStat.ino});
   const marker={sha:exactSha,treeSha:exactTree,profileDigest,evidenceDigest:'d'.repeat(64)};
-  const sealed=run({action:'seal',profile,stage,release,sha:exactSha,treeSha:exactTree,marker});assert.equal(sealed.status,0,sealed.stdout);
+  const sealed=run({action:'seal',profile,stage,release,sha:exactSha,treeSha:exactTree,gitIdentity,marker});assert.equal(sealed.status,0,sealed.stdout);
   assert.equal((await fs.stat(release)).uid,0);assert.equal((await fs.stat(path.join(release,'built.txt'))).mode&0o222,0);
   const verified=run({action:'artifact',profile,release,...marker,artifactDigest:JSON.parse(sealed.stdout).artifactDigest});assert.equal(verified.status,0,verified.stdout);
 });
 
+test('a .git swapped during the build is refused at the seal with a plain reason', async t => {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'app-gitswap-')); t.after(()=>fs.rm(root,{recursive:true,force:true}));await fs.chmod(root,0o755);
+  const repo=path.join(root,'repo'),stageRoot=path.join(root,'.staging'),stage=path.join(stageRoot,'job'),release=path.join(root,'release'),bundle=path.join(stageRoot,'source.bundle');
+  await fs.mkdir(repo);await fs.mkdir(stageRoot,{mode:0o711});
+  await fs.writeFile(path.join(repo,'package.json'),JSON.stringify({name:'fixture',version:'1.0.0',scripts:{check:'true'}}));
+  execFileSync('git',['init','-q',repo]);execFileSync('git',['-C',repo,'add','package.json']);execFileSync('git',['-C',repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);
+  const exactSha=execFileSync('git',['-C',repo,'rev-parse','HEAD'],{encoding:'utf8'}).trim(),exactTree=execFileSync('git',['-C',repo,'rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim();
+  execFileSync('git',['-C',repo,'bundle','create',bundle,'HEAD']);await fs.chmod(bundle,0o600);
+  const profile={sourceDir:'/opt/fixture',preservePaths:[],envFiles:[]};
+  const run=data=>spawnSync('sh',['-c',applicationGuestScript(data)],{encoding:'utf8'});
+  const staged=run({action:'stage',profile,stage,release,bundle,sha:exactSha,treeSha:exactTree,scripts:['check'],user:'root',group:''});assert.equal(staged.status,0,staged.stdout);
+  const {gitIdentity}=JSON.parse(staged.stdout);
+  // The build replaces .git with its own copy (a new inode, with a planted filter).
+  await fs.rename(path.join(stage,'.git'),path.join(stage,'.git.orig'));execFileSync('cp',['-a',path.join(stage,'.git.orig'),path.join(stage,'.git')]);
+  execFileSync('git',['-C',stage,'config','filter.x.clean',`sh -c 'id -u > ${root}/RAN; cat'`]);
+  const marker={sha:exactSha,treeSha:exactTree,profileDigest,evidenceDigest:'d'.repeat(64)};
+  const sealed=run({action:'seal',profile,stage,release,sha:exactSha,treeSha:exactTree,gitIdentity,marker});
+  assert.equal(JSON.parse(sealed.stdout).code,'GIT_METADATA_CHANGED');
+  await assert.rejects(fs.stat(release),'nothing was sealed');
+  await assert.rejects(fs.stat(path.join(root,'RAN')),'the planted filter never ran');
+  // The job turns the code into the plain reason.
+  const f=fixture();const exec={...f.exec,guest:async(c,script)=>{const r=await f.exec.guest(c,script);if(script.includes('printf')){const body=Buffer.from(script.match(/printf '%s' '([^']+)' \| base64/)[1],'base64').toString();const data=JSON.parse(Buffer.from(body.match(/ '([A-Za-z0-9+/=]+)'\n$/)[1],'base64').toString());if(data.action==='seal')return{code:1,stdout:JSON.stringify({ok:false,code:'GIT_METADATA_CHANGED'}),stderr:'CONTAINMENT:systemd fixture'};}return r;}};
+  const hostRoot=path.join(root,'transfers');
+  await assert.rejects(runApplicationReleaseOperation({kind:'application_validate',params,...f,exec,hostRoot,sleep:async()=>{}}),e=>e.message==="The repository's git metadata changed during the build, so this release was not sealed.");
+});
+
 test('real guest link program preserves absolute data paths, rejects tracked collision and nested symlink escape', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'app-guest-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'app-guest-')); t.after(() => fs.rm(root, { recursive: true, force: true })); await fs.chmod(root, 0o755); // read-only git runs unprivileged
   const old = path.join(root, 'old'), release = path.join(root, 'new'), source = path.join(root, 'current');
   await fs.mkdir(old); await fs.mkdir(release); await fs.symlink(old, source); await fs.mkdir(path.join(old,'data')); await fs.writeFile(path.join(old,'data','record'), 'preserve');
   execFileSync('git',['init','-q',release]); await fs.writeFile(path.join(release,'app.js'),'source'); execFileSync('git',['-C',release,'add','app.js']);

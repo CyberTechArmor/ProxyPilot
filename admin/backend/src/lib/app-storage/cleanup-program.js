@@ -10,20 +10,28 @@
 //   live               realpath of the profile's sourceDir, the release
 //                      root's protected set (describeReleases), statfs('/')
 //   remove             entries [{ path, identity }] under approvedRoots:
-//                      every ancestor a real directory (no link), lstat
-//                      identity unchanged since the check, nothing mounted
-//                      at or below, optionally nothing open inside; then an
-//                      atomic rename to `.pp-cleanup-<cleanupId>-<n>` in the
-//                      same parent, the renamed inode re-verified, a
-//                      recursive removal that never follows a link nor
-//                      crosses into another filesystem, and an fsync of the
-//                      parent
+//                      the parent opened by file descriptor from / with no
+//                      link on the way, lstat identity unchanged since the
+//                      check, nothing mounted at or below, optionally
+//                      nothing open inside; then an atomic rename to
+//                      `.pp-cleanup-<cleanupId>-<n>` inside that same open
+//                      directory, the renamed inode re-verified, a removal
+//                      that descends by file descriptor only (never follows
+//                      a link, never enters another filesystem, stops when a
+//                      name changes under it), and an fsync of the parent.
+//                      All of it is safe-remove.js (the one remover); without
+//                      a usable /proc/self/fd nothing is removed (NO_PROCFS).
+//                      A renamed entry that is not what the check saw is put
+//                      back, or parked as `.pp-cleanup-hold-<id>-<n>` and
+//                      reported (`parked`) — never removed.
 //   remove-release     one sealed release through removeSelectedRelease (the
 //                      release retention predicates), removed as above
 //   finish-quarantine  on resume: removes only `.pp-cleanup-<cleanupId>-<n>`
 //                      entries directly under approved roots or the recorded
 //                      parents
 //   vacuum-journal     journalctl --vacuum-size=<targetBytes>, measured
+//   measure            statfs('/') and, for memoryPaths, the used bytes of
+//                      memory-backed filesystems (tmpfs, ramfs)
 //
 // Result codes per entry: removed | gone (no longer exists) | refused (nothing
 // was changed; code says why) | failed (removal began and did not finish; the
@@ -39,22 +47,14 @@ export const CLEANUP_PROGRAM = String.raw`
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process');
 ${RELEASE_CLEANUP_SOURCE}
 const a=JSON.parse(Buffer.from(process.argv[1],'base64').toString());
+const R=safeRemover(fs,p);
 function emit(x){process.stdout.write(JSON.stringify(x))}
 function fail(code){emit({ok:false,code});process.exit(1)}
-function refuse(code){const e=new Error(code);e.refusal=code;throw e}
+function refuse(code,extra){const e=new Error(code);e.refusal=code;if(extra)Object.assign(e,extra);throw e}
 function normalAbs(x){return typeof x==='string'&&x.length<4096&&x.charAt(0)==='/'&&p.normalize(x)===x&&x!=='/'&&!x.endsWith('/')&&x.indexOf('\0')===-1}
 function within(root,x){return x.startsWith(root+'/')}
 function cleanupIdOk(){return typeof a.cleanupId==='string'&&/^cln_[a-f0-9-]{36}$/.test(a.cleanupId)}
 function approvedRoots(){const r=(Array.isArray(a.approvedRoots)?a.approvedRoots:[]).filter(normalAbs);if(!r.length)fail('NO_APPROVED_ROOTS');return r}
-// Every component from / down to dir must be a real directory.
-function realDirChain(dir){let at='/';const top=fs.lstatSync('/');if(!top.isDirectory())refuse('NOT_A_DIRECTORY');for(const part of dir.split('/').filter(Boolean)){at=p.join(at,part);const s=fs.lstatSync(at);if(s.isSymbolicLink())refuse('SYMLINK_IN_PATH');if(!s.isDirectory())refuse('NOT_A_DIRECTORY')}}
-function unescapeMount(x){return x.replace(/\\([0-7]{3})/g,(m,o)=>String.fromCharCode(parseInt(o,8)))}
-let mountList=null;
-function mounts(){if(mountList)return mountList;mountList=[];try{for(const line of fs.readFileSync('/proc/self/mounts','utf8').split('\n')){const f=line.split(' ');if(f.length>2)mountList.push(unescapeMount(f[1]))}}catch(e){mountList=[]}return mountList}
-let openList=null;
-// What running processes hold open or work in: /proc/<pid>/cwd and fd links.
-function openPaths(){if(openList)return openList;openList=[];let pids=[];try{pids=fs.readdirSync('/proc').filter(x=>/^[0-9]+$/.test(x))}catch(e){return openList}for(const pid of pids){if(pid===String(process.pid))continue;try{openList.push(fs.readlinkSync('/proc/'+pid+'/cwd'))}catch(e){}let fds=[];try{fds=fs.readdirSync('/proc/'+pid+'/fd')}catch(e){continue}for(const fd of fds){try{const t=fs.readlinkSync('/proc/'+pid+'/fd/'+fd);if(t.charAt(0)==='/')openList.push(t.replace(/ \(deleted\)$/,''))}catch(e){}}}return openList}
-function inUse(x){return openPaths().some(o=>o===x||o.startsWith(x+'/'))}
 function sameIdentity(st,id){
  if(!id||typeof id!=='object'||id.dev==null||id.ino==null)return false;
  if(Number(id.dev)!==st.dev||Number(id.ino)!==st.ino)return false;
@@ -68,49 +68,66 @@ function sameIdentity(st,id){
  else{if(id.size!=null&&st.size!==Number(id.size))return false;if(id.mtimeMs!=null&&st.mtimeMs!==Number(id.mtimeMs))return false}
  if(id.birthtimeMs!=null&&st.birthtimeMs>0&&st.birthtimeMs!==Number(id.birthtimeMs))return false;
  return true}
-// Post-order removal by lstat: a link is unlinked, never followed; a
-// directory on another device (a mount) is never entered.
-function removeTree(x,dev){const st=fs.lstatSync(x);let bytes=(st.blocks||0)*512,entries=1;if(st.isDirectory()&&!st.isSymbolicLink()){if(st.dev!==dev)refuse('MOUNT_INSIDE');for(const name of fs.readdirSync(x)){const r=removeTree(p.join(x,name),dev);bytes+=r.bytes;entries+=r.entries}fs.rmdirSync(x)}else fs.unlinkSync(x);return {bytes,entries}}
-function fsyncDir(d){const fd=fs.openSync(d,'r');try{fs.fsyncSync(fd)}finally{fs.closeSync(fd)}}
-function exists(x){try{fs.lstatSync(x);return true}catch(e){if(e.code==='ENOENT')return false;throw e}}
 let counter=Number.isInteger(a.startIndex)&&a.startIndex>=0?a.startIndex:0;
+// One entry, relative to its parent directory held open (R.openDir walks
+// from / and refuses any link on the way): lstat, identity, nothing mounted
+// at or below, optionally nothing open inside; the atomic rename to
+// .pp-cleanup-<id>-<n> happens INSIDE that same directory, the renamed inode
+// is re-verified, and the removal descends by file descriptor only.
 // state.touched: set once the entry was renamed (a later error is a failure,
 // not a refusal: the remainder sits in quarantine for finish-quarantine).
 function removeOne(x,identity,roots,opts,state){
  if(!normalAbs(x))refuse('INVALID_PATH');
  if(!roots.some(r=>within(r,x)))refuse('OUTSIDE_APPROVED_ROOTS');
- const parent=p.dirname(x);
- realDirChain(parent);
- let st;try{st=fs.lstatSync(x)}catch(e){if(e.code==='ENOENT')return {status:'gone'};throw e}
- if(!st.isDirectory()&&!st.isFile()&&!st.isSymbolicLink())refuse('NOT_REMOVABLE_TYPE');
- if(!sameIdentity(st,identity))refuse('CHANGED_SINCE_CHECK');
- if(mounts().some(m=>m===x||m.startsWith(x+'/')))refuse('MOUNT_INSIDE');
- if(opts.checkInUse&&inUse(x))refuse('IN_USE');
- let q,n;for(;;){n=counter++;q=p.join(parent,'.pp-cleanup-'+a.cleanupId+'-'+n);if(!exists(q))break}
- fs.renameSync(x,q);
- let qs=null;try{qs=fs.lstatSync(q)}catch(e){qs=null}
- let parentOk=false;try{realDirChain(parent);parentOk=fs.realpathSync(parent)===parent}catch(e){parentOk=false}
- if(!qs||qs.dev!==st.dev||qs.ino!==st.ino||!parentOk){
-  // Whatever was renamed is not what the check saw: put it back, or park it
-  // under a name finish-quarantine never touches, and remove nothing.
-  try{if(qs){if(!exists(x))fs.renameSync(q,x);else fs.renameSync(q,p.join(parent,'.pp-cleanup-hold-'+a.cleanupId+'-'+n))}}catch(e){}
-  refuse('CHANGED_SINCE_CHECK');
- }
- state.touched=true;
- const r=removeTree(q,st.dev);
- fsyncDir(parent);
- return {status:'removed',bytes:r.bytes,entries:r.entries};
+ const parent=p.dirname(x),name=p.basename(x);
+ const pfd=R.openDir(parent);
+ try{
+  const pst=fs.fstatSync(pfd);
+  let st;try{st=R.lstatAt(pfd,name)}catch(e){if(e.code==='ENOENT')return {status:'gone'};throw e}
+  if(!st.isDirectory()&&!st.isFile()&&!st.isSymbolicLink())refuse('NOT_REMOVABLE_TYPE');
+  if(!sameIdentity(st,identity))refuse('CHANGED_SINCE_CHECK');
+  if(R.mountedAt(x))refuse('MOUNT_INSIDE');
+  if(opts.checkInUse&&R.inUse(x))refuse('IN_USE');
+  // Too deep (or another filesystem inside): refused before the rename.
+  R.measureTreeAt(pfd,name,st.dev,st);
+  let q,n;for(;;){n=counter++;q='.pp-cleanup-'+a.cleanupId+'-'+n;if(!R.existsAt(pfd,q))break}
+  R.renameAt(pfd,name,q);
+  let qs=null;try{qs=R.lstatAt(pfd,q)}catch(e){qs=null}
+  const pnow=fs.fstatSync(pfd);
+  if(!qs||!R.same(qs,st)||!R.same(pnow,pst)||pnow.nlink===0){
+   // Whatever was renamed is not what the check saw: put it back, or park it
+   // under a name finish-quarantine never touches (reported), remove nothing.
+   let parked=null;
+   try{if(qs){if(!R.existsAt(pfd,name))R.renameAt(pfd,q,name);else{const h='.pp-cleanup-hold-'+a.cleanupId+'-'+n;R.renameAt(pfd,q,h);parked=p.join(parent,h)}}}catch(e){}
+   refuse('CHANGED_SINCE_CHECK',parked?{parked}:null);
+  }
+  state.touched=true;
+  let r;
+  try{r=R.removeTreeAt(pfd,q,st.dev,st)}
+  catch(e){
+   // A failure that will not go away by retrying (it grew too deep meanwhile)
+   // is set aside under the hold name, so no later resume retries it.
+   if(e&&e.refusal==='TOO_DEEP'){try{const h='.pp-cleanup-hold-'+a.cleanupId+'-'+n;R.renameAt(pfd,q,h);e.parked=p.join(parent,h)}catch(x){}}
+   throw e;
+  }
+  fs.fsyncSync(pfd);
+  return {status:'removed',bytes:r.bytes,entries:r.entries};
+ }finally{R.close(pfd)}
 }
 function codeOf(e){if(e&&e.refusal)return e.refusal;const m=String(e&&e.message||'');if(/^[A-Z][A-Z0-9_]{2,60}$/.test(m))return m;return e&&e.code?'FS_'+String(e.code).replace(/[^A-Z0-9_]/g,''):'REMOVE_FAILED'}
-function attempt(x,fn){const state={touched:false};try{return {path:x,...fn(state)}}catch(e){return {path:x,status:state.touched?'failed':'refused',code:codeOf(e)}}}
+function attempt(x,fn){const state={touched:false};try{return {path:x,...fn(state)}}catch(e){return {path:x,status:state.touched?'failed':'refused',code:codeOf(e),...(e&&e.parked?{parked:e.parked}:{})}}}
 function statfsRoot(){if(typeof fs.statfsSync!=='function')return null;try{const s=fs.statfsSync('/');return {totalBytes:s.bsize*s.blocks,freeBytes:s.bsize*s.bfree,availBytes:s.bsize*s.bavail,usedBytes:s.bsize*(s.blocks-s.bfree)}}catch(e){return null}}
+// Memory-backed filesystems (tmpfs, ramfs) holding the given paths: used
+// bytes per mount, each mount once.
+function memoryUse(paths){const out=[],seen=new Set();if(typeof fs.statfsSync!=='function'||!Array.isArray(paths))return out;for(const x of paths.filter(normalAbs).slice(0,20)){try{const m=R.mountOf(x);if(!m||seen.has(m.path)||!/^(tmpfs|ramfs)$/.test(m.type))continue;seen.add(m.path);const s=fs.statfsSync(m.path);out.push({mount:m.path,usedBytes:s.bsize*(s.blocks-s.bfree)})}catch(e){}}return out}
 function walkBytes(x){let st;try{st=fs.lstatSync(x)}catch(e){return 0}let b=(st.blocks||0)*512;if(st.isDirectory()&&!st.isSymbolicLink()){let names=[];try{names=fs.readdirSync(x)}catch(e){names=[]}for(const n of names)b+=walkBytes(p.join(x,n))}return b}
 try{
  if(a.action==='live'){
   const out={ok:true,live:null};
   if(normalAbs(a.sourceDir)){try{out.isLink=fs.lstatSync(a.sourceDir).isSymbolicLink();out.live=fs.realpathSync(a.sourceDir)}catch(e){out.liveError=e.code||'UNREADABLE'}}
-  if(a.profile&&a.profile.releaseRoot){try{const d=describeReleases(fs,p,a);out.releases={root:d.root,live:d.live,rollback:d.rollback,candidate:d.candidate,protect:[...d.protect],backing:[...d.backing],sealed:d.sealed.map(r=>({path:r.path,mtimeMs:r.mtimeMs,sha:r.sha}))}}catch(e){out.releasesError=codeOf(e)}}
+  if(a.profile&&a.profile.releaseRoot){try{const d=describeReleases(fs,p,a);out.releases={root:d.root,live:d.live,rollback:d.rollback,rollbackUnknown:d.rollbackUnknown===true,waiting:d.waiting||null,pending:[...(d.pending||[])],candidate:d.candidate,protect:[...d.protect],backing:[...d.backing],sealed:d.sealed.map(r=>({path:r.path,mtimeMs:r.mtimeMs,sha:r.sha}))}}catch(e){out.releasesError=codeOf(e)}}
   if(a.statfs)out.fs=statfsRoot();
+  if(a.memoryPaths)out.memory=memoryUse(a.memoryPaths);
   emit(out);
  }
  else if(a.action==='remove'){
@@ -118,13 +135,16 @@ try{
   const roots=approvedRoots();
   const entries=Array.isArray(a.entries)?a.entries:[];
   if(!entries.length||entries.length>100000)fail('INVALID_ENTRIES');
-  const results=entries.map(e=>attempt(e&&e.path,state=>removeOne(e&&e.path,e&&e.identity,roots,{checkInUse:a.checkInUse===true},state)));
+  // Mounts and open files are re-read when older than 2 s; a small batch
+  // re-reads them for every entry.
+  const small=entries.length<=20;
+  const results=entries.map(e=>attempt(e&&e.path,state=>{if(small)R.refresh();return removeOne(e&&e.path,e&&e.identity,roots,{checkInUse:a.checkInUse===true},state)}));
   emit({ok:true,results,next:counter});
  }
  else if(a.action==='remove-release'){
   if(!cleanupIdOk())fail('INVALID_CLEANUP_ID');
   const roots=approvedRoots();
-  const r=attempt(a.path,state=>{if(!normalAbs(a.path))refuse('INVALID_PATH');if(!exists(a.path))return {status:'gone'};const out=removeSelectedRelease(fs,p,a,x=>removeOne(x,a.identity,roots,{checkInUse:false},state));delete out.removed;return out});
+  const r=attempt(a.path,state=>{if(!normalAbs(a.path))refuse('INVALID_PATH');try{fs.lstatSync(a.path)}catch(e){if(e.code==='ENOENT')return {status:'gone'};throw e}const out=removeSelectedRelease(fs,p,a,x=>removeOne(x,a.identity,roots,{checkInUse:false},state));delete out.removed;return out});
   emit({ok:true,results:[r],next:counter});
  }
  else if(a.action==='finish-quarantine'){
@@ -134,14 +154,23 @@ try{
   const pattern=new RegExp('^\\.pp-cleanup-'+a.cleanupId.replace(/[^a-z0-9_]/g,c=>'\\'+c)+'-[0-9]+$');
   const removed=[],failed=[],skipped=[];
   for(const dir of dirs){
-   try{realDirChain(dir)}catch(e){skipped.push({dir,code:codeOf(e)});continue}
-   let names=[];try{names=fs.readdirSync(dir)}catch(e){skipped.push({dir,code:codeOf(e)});continue}
-   for(const name of names){
-    if(!pattern.test(name))continue;
-    const q=p.join(dir,name);
-    try{const st=fs.lstatSync(q);if(mounts().some(m=>m===q||m.startsWith(q+'/')))refuse('MOUNT_INSIDE');const r=removeTree(q,st.dev);fsyncDir(dir);removed.push({dir,name,bytes:r.bytes,entries:r.entries})}
-    catch(e){failed.push({dir,name,code:codeOf(e)})}
-   }
+   let dfd;try{dfd=R.openDir(dir)}catch(e){skipped.push({dir,code:codeOf(e)});continue}
+   try{
+    let names=[];try{names=R.listAt(dfd)}catch(e){skipped.push({dir,code:codeOf(e)});continue}
+    for(const raw of names){
+     const name=raw.toString();
+     if(!pattern.test(name)||!Buffer.from(name).equals(raw))continue;
+     const q=p.join(dir,name);
+     try{const st=R.lstatAt(dfd,raw);if(R.mountedAt(q))refuse('MOUNT_INSIDE');R.measureTreeAt(dfd,raw,st.dev,st);const r=R.removeTreeAt(dfd,raw,st.dev,st);fs.fsyncSync(dfd);removed.push({dir,name,bytes:r.bytes,entries:r.entries})}
+     catch(e){
+      // A failure that retrying cannot fix (too deep, a mount inside) is set
+      // aside under the hold name, reported, and not retried on every resume.
+      const code=codeOf(e);let parked=null;
+      if(code==='TOO_DEEP'||code==='MOUNT_INSIDE'){try{const h=name.replace(/^\.pp-cleanup-/,'.pp-cleanup-hold-');R.renameAt(dfd,raw,h);parked=p.join(dir,h)}catch(x){parked=null}}
+      failed.push({dir,name,code,...(parked?{parked}:{})});
+     }
+    }
+   }finally{R.close(dfd)}
   }
   emit({ok:true,removed,failed,skipped});
  }
@@ -153,9 +182,9 @@ try{
   if(r.status!==0)fail('JOURNAL_VACUUM_FAILED');
   emit({ok:true,beforeBytes:before,afterBytes:walkBytes('/var/log/journal')});
  }
- else if(a.action==='measure'){emit({ok:true,fs:statfsRoot()})}
+ else if(a.action==='measure'){emit({ok:true,fs:statfsRoot(),...(a.memoryPaths?{memory:memoryUse(a.memoryPaths)}:{})})}
  else fail('UNKNOWN_ACTION');
-}catch(e){fail('PROGRAM_FAILED')}
+}catch(e){fail(e&&e.refusal==='NO_PROCFS'?'NO_PROCFS':'PROGRAM_FAILED')}
 `;
 
 const quote = s => `'${String(s).replace(/'/g, `'\\''`)}'`;

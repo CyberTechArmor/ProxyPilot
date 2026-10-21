@@ -1,10 +1,19 @@
-// Application storage store (mock2.db, migration 560). Checks, per-target
-// policies, cleanup records and usage samples. The feature must not itself
-// grow without bound: the newest 20 checks per target, 50 cleanups per
-// target and 30 days of samples are kept (pruned on insert).
+// Application storage store (mock2.db, migrations 560 and 561). Checks,
+// per-target policies, cleanup records and usage samples. The feature must
+// not itself grow without bound: the newest 20 checks per target, 50
+// cleanups per target and 30 days of samples are kept (pruned on insert and
+// by prune(), which the monitor calls every run), and dropGoneTargets()
+// removes the rows of applications and projects that are gone. A finished
+// check stores a small summary beside its full result (summary_json,
+// migration 561), so the overview and the policy limits never parse the
+// full result.
 //
+// APP_STORAGE_SCHEMA is the current shape for tests and helpers; the
+// migrations carry their own DDL and never read it.
 // Works on any handle with prepare()/exec() (better-sqlite3 in production,
 // node:sqlite in tests); no transaction helper is required.
+
+import { SEPARATE_CATEGORIES } from './categories.js';
 
 export const APP_STORAGE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS mock2_storage_checks (
@@ -16,7 +25,8 @@ CREATE TABLE IF NOT EXISTS mock2_storage_checks (
   finished_at TEXT,
   requested_by TEXT,
   result_json TEXT,
-  error_code TEXT
+  error_code TEXT,
+  summary_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mock2_storage_checks_target ON mock2_storage_checks(target_key, started_at);
 CREATE TABLE IF NOT EXISTS mock2_storage_policies (
@@ -61,11 +71,25 @@ export const CHECK_STATUSES = Object.freeze(['running', 'complete', 'partial', '
 export const CLEANUP_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'partial', 'failed', 'refused', 'cancelled']);
 const OPEN_CLEANUP = "('queued','running')";
 
+/**
+ * The small summary kept beside a finished check's result: the totals and
+ * what can be cleaned up from the files (disk and memory apart; snapshots
+ * and exports are separate selections).
+ */
+export function summarizeCheckResult(result) {
+  if (!result || typeof result !== 'object') return null;
+  const files = (result.categories || []).filter((c) => !SEPARATE_CATEGORIES.includes(c?.key));
+  const sum = (field) => files.reduce((s, c) => s + (Number.isFinite(Number(c?.[field])) ? Number(c[field]) : 0), 0);
+  return { totals: result.totals ?? null, eligibleBytes: sum('eligibleBytes'), eligibleMemoryBytes: sum('eligibleMemoryBytes') };
+}
+
 const iso = (v) => (v == null ? new Date().toISOString() : typeof v === 'number' ? new Date(v).toISOString() : v instanceof Date ? v.toISOString() : String(v));
 const parse = (text) => { if (text == null) return null; try { return JSON.parse(text); } catch { return null; } };
 
 export function ensureAppStorageSchema(db) {
   db.exec(APP_STORAGE_SCHEMA);
+  const cols = db.prepare('PRAGMA table_info(mock2_storage_checks)').all().map((c) => c.name);
+  if (!cols.includes('summary_json')) db.exec('ALTER TABLE mock2_storage_checks ADD COLUMN summary_json TEXT');
 }
 
 export function readInstalledAt(db) {
@@ -129,8 +153,9 @@ export function createStorageStore(db, { now = () => Date.now() } = {}) {
     },
     finishCheck(id, { status, result = null, errorCode = null, finishedAt = null } = {}) {
       if (!CHECK_STATUSES.includes(status) || status === 'running') throw new Error(`finishCheck: invalid status ${status}`);
-      const r = db.prepare(`UPDATE mock2_storage_checks SET status = ?, finished_at = ?, result_json = ?, error_code = ? WHERE id = ? AND status = 'running'`)
-        .run(status, iso(finishedAt ?? nowMs()), result == null ? null : JSON.stringify(result), errorCode, String(id));
+      const summary = summarizeCheckResult(result);
+      const r = db.prepare(`UPDATE mock2_storage_checks SET status = ?, finished_at = ?, result_json = ?, error_code = ?, summary_json = ? WHERE id = ? AND status = 'running'`)
+        .run(status, iso(finishedAt ?? nowMs()), result == null ? null : JSON.stringify(result), errorCode, summary == null ? null : JSON.stringify(summary), String(id));
       return Number(r?.changes || 0) === 1;
     },
     getCheck(id) {
@@ -140,6 +165,24 @@ export function createStorageStore(db, { now = () => Date.now() } = {}) {
     latestCheck(targetKey, { statuses = ['complete', 'partial'] } = {}) {
       const marks = statuses.map(() => '?').join(',');
       return checkView(db.prepare(`SELECT * FROM mock2_storage_checks WHERE target_key = ? AND status IN (${marks}) ORDER BY started_at DESC, id DESC LIMIT 1`).get(String(targetKey), ...statuses));
+    },
+    /**
+     * The newest finished check's row and summary, without reading the full
+     * result: { id, checkId, targetKey, status, startedAt, finishedAt,
+     * errorCode, summary }. A row written before the summary existed is
+     * summarised from its result once (then stored).
+     */
+    latestCheckSummary(targetKey, { statuses = ['complete', 'partial'] } = {}) {
+      const marks = statuses.map(() => '?').join(',');
+      const row = db.prepare(`SELECT id, target_key, origin, status, started_at, finished_at, requested_by, error_code, summary_json FROM mock2_storage_checks WHERE target_key = ? AND status IN (${marks}) ORDER BY started_at DESC, id DESC LIMIT 1`).get(String(targetKey), ...statuses);
+      if (!row) return null;
+      let summary = parse(row.summary_json);
+      if (summary == null) {
+        const full = db.prepare('SELECT result_json FROM mock2_storage_checks WHERE id = ?').get(row.id);
+        summary = summarizeCheckResult(parse(full?.result_json));
+        if (summary) { try { db.prepare('UPDATE mock2_storage_checks SET summary_json = ? WHERE id = ? AND summary_json IS NULL').run(JSON.stringify(summary), row.id); } catch { /* read-only is fine */ } }
+      }
+      return { ...checkView(row, { withResult: false }), summary };
     },
     /** The check running now for this target; one older than maxAgeMs is not counted (it was interrupted). */
     runningCheck(targetKey, { maxAgeMs = null } = {}) {
@@ -231,6 +274,25 @@ export function createStorageStore(db, { now = () => Date.now() } = {}) {
     latestSample(targetKey) {
       const r = db.prepare('SELECT sampled_at, used_bytes FROM mock2_storage_samples WHERE target_key = ? ORDER BY sampled_at DESC LIMIT 1').get(String(targetKey));
       return r ? { sampledAt: r.sampled_at, usedBytes: Number(r.used_bytes) } : null;
+    },
+
+    /**
+     * Drop the rows of targets that are gone. `live` = the keys listed now;
+     * `known` = every application and project record that still exists
+     * (archived ones included). Checks (never a running one) and samples of a
+     * target not listed now go; finished cleanup records and the policy go
+     * only when the record itself no longer exists, so an archived project
+     * that comes back keeps its rules. Both sets are required.
+     */
+    dropGoneTargets({ live, known } = {}) {
+      const out = { checks: 0, samples: 0, cleanups: 0, policies: 0 };
+      if (!(live instanceof Set) || !(known instanceof Set)) return out;
+      const keysOf = (table) => db.prepare(`SELECT DISTINCT target_key FROM ${table}`).all().map((r) => r.target_key);
+      for (const k of keysOf('mock2_storage_checks')) if (!live.has(k)) out.checks += Number(db.prepare("DELETE FROM mock2_storage_checks WHERE target_key = ? AND status <> 'running'").run(k)?.changes || 0);
+      for (const k of keysOf('mock2_storage_samples')) if (!live.has(k)) out.samples += Number(db.prepare('DELETE FROM mock2_storage_samples WHERE target_key = ?').run(k)?.changes || 0);
+      for (const k of keysOf('mock2_storage_cleanups')) if (!known.has(k) && !live.has(k)) out.cleanups += Number(db.prepare(`DELETE FROM mock2_storage_cleanups WHERE target_key = ? AND status NOT IN ${OPEN_CLEANUP}`).run(k)?.changes || 0);
+      for (const k of keysOf('mock2_storage_policies')) if (!known.has(k) && !live.has(k)) out.policies += Number(db.prepare('DELETE FROM mock2_storage_policies WHERE target_key = ?').run(k)?.changes || 0);
+      return out;
     },
 
     /** Apply every retention limit (all targets). */

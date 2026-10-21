@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeTotals, summarizeCategories, estimateSelection, formatBytes } from '../lib/app-storage/accounting.js';
+import { computeTotals, summarizeCategories, estimateSelection, formatBytes, FIGURE_SOURCES } from '../lib/app-storage/accounting.js';
 import { performCheck } from '../lib/app-storage/perform-check.js';
 import * as W from './helpers/app-storage-world.js';
 
@@ -37,7 +37,9 @@ test('totals: what the guest sees, what was measured, what is left as an estimat
   ];
   const host = { usageBytes: 2.9e9, limit: { bytes: 220e9, source: 'root-device' }, datasetName: 'tank/c/pp-x', dataset: { usedBytes: 2.9e9, referencedBytes: 3e9, snapshotsBytes: 1.2e8, datasetBytes: 2.78e9, logicalUsedBytes: 6e9, compressRatio: 2.1, availableBytes: 97e9 } };
   const t = computeTotals({ facts, host, items });
-  assert.deepEqual(t.guest, { totalBytes: 100e9, usedBytes: 3e9, availableBytes: 97e9, precision: 'exact' });
+  assert.deepEqual(t.guest, { totalBytes: 100e9, usedBytes: 3e9, availableBytes: 97e9, precision: 'exact', shared: false, source: 'container-df', label: FIGURE_SOURCES['container-df'] });
+  assert.equal(t.sharedHostFilesystem, false);
+  assert.deepEqual([t.usageSource, t.dataset.source], ['incus-root-usage', 'zfs-dataset'], 'every used figure names where it comes from');
   assert.equal(t.measuredBytes, 1.5e9, 'only guest items on the root filesystem count');
   assert.equal(t.measuredPrecision, 'at-least', 'a partial walk makes the measured figure a lower bound');
   assert.equal(t.unattributedBytes, 1.5e9);
@@ -128,4 +130,70 @@ test('on real files: a hard link shared between a data folder and a leftover is 
   const pseudo = r.items.find((it) => it.kind === 'pseudo');
   assert.equal(pseudo.allocatedBytes, r.totals.unattributedBytes);
   assert.equal(pseudo.precision, 'estimate');
+});
+
+test('hard links: the collector records hard-linked bytes per item and the estimate says the figure is uncertain', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const world = W.buildNodusGuest(root, NOW);
+  const r = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root }), now: NOW, checkId: 'chk_00000000-0000-4000-8000-000000000003', listExports: () => [] });
+  const data = r.items.find((it) => it.path === '/var/lib/nodus');
+  assert.ok(data.hardLinkedBytes >= 900, 'the item that carries the shared file records its hard-linked bytes');
+  const est = estimateSelection({ items: [item({ id: 'x', allocatedBytes: 5000, hardLinkedBytes: 4096 })] }, { items: ['x'] });
+  assert.equal(est.precision, 'estimate');
+  assert.equal(est.hardLinkedBytes, 4096);
+  assert.ok(est.notes.some((n) => /hard links/.test(n)));
+  assert.equal(estimateSelection({ items: [item({ id: 'y', allocatedBytes: 5000 })] }, { items: ['y'] }).precision, 'exact');
+});
+
+/* ---- review findings 8 and 12 ---- */
+
+test('categories keep disk and memory apart; "mixed" only when something can be cleaned up', () => {
+  const cats = Object.fromEntries(summarizeCategories([
+    item({ category: 'temp', allocatedBytes: 100, logicalBytes: 90 }),
+    item({ category: 'temp', allocatedBytes: 50, logicalBytes: 40, memoryBacked: true }),
+    item({ category: 'temp', status: 'protected', allocatedBytes: 20, memoryBacked: true }),
+    item({ category: 'other', status: 'protected' }), item({ category: 'other', status: 'investigate' }),
+    item({ category: 'data', status: 'protected' }), item({ category: 'data', status: 'eligible' }),
+  ]).map((c) => [c.key, c]));
+  assert.deepEqual([cats.temp.allocatedBytes, cats.temp.logicalBytes, cats.temp.memoryBytes], [100, 90, 70], 'tmpfs is not counted as disk');
+  assert.deepEqual([cats.temp.eligibleBytes, cats.temp.eligibleMemoryBytes, cats.temp.eligibleCount], [100, 50, 2]);
+  assert.equal(cats.other.status, 'investigate', 'protected and needs-a-look, nothing cleanable');
+  assert.equal(cats.data.status, 'mixed');
+});
+
+/* ---- review findings 10 and 17 ---- */
+
+test('a dir or btrfs pool: the figures are the shared host filesystem\'s, flagged, and nothing is estimated from them', async (t) => {
+  const facts = { rootDev: 1, fs: [{ path: '/', mount: '/', fstype: 'ext4', totalBytes: 1e12, freeBytes: 5e11, availBytes: 5e11 }] };
+  for (const driver of ['dir', 'btrfs']) {
+    const tt = computeTotals({ facts, host: { poolDriver: driver, usageBytes: 2e9 }, items: [item({ allocatedBytes: 1e9 })] });
+    assert.equal(tt.sharedHostFilesystem, true, driver);
+    assert.deepEqual([tt.guest.shared, tt.guest.source], [true, 'shared-host-df']);
+    assert.match(tt.guest.label, /shares with other containers/);
+    assert.deepEqual([tt.unattributedBytes, tt.unattributedPrecision], [null, null]);
+    assert.equal(tt.usageBytes, 2e9);
+  }
+  assert.equal(computeTotals({ facts, host: { poolDriver: 'lvm' } }).sharedHostFilesystem, false, 'an LVM volume is the container\'s own filesystem');
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const world = W.buildNodusGuest(root, NOW);
+  const r = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root, driver: 'dir' }), now: NOW, checkId: 'chk_00000000-0000-4000-8000-000000000004', listExports: () => [] });
+  assert.equal(r.totals.sharedHostFilesystem, true);
+  assert.equal(r.items.some((it) => it.kind === 'pseudo'), false, 'no "Not measured individually" from host-wide numbers');
+  assert.ok(r.notes.some((n) => /shares the host filesystem/.test(n)));
+});
+
+test('several snapshots but not all free at least the sum of their figures; one frees exactly its own; a 0 figure is 0', () => {
+  const snap = (id, bytes) => item({ id, category: 'snapshots', kind: 'snapshot', location: 'host', allocatedBytes: bytes, logicalBytes: bytes });
+  const check = { items: [snap('s1', 40e6), snap('s2', 30e6), snap('s3', 0)], totals: { dataset: { snapshotsBytes: 200e6 } } };
+  const two = estimateSelection(check, { snapshots: ['s1', 's2'] });
+  assert.equal(two.snapshotBytes, 70e6);
+  assert.equal(two.precision, 'at-least', 'a subset is a lower bound');
+  assert.ok(two.notes.includes('Deleting these snapshots together frees at least this much: space that only they share is freed too, but it is in none of their own figures.'));
+  const one = estimateSelection(check, { snapshots: ['s2'] });
+  assert.equal(one.precision, 'exact');
+  assert.equal(one.notes.some((x) => /at least this much/.test(x)), false);
+  const fresh = estimateSelection(check, { snapshots: ['s3'] });
+  assert.deepEqual([fresh.snapshotBytes, fresh.precision], [0, 'exact']);
+  const every = estimateSelection(check, { snapshots: ['s1', 's2', 's3'] });
+  assert.deepEqual([every.snapshotBytes, every.precision], [200e6, 'estimate']);
 });

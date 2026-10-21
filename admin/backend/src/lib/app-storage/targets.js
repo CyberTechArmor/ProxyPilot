@@ -6,11 +6,18 @@
 
 import { createApplicationStore } from '../../mock2/application-store.js';
 import { APPLICATION_JOB_KINDS, applicationGuestName } from '../setup-engine/application-deploy-logic.js';
+import { previousLiveRelease } from './release-history.js';
 
 export const TARGET_KINDS = Object.freeze(['application', 'project']);
 const KEY_RE = /^(application|project):([1-9][0-9]{0,15})$/;
 const LIVE_CYCLE_STATUSES = Object.freeze(['queued', 'estimating', 'running']);
 const OPEN_STATUSES = "('queued','running')";
+// An application job is open while queued or running, and also while it is
+// recovery_required and not yet recovered (the same rule as the setup
+// engine's own "is an application job open", backend.js): its staging
+// attempt and transfer copies are still needed by the recovery.
+const appJobKinds = APPLICATION_JOB_KINDS.map((k) => `'${String(k).replace(/'/g, "''")}'`).join(',');
+const OPEN_JOB_SQL = `(status IN ${OPEN_STATUSES} OR (status = 'recovery_required' AND kind IN (${appJobKinds}) AND (outcome IS NULL OR outcome <> 'application_recovered')))`;
 
 export class AppStorageError extends Error {
   constructor(code, message, status = 400, extra = {}) {
@@ -40,8 +47,30 @@ function tableExists(db, name) {
   try { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name); } catch { return false; }
 }
 
+function columnExists(db, table, column) {
+  try { return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column); } catch { return false; }
+}
+
 function projectGuest(row) {
   return row.container_name || `m2-${row.id}`;
+}
+
+// How a project that did not start empty arrived (mock2/projects.js
+// createProject `origin`, e.g. a clone): mock2_settings `project_origin.<id>`.
+// Such a project is an existing application for its storage rules.
+const PROJECT_ORIGIN_PREFIX = 'project_origin.';
+function projectOrigins(mock2Db, id = null) {
+  const out = new Map();
+  if (!tableExists(mock2Db, 'mock2_settings')) return out;
+  const rows = id == null
+    ? mock2Db.prepare("SELECT key, value FROM mock2_settings WHERE key LIKE 'project_origin.%'").all()
+    : mock2Db.prepare('SELECT key, value FROM mock2_settings WHERE key = ?').all(`${PROJECT_ORIGIN_PREFIX}${Number(id)}`);
+  for (const r of rows) {
+    const pid = Number(String(r.key).slice(PROJECT_ORIGIN_PREFIX.length));
+    const v = safeJson(r.value);
+    if (Number.isInteger(pid) && pid > 0 && v && typeof v === 'object' && typeof v.kind === 'string') out.set(pid, { kind: v.kind, ...(Number.isInteger(Number(v.sourceProjectId)) ? { sourceProjectId: Number(v.sourceProjectId) } : {}) });
+  }
+  return out;
 }
 
 /** Every target shown in the overview, applications first. */
@@ -53,13 +82,29 @@ export function listTargets({ mock2Db }) {
     }
   }
   if (tableExists(mock2Db, 'mock2_projects')) {
+    const origins = projectOrigins(mock2Db);
     for (const row of mock2Db.prepare('SELECT id, name, container_name, lifecycle, created_at FROM mock2_projects ORDER BY name, id').all()) {
       // An archived project has no guest any more (its container_name is NULL).
       if (row.lifecycle === 'archived' && !row.container_name) continue;
-      out.push({ key: targetKeyOf('project', row.id), kind: 'project', id: Number(row.id), name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle, createdAt: row.created_at || null });
+      out.push({ key: targetKeyOf('project', row.id), kind: 'project', id: Number(row.id), name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle, createdAt: row.created_at || null, origin: origins.get(Number(row.id)) || null });
     }
   }
   return out;
+}
+
+/**
+ * The keys of every application and project record that still exists,
+ * archived ones included, or null when the records cannot be read (then
+ * nothing is dropped).
+ */
+export function existingTargetKeys({ mock2Db }) {
+  try {
+    if (!tableExists(mock2Db, 'mock2_applications') || !tableExists(mock2Db, 'mock2_projects')) return null;
+    const keys = new Set();
+    for (const r of mock2Db.prepare('SELECT id FROM mock2_applications').all()) keys.add(targetKeyOf('application', r.id));
+    for (const r of mock2Db.prepare('SELECT id FROM mock2_projects').all()) keys.add(targetKeyOf('project', r.id));
+    return keys;
+  } catch { return null; }
 }
 
 /** The full target, with the layout knowledge classification needs. */
@@ -81,15 +126,26 @@ export function resolveTarget(key, { mock2Db }) {
         healthUrl: profile.healthUrl || null, preservePaths: profile.preservePaths || [], envFiles: profile.envFiles || [], revision: profile.revision || null,
       },
       live: app.live || null,
-      candidates: (app.candidates || []).map((c) => ({ sha: c.sha, checkpointAt: c.checkpointAt, validation: c.validation ? { passed: !!c.validation.passed, releasePath: c.validation.releasePath || null, validatedAt: c.validation.validatedAt || null, jobId: c.validation.jobId || null } : null })),
+      // Each candidate's own live record (its last time live), so the
+      // release roles can name the folder a previous release ran from.
+      candidates: (app.candidates || []).map((c) => ({ sha: c.sha, checkpointAt: c.checkpointAt, validation: c.validation ? { passed: c.validation.passed === true ? true : c.validation.passed === false ? false : null, releasePath: c.validation.releasePath || null, validatedAt: c.validation.validatedAt || null, jobId: c.validation.jobId || null } : null, live: c.live && typeof c.live === 'object' ? { releasePath: c.live.releasePath || null, verifiedAt: c.live.verifiedAt || null } : null })),
+      // The release that ran before the live one, from the deploy history
+      // (release-history.js); null when unknown.
+      previousLive: previousLiveRelease(mock2Db, id),
     };
   }
   if (!tableExists(mock2Db, 'mock2_projects')) throw notFound();
-  const row = mock2Db.prepare('SELECT id, name, container_name, lifecycle, repo_path, created_at FROM mock2_projects WHERE id = ?').get(id);
+  // web_port (migration 504) is the port the project's app serves on; the
+  // cleanup's health check probes it (an older table without it: the default).
+  const hasPort = columnExists(mock2Db, 'mock2_projects', 'web_port');
+  const row = mock2Db.prepare(`SELECT id, name, container_name, lifecycle, repo_path, created_at${hasPort ? ', web_port' : ''} FROM mock2_projects WHERE id = ?`).get(id);
   if (!row || (row.lifecycle === 'archived' && !row.container_name)) throw notFound();
+  const webPort = Number(row.web_port);
   return {
     key: targetKeyOf(kind, id), kind, id, name: row.name, guest: projectGuest(row), lifecycle: row.lifecycle,
     createdAt: row.created_at || null, repoPath: row.repo_path || null, appDir: '/srv/app', repoMount: '/srv/repo.git',
+    webPort: Number.isInteger(webPort) && webPort > 0 && webPort < 65536 ? webPort : null,
+    origin: projectOrigins(mock2Db, id).get(Number(id)) || null,
   };
 }
 
@@ -102,23 +158,24 @@ const attemptOf = (job) => `${job.id}-${job.epoch || 1}`;
  */
 export function activityFor(target, { mainDb, mock2Db, now = Date.now(), excludeJobId = null } = {}) {
   const nowMs = typeof now === 'function' ? now() : Number(now);
-  const out = { openJobs: [], buildActive: false, leaseHeld: null, openRestoreJob: false, anyApplicationJobOpen: false, activeAttempts: [], openJobIds: [], reasons: [] };
+  const out = { openJobs: [], buildActive: false, leaseHeld: null, openRestoreJob: false, anyApplicationJobOpen: false, activeAttempts: [], recoveryAttempts: [], openJobIds: [], reasons: [] };
   const guest = target.guest;
   if (mainDb && tableExists(mainDb, 'setup_jobs')) {
-    const rows = mainDb.prepare(`SELECT id, kind, app, status, epoch FROM setup_jobs WHERE app = ? AND status IN ${OPEN_STATUSES} ORDER BY created_at`).all(String(guest));
+    const rows = mainDb.prepare(`SELECT id, kind, app, status, epoch FROM setup_jobs WHERE app = ? AND ${OPEN_JOB_SQL} ORDER BY created_at`).all(String(guest));
     for (const job of rows) {
       if (excludeJobId && job.id === excludeJobId) continue;
       out.openJobs.push({ id: job.id, kind: job.kind, status: job.status, attempt: attemptOf(job) });
       out.openJobIds.push(job.id, attemptOf(job));
     }
     out.activeAttempts = out.openJobs.filter((j) => APPLICATION_JOB_KINDS.includes(j.kind)).map((j) => j.attempt);
+    out.recoveryAttempts = out.openJobs.filter((j) => APPLICATION_JOB_KINDS.includes(j.kind) && j.status === 'recovery_required').map((j) => j.attempt);
     out.openRestoreJob = out.openJobs.some((j) => j.kind === 'restore_snapshot');
     const marks = APPLICATION_JOB_KINDS.map(() => '?').join(',');
-    const anyApp = mainDb.prepare(`SELECT id FROM setup_jobs WHERE kind IN (${marks}) AND status IN ${OPEN_STATUSES}`).all(...APPLICATION_JOB_KINDS);
+    const anyApp = mainDb.prepare(`SELECT id FROM setup_jobs WHERE kind IN (${marks}) AND ${OPEN_JOB_SQL}`).all(...APPLICATION_JOB_KINDS);
     out.anyApplicationJobOpen = anyApp.some((j) => j.id !== excludeJobId);
     if (target.kind === 'application') {
       const build = out.openJobs.find((j) => APPLICATION_JOB_KINDS.includes(j.kind));
-      if (build) { out.buildActive = true; out.reasons.push(`An application ${build.kind.replace('application_', '')} job is ${build.status}.`); }
+      if (build) { out.buildActive = true; out.reasons.push(build.status === 'recovery_required' ? `An application ${build.kind.replace('application_', '')} job was interrupted and needs recovery.` : `An application ${build.kind.replace('application_', '')} job is ${build.status}.`); }
     } else {
       const deploy = out.openJobs.find((j) => j.kind === 'deploy');
       if (deploy) { out.buildActive = true; out.reasons.push(`A deploy of this project is ${deploy.status}.`); }

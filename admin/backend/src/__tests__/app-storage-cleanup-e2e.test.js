@@ -11,11 +11,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { makeRoot, buildNodusGuest, scriptedExec, databases, registerNodus, cleanupRoot, LIVE, ROLLBACK, OLD, CANDIDATE, ADOPTED, OLD_JOB, ACTIVE_JOB, RELEASE_ROOT } from './helpers/app-storage-world.js';
+import { makeRoot, buildNodusGuest, scriptedExec, databases, registerNodus, cleanupRoot, LIVE, ROLLBACK, ROLLBACK_SHA, OLD, CANDIDATE, ADOPTED, OLD_JOB, ACTIVE_JOB, RELEASE_ROOT } from './helpers/app-storage-world.js';
 import { unwrapContained } from './helpers/scripted-guest.js';
 import { createAppStorage } from '../lib/app-storage/index.js';
 import { createBackendCleanupService, cleanupDepsFor, bellOver, auditInto, runnerExportStore } from '../lib/app-storage/cleanup-deps.js';
 import { CLEANUP_PROGRAM } from '../lib/app-storage/cleanup-program.js';
+import { ROLLBACK_UNKNOWN_REASON } from '../lib/setup-engine/application-release-cleanup.js';
 import { ensureSetupEngineSchema, claimNextJob, getJob, runnerHeartbeat } from '../lib/setup-engine/store.js';
 import { executeJob } from '../lib/setup-engine/executor.js';
 import { ownerIdentity } from '../lib/setup-engine/logic.js';
@@ -48,7 +49,7 @@ function worldExec(root) {
       if (/STALE_WRITERS:/.test(raw) && !/printf '%s'/.test(raw)) return { code: 0, stdout: 'STALE_WRITERS:0\n' };
       if (/printf '%s' '[A-Za-z0-9+/=]+' \| base64 -d/.test(raw)) {
         const data = JSON.parse(Buffer.from(unwrapContained(raw).match(/ '([A-Za-z0-9+/=]+)'\n$/)[1], 'base64').toString());
-        if (data.action === 'verify') { state.verify.push(data); return { code: 0, stdout: JSON.stringify({ ok: true, target: data.expected, sha: data.sha }), stderr: 'CONTAINMENT:systemd e2e\n' }; }
+        if (data.action === 'verify') { state.verify.push(data); if (state.verifyFail) return { code: 1, stdout: JSON.stringify({ ok: false, code: 'HEALTH_FAILED' }), stderr: 'CONTAINMENT:systemd e2e\n' }; return { code: 0, stdout: JSON.stringify({ ok: true, target: data.expected, sha: data.sha }), stderr: 'CONTAINMENT:systemd e2e\n' }; }
         return runProgram(data, root);
       }
       // The storage check's collector. WS1's world runs it with `service: null`
@@ -72,16 +73,27 @@ function worldExec(root) {
   return { exec, state };
 }
 
-async function setup(t) {
+async function setup(t, { history = true } = {}) {
   const root = makeRoot('pp-cleanup-e2e-');
   t.after(() => cleanupRoot(root));
   const world = buildNodusGuest(root, Date.now());
   const { mock2Db, mainDb } = databases();
   ensureSetupEngineSchema(mainDb);
-  mainDb.exec(`CREATE TABLE audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+  // The real audit_log schema: user_id references users(id), with foreign
+  // keys on as better-sqlite3 has them in production (review N2).
+  mainDb.exec('PRAGMA foreign_keys = ON');
+  mainDb.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL);
+    INSERT INTO users (id, username) VALUES ('admin', 'admin');
+    CREATE TABLE audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (user_id) REFERENCES users(id));
     CREATE TABLE notifications (id TEXT PRIMARY KEY, level TEXT NOT NULL, title TEXT NOT NULL, body TEXT, source TEXT NOT NULL, source_id TEXT, dedupe_key TEXT, seen_count INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT, dismissed_at TEXT);
     CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);`);
-  registerNodus(mock2Db, world);
+  const appId = registerNodus(mock2Db, world);
+  // The deploy history: the rollback release was live before the current one
+  // (the live record itself has previousSha null, as on the real Nodus).
+  if (history) {
+    mock2Db.prepare("INSERT INTO mock2_application_candidates (application_id, sha, profile_revision, profile_digest, tree_sha, checkpoint_at, hygiene_json, validation_json, live_json) VALUES (?, ?, 6, ?, ?, ?, '{}', ?, ?)")
+      .run(appId, ROLLBACK_SHA, 'd'.repeat(64), 'b'.repeat(40), new Date(Date.now() - 5 * 86_400_000).toISOString(), JSON.stringify({ passed: true, releasePath: `${RELEASE_ROOT}/${ROLLBACK}` }), JSON.stringify({ sha: ROLLBACK_SHA, releasePath: `${RELEASE_ROOT}/${ROLLBACK}`, verifiedAt: new Date(Date.now() - 4 * 86_400_000).toISOString() }));
+  }
   // A ready prepared download of the guest, recorded under its short name.
   const exportFile = path.join(root, 'exports', 'nodus-20261003.tar.zst');
   fs.mkdirSync(path.dirname(exportFile), { recursive: true }); fs.writeFileSync(exportFile, Buffer.alloc(5000, 1));
@@ -94,7 +106,7 @@ async function setup(t) {
   const logAudit = (userId, action, type, id, details, ip) => auditInto(mainDb, { resourceType: type })({ userId, action, targetKey: id, details, ip });
   storage.setCleanupService(createBackendCleanupService({ storage, mainDb, logAudit }));
   runnerHeartbeat(mainDb, { owner: RUNNER, host: 'e2e', pid: 1, nowMs: Date.now() });
-  const check = await storage.runCheck('application:1', { userId: 1 });
+  const check = await storage.runCheck('application:1', { userId: 'admin' });
   const find = (pred, what) => { const it = check.items.find(pred); assert.ok(it, `the check lists ${what}`); assert.equal(it.status, 'eligible', `${what} is eligible: ${it.reason}`); return it; };
   const runJob = async () => {
     const job = claimNextJob(mainDb, { owner: RUNNER, kinds: ['storage_cleanup'], nowMs: Date.now() });
@@ -103,7 +115,7 @@ async function setup(t) {
     return { job: getJob(mainDb, job.id), r };
   };
   const P = rel => path.join(root, rel.replace(/^\//, ''));
-  return { root, world, mock2Db, mainDb, storage, check, find, runJob, P, state, dispatched, bell };
+  return { root, world, mock2Db, mainDb, storage, check, find, runJob, P, state, dispatched, bell, exec };
 }
 
 const quarantined = dir => { const out = []; const walk = d => { for (const n of fs.readdirSync(d)) { const f = path.join(d, n); if (n.startsWith('.pp-cleanup-')) out.push(f); const s = fs.lstatSync(f); if (s.isDirectory() && !s.isSymbolicLink()) walk(f); } }; walk(dir); return out; };
@@ -118,8 +130,8 @@ test('end to end: a check, an approved mixed cleanup, the job, the rescan; prote
     release: w.find(it => it.path === `${RELEASE_ROOT}/${OLD}`, 'the old sealed release'),
     cache: w.find(it => it.path === '/var/lib/nodus/.cache/ms-playwright', "the service user's browser cache"),
     log: w.find(it => it.path === '/var/log/syslog.2.gz', 'a rotated log'),
-    dump: w.find(it => it.path === '/var/backups/proxypilot-db/app-pre-deploy-job1.sql', 'the oldest pre-deploy dump'),
-    host: w.find(it => it.location === 'host' && /bundle-a1b2c3$/.test(it.path || ''), 'the host transfer copy'),
+    dump: w.find(it => it.category === 'history' && (it.path === '/var/backups/proxypilot-db/app-pre-deploy-job1.sql' || (it.members || []).some(m => m.path === '/var/backups/proxypilot-db/app-pre-deploy-job1.sql')), 'the oldest pre-deploy recovery set'),
+    host: w.find(it => it.location === 'host' && /bundle-app1-a1b2c3$/.test(it.path || ''), 'the host transfer copy'),
   };
   const snapshot = w.find(it => it.kind === 'snapshot' && it.identity?.name === SNAP_OLD.name, 'the older snapshot');
   const exported = w.find(it => it.kind === 'export', 'the prepared download');
@@ -127,7 +139,7 @@ test('end to end: a check, an approved mixed cleanup, the job, the rescan; prote
   w.bell.post({ level: 'error', title: 'old failure', source: 'app-storage', source_id: 'application:1', dedupe_key: 'appstorage:cleanup:application:1' });
   w.bell.post({ level: 'error', title: 'old health', source: 'app-storage', source_id: 'application:1', dedupe_key: 'appstorage:health:application:1' });
 
-  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: Object.values(picks).map(i => i.id), snapshots: [snapshot.id], exports: [exported.id], acknowledgeSnapshotLoss: true, scope: 'items', origin: 'user', userId: 1, ip: '127.0.0.1' });
+  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: Object.values(picks).map(i => i.id), snapshots: [snapshot.id], exports: [exported.id], acknowledgeSnapshotLoss: true, scope: 'items', origin: 'user', userId: 'admin', ip: '127.0.0.1' });
   assert.equal(approved.changed, true);
   assert.ok(approved.estimate.bytes > 0);
   const { job, r } = await w.runJob();
@@ -143,7 +155,7 @@ test('end to end: a check, an approved mixed cleanup, the job, the rescan; prote
   assert.ok(cleanup.result.removed.find(x => x.id === picks.release.id).bytes > 0, 'removed bytes are measured');
 
   // Removed, for real.
-  for (const gone of [`${RELEASE_ROOT}/.staging/${OLD_JOB}-1`, `${RELEASE_ROOT}/.staging/${OLD_JOB}-1.bundle`, `${RELEASE_ROOT}/${OLD}`, '/var/lib/nodus/.cache/ms-playwright', '/var/log/syslog.2.gz', '/var/backups/proxypilot-db/app-pre-deploy-job1.sql', '/host/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3']) assert.equal(fs.existsSync(w.P(gone)), false, gone);
+  for (const gone of [`${RELEASE_ROOT}/.staging/${OLD_JOB}-1`, `${RELEASE_ROOT}/.staging/${OLD_JOB}-1.bundle`, `${RELEASE_ROOT}/${OLD}`, '/var/lib/nodus/.cache/ms-playwright', '/var/log/syslog.2.gz', '/var/backups/proxypilot-db/app-pre-deploy-job1.sql', '/etc/systemd/system/nodus.service.pre-job1', '/host/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3']) assert.equal(fs.existsSync(w.P(gone)), false, gone);
   for (const m of picks.group.members) assert.equal(fs.existsSync(w.P(m.path)), false, m.path);
   assert.equal(fs.existsSync(path.join(w.root, 'exports', 'nodus-20261003.tar.zst')), false);
   assert.equal(w.mainDb.prepare('SELECT COUNT(*) AS n FROM lxc_exports').get().n, 0);
@@ -164,6 +176,11 @@ test('end to end: a check, an approved mixed cleanup, the job, the rescan; prote
   // Audit rows (backend approval, job finish, export delete) and the alerts resolved by the success.
   const actions = w.mainDb.prepare('SELECT action FROM audit_log ORDER BY rowid').all().map(x => x.action);
   for (const a of ['STORAGE_CLEANUP_APPROVED', 'LXC_EXPORT_DELETE', 'STORAGE_CLEANUP_FINISHED']) assert.ok(actions.includes(a), a);
+  // The runner's export deletion is audited although it acts for no user (review M2).
+  const exportAudit = w.mainDb.prepare("SELECT user_id, resource_type, resource_id, details FROM audit_log WHERE action = 'LXC_EXPORT_DELETE'").get();
+  assert.equal(exportAudit.user_id, null); assert.equal(exportAudit.resource_type, 'lxc'); assert.equal(exportAudit.resource_id, 'nodus');
+  assert.equal(JSON.parse(exportAudit.details).actor, 'storage-cleanup');
+  assert.equal(w.mainDb.prepare("SELECT user_id FROM audit_log WHERE action = 'STORAGE_CLEANUP_APPROVED'").get().user_id, 'admin');
   const approval = JSON.parse(w.mainDb.prepare("SELECT details FROM audit_log WHERE action = 'STORAGE_CLEANUP_APPROVED'").get().details);
   assert.deepEqual(approval.counts, { items: 8, snapshots: 1, exports: 1 });
   const dismissed = key => w.mainDb.prepare('SELECT dismissed_at FROM notifications WHERE dedupe_key = ?').get(key).dismissed_at;
@@ -176,7 +193,7 @@ test('end to end: an item changed between the check and the cleanup is skipped, 
   const staging = w.find(it => it.path === `${RELEASE_ROOT}/.staging/${OLD_JOB}-1`, 'the abandoned staging workspace');
   const cache = w.find(it => it.path === '/var/lib/nodus/.cache/ms-playwright', "the service user's browser cache");
   const group = w.find(it => it.kind === 'group' && /nodus-embed/.test(it.label), 'the temp group');
-  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: [staging.id, cache.id, group.id], origin: 'user', userId: 1 });
+  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: [staging.id, cache.id, group.id], origin: 'user', userId: 'admin' });
   // Someone writes into the workspace after the check.
   fs.writeFileSync(w.P(`${RELEASE_ROOT}/.staging/${OLD_JOB}-1/written-later.txt`), 'new work');
   await w.runJob();
@@ -191,18 +208,43 @@ test('end to end: an item changed between the check and the cleanup is skipped, 
   assert.equal(w.mainDb.prepare("SELECT COUNT(*) AS n FROM notifications WHERE dedupe_key = 'appstorage:cleanup:application:1' AND dismissed_at IS NULL").get().n, 0);
 });
 
-test('a cleanup alert the host runner posts is delivered once by the backend monitor', { skip }, async t => {
+test('end to end: without a recorded previous release or deploy history, no release is removed', { skip }, async t => {
+  const w = await setup(t, { history: false });
+  const old = w.check.items.find(it => it.path === `${RELEASE_ROOT}/${OLD}`);
+  assert.ok(old);
+  // Once the check shares describeReleases it keeps the release itself; until then the job refuses it.
+  if (old.status !== 'eligible') { assert.equal(old.status, 'protected'); return; }
+  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: [old.id], origin: 'user', userId: 'admin' });
+  await w.runJob();
+  const cleanup = await w.storage.cleanupService().getCleanup(approved.cleanupId);
+  assert.deepEqual(cleanup.result.skipped, [{ id: old.id, label: old.label, reason: ROLLBACK_UNKNOWN_REASON }]);
+  assert.equal(fs.existsSync(w.P(`${RELEASE_ROOT}/${OLD}/.proxypilot-release.json`)), true);
+});
+
+test('an alert the host runner posts is delivered by the backend monitor exactly once, also after a backend restart', { skip }, async t => {
   const w = await setup(t);
-  const runnerSide = cleanupDepsFor({ mainDb: w.mainDb, mock2Db: w.mock2Db, bell: w.bell });
-  await runnerSide.monitor.postCleanupAlert('application:1', { ok: false, failedCount: 2, healthFailed: true }, { name: 'Nodus' });
-  const open = w.mainDb.prepare("SELECT dedupe_key, level FROM notifications WHERE dismissed_at IS NULL AND dedupe_key LIKE 'appstorage:%' ORDER BY dedupe_key").all();
-  assert.deepEqual(open.map(r => r.dedupe_key), ['appstorage:cleanup:application:1', 'appstorage:health:application:1']);
+  // The cleanup's health check fails in the runner: it posts the health
+  // alert to the bell but cannot deliver it, and keeps it with the row.
+  w.state.verifyFail = true;
+  const cache = w.find(it => it.path === '/var/lib/nodus/.cache/ms-playwright', "the service user's browser cache");
+  const approved = await w.storage.cleanupService().requestCleanup({ targetKey: 'application:1', checkId: w.check.checkId, items: [cache.id], origin: 'user', userId: 'admin' });
+  await w.runJob();
+  const row = w.storage.store.getCleanup(approved.cleanupId);
+  assert.equal(row.result.health, 'failed');
+  assert.deepEqual(row.result.alertsUndelivered.map(m => m.event), ['appstorage.health']);
   assert.equal(w.dispatched.length, 0, 'the runner writes the bell row only');
-  await w.storage.monitor.runOnce();
-  assert.deepEqual(w.dispatched.map(m => m.event).sort(), ['appstorage.cleanup', 'appstorage.health']);
-  await w.storage.monitor.runOnce();
-  assert.equal(w.dispatched.length, 2, 'delivered once, not every round');
-  await runnerSide.monitor.postCleanupAlert('application:1', { ok: true, failedCount: 0, healthFailed: false }, { name: 'Nodus' });
-  await w.storage.monitor.runOnce();
-  assert.equal(w.storage.monitor.active.has('appstorage:cleanup:application:1'), false, 'a runner-resolved alert leaves the active set');
+  // The backend restarts before its monitor runs: a new instance hydrates its
+  // active set from the bell (the alert is already there) and runs a pass.
+  const restarted = createAppStorage({ mock2Db: w.mock2Db, mainDb: w.mainDb, exec: w.exec, notifications: { ...w.bell, dispatch: m => { w.dispatched.push(m); } }, logger: { error() {}, log() {} } });
+  await restarted.monitor.hydrate();
+  await restarted.monitor.runOnce();
+  assert.deepEqual(w.dispatched.map(m => [m.event, m.dedupe_key]), [['appstorage.health', 'appstorage:health:application:1']], 'delivered once after the restart');
+  assert.ok(w.storage.store.getCleanup(approved.cleanupId).result.alertDispatchedAt);
+  await restarted.monitor.runOnce();
+  assert.equal(w.dispatched.length, 1, 'a second pass delivers nothing');
+  // A later run whose health check passes resolves it (in the runner); it leaves the active set.
+  await cleanupDepsFor({ mainDb: w.mainDb, mock2Db: w.mock2Db, bell: w.bell }).monitor.postCleanupAlert('application:1', { ok: true, failedCount: 0, healthFailed: false }, { name: 'Nodus' });
+  await restarted.monitor.runOnce();
+  assert.equal(restarted.monitor.active.has('appstorage:health:application:1'), false);
+  assert.equal(w.dispatched.length, 1);
 });

@@ -6,15 +6,17 @@
 // an install with Dev Studio enabled (mock2.db exists there).
 
 import { createStorageStore, readInstalledAt } from './store.js';
-import { listTargets, resolveTarget, activityFor, AppStorageError } from './targets.js';
+import { listTargets, resolveTarget, activityFor, existingTargetKeys, AppStorageError } from './targets.js';
 import { createCheckService } from './check-service.js';
 import { createAppStorageMonitor, createGuestLister, registerMonitor, unregisterMonitor } from './monitor.js';
 import { backendExec, exportsFor } from './host-measures.js';
 import { estimateSelection } from './accounting.js';
 import {
   RULES, RULE_KEYS, DEFAULT_POLICY, resolvePolicy, ruleStates, proposedAfterEdit, validatePolicy, policyDiff, policyEffects,
-  effectiveReleaseRetention, effectiveSnapshotLimits,
+  effectiveReleaseRetention, effectiveSnapshotLimits, recordNewProjectDefaults as recordDefaultsOnce, auditLogWriter, NEW_PROJECT_DEFAULTS_ORIGIN,
 } from './policy.js';
+
+export { NEW_PROJECT_DEFAULTS_ORIGIN };
 
 /** Until the cleanup service is wired (WS2), cleanup requests answer 503 and reads come from the store. */
 export function unavailableCleanupService(store = null) {
@@ -30,7 +32,7 @@ export function unavailableCleanupService(store = null) {
 
 export function createAppStorage({
   mock2Db, mainDb = null, exec = null, now = () => Date.now(), notifications = null, listGuests = null,
-  logger = console, cleanupService = null, performCheck = undefined,
+  logger = console, cleanupService = null, performCheck = undefined, audit = null,
 } = {}) {
   if (!mock2Db) throw new TypeError('createAppStorage needs the mock2 database');
   const executor = exec || backendExec();
@@ -39,20 +41,40 @@ export function createAppStorage({
   const resolve = (key) => resolveTarget(key, { mock2Db });
   const activity = (target, opts = {}) => activityFor(target, { mainDb, mock2Db, now: now(), ...opts });
   const limitOf = (targetKey) => {
-    try { return store.latestCheck(targetKey)?.result?.totals?.limit?.bytes ?? null; } catch { return null; }
+    try { return store.latestCheckSummary(targetKey)?.summary?.totals?.limit?.bytes ?? null; } catch { return null; }
   };
+  // A new project's defaults are recorded once, by the shared
+  // recordNewProjectDefaults (policy.js) on whichever side resolves the policy
+  // first; here with the backend's audit (user NULL, actor 'backend'). The
+  // policy listeners are not told: the stored rules are the defaults that
+  // were already in force, so no limit changes.
+  const auditSink = typeof audit === 'function' ? (e) => audit(e) : auditLogWriter(mainDb);
+  const recordNewProjectDefaults = (target) => recordDefaultsOnce(target, { mock2Db, audit: auditSink, actor: 'backend', diskLimitBytes: limitOf(target?.key), logger, now });
   const policyFor = (target) => {
+    recordNewProjectDefaults(target);
     const r = resolvePolicy(target, { store, installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
     return { ...r, ...ruleStates(r.policy, r.source, r.stored ? r.proposedRules : null) };
   };
   const guestLister = listGuests || createGuestLister(executor, { now });
-  const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger });
+  const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger, knownTargetKeys: () => existingTargetKeys({ mock2Db }) });
   const checks = createCheckService({
     store, exec: executor, mainDb, now, resolveTarget: resolve, listTargets: list, activityFor: (t) => activity(t), policyFor,
     listExports: (guest) => exportsFor(mainDb, guest), listGuests: guestLister, alertsFor: (key) => monitor.alertsFor(key), logger,
     ...(performCheck ? { performCheck } : {}),
   });
   let cleanup = cleanupService || unavailableCleanupService(store);
+  // Told after every saved policy (the snapshot-limit memo is dropped then).
+  const policyListeners = new Set();
+
+  // Who changed the policy, for the page: the user's name, else the stored id
+  // (a user since removed), else "ProxyPilot" for no user or a system actor.
+  const SYSTEM_ACTORS = new Set(['system', 'backend', 'host-runner', 'storage-cleanup', 'storage-retention', 'proxypilot']);
+  function changerName(updatedBy) {
+    const id = updatedBy == null ? '' : String(updatedBy);
+    if (!id || SYSTEM_ACTORS.has(id.toLowerCase())) return 'ProxyPilot';
+    try { const row = mainDb?.prepare?.('SELECT username FROM users WHERE id = ?').get(id); if (row?.username) return String(row.username); } catch { /* no users table here */ }
+    return id;
+  }
 
   function getPolicy(targetKey) {
     const target = resolve(targetKey);
@@ -60,7 +82,7 @@ export function createAppStorage({
     const latest = checks.latestCheck(target.key);
     return {
       targetKey: target.key, policy: pol.policy, defaults: pol.defaults.policy, defaultsSource: pol.defaults.source, source: pol.source,
-      revision: pol.revision, stored: pol.stored, updatedAt: pol.updatedAt, updatedBy: pol.updatedBy,
+      revision: pol.revision, stored: pol.stored, updatedAt: pol.updatedAt, updatedBy: pol.updatedBy, updatedByName: pol.stored ? changerName(pol.updatedBy) : null,
       enabledRules: pol.enabledRules, proposedRules: pol.proposedRules, rules: RULES,
       effects: policyEffects(latest, pol.policy, now()), checkId: latest?.checkId || null,
       ...(pol.invalidStored ? { invalidStored: true } : {}),
@@ -75,6 +97,7 @@ export function createAppStorage({
     const changed = policyDiff(before.policy, policy);
     const proposedRules = proposedAfterEdit(before.proposedRules, policy);
     const row = store.putPolicy(target.key, { policy, source: 'edited', updatedBy: userId == null ? null : String(userId), expectedRevision, proposedRules });
+    for (const fn of policyListeners) { try { fn(target.key); } catch (e) { logger?.error?.('[app-storage] policy listener failed', e?.message || e); } }
     return { targetKey: target.key, policy: row.policy, revision: row.revision, source: row.source, proposedRules, changed, previousRevision: before.revision, previousSource: before.source };
   }
 
@@ -92,7 +115,7 @@ export function createAppStorage({
       target: { key: target.key, kind: target.kind, id: target.id, name: target.name, guest: target.guest, guestStatus: await guestStatusOf(target, latest), ...(target.kind === 'project' ? { lifecycle: target.lifecycle } : {}) },
       latestCheck: latest,
       runningCheckId: running?.id || null,
-      policy: { policy: pol.policy, source: pol.source, revision: pol.revision, enabledRules: pol.enabledRules, proposedRules: pol.proposedRules },
+      policy: { policy: pol.policy, source: pol.source, revision: pol.revision, enabledRules: pol.enabledRules, proposedRules: pol.proposedRules, updatedAt: pol.updatedAt, updatedBy: pol.updatedBy, updatedByName: pol.updatedByName },
       effects: pol.effects,
       activity: activity(target).reasons,
     };
@@ -109,10 +132,14 @@ export function createAppStorage({
     targetDetail, getPolicy, putPolicy,
     estimateSelection: (checkId, selection) => estimateSelection(checks.getCheck(checkId), selection),
     effectiveReleaseRetention: (targetId) => effectiveReleaseRetention(targetId, { mock2Db }),
-    effectiveSnapshotLimits: () => effectiveSnapshotLimits({ mock2Db, mainDb }),
+    effectiveSnapshotLimits: () => {
+      // A new project's defaults are recorded (inside) before they first decide anything.
+      return effectiveSnapshotLimits({ mock2Db, mainDb, audit: auditSink, actor: 'backend', logger });
+    },
     postCleanupAlert: (targetKey, outcome, opts) => monitor.postCleanupAlert(targetKey, outcome, opts),
     cleanupService: () => cleanup,
     setCleanupService(svc) { cleanup = svc || unavailableCleanupService(store); },
+    onPolicyChange(fn) { policyListeners.add(fn); return () => policyListeners.delete(fn); },
     RULE_KEYS, DEFAULT_POLICY,
   };
 }
@@ -129,6 +156,7 @@ export function getAppStorage() {
       return createAppStorage({
         mock2Db: getMock2Db(), mainDb: db.getDb(),
         notifications: { post: bell.postNotification, resolve: bell.resolveNotification, list: bell.listNotifications, dispatch: dispatch.dispatchToChannels },
+        audit: ({ action, targetKey, detail }) => db.logAudit(null, action, 'app_storage', String(targetKey), detail, null),
       });
     })();
     singleton.catch(() => { singleton = null; });

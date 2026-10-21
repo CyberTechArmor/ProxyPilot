@@ -289,3 +289,24 @@ test('defaults are never stored without their audit: when the audit cannot be wr
 });
 
 function s0(mock2Db) { return mock2Db.prepare("SELECT revision, source FROM mock2_storage_policies WHERE target_key = 'project:9'").get() || null; }
+
+test('the policy says who changed it by name: the user\'s name, else the stored id, else "ProxyPilot" for no user', async (t) => {
+  const { s, mainDb, mock2Db } = setup(t);
+  mainDb.exec("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL); INSERT INTO users (id, username) VALUES ('u-7', 'alice');");
+  assert.equal(s.getPolicy('application:1').updatedByName, null, 'nothing stored: no changer');
+  const p = s.getPolicy('application:1');
+  const next = JSON.parse(JSON.stringify(p.policy)); next.rules.caches.enabled = true;
+  s.putPolicy('application:1', next, { userId: 'u-7', expectedRevision: 0 });
+  const after = s.getPolicy('application:1');
+  assert.deepEqual([after.updatedBy, after.updatedByName], ['u-7', 'alice']);
+  const d = await s.targetDetail('application:1');
+  assert.deepEqual([d.policy.updatedBy, d.policy.updatedByName, typeof d.policy.updatedAt], ['u-7', 'alice', 'string']);
+  // A user since removed: the id.
+  mainDb.prepare("DELETE FROM users WHERE id = 'u-7'").run();
+  assert.equal(s.getPolicy('application:1').updatedByName, 'u-7');
+  // Recorded by ProxyPilot itself (a new project's defaults): "ProxyPilot".
+  mainDb.exec('CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (21, 'New', 'm2-21', 'active', '/x/21.git', '2026-10-20 22:59:00')").run();
+  const fresh = s.getPolicy('project:21');
+  assert.deepEqual([fresh.source, fresh.updatedBy, fresh.updatedByName], ['defaults-new', null, 'ProxyPilot']);
+});

@@ -66,13 +66,23 @@ export function createAppStorage({
   // Told after every saved policy (the snapshot-limit memo is dropped then).
   const policyListeners = new Set();
 
+  // Who changed the policy, for the page: the user's name, else the stored id
+  // (a user since removed), else "ProxyPilot" for no user or a system actor.
+  const SYSTEM_ACTORS = new Set(['system', 'backend', 'host-runner', 'storage-cleanup', 'storage-retention', 'proxypilot']);
+  function changerName(updatedBy) {
+    const id = updatedBy == null ? '' : String(updatedBy);
+    if (!id || SYSTEM_ACTORS.has(id.toLowerCase())) return 'ProxyPilot';
+    try { const row = mainDb?.prepare?.('SELECT username FROM users WHERE id = ?').get(id); if (row?.username) return String(row.username); } catch { /* no users table here */ }
+    return id;
+  }
+
   function getPolicy(targetKey) {
     const target = resolve(targetKey);
     const pol = policyFor(target);
     const latest = checks.latestCheck(target.key);
     return {
       targetKey: target.key, policy: pol.policy, defaults: pol.defaults.policy, defaultsSource: pol.defaults.source, source: pol.source,
-      revision: pol.revision, stored: pol.stored, updatedAt: pol.updatedAt, updatedBy: pol.updatedBy,
+      revision: pol.revision, stored: pol.stored, updatedAt: pol.updatedAt, updatedBy: pol.updatedBy, updatedByName: pol.stored ? changerName(pol.updatedBy) : null,
       enabledRules: pol.enabledRules, proposedRules: pol.proposedRules, rules: RULES,
       effects: policyEffects(latest, pol.policy, now()), checkId: latest?.checkId || null,
       ...(pol.invalidStored ? { invalidStored: true } : {}),
@@ -105,7 +115,7 @@ export function createAppStorage({
       target: { key: target.key, kind: target.kind, id: target.id, name: target.name, guest: target.guest, guestStatus: await guestStatusOf(target, latest), ...(target.kind === 'project' ? { lifecycle: target.lifecycle } : {}) },
       latestCheck: latest,
       runningCheckId: running?.id || null,
-      policy: { policy: pol.policy, source: pol.source, revision: pol.revision, enabledRules: pol.enabledRules, proposedRules: pol.proposedRules },
+      policy: { policy: pol.policy, source: pol.source, revision: pol.revision, enabledRules: pol.enabledRules, proposedRules: pol.proposedRules, updatedAt: pol.updatedAt, updatedBy: pol.updatedBy, updatedByName: pol.updatedByName },
       effects: pol.effects,
       activity: activity(target).reasons,
     };

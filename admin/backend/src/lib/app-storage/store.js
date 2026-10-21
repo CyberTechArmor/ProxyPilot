@@ -58,7 +58,7 @@ export const CHECKS_PER_TARGET = 20;
 export const CLEANUPS_PER_TARGET = 50;
 export const SAMPLE_RETENTION_DAYS = 30;
 export const CHECK_STATUSES = Object.freeze(['running', 'complete', 'partial', 'failed']);
-export const CLEANUP_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'partial', 'failed', 'refused']);
+export const CLEANUP_STATUSES = Object.freeze(['queued', 'running', 'succeeded', 'partial', 'failed', 'refused', 'cancelled']);
 const OPEN_CLEANUP = "('queued','running')";
 
 const iso = (v) => (v == null ? new Date().toISOString() : typeof v === 'number' ? new Date(v).toISOString() : v instanceof Date ? v.toISOString() : String(v));

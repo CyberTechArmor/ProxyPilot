@@ -191,11 +191,34 @@ export function createAppStorageMonitor({ store, listTargets, listGuests, policy
         if (gr.raise) { await raise(growthAlert({ name: t.name, guest: t.guest, targetKey: t.key, growth: gr.growth, windowHours }), t.key); summary.raised.push(growthKey); }
         else if (await clear(growthKey, 'growth fell below the threshold')) summary.resolved.push(growthKey);
       }
+      await relayRunnerAlerts(summary);
       return summary;
     } catch (e) {
       logger?.error?.('[app-storage-monitor] runOnce failed', e?.message || e);
       return { ...summary, error: e?.message || String(e) };
     } finally { running = false; }
+  }
+
+  // The cleanup job runs in the host runner, which writes the bell row but
+  // cannot reach the delivery channels (they need the backend's database
+  // connection and keys). A cleanup or health alert in the bell that this
+  // monitor did not raise is delivered once here; one the runner resolved
+  // leaves the active set.
+  async function relayRunnerAlerts(summary) {
+    const bell = await n();
+    let rows = [];
+    try { rows = bell.list?.({ limit: 1000 }) || []; } catch { return; }
+    const open = new Set();
+    for (const row of rows) {
+      const k = parseAlertKey(row?.dedupe_key);
+      if (!k || !['cleanup', 'health'].includes(k.kind)) continue;
+      open.add(row.dedupe_key);
+      if (active.has(row.dedupe_key)) continue;
+      active.add(row.dedupe_key);
+      try { await bell.dispatch?.({ event: `appstorage.${k.kind}`, level: row.level, title: row.title, body: row.body, link: linkFor(k.targetKey), dedupe_key: row.dedupe_key }); } catch (e) { logger?.error?.('[app-storage-monitor] dispatch failed', e?.message); }
+      summary.relayed = [...(summary.relayed || []), row.dedupe_key];
+    }
+    for (const key of [...active]) { const k = parseAlertKey(key); if (k && ['cleanup', 'health'].includes(k.kind) && !open.has(key)) active.delete(key); }
   }
 
   /** Rebuild the active set from the bell rows (non-dismissed, appstorage: keys). */

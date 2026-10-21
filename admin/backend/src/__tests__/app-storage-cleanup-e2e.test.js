@@ -118,7 +118,7 @@ test('end to end: a check, an approved mixed cleanup, the job, the rescan; prote
     release: w.find(it => it.path === `${RELEASE_ROOT}/${OLD}`, 'the old sealed release'),
     cache: w.find(it => it.path === '/var/lib/nodus/.cache/ms-playwright', "the service user's browser cache"),
     log: w.find(it => it.path === '/var/log/syslog.2.gz', 'a rotated log'),
-    dump: w.find(it => it.path === '/var/backups/proxypilot-db/app-pre-deploy-job1.sql', 'the oldest pre-deploy dump'),
+    dump: w.find(it => it.category === 'history' && (it.path === '/var/backups/proxypilot-db/app-pre-deploy-job1.sql' || (it.members || []).some(m => m.path === '/var/backups/proxypilot-db/app-pre-deploy-job1.sql')), 'the oldest pre-deploy recovery set'),
     host: w.find(it => it.location === 'host' && /bundle-a1b2c3$/.test(it.path || ''), 'the host transfer copy'),
   };
   const snapshot = w.find(it => it.kind === 'snapshot' && it.identity?.name === SNAP_OLD.name, 'the older snapshot');
@@ -143,7 +143,7 @@ test('end to end: a check, an approved mixed cleanup, the job, the rescan; prote
   assert.ok(cleanup.result.removed.find(x => x.id === picks.release.id).bytes > 0, 'removed bytes are measured');
 
   // Removed, for real.
-  for (const gone of [`${RELEASE_ROOT}/.staging/${OLD_JOB}-1`, `${RELEASE_ROOT}/.staging/${OLD_JOB}-1.bundle`, `${RELEASE_ROOT}/${OLD}`, '/var/lib/nodus/.cache/ms-playwright', '/var/log/syslog.2.gz', '/var/backups/proxypilot-db/app-pre-deploy-job1.sql', '/host/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3']) assert.equal(fs.existsSync(w.P(gone)), false, gone);
+  for (const gone of [`${RELEASE_ROOT}/.staging/${OLD_JOB}-1`, `${RELEASE_ROOT}/.staging/${OLD_JOB}-1.bundle`, `${RELEASE_ROOT}/${OLD}`, '/var/lib/nodus/.cache/ms-playwright', '/var/log/syslog.2.gz', '/var/backups/proxypilot-db/app-pre-deploy-job1.sql', '/etc/systemd/system/nodus.service.pre-job1', '/host/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3']) assert.equal(fs.existsSync(w.P(gone)), false, gone);
   for (const m of picks.group.members) assert.equal(fs.existsSync(w.P(m.path)), false, m.path);
   assert.equal(fs.existsSync(path.join(w.root, 'exports', 'nodus-20261003.tar.zst')), false);
   assert.equal(w.mainDb.prepare('SELECT COUNT(*) AS n FROM lxc_exports').get().n, 0);

@@ -382,37 +382,70 @@ function classifyOther(it, { target }) {
 
 /* ----------------------- ranked history (newest N kept) -------------------- */
 
+// Execution history as RECOVERY SETS: the copies one job took before a change
+// belong together — app-pre-deploy-<job>.sql with environment.pre-<job> and
+// <unit>.pre-<job>; app-pre-restore-<job>.sql with environment.pre-restore-<job>.
+// restore_project_db needs a dump together with the environment copy its job
+// recorded, so sets are kept or removed whole: the newest HISTORY_KEEP sets
+// (and any set whose job is still open) are protected; older sets are one
+// cleanable item each (a group when the set has several files).
+const DUMP_SET_RE = /^app-pre-(deploy|restore)-([A-Za-z0-9-]{1,64})\.sql$/;
+const COPY_SET_RE = /^(.+)\.pre-(restore-)?([A-Za-z0-9-]{1,64})$/;
+export function recoverySetKey(role, name) {
+  if (role === 'db-dump') { const m = DUMP_SET_RE.exec(name); return m ? { job: m[2], kind: m[1], part: 'database' } : null; }
+  const m = COPY_SET_RE.exec(name);
+  if (!m) return null;
+  if (role === 'env-copy' && m[1] !== 'environment') return null;
+  return { job: m[3], kind: m[2] ? 'restore' : null, part: role === 'env-copy' ? 'environment' : 'service unit' };
+}
+
 function historyItems(facts, roleItems, env) {
   const out = [];
-  const groups = new Map();
+  const sets = new Map();
+  const openIds = env?.context?.openJobIds || [];
   for (const { it, root } of roleItems) {
     if (it.missing) continue;
     const name = it.name || basename(it.path);
-    let base = null; let kind = null;
-    if (root.role === 'db-dump') {
-      const m = /^(app-pre-[a-z]+)-.*\.sql$/.exec(name);
-      if (!m || it.type !== 'file') { out.push(fileItem(it, root, { category: 'data', status: 'protected', sub: 'database', reason: 'A database copy made on request.' })); continue; }
-      base = m[1]; kind = 'dump';
-    } else if (root.role === 'unit-copy') {
-      const i = name.indexOf('.pre-'); base = name.slice(0, i); kind = 'copy';
-    } else {
-      base = 'environment'; kind = 'copy';
+    const key = it.type === 'file' ? recoverySetKey(root.role, name) : null;
+    if (!key) {
+      if (root.role === 'db-dump' && it.type === 'file') out.push(fileItem(it, root, { category: 'data', status: 'protected', sub: 'database', reason: 'A database copy made on request.' }));
+      else out.push(fileItem(it, root, { category: 'history', status: 'investigate', reason: it.type === 'file' ? 'Not recognised as a copy ProxyPilot takes before a change, so it is left for you to look at.' : 'Not a plain file, so it is left for you to look at.' }));
+      continue;
     }
-    if (it.type !== 'file') { out.push(fileItem(it, root, { category: 'history', status: 'investigate', reason: 'Not a plain file, so it is left for you to look at.' })); continue; }
-    const key = `${root.role}:${base}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ it, root, kind, base });
+    if (!sets.has(key.job)) sets.set(key.job, { job: key.job, kind: null, members: [] });
+    const set = sets.get(key.job);
+    if (key.kind) set.kind = key.kind;
+    set.members.push({ it, root, part: key.part });
   }
-  for (const [key, list] of groups) {
-    list.sort((a, b) => Number(b.it.mtimeMs) - Number(a.it.mtimeMs));
-    list.forEach(({ it, root, kind }, rank) => {
-      const keep = rank < HISTORY_KEEP;
-      const reason = kind === 'dump'
-        ? (keep ? 'Recent database copy taken before a change.' : 'An older database copy taken before a change.')
-        : (keep ? 'A recent copy of a settings file from before a change (contents are not read).' : 'An old copy of a settings file from before a change (contents are not read).');
-      out.push(fileItem(it, root, { category: 'history', status: keep ? 'protected' : 'eligible', reason, sub: kind, extra: { group: key, rank } }));
+  const ordered = [...sets.values()].map((set) => ({ ...set, newest: Math.max(...set.members.map((m) => Number(m.it.mtimeMs) || 0)) }))
+    .sort((a, b) => b.newest - a.newest || (a.job < b.job ? -1 : 1));
+  ordered.forEach((set, rank) => {
+    const open = openIds.some((id) => id === set.job || String(id).startsWith(`${set.job}-`) || set.job.startsWith(`${id}-`));
+    const keep = open || rank < HISTORY_KEEP;
+    const reason = open ? 'Belongs to a job that is running.'
+      : keep ? 'Recent copies taken before a change (database and settings together, as a restore needs them).'
+        : 'Older copies taken before a change; they are removed together, so no database copy loses its settings (contents are not read).';
+    const parts = [...new Set(set.members.map((m) => m.part))];
+    const what = set.kind === 'deploy' ? 'a deploy' : set.kind === 'restore' ? 'a restore' : 'a change';
+    const label = `Copies taken before ${what} (job ${set.job.slice(0, 8)}): ${parts.join(', ')}`;
+    const status = keep ? 'protected' : 'eligible';
+    const extra = { group: `history:${set.job}`, rank, setJob: set.job, setParts: parts };
+    if (set.members.length === 1) {
+      const { it, root } = set.members[0];
+      out.push(fileItem(it, root, { category: 'history', status, reason, label, sub: 'recovery-set', extra }));
+      return;
+    }
+    const items = set.members.map(({ it, root }) => fileItem(it, root, { category: 'history', status, reason, sub: 'recovery-set' }));
+    out.push({
+      ...items[0], id: null, path: null, label, kind: 'group', sub: 'recovery-set',
+      logicalBytes: items.reduce((n, x) => n + x.logicalBytes, 0), allocatedBytes: items.reduce((n, x) => n + x.allocatedBytes, 0),
+      files: items.length, newestMtimeMs: Math.max(...items.map((x) => Number(x.newestMtimeMs) || 0)),
+      precision: items.some((x) => x.precision !== 'exact') ? 'at-least' : 'exact', inUse: items.some((x) => x.inUse), hint: null,
+      identity: { set: set.job }, memberCount: items.length, memberKind: 'files',
+      members: items.map((x) => ({ path: x.path, kind: x.kind, identity: x.identity, allocatedBytes: x.allocatedBytes, logicalBytes: x.logicalBytes, newestMtimeMs: x.newestMtimeMs })),
+      ...extra,
     });
-  }
+  });
   return out;
 }
 

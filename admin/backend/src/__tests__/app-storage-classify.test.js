@@ -142,12 +142,14 @@ test('caches, logs and execution history follow their rules', async (t) => {
   assert.equal(at('/var/log/postgresql/postgresql-17-main.log').status, 'protected');
   const journal = label(/^System journal$/);
   assert.deepEqual([journal.kind, journal.status], ['journal', 'protected']);
-  const dumps = ['job3', 'job2', 'job1'].map((j) => at(`/var/backups/proxypilot-db/app-pre-deploy-${j}.sql`));
-  assert.deepEqual(dumps.map((d) => d.status), ['protected', 'protected', 'eligible']);
-  assert.deepEqual(dumps.map((d) => d.rank), [0, 1, 2]);
-  const units = ['job3', 'job2', 'job1'].map((j) => at(`/etc/systemd/system/nodus.service.pre-${j}`));
-  assert.deepEqual(units.map((d) => d.status), ['protected', 'protected', 'eligible']);
-  assert.equal(at('/etc/environment.pre-job3').status, 'protected');
+  // Recovery sets: job3 (dump, unit and environment copies) and job2 are kept; job1 goes as one set.
+  const set = (job) => label(new RegExp(`\\(job ${job}\\)`));
+  assert.deepEqual([set('job3').status, set('job3').kind, set('job3').memberCount], ['protected', 'group', 3]);
+  assert.deepEqual(set('job3').setParts.sort(), ['database', 'environment', 'service unit']);
+  assert.deepEqual([set('job2').status, set('job2').memberCount], ['protected', 2]);
+  assert.deepEqual([set('job1').status, set('job1').rank, set('job1').action], ['eligible', 2, 'remove']);
+  assert.deepEqual(set('job1').members.map((m) => m.path).sort(), ['/etc/systemd/system/nodus.service.pre-job1', '/var/backups/proxypilot-db/app-pre-deploy-job1.sql']);
+  assert.equal(at('/var/backups/proxypilot-db/app-pre-deploy-job1.sql'), undefined, 'set members are not separate items');
 });
 function result_items_have(at, p) { return !!at(p); }
 
@@ -428,4 +430,36 @@ test('logs: current logs (package history, bootstrap, alternatives, an applicati
   const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
   const picked = sel.items.map((id) => r.items.find((x) => x.id === id).path).sort();
   assert.deepEqual(picked, ['/var/log/apt/history.log.1.gz', '/var/log/apt/history.log.2.gz', '/var/log/dpkg.log.1', '/var/log/kern.log.old', '/var/log/syslog-20261001', '/var/log/syslog-20261001.gz']);
+});
+
+/* ---- review finding 6: execution history kept and removed as whole recovery sets ---- */
+
+test('history: dumps stay together with the environment copies of the same job; the newest sets are kept whole', () => {
+  const day = (d) => NOW - d * W.DAY;
+  const dumps = [['deploy', 'D1', 60], ['deploy', 'D2', 50], ['deploy', 'D3', 40], ['restore', 'R1', 35], ['restore', 'R2', 33]];
+  const f = facts([{ path: '/var/backups/proxypilot-db', depth: 1, role: 'db-dump' }, { path: '/etc/systemd/system', depth: 1, role: 'unit-copy' }, { path: '/etc', depth: 1, role: 'env-copy' }], [
+    ...dumps.map(([k, j, d]) => ({ path: `/var/backups/proxypilot-db/app-pre-${k}-${j}.sql`, r: 0, type: 'file', mtimeMs: day(d), newestMtimeMs: day(d) })),
+    ...dumps.filter(([k]) => k === 'deploy').map(([, j, d]) => ({ path: `/etc/systemd/system/mock2-dev.service.pre-${j}`, r: 1, type: 'file', mtimeMs: day(d), newestMtimeMs: day(d) })),
+    ...dumps.map(([k, j, d]) => ({ path: `/etc/environment.pre-${k === 'restore' ? 'restore-' : ''}${j}`, r: 2, type: 'file', mtimeMs: day(d), newestMtimeMs: day(d) })),
+    { path: '/var/backups/proxypilot-db/app-pre-deploy-OPEN.sql', r: 0, type: 'file', mtimeMs: day(90), newestMtimeMs: day(90) },
+    { path: '/etc/environment.pre-OPEN', r: 2, type: 'file', mtimeMs: day(90), newestMtimeMs: day(90) },
+  ]);
+  const r = run(projTarget, f, { context: { openJobIds: ['OPEN'] } });
+  const set = (job) => r.items.find((it) => it.setJob === job);
+  assert.deepEqual(['R2', 'R1'].map((j) => set(j).status), ['protected', 'protected'], 'the two newest sets');
+  for (const j of ['D3', 'D2', 'D1']) {
+    const s = set(j);
+    assert.equal(s.status, 'eligible', j);
+    assert.equal(s.kind, 'group');
+    assert.deepEqual(s.members.map((m) => m.path).sort(), [`/etc/environment.pre-${j}`, `/etc/systemd/system/mock2-dev.service.pre-${j}`, `/var/backups/proxypilot-db/app-pre-deploy-${j}.sql`].sort(), 'dump, environment and unit copies go together');
+  }
+  assert.deepEqual(set('R2').members.map((m) => m.path).sort(), ['/etc/environment.pre-restore-R2', '/var/backups/proxypilot-db/app-pre-restore-R2.sql']);
+  assert.equal(set('OPEN').status, 'protected', 'a set whose job is still open is kept');
+  assert.equal(set('OPEN').reason, 'Belongs to a job that is running.');
+  assert.match(set('D3').label, /^Copies taken before a deploy \(job D3\): database, service unit, environment$/);
+  // No kept dump ever loses its environment copy: every protected dump's set is protected.
+  for (const it of r.items) for (const m of it.members || []) if (/app-pre-/.test(m.path)) assert.equal(it.status === 'protected', ['R2', 'R1', 'OPEN'].includes(it.setJob));
+  // The automatic history rule removes whole old sets only.
+  const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  assert.deepEqual(sel.items.map((id) => r.items.find((x) => x.id === id).setJob).sort(), ['D1', 'D2', 'D3']);
 });

@@ -59,6 +59,10 @@ test('depth 0 is one item, depth 1 is one item per child; sizes add up; empty fi
   assert.equal(items.get(join(root, 'b.txt')).logicalBytes, 10);
   assert.equal(facts.roots[0].children, 2);
   assert.equal('partial' in a, false);
+  // The creation time goes into the item's identity, so a cleanup refuses an
+  // item recreated on a reused inode (where the filesystem records it).
+  const born = lstatSync(join(root, 'b.txt')).birthtimeMs;
+  if (born > 0) assert.equal(items.get(join(root, 'b.txt')).birthtimeMs, born);
 });
 
 test('symlinks are never followed: a link is reported with its target, the target tree is not counted', (t) => {

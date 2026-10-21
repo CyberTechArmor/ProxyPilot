@@ -14,7 +14,11 @@ const run = data => {
   const r = spawnSync('node', ['-e', CLEANUP_PROGRAM, Buffer.from(JSON.stringify(data)).toString('base64')], { encoding: 'utf8' });
   return { ...parseProgramOutput({ stdout: r.stdout, stderr: r.stderr, code: r.status }), status: r.status };
 };
-const identity = file => { const s = fs.lstatSync(file); return { dev: s.dev, ino: s.ino, mtimeMs: s.mtimeMs, size: s.size, type: s.isDirectory() ? 'dir' : s.isSymbolicLink() ? 'link' : 'file' }; };
+const identity = file => { const s = fs.lstatSync(file); return { dev: s.dev, ino: s.ino, mtimeMs: s.mtimeMs, ...(s.birthtimeMs > 0 ? { birthtimeMs: s.birthtimeMs } : {}), size: s.size, type: s.isDirectory() ? 'dir' : s.isSymbolicLink() ? 'link' : 'file' }; };
+// A check and its cleanup are seconds apart. File timestamps advance in
+// clock ticks of a few milliseconds and inode numbers are reused, so an item
+// replaced within the same tick would look unchanged: wait past one first.
+const laterTick = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
 function fixture(t) {
   const parent = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cleanup-program-'));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
@@ -51,11 +55,13 @@ test('a path through a symlink is refused and nothing is removed', { skip }, t =
 test('an item replaced after the check (or replaced by a link) is refused', { skip }, t => {
   const f = fixture(t);
   const seen = identity(f.tree);
+  laterTick();
   fs.rmSync(f.tree, { recursive: true }); fs.mkdirSync(f.tree); fs.writeFileSync(path.join(f.tree, 'new'), 'fresh data');
   const r = remove(f, [{ path: f.tree, identity: seen }]);
   assert.equal(r.results[0].code, 'CHANGED_SINCE_CHECK');
   assert.equal(fs.readFileSync(path.join(f.tree, 'new'), 'utf8'), 'fresh data');
   const before = identity(f.tree);
+  laterTick();
   fs.rmSync(f.tree, { recursive: true }); fs.symlinkSync(f.outside, f.tree, 'dir');
   const linked = remove(f, [{ path: f.tree, identity: before }]);
   assert.equal(linked.results[0].code, 'CHANGED_SINCE_CHECK');
@@ -64,6 +70,15 @@ test('an item replaced after the check (or replaced by a link) is refused', { sk
   const fileId = identity(file); fs.appendFileSync(file, 'more');
   assert.equal(remove(f, [{ path: file, identity: fileId }]).results[0].code, 'CHANGED_SINCE_CHECK', 'a file that grew since the check stays');
   assert.equal(remove(f, [{ path: file, identity: { type: 'file' } }]).results[0].code, 'CHANGED_SINCE_CHECK', 'no identity, no removal');
+});
+
+test('an item whose creation time differs from the check is refused even with the same inode and times', { skip }, t => {
+  const f = fixture(t);
+  const id = identity(f.tree);
+  if (!(id.birthtimeMs > 0)) { t.skip('no creation time on this filesystem'); return; }
+  const r = remove(f, [{ path: f.tree, identity: { ...id, birthtimeMs: id.birthtimeMs - 1000 } }]);
+  assert.equal(r.results[0].code, 'CHANGED_SINCE_CHECK');
+  assert.equal(fs.existsSync(path.join(f.tree, 'a.txt')), true);
 });
 
 test('outside the approved roots, or the root itself, is refused', { skip }, t => {

@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { categoryLabel } from './categories.js';
 import { computeTotals, summarizeCategories, formatBytes } from './accounting.js';
 import { HOST_TRANSFER_ROOT } from './host-measures.js';
+import { releaseContextFromApplication, ROLLBACK_UNKNOWN_REASON } from '../setup-engine/application-release-cleanup.js';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -29,7 +30,6 @@ export const GROUP_THRESHOLD = 5;
 const TEMP_MIN_AGE_MS = DAY;
 const WORKSPACE_MIN_AGE_MS = HOUR;
 const ROTATED_MIN_AGE_MS = 7 * DAY;
-const FINISHED_LOG_MIN_AGE_MS = 14 * DAY;
 const EVIDENCE_MIN_AGE_MS = 14 * DAY;
 const HISTORY_KEEP = 2;
 
@@ -53,6 +53,7 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
   const tracked = [];
   const resolve = [];
   let service = null;
+  let releases = null;
   if (target.kind === 'application') {
     const p = target.profile || {};
     service = p.serviceName || null;
@@ -63,6 +64,10 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
     add('/usr', 0, 'os');
     add('/var/lib/dpkg', 0, 'os');
     if (p.releaseRoot) {
+      // The release roles are decided in the guest by describeReleases, the
+      // one definition the release job and the cleanup also run, from the
+      // records' facts (the previous release from the deploy history).
+      if (p.sourceDir) releases = { profile: { sourceDir: p.sourceDir, releaseRoot: p.releaseRoot, preservePaths: [...(p.preservePaths || [])], envFiles: [...(p.envFiles || [])] }, ...releaseContextFromApplication(target, { root: p.releaseRoot, ...('previousLive' in target ? { previousLive: target.previousLive ?? null } : {}) }) };
       add(p.releaseRoot, 1, 'release-root', { marker: true, breakdown: ['node_modules', 'release-evidence', 'test-results'] });
       add(`${p.releaseRoot}/.staging`, 1, 'staging');
       if (p.sourceDir) add(p.sourceDir, 0, 'live', { resolve: true, breakdown: ['node_modules', 'release-evidence', 'test-results'] });
@@ -101,7 +106,7 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
   add('/etc', 1, 'env-copy', { match: '^environment\\.pre-' });
   add('/run/mock2-deploy', 1, 'containment');
   for (const d of ['/opt', '/srv', '/home', '/var/lib']) add(d, 1, 'other', { gitLinks: true });
-  return { roots, resolve, tracked, service, statfs: ['/', '/tmp', '/var/tmp', '/run'], procScan: true, journal: true, budget, maxItems: 20_000, maxChildren: 5_000 };
+  return { roots, resolve, tracked, service, ...(releases ? { releases } : {}), statfs: ['/', '/tmp', '/var/tmp', '/run'], procScan: true, journal: true, budget, maxItems: 20_000, maxChildren: 5_000 };
 }
 
 /* -------------------------------- context --------------------------------- */
@@ -118,52 +123,84 @@ export function isSealedRelease(it) {
 /**
  * What must stay, derived from the target's records and the facts:
  * { liveRelease, rollbackRelease, waitingCandidate, backingRoots,
- *   activeAttempts, buildActive, openRestoreJob, anyApplicationJobOpen, openJobIds }.
+ *   releasesKnown, releasesUnknown, rollbackUnknown, keptReleases,
+ *   pendingReleases, sealedReleases, activeAttempts, recoveryAttempts, buildActive,
+ *   openRestoreJob, anyApplicationJobOpen, openJobIds }.
+ * The release roles come only from describeReleases' answer in the facts
+ * (facts.releases); without one, no release is cleanable and the live
+ * release and backing roots are named for the labels only.
  */
 export function buildContext({ target, activity = {}, facts = null } = {}) {
-  const ctx = { liveRelease: null, rollbackRelease: null, waitingCandidate: null, backingRoots: [], activeAttempts: [...(activity.activeAttempts || [])], buildActive: !!activity.buildActive, openRestoreJob: !!activity.openRestoreJob, anyApplicationJobOpen: !!activity.anyApplicationJobOpen, openJobIds: [...(activity.openJobIds || [])] };
+  const ctx = { liveRelease: null, rollbackRelease: null, waitingCandidate: null, backingRoots: [], releasesKnown: false, releasesUnknown: null, rollbackUnknown: false, keptReleases: [], sealedReleases: [], activeAttempts: [...(activity.activeAttempts || [])], recoveryAttempts: [...(activity.recoveryAttempts || [])], buildActive: !!activity.buildActive, openRestoreJob: !!activity.openRestoreJob, anyApplicationJobOpen: !!activity.anyApplicationJobOpen, openJobIds: [...(activity.openJobIds || [])] };
   if (target?.kind !== 'application' || !facts) return ctx;
   const p = target.profile || {};
+  const rel = facts.releases;
+  if (rel && rel.ok === true) {
+    ctx.releasesKnown = true;
+    ctx.liveRelease = rel.live || null;
+    ctx.rollbackRelease = rel.rollback || null;
+    ctx.waitingCandidate = rel.waiting || null;
+    ctx.backingRoots = [...(rel.backing || [])].sort();
+    ctx.rollbackUnknown = !!rel.rollbackUnknown;
+    ctx.keptReleases = [...(rel.protect || [])];
+    ctx.pendingReleases = [...(rel.pending || [])];
+    ctx.sealedReleases = (rel.sealed || []).map((r) => r.path);
+    return ctx;
+  }
+  ctx.releasesUnknown = p.releaseRoot ? (rel?.code || 'NOT_DESCRIBED') : null;
   const live = p.sourceDir ? facts.resolved?.[p.sourceDir] : null;
   if (live?.exists && live.realpath) ctx.liveRelease = live.realpath;
   const releaseItems = itemsOfRole(facts, 'release-root');
   const root = releaseItems.length ? dirname(releaseItems[0].path) : (p.releaseRoot || null);
-  // Backing roots: the release-root child holding the real path of a preserved path or env file.
+  // Backing roots (labels only here): the release-root child holding the real path of a preserved path or env file.
   if (root) {
     const backing = new Set();
     for (const x of [...(p.preservePaths || []), ...(p.envFiles || [])]) {
       const real = facts.resolved?.[x]?.realpath;
       if (!real || !inside(root, real) || real === root) continue;
-      const top = `${root}/${real.slice(root.length + 1).split('/')[0]}`;
-      backing.add(top);
+      backing.add(`${root}/${real.slice(root.length + 1).split('/')[0]}`);
     }
     ctx.backingRoots = [...backing].sort();
   }
-  const sealed = releaseItems.filter(isSealedRelease);
-  // Waiting candidate: the newest validated release newer than the live verification, not live.
-  const liveAt = Date.parse(target.live?.verifiedAt || '') || null;
-  const waiting = (target.candidates || [])
-    .filter((c) => c.validation?.passed && c.validation.releasePath && c.validation.releasePath !== ctx.liveRelease)
-    .map((c) => ({ path: c.validation.releasePath, at: Date.parse(c.validation.validatedAt || c.checkpointAt || '') || 0 }))
-    .filter((c) => liveAt == null || c.at > liveAt)
-    .filter((c) => sealed.some((it) => it.path === c.path))
-    .sort((a, b) => b.at - a.at)[0];
-  if (waiting) ctx.waitingCandidate = waiting.path;
-  // Rollback: the release of live.previousSha, else the newest other sealed release.
-  const others = sealed.filter((it) => it.path !== ctx.liveRelease && it.path !== ctx.waitingCandidate);
-  const prev = target.live?.previousSha || null;
-  const bySha = prev ? others.find((it) => it.marker?.sha === prev) : null;
-  const newest = others.slice().sort((a, b) => Number(b.mtimeMs) - Number(a.mtimeMs))[0];
-  ctx.rollbackRelease = (bySha || newest)?.path || null;
   return ctx;
 }
+
+// Why the release roles are not known, in plain words (describeReleases' refusals).
+const RELEASES_UNKNOWN_REASONS = {
+  RETENTION_REQUIRES_SYMLINK_LAYOUT: 'The application does not run through a link into its release folder, so which release is which cannot be told; no release is cleaned up.',
+  UNSAFE_RETENTION_ROOT: 'The release folder is not owned by root or can be changed by other accounts, so no release is cleaned up.',
+  LIVE_RELEASE_OUTSIDE_ROOT: 'The application runs from outside its release folder, so which release is which cannot be told; no release is cleaned up.',
+};
+const releasesUnknownReason = (code) => RELEASES_UNKNOWN_REASONS[code] || 'Which release is which could not be worked out in the container, so no release is cleaned up.';
 
 /* ------------------------------ item building ----------------------------- */
 
 const kindOf = (it) => ({ dir: 'directory', file: 'file', link: 'link', other: 'other' }[it.type] || 'other');
 
+// A walk cut short by the budget, or one with unreadable parts, does not know
+// how recently its contents changed: an age rule can never decide for it.
+const AGE_ROLES = new Set(['temp', 'staging', 'evidence', 'log', 'host-transfers']);
+export function unknownAgeReason(it) {
+  if (it?.partial) return 'Too large to measure fully here, so how recently it changed is unknown.';
+  if (Number(it?.inaccessible) > 0) return 'Parts of it could not be read, so how recently it changed is unknown.';
+  return null;
+}
+function ageGuard(cls, it, role) {
+  if (!cls || cls.status !== 'eligible' || !AGE_ROLES.has(role)) return cls;
+  const why = unknownAgeReason(it);
+  return why ? { ...cls, status: 'investigate', reason: why, action: null } : cls;
+}
+
+function unreadableHint(it) {
+  const n = Number(it.inaccessible || 0);
+  if (!n) return null;
+  const paths = (it.inaccessiblePaths || []).slice(0, 3);
+  return `${n === 1 ? 'One part' : `${n} parts`} could not be read and ${n === 1 ? 'is' : 'are'} not counted${paths.length ? `: ${paths.join(', ')}${n > paths.length ? ', …' : ''}` : ''}.`;
+}
+
 function fileItem(it, root, cls) {
   const status = cls.status;
+  const unreadable = unreadableHint(it);
   return {
     id: null,
     category: cls.category,
@@ -173,12 +210,13 @@ function fileItem(it, root, cls) {
     sub: cls.sub || null,
     status,
     reason: cls.reason,
-    hint: cls.hint || null,
+    hint: [cls.hint, unreadable].filter(Boolean).join(' ') || null,
     logicalBytes: Number(it.logicalBytes || 0),
     allocatedBytes: Number(it.allocatedBytes || 0),
     files: Number(it.files || 0),
     newestMtimeMs: Number.isFinite(it.newestMtimeMs) ? it.newestMtimeMs : (Number.isFinite(it.mtimeMs) ? it.mtimeMs : null),
-    precision: it.partial ? 'at-least' : 'exact',
+    precision: it.partial || Number(it.inaccessible || 0) > 0 ? 'at-least' : 'exact',
+    hardLinkedBytes: Number(it.hardLinkedBytes || 0),
     memoryBacked: !!it.memoryBacked,
     action: status === 'eligible' ? (cls.action || 'remove') : null,
     location: cls.location || 'guest',
@@ -201,15 +239,29 @@ const tooYoung = (it, now, ms) => !Number.isFinite(it.newestMtimeMs) || it.newes
 
 /* -------------------------------- the rules ------------------------------- */
 
+export const HOLD_PREFIX = '.pp-cleanup-hold-';
+const HOLD_CLASS = { category: 'other', status: 'investigate', sub: 'held', reason: 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.' };
+
+// Why a build keeps an item: running, or interrupted and waiting for recovery.
+function buildBusyReason(context) {
+  const recovering = context?.recoveryAttempts || [];
+  const running = (context?.activeAttempts || []).some((a) => !recovering.includes(a));
+  return recovering.length && !running ? 'A build was interrupted and still needs recovery.' : 'A build is running.';
+}
+
 function classifyGuestItem(it, root, env) {
   const { target, context, now, facts } = env;
   const role = root?.role;
   const svcUid = facts?.service?.uid;
   if (it.missing) return null;
+  // Never cleanable, whatever folder it sits in.
+  if ((it.name || basename(it.path)).startsWith(HOLD_PREFIX)) return HOLD_CLASS;
   switch (role) {
     case 'preserve': {
       const models = /model/i.test(root.declared || it.path) || /model/i.test(it.path);
-      return { category: 'data', status: 'protected', sub: models ? 'models' : 'data', reason: models ? 'Model files the application uses; kept across releases.' : 'Application data kept across releases.', hint: root.declared && root.declared !== it.path ? `Declared as ${root.declared}` : null };
+      // Labelled with the path the profile names; where it really lives is the detail.
+      const moved = root.declared && root.declared !== it.path;
+      return { category: 'data', status: 'protected', sub: models ? 'models' : 'data', label: moved ? root.declared : null, reason: models ? 'Model files the application uses; kept across releases.' : 'Application data kept across releases.', hint: moved ? `Stored at ${it.path} (the path above links there).` : null };
     }
     case 'env':
       return { category: 'data', status: 'protected', sub: 'settings', reason: 'Settings and secrets (contents are never read).' };
@@ -234,16 +286,16 @@ function classifyGuestItem(it, root, env) {
       const t = facts?.tracked?.[repo];
       if (!t || !t.ok) return { category: 'test_reports', status: 'investigate', reason: 'Could not check whether Git tracks it, so it is left for you to look at.' };
       if (t.paths.some((x) => x === rel || x.startsWith(`${rel}/`))) return { category: 'test_reports', status: 'protected', reason: 'Part of the source (tracked in Git).' };
-      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: buildBusyReason(context) };
       if (it.inUse) return { category: 'test_reports', status: 'protected', reason: 'In use by a running process.' };
       return { category: 'test_reports', status: 'eligible', reason: 'Test output that the next test run writes again.' };
     }
     case 'project-cache':
-      if (context.buildActive) return { category: 'caches', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'caches', status: 'protected', reason: buildBusyReason(context) };
       if (it.inUse) return { category: 'caches', status: 'protected', reason: 'In use by a running process.' };
       return { category: 'caches', status: 'eligible', reason: 'Check results the next check computes again.' };
     case 'evidence':
-      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'test_reports', status: 'protected', reason: buildBusyReason(context) };
       if (it.inUse) return { category: 'test_reports', status: 'protected', reason: 'In use by a running process.' };
       if (tooYoung(it, now, EVIDENCE_MIN_AGE_MS)) return { category: 'test_reports', status: 'protected', reason: 'Recent check results.' };
       return { category: 'test_reports', status: 'eligible', reason: 'An old check report.' };
@@ -253,7 +305,7 @@ function classifyGuestItem(it, root, env) {
     case 'cache': case 'cache-apt': {
       if (it.type === 'link') return { category: 'caches', status: 'investigate', reason: 'A link inside a cache folder (never followed).' };
       if (it.inUse) return { category: 'caches', status: 'protected', reason: 'In use by a running process.' };
-      if (context.buildActive) return { category: 'caches', status: 'protected', reason: 'A build is running.' };
+      if (context.buildActive) return { category: 'caches', status: 'protected', reason: buildBusyReason(context) };
       const hint = it.name === 'ms-playwright' ? 'Tests download it again.' : null;
       return { category: 'caches', status: 'eligible', reason: role === 'cache-apt' ? 'A downloaded package file that is fetched again when needed.' : 'Downloaded files that are fetched again when needed.', hint };
     }
@@ -278,7 +330,8 @@ function classifyGuestItem(it, root, env) {
 
 function classifyReleaseChild(it, { context }) {
   const name = it.name || basename(it.path);
-  const sealed = isSealedRelease(it);
+  // Sealed as describeReleases saw it when its answer is there (the same test).
+  const sealed = context.releasesKnown ? (context.sealedReleases || []).includes(it.path) : isSealedRelease(it);
   const sha8 = it.marker?.sha ? it.marker.sha.slice(0, 8) : name.slice(0, 8);
   if (it.path === context.liveRelease) {
     return { category: 'running_app', status: 'protected', kind: 'release', sub: 'live', label: `Release ${sha8} (running now)`, reason: 'The release the application is running now.', breakdown: breakdownOf(it), hint: 'Inside a sealed release; its parts are removed only with the whole release.', identity: { markerSha: it.marker?.sha || null } };
@@ -288,9 +341,15 @@ function classifyReleaseChild(it, { context }) {
   }
   if (it.type === 'link') return { category: 'other', status: 'investigate', reason: 'A link in the release folder (never followed).' };
   if (sealed) {
-    if (it.path === context.rollbackRelease) return { category: 'releases', status: 'protected', kind: 'release', sub: 'rollback', label: `Release ${sha8} (rollback)`, reason: 'Kept so you can roll back to the previous version.', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
-    if (it.path === context.waitingCandidate) return { category: 'releases', status: 'protected', kind: 'release', sub: 'candidate', label: `Release ${sha8} (waiting to deploy)`, reason: 'A validated release waiting to be deployed.', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
-    return { category: 'releases', status: 'eligible', kind: 'release', sub: 'sealed', action: 'remove-release', label: `Release ${sha8}`, reason: 'An older release that is no longer needed for rollback.', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
+    const release = { category: 'releases', kind: 'release', breakdown: breakdownOf(it), identity: { markerSha: it.marker?.sha || null } };
+    // Without describeReleases' answer nothing is decided here.
+    if (!context.releasesKnown) return { ...release, status: 'protected', sub: 'unknown', label: `Release ${sha8}`, reason: releasesUnknownReason(context.releasesUnknown) };
+    if (it.path === context.rollbackRelease) return { ...release, status: 'protected', sub: 'rollback', label: `Release ${sha8} (rollback)`, reason: 'Kept so you can roll back to the previous version.' };
+    if (it.path === context.waitingCandidate) return { ...release, status: 'protected', sub: 'candidate', label: `Release ${sha8} (waiting to deploy)`, reason: 'A validated release waiting to be deployed.' };
+    if ((context.pendingReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'pending', label: `Release ${sha8} (validation not passed)`, reason: 'Its validation has not passed (it may still be running), so it is kept.' };
+    if (context.rollbackUnknown) return { ...release, status: 'protected', sub: 'rollback-unknown', label: `Release ${sha8}`, reason: ROLLBACK_UNKNOWN_REASON };
+    if ((context.keptReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'kept', label: `Release ${sha8}`, reason: 'Kept by the release process.' };
+    return { ...release, status: 'eligible', sub: 'sealed', action: 'remove-release', label: `Release ${sha8}`, reason: 'An older release that is no longer needed for rollback.' };
   }
   if (RELEASE_NAME_RE.test(name)) return { category: 'other', status: 'investigate', reason: 'Looks like a release but is not sealed by ProxyPilot (no valid release marker or unexpected owner), so it is left for you to look at.' };
   return { category: 'other', status: 'investigate', reason: "Not created by ProxyPilot's release process." };
@@ -303,6 +362,7 @@ function classifyStaging(it, { context, now }) {
   if (!attempt) return { category: 'workspaces', status: 'investigate', reason: "Not created by ProxyPilot's build process." };
   const category = name.endsWith('.bundle') ? 'archives' : 'workspaces';
   const what = category === 'archives' ? 'A source archive' : 'A build workspace';
+  if ((context.recoveryAttempts || []).includes(attempt)) return { category, status: 'protected', reason: 'Belongs to a build that was interrupted and still needs recovery.' };
   if (context.activeAttempts.includes(attempt)) return { category, status: 'protected', reason: 'A build is using it.' };
   if (tooYoung(it, now, WORKSPACE_MIN_AGE_MS)) return { category, status: 'protected', reason: 'Changed in the last hour; a build may still be finishing.' };
   return { category, status: 'eligible', reason: `${what} left behind by a build that has ended.`, extra: { attempt } };
@@ -310,8 +370,8 @@ function classifyStaging(it, { context, now }) {
 
 function classifyTemp(it, { now }, svcUid) {
   const name = it.name || basename(it.path);
-  const memoryHint = it.memoryBacked ? 'Uses memory, not disk.' : null;
-  const base = { category: 'temp', hint: memoryHint };
+  // memoryBacked is on the item itself; the page shows it once.
+  const base = { category: 'temp' };
   if (/^systemd-private-/.test(name)) return { ...base, status: 'protected', reason: 'Private temporary space of a system service.' };
   if (/^\.[A-Za-z0-9]+-unix$/.test(name)) return { ...base, status: 'protected', reason: 'A system folder.' };
   if (it.type === 'other') return { ...base, status: 'protected', reason: it.special === 'socket' ? 'A system socket.' : 'A special file (pipe or device).' };
@@ -322,22 +382,27 @@ function classifyTemp(it, { now }, svcUid) {
   return { ...base, status: 'eligible', reason: it.type === 'link' ? 'A temporary link nothing is using (the link only; never followed).' : 'Temporary files nothing is using that have not changed for over a day.' };
 }
 
-const ROTATED_RE = /(\.[0-9]+(\.(gz|xz|bz2|zst))?|\.(gz|xz|bz2|zst)|\.old)$/;
+// Rotated copies only: name.1 … name.N, compressed copies (.gz .xz .bz2 .zst),
+// .old, and date-stamped copies (name-YYYYMMDD[HH]), each optionally
+// compressed. Current logs — dpkg.log, apt/history.log, alternatives.log,
+// bootstrap.log, an application's own .log — are never cleaned up here: they
+// are the record of what happened, and logrotate already manages them.
+export const ROTATED_RE = /(\.[0-9]+|\.old|-[0-9]{8}(?:[0-9]{2})?)?(?:\.(?:gz|xz|bz2|zst))?$/;
+export function isRotatedLog(name) {
+  const m = ROTATED_RE.exec(String(name || ''));
+  return !!m && m[0].length > 0 && m.index > 0;
+}
 
 function classifyLog(it, { now }) {
   const name = it.name || basename(it.path);
   if (it.type === 'dir') return { category: 'logs', status: 'protected', reason: 'A log folder; its files are not checked one by one.' };
   if (it.type !== 'file') return { category: 'logs', status: 'protected', reason: 'A system log entry.' };
-  if (ROTATED_RE.test(name)) {
+  if (isRotatedLog(name)) {
+    if (it.inUse) return { category: 'logs', status: 'protected', sub: 'rotated', reason: 'Being written now.' };
     if (tooYoung(it, now, ROTATED_MIN_AGE_MS)) return { category: 'logs', status: 'protected', sub: 'rotated', reason: 'A recently rotated log.' };
-    return { category: 'logs', status: 'eligible', sub: 'rotated', reason: 'An old rotated log.' };
+    return { category: 'logs', status: 'eligible', sub: 'rotated', reason: 'An old rotated copy of a log.' };
   }
-  if (/\.log$/.test(name)) {
-    if (it.inUse) return { category: 'logs', status: 'protected', reason: 'Being written now.' };
-    if (tooYoung(it, now, FINISHED_LOG_MIN_AGE_MS)) return { category: 'logs', status: 'protected', reason: 'Recent.' };
-    return { category: 'logs', status: 'eligible', sub: 'finished', reason: 'A finished log nothing is writing to.' };
-  }
-  return { category: 'logs', status: 'protected', reason: 'A system log.' };
+  return { category: 'logs', status: 'protected', sub: 'current', reason: it.inUse ? 'Being written now.' : 'A current log; only old rotated copies are cleaned up.' };
 }
 
 function classifyOther(it, { target }) {
@@ -347,7 +412,7 @@ function classifyOther(it, { target }) {
   }
   if (it.path.startsWith('/var/lib/') && SYSTEM_VAR_LIB.has(name)) return { category: 'dependencies', status: 'protected', reason: 'Part of the operating system.' };
   let hint = null;
-  if (it.gitLink && it.gitLink.exists === false) hint = 'A leftover working copy: its .git link no longer resolves.';
+  if (it.gitLink && it.gitLink.exists === false) hint = `A leftover working copy: its Git link no longer resolves, so Git does not track it any more. To remove it by hand, open the container's terminal, look through it for anything you still need (ls -la ${it.path}), make sure no service runs from it (systemctl status shows each service's folder), then delete it with rm -r ${it.path}.`;
   else if (/\.old$/.test(name)) hint = 'An old backup file.';
   else if (it.type === 'link') hint = it.linkTargetExists === false ? 'A link whose target no longer exists (never followed).' : 'A link (never followed).';
   return { category: 'other', status: 'investigate', reason: 'Not recognised by any rule, so it is left for you to look at.', hint };
@@ -355,37 +420,71 @@ function classifyOther(it, { target }) {
 
 /* ----------------------- ranked history (newest N kept) -------------------- */
 
+// Execution history as RECOVERY SETS: the copies one job took before a change
+// belong together — app-pre-deploy-<job>.sql with environment.pre-<job> and
+// <unit>.pre-<job>; app-pre-restore-<job>.sql with environment.pre-restore-<job>.
+// restore_project_db needs a dump together with the environment copy its job
+// recorded, so sets are kept or removed whole: the newest HISTORY_KEEP sets
+// (and any set whose job is still open) are protected; older sets are one
+// cleanable item each (a group when the set has several files).
+const DUMP_SET_RE = /^app-pre-(deploy|restore)-([A-Za-z0-9-]{1,64})\.sql$/;
+const COPY_SET_RE = /^(.+)\.pre-(restore-)?([A-Za-z0-9-]{1,64})$/;
+export function recoverySetKey(role, name) {
+  if (role === 'db-dump') { const m = DUMP_SET_RE.exec(name); return m ? { job: m[2], kind: m[1], part: 'database' } : null; }
+  const m = COPY_SET_RE.exec(name);
+  if (!m) return null;
+  if (role === 'env-copy' && m[1] !== 'environment') return null;
+  return { job: m[3], kind: m[2] ? 'restore' : null, part: role === 'env-copy' ? 'environment' : 'service unit' };
+}
+
 function historyItems(facts, roleItems, env) {
   const out = [];
-  const groups = new Map();
+  const sets = new Map();
+  const openIds = env?.context?.openJobIds || [];
   for (const { it, root } of roleItems) {
     if (it.missing) continue;
     const name = it.name || basename(it.path);
-    let base = null; let kind = null;
-    if (root.role === 'db-dump') {
-      const m = /^(app-pre-[a-z]+)-.*\.sql$/.exec(name);
-      if (!m || it.type !== 'file') { out.push(fileItem(it, root, { category: 'data', status: 'protected', sub: 'database', reason: 'A database copy made on request.' })); continue; }
-      base = m[1]; kind = 'dump';
-    } else if (root.role === 'unit-copy') {
-      const i = name.indexOf('.pre-'); base = name.slice(0, i); kind = 'copy';
-    } else {
-      base = 'environment'; kind = 'copy';
+    if (name.startsWith(HOLD_PREFIX)) { out.push(fileItem(it, root, HOLD_CLASS)); continue; }
+    const key = it.type === 'file' ? recoverySetKey(root.role, name) : null;
+    if (!key) {
+      if (root.role === 'db-dump' && it.type === 'file') out.push(fileItem(it, root, { category: 'data', status: 'protected', sub: 'database', reason: 'A database copy made on request.' }));
+      else out.push(fileItem(it, root, { category: 'history', status: 'investigate', reason: it.type === 'file' ? 'Not recognised as a copy ProxyPilot takes before a change, so it is left for you to look at.' : 'Not a plain file, so it is left for you to look at.' }));
+      continue;
     }
-    if (it.type !== 'file') { out.push(fileItem(it, root, { category: 'history', status: 'investigate', reason: 'Not a plain file, so it is left for you to look at.' })); continue; }
-    const key = `${root.role}:${base}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ it, root, kind, base });
+    if (!sets.has(key.job)) sets.set(key.job, { job: key.job, kind: null, members: [] });
+    const set = sets.get(key.job);
+    if (key.kind) set.kind = key.kind;
+    set.members.push({ it, root, part: key.part });
   }
-  for (const [key, list] of groups) {
-    list.sort((a, b) => Number(b.it.mtimeMs) - Number(a.it.mtimeMs));
-    list.forEach(({ it, root, kind }, rank) => {
-      const keep = rank < HISTORY_KEEP;
-      const reason = kind === 'dump'
-        ? (keep ? 'Recent database copy taken before a change.' : 'An older database copy taken before a change.')
-        : (keep ? 'A recent copy of a settings file from before a change (contents are not read).' : 'An old copy of a settings file from before a change (contents are not read).');
-      out.push(fileItem(it, root, { category: 'history', status: keep ? 'protected' : 'eligible', reason, sub: kind, extra: { group: key, rank } }));
+  const ordered = [...sets.values()].map((set) => ({ ...set, newest: Math.max(...set.members.map((m) => Number(m.it.mtimeMs) || 0)) }))
+    .sort((a, b) => b.newest - a.newest || (a.job < b.job ? -1 : 1));
+  ordered.forEach((set, rank) => {
+    const open = openIds.some((id) => id === set.job || String(id).startsWith(`${set.job}-`) || set.job.startsWith(`${id}-`));
+    const keep = open || rank < HISTORY_KEEP;
+    const reason = open ? 'Belongs to a job that is running.'
+      : keep ? 'Recent copies taken before a change (database and settings together, as a restore needs them).'
+        : 'Older copies taken before a change; they are removed together, so no database copy loses its settings (contents are not read).';
+    const parts = [...new Set(set.members.map((m) => m.part))];
+    const what = set.kind === 'deploy' ? 'a deploy' : set.kind === 'restore' ? 'a restore' : 'a change';
+    const label = `Copies taken before ${what} (job ${set.job.slice(0, 8)}): ${parts.join(', ')}`;
+    const status = keep ? 'protected' : 'eligible';
+    const extra = { group: `history:${set.job}`, rank, setJob: set.job, setParts: parts };
+    if (set.members.length === 1) {
+      const { it, root } = set.members[0];
+      out.push(fileItem(it, root, { category: 'history', status, reason, label, sub: 'recovery-set', extra }));
+      return;
+    }
+    const items = set.members.map(({ it, root }) => fileItem(it, root, { category: 'history', status, reason, sub: 'recovery-set' }));
+    out.push({
+      ...items[0], id: null, path: null, label, kind: 'group', sub: 'recovery-set',
+      logicalBytes: items.reduce((n, x) => n + x.logicalBytes, 0), allocatedBytes: items.reduce((n, x) => n + x.allocatedBytes, 0),
+      files: items.length, newestMtimeMs: Math.max(...items.map((x) => Number(x.newestMtimeMs) || 0)),
+      precision: items.some((x) => x.precision !== 'exact') ? 'at-least' : 'exact', inUse: items.some((x) => x.inUse), hint: null,
+      identity: { set: set.job }, memberCount: items.length, memberKind: 'files',
+      members: items.map((x) => ({ path: x.path, kind: x.kind, identity: x.identity, allocatedBytes: x.allocatedBytes, logicalBytes: x.logicalBytes, newestMtimeMs: x.newestMtimeMs })),
+      ...extra,
     });
-  }
+  });
   return out;
 }
 
@@ -397,13 +496,14 @@ export function namePattern(name) {
   const m = /^(.+?)(\.[a-z]{1,5})$/.exec(stem);
   if (m && !/^\.[0-9]/.test(m[2])) { stem = m[1]; ext = m[2]; }
   const random = (tok) => /[0-9]/.test(tok) || (tok.length >= 5 && /[A-Z]/.test(tok.slice(1)) && /[a-z]/.test(tok));
-  let changed = false;
+  let sep = null;
   for (let i = 0; i < 8; i += 1) {
     const mm = /^(.+?)([-_.])([0-9A-Za-z]+)$/.exec(stem);
     if (!mm || !random(mm[3])) break;
-    stem = mm[1]; changed = true;
+    stem = mm[1]; sep = mm[2];
   }
-  return changed ? `${stem}-*${ext}` : null;
+  // The label keeps the separator the names really use (tmp.* for tmp.XXXX).
+  return sep ? `${stem}${sep}*${ext}` : null;
 }
 
 function groupTemp(items) {
@@ -423,16 +523,23 @@ function groupTemp(items) {
     const dirs = m.filter((x) => x.kind === 'directory').length;
     const noun = dirs === m.length ? 'folders' : dirs === 0 ? 'files' : 'entries';
     const reasons = [...new Set(m.map((x) => x.reason))];
+    // Members are grouped by status, so one pattern can give two groups: their
+    // labels say which is which instead of repeating each other.
+    const which = b.status === 'eligible' ? '' : b.status === 'protected' ? ', kept' : ', to look at';
     out.push({
       ...m[0],
       id: null,
       path: null,
-      label: `${b.parent === '/' ? '' : b.parent}/${b.pattern} (${m.length} ${noun})`,
+      label: `${b.parent === '/' ? '' : b.parent}/${b.pattern} (${m.length} ${noun}${which})`,
+      memberKind: noun,
       kind: 'group',
       reason: reasons.length === 1 ? reasons[0] : m[0].reason,
       logicalBytes: m.reduce((s, x) => s + x.logicalBytes, 0),
       allocatedBytes: m.reduce((s, x) => s + x.allocatedBytes, 0),
       files: m.reduce((s, x) => s + x.files, 0),
+      hardLinkedBytes: m.reduce((s, x) => s + (x.hardLinkedBytes || 0), 0),
+      sharedBytes: m.reduce((s, x) => s + (x.sharedBytes || 0), 0),
+      inaccessible: m.reduce((s, x) => s + (x.inaccessible || 0), 0),
       newestMtimeMs: Math.max(...m.map((x) => Number(x.newestMtimeMs) || 0)),
       precision: m.some((x) => x.precision === 'at-least') ? 'at-least' : 'exact',
       inUse: m.some((x) => x.inUse),
@@ -477,7 +584,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
       continue;
     }
     if (['db-dump', 'unit-copy', 'env-copy'].includes(root.role)) { historyRole.push({ it, root }); continue; }
-    const cls = classifyGuestItem(it, root, env);
+    const cls = ageGuard(classifyGuestItem(it, root, env), it, root.role);
     if (!cls) continue;
     const item = fileItem(it, root, cls);
     if (root.role === 'temp') temp.push(item); else items.push(item);
@@ -490,7 +597,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
   for (const it of host?.hostFiles?.items || []) {
     if (it.missing) continue;
     const root = hostRoots[it.r] || {};
-    if (root.role === 'host-transfers') items.push(fileItem(it, root, transferClass(it, env)));
+    if (root.role === 'host-transfers') { const cls = ageGuard(transferClass(it, env), it, root.role); if (cls) items.push(fileItem(it, root, cls)); }
     else if (root.role === 'host-repo') items.push(fileItem(it, root, { category: 'data', status: 'protected', location: 'host', reason: "The project's source history, kept by ProxyPilot (on the host)." }));
   }
   // Snapshots and exports: separate selections.
@@ -523,6 +630,7 @@ export function classify({ target, context, facts = null, host = null, policy = 
     });
   }
   const totals = computeTotals({ facts, host, items: items.map((x) => ({ ...x, location: x.location })) });
+  if (totals.sharedHostFilesystem) notes.push('This container is on a storage pool that shares the host filesystem, so the used and available figures are the whole host\'s, and what this check did not measure one by one cannot be estimated.');
   if (facts && totals.unattributedBytes > 0) {
     items.push({
       id: null, category: 'other', label: 'Not measured individually (operating system and other files)', path: null, kind: 'pseudo', sub: null,
@@ -545,8 +653,9 @@ export function classify({ target, context, facts = null, host = null, policy = 
   if (snaps.length) {
     const held = totals.dataset?.snapshotsBytes;
     notes.push(`Space held by snapshots${held ? ` (about ${formatBytes(held)})` : ''} is only returned after those snapshots are deleted.`);
-    notes.push("Each snapshot's figure counts only what that snapshot alone holds; blocks shared by several snapshots are counted in none of them, so the figures add up to less than the total held by snapshots.");
+    notes.push("Each snapshot's figure is the space only that snapshot holds. Space that several snapshots share is freed only when all of them are deleted, so the figures add up to less than the total held by snapshots.");
   }
+  if (env.context.rollbackUnknown) notes.push(ROLLBACK_UNKNOWN_REASON);
   if (facts?.budgetExceeded) notes.push('The measurement stopped at its time or size budget; figures marked "at least" are lower bounds.');
   if (facts?.truncatedItems) notes.push(`${facts.truncatedItems} entries were not listed one by one (too many); their space is in "Not measured individually".`);
   const omitted = (facts?.roots || []).reduce((s, r) => s + Number(r.omitted || 0), 0);
@@ -577,13 +686,29 @@ function journalItem(it, root, facts, policy) {
   };
 }
 
-function transferClass(it, { context, now }) {
+// Host transfer bundles live in ONE host-wide folder. A bundle belongs to an
+// application only when its name says so (bundle-app<id>-…); another
+// application's bundle is not listed at all, and a bundle whose name names no
+// application is listed as shared (Needs a look, never cleanable from an
+// application's page, kept out of the category totals so no application —
+// and no overview — counts it as its own).
+export const ATTRIBUTED_BUNDLE_RE = /^bundle-app([1-9][0-9]{0,15})-[A-Za-z0-9]{1,40}$/;
+export function bundleOwner(name) {
+  const m = ATTRIBUTED_BUNDLE_RE.exec(String(name || ''));
+  return m ? Number(m[1]) : null;
+}
+
+function transferClass(it, { target, context, now }) {
   const name = it.name || basename(it.path);
+  if (name.startsWith(HOLD_PREFIX)) return { ...HOLD_CLASS, location: 'host' };
   if (!/^bundle-/.test(name)) return { category: 'archives', status: 'investigate', location: 'host', reason: "Not created by ProxyPilot's release process." };
+  const owner = bundleOwner(name);
+  if (owner == null) return { category: 'archives', status: 'investigate', location: 'host', sub: 'shared', reason: "In the host's shared transfer folder; its name does not say which application left it, so it is not cleaned up from an application's page.", extra: { sharedHost: true } };
+  if (target.kind !== 'application' || owner !== Number(target.id)) return null;
   if (it.type === 'link') return { category: 'archives', status: 'investigate', location: 'host', reason: 'A link (never followed).' };
-  if (context.anyApplicationJobOpen) return { category: 'archives', status: 'protected', location: 'host', reason: 'An application build is running; transfer copies may be in use.' };
+  if (context.anyApplicationJobOpen) return { category: 'archives', status: 'protected', location: 'host', reason: 'An application build is running or waiting for recovery; transfer copies may be in use.' };
   if (tooYoung(it, now, WORKSPACE_MIN_AGE_MS)) return { category: 'archives', status: 'protected', location: 'host', reason: 'Changed in the last hour.' };
-  return { category: 'archives', status: 'eligible', location: 'host', reason: 'A transfer copy left by an interrupted build.' };
+  return { category: 'archives', status: 'eligible', location: 'host', reason: 'A transfer copy left by an interrupted build of this application.' };
 }
 
 /** The scan roots on the host that classification knows (for WS2's approved roots). */

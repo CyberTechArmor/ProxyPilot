@@ -6,15 +6,18 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { rmSync, mkdirSync } from 'node:fs';
 import { performCheck } from '../lib/app-storage/perform-check.js';
 import { classify, buildContext, scanPlanFor, namePattern, isSealedRelease, GROUP_THRESHOLD } from '../lib/app-storage/classify.js';
 import * as W from './helpers/app-storage-world.js';
+import { policySelection, DEFAULT_POLICY } from '../lib/app-storage/policy.js';
+import { previousLiveFrom } from '../lib/app-storage/release-history.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const CHECK_ID = 'chk_00000000-0000-4000-8000-000000000001';
 const inside = (root, p) => p === root || p.startsWith(`${root}/`);
 
-async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {}, exports = [], mutate = null } = {}) {
+async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {}, exports = [], mutate = null, history = true } = {}) {
   const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
   const world = W.buildNodusGuest(root, NOW);
   if (mutate) mutate(root, world);
@@ -22,7 +25,12 @@ async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {},
   t.after(release);
   await new Promise((r) => setTimeout(r, 150));
   const exec = W.scriptedExec({ prefix: root, snapshots, snapshotUsed });
-  const result = await performCheck({ target: W.nodusTarget(world), activity, exec, policy: null, now: NOW, checkId: CHECK_ID, listExports: () => exports });
+  // The previous release as release-history.js finds it in production: the
+  // live record's previousSha first, else the deploy history (the rollback
+  // release's own live record when `history`).
+  const rows = [...world.candidates.map((c) => ({ sha: c.sha, live: c.live || null, validation: c.validation || null })), ...(history ? [{ sha: W.DEPLOY_HISTORY.sha, live: { sha: W.DEPLOY_HISTORY.sha, releasePath: W.DEPLOY_HISTORY.path, verifiedAt: new Date(NOW - 4 * W.DAY).toISOString() }, validation: null }] : [])];
+  const target = { ...W.nodusTarget(world), previousLive: previousLiveFrom(world.live, rows) };
+  const result = await performCheck({ target, activity, exec, policy: null, now: NOW, checkId: CHECK_ID, listExports: () => exports });
   const at = (p) => result.items.find((it) => it.path === p);
   const label = (re) => result.items.find((it) => re.test(it.label));
   return { result, at, label, root, world };
@@ -52,7 +60,9 @@ test('a Nodus-like guest: running app, rollback, waiting candidate and the share
   // Models are measured as data on their own and not inside the backing root.
   const models = at(`${R}/${W.ADOPTED}/voice/models`);
   assert.deepEqual([models.category, models.status, models.sub], ['data', 'protected', 'models']);
-  assert.equal(models.hint, 'Declared as /opt/nodus/voice/models');
+  // Labelled with the path the profile declares; where it really lives is the detail.
+  assert.equal(models.label, '/opt/nodus/voice/models');
+  assert.equal(models.hint, `Stored at ${R}/${W.ADOPTED}/voice/models (the path above links there).`);
   assert.ok(label(/^Release 3c932650 \(running now\)$/));
 });
 
@@ -68,7 +78,12 @@ test('preserve paths, env files, databases and the operating system are protecte
   assert.equal(at('/var/lib/apt').status, 'protected');
   const w48 = at('/opt/nodus-w48');
   assert.deepEqual([w48.category, w48.status], ['other', 'investigate']);
-  assert.equal(w48.hint, 'A leftover working copy: its .git link no longer resolves.');
+  assert.match(w48.hint, /^A leftover working copy: its Git link no longer resolves, so Git does not track it any more\./);
+  assert.match(w48.hint, /open the container's terminal/);
+  assert.match(w48.hint, /ls -la \/opt\/nodus-w48\)/);
+  assert.match(w48.hint, /systemctl status/);
+  assert.match(w48.hint, /rm -r \/opt\/nodus-w48\.$/);
+  assert.doesNotMatch(w48.hint, /\.git link/);
   assert.equal(at('/var/lib/nodus-publication').status, 'investigate');
   assert.equal(at(`${W.RELEASE_ROOT}/stray-notes.txt`).status, 'investigate');
   assert.equal(at('/var/backups/proxypilot-db/app-manual-20261001.sql').status, 'protected');
@@ -135,18 +150,20 @@ test('caches, logs and execution history follow their rules', async (t) => {
   assert.equal(at('/root/.cache/Microsoft').status, 'eligible');
   assert.equal(at('/var/cache/apt/archives/nodejs_22.deb').status, 'eligible');
   assert.equal(result_items_have(at, '/var/cache/apt/archives/lock'), false, 'apt lock is not a cache item');
-  assert.equal(at('/var/log/nodus-image-e2e.log').status, 'eligible');
+  assert.equal(at('/var/log/nodus-image-e2e.log').status, 'protected', 'a current .log is never cleaned up, however old');
   assert.equal(at('/var/log/syslog.2.gz').status, 'eligible');
   assert.equal(at('/var/log/dpkg.log').status, 'protected');
   assert.equal(at('/var/log/postgresql/postgresql-17-main.log').status, 'protected');
   const journal = label(/^System journal$/);
   assert.deepEqual([journal.kind, journal.status], ['journal', 'protected']);
-  const dumps = ['job3', 'job2', 'job1'].map((j) => at(`/var/backups/proxypilot-db/app-pre-deploy-${j}.sql`));
-  assert.deepEqual(dumps.map((d) => d.status), ['protected', 'protected', 'eligible']);
-  assert.deepEqual(dumps.map((d) => d.rank), [0, 1, 2]);
-  const units = ['job3', 'job2', 'job1'].map((j) => at(`/etc/systemd/system/nodus.service.pre-${j}`));
-  assert.deepEqual(units.map((d) => d.status), ['protected', 'protected', 'eligible']);
-  assert.equal(at('/etc/environment.pre-job3').status, 'protected');
+  // Recovery sets: job3 (dump, unit and environment copies) and job2 are kept; job1 goes as one set.
+  const set = (job) => label(new RegExp(`\\(job ${job}\\)`));
+  assert.deepEqual([set('job3').status, set('job3').kind, set('job3').memberCount], ['protected', 'group', 3]);
+  assert.deepEqual(set('job3').setParts.sort(), ['database', 'environment', 'service unit']);
+  assert.deepEqual([set('job2').status, set('job2').memberCount], ['protected', 2]);
+  assert.deepEqual([set('job1').status, set('job1').rank, set('job1').action], ['eligible', 2, 'remove']);
+  assert.deepEqual(set('job1').members.map((m) => m.path).sort(), ['/etc/systemd/system/nodus.service.pre-job1', '/var/backups/proxypilot-db/app-pre-deploy-job1.sql']);
+  assert.equal(at('/var/backups/proxypilot-db/app-pre-deploy-job1.sql'), undefined, 'set members are not separate items');
 });
 function result_items_have(at, p) { return !!at(p); }
 
@@ -158,10 +175,10 @@ test('while a build runs, caches and test output are protected', async (t) => {
 
 test('host transfer leftovers: eligible when no application job is open anywhere, else protected', async (t) => {
   const a = await nodusCheck(t);
-  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').status, 'eligible');
-  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').location, 'host');
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3').status, 'eligible');
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3').location, 'host');
   const b = await nodusCheck(t, { activity: { anyApplicationJobOpen: true } });
-  assert.equal(b.at('/var/lib/proxypilot/application-release-transfers/bundle-a1b2c3').status, 'protected');
+  assert.equal(b.at('/var/lib/proxypilot/application-release-transfers/bundle-app1-a1b2c3').status, 'protected');
 });
 
 test('snapshots and exports are separate items; protected while a restore runs or an export is being prepared', async (t) => {
@@ -354,4 +371,288 @@ test('a stopped guest, a guest without Node.js and an unknown guest are reported
   const broken = await performCheck({ target: W.nodusTarget(world), exec: null, now: NOW, checkId: CHECK_ID });
   assert.equal(broken.status, 'failed');
   assert.equal(broken.error.code, 'NO_EXECUTOR');
+});
+
+/* ---- review finding 4 / 14: an unknown age never satisfies an age rule ---- */
+
+test('a walk cut by its budget, or with unreadable parts, has an unknown age: Needs a look, never eligible by age', () => {
+  const nodusApp = { ...appTarget, profile: { ...appTarget.profile, releaseRoot: '/opt/r' } };
+  const f = facts([{ path: '/tmp', depth: 1, role: 'temp' }, { path: '/opt/r/.staging', depth: 1, role: 'staging' }, { path: '/root/.cache', depth: 1, role: 'cache' }], [
+    { path: '/tmp/playwright-transform-cache-989', r: 0, partial: true, logicalBytes: 0, allocatedBytes: 4096 },
+    { path: '/tmp/half-readable', r: 0, inaccessible: 2, inaccessiblePaths: ['/tmp/half-readable/a', '/tmp/half-readable/b'] },
+    { path: '/tmp/fully-measured-old', r: 0 },
+    { path: `/opt/r/.staging/${W.OLD_JOB}-1`, r: 1, partial: true },
+    { path: '/root/.cache/pip', r: 2, partial: true },
+  ]);
+  const r = run(nodusApp, f);
+  const cut = r.at('/tmp/playwright-transform-cache-989');
+  assert.deepEqual([cut.status, cut.precision, cut.action], ['investigate', 'at-least', null]);
+  assert.equal(cut.reason, 'Too large to measure fully here, so how recently it changed is unknown.');
+  const half = r.at('/tmp/half-readable');
+  assert.deepEqual([half.status, half.precision], ['investigate', 'at-least'], 'unreadable parts lower the precision');
+  assert.equal(half.reason, 'Parts of it could not be read, so how recently it changed is unknown.');
+  assert.equal(half.hint, '2 parts could not be read and are not counted: /tmp/half-readable/a, /tmp/half-readable/b.');
+  assert.deepEqual(half.inaccessiblePaths, ['/tmp/half-readable/a', '/tmp/half-readable/b']);
+  assert.equal(r.at('/tmp/fully-measured-old').status, 'eligible');
+  assert.equal(r.at(`/opt/r/.staging/${W.OLD_JOB}-1`).status, 'investigate');
+  // A cache has no age rule in the check, but the automatic caches rule (maxAgeDays) never picks a partial one.
+  const pip = r.at('/root/.cache/pip');
+  assert.deepEqual([pip.status, pip.precision], ['eligible', 'at-least']);
+  const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  assert.deepEqual(sel.items.map((id) => r.items.find((x) => x.id === id).path), ['/tmp/fully-measured-old']);
+});
+
+test('project check results and host transfer bundles cut by the budget are not eligible either', () => {
+  const p = run(projTarget, facts([{ path: '/srv/app/.mock2/evidence', depth: 1, role: 'evidence' }], [{ path: '/srv/app/.mock2/evidence/run-old', r: 0, partial: true }]));
+  assert.equal(p.at('/srv/app/.mock2/evidence/run-old').status, 'investigate');
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: '/var/lib/proxypilot/application-release-transfers', role: 'host-transfers' }], items: [{ path: '/var/lib/proxypilot/application-release-transfers/bundle-app2-a1b2c3', r: 0, type: 'dir', partial: true, mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const a = run(appTarget, facts([], []), { host });
+  assert.equal(a.at('/var/lib/proxypilot/application-release-transfers/bundle-app2-a1b2c3').status, 'investigate');
+});
+
+test('on real files, a check cut by its budget makes nothing eligible through an age rule', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const world = W.buildNodusGuest(root, NOW);
+  const r = await performCheck({ target: W.nodusTarget(world), exec: W.scriptedExec({ prefix: root }), now: NOW, checkId: CHECK_ID, listExports: () => [], budget: { ms: 60_000, entries: 60 } });
+  assert.equal(r.guest.budgetExceeded, true);
+  const partialEligible = r.items.filter((it) => it.status === 'eligible' && it.precision === 'at-least');
+  assert.ok(partialEligible.every((it) => ['caches', 'test_reports'].includes(it.category)), partialEligible.map((it) => it.path).join(', '));
+  assert.ok(r.items.some((it) => it.status === 'investigate' && /how recently it changed is unknown/.test(it.reason)));
+  const sel = policySelection(r, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  assert.ok(sel.items.every((id) => r.items.find((x) => x.id === id).precision !== 'at-least'));
+});
+
+/* ---- review finding 5: only rotated copies of logs are cleanable ---- */
+
+test('logs: current logs (package history, bootstrap, alternatives, an application\'s own) are protected; old rotated copies are eligible', () => {
+  const old = NOW - 60 * W.DAY;
+  const f = facts([{ path: '/var/log/apt', depth: 1, role: 'log' }, { path: '/var/log', depth: 1, role: 'log' }], [
+    ...['history.log', 'term.log', 'history.log.1.gz', 'history.log.2.gz'].map((n) => ({ path: `/var/log/apt/${n}`, r: 0, type: 'file', mtimeMs: old, newestMtimeMs: old })),
+    ...['dpkg.log', 'alternatives.log', 'bootstrap.log', 'nodus-image-e2e.log', 'wtmp', 'dpkg.log.1', 'syslog-20261001', 'syslog-20261001.gz', 'kern.log.old', 'fresh.log.1'].map((n) => ({ path: `/var/log/${n}`, r: 1, type: 'file', mtimeMs: n === 'fresh.log.1' ? NOW - W.DAY : old, newestMtimeMs: n === 'fresh.log.1' ? NOW - W.DAY : old })),
+    { path: '/var/log/busy.log.1', r: 1, type: 'file', inUse: true, mtimeMs: old, newestMtimeMs: old },
+  ]);
+  const r = run(appTarget, f);
+  for (const p of ['/var/log/apt/history.log', '/var/log/apt/term.log', '/var/log/dpkg.log', '/var/log/alternatives.log', '/var/log/bootstrap.log', '/var/log/nodus-image-e2e.log', '/var/log/wtmp']) {
+    assert.equal(r.at(p).status, 'protected', p);
+  }
+  assert.equal(r.at('/var/log/dpkg.log').reason, 'A current log; only old rotated copies are cleaned up.');
+  for (const p of ['/var/log/apt/history.log.1.gz', '/var/log/apt/history.log.2.gz', '/var/log/dpkg.log.1', '/var/log/syslog-20261001', '/var/log/syslog-20261001.gz', '/var/log/kern.log.old']) {
+    assert.deepEqual([r.at(p).status, r.at(p).sub], ['eligible', 'rotated'], p);
+  }
+  assert.equal(r.at('/var/log/fresh.log.1').status, 'protected', 'rotated within the week');
+  assert.equal(r.at('/var/log/busy.log.1').status, 'protected', 'still being written');
+  const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  const picked = sel.items.map((id) => r.items.find((x) => x.id === id).path).sort();
+  assert.deepEqual(picked, ['/var/log/apt/history.log.1.gz', '/var/log/apt/history.log.2.gz', '/var/log/dpkg.log.1', '/var/log/kern.log.old', '/var/log/syslog-20261001', '/var/log/syslog-20261001.gz']);
+});
+
+/* ---- review finding 6: execution history kept and removed as whole recovery sets ---- */
+
+test('history: dumps stay together with the environment copies of the same job; the newest sets are kept whole', () => {
+  const day = (d) => NOW - d * W.DAY;
+  const dumps = [['deploy', 'D1', 60], ['deploy', 'D2', 50], ['deploy', 'D3', 40], ['restore', 'R1', 35], ['restore', 'R2', 33]];
+  const f = facts([{ path: '/var/backups/proxypilot-db', depth: 1, role: 'db-dump' }, { path: '/etc/systemd/system', depth: 1, role: 'unit-copy' }, { path: '/etc', depth: 1, role: 'env-copy' }], [
+    ...dumps.map(([k, j, d]) => ({ path: `/var/backups/proxypilot-db/app-pre-${k}-${j}.sql`, r: 0, type: 'file', mtimeMs: day(d), newestMtimeMs: day(d) })),
+    ...dumps.filter(([k]) => k === 'deploy').map(([, j, d]) => ({ path: `/etc/systemd/system/mock2-dev.service.pre-${j}`, r: 1, type: 'file', mtimeMs: day(d), newestMtimeMs: day(d) })),
+    ...dumps.map(([k, j, d]) => ({ path: `/etc/environment.pre-${k === 'restore' ? 'restore-' : ''}${j}`, r: 2, type: 'file', mtimeMs: day(d), newestMtimeMs: day(d) })),
+    { path: '/var/backups/proxypilot-db/app-pre-deploy-OPEN.sql', r: 0, type: 'file', mtimeMs: day(90), newestMtimeMs: day(90) },
+    { path: '/etc/environment.pre-OPEN', r: 2, type: 'file', mtimeMs: day(90), newestMtimeMs: day(90) },
+  ]);
+  const r = run(projTarget, f, { context: { openJobIds: ['OPEN'] } });
+  const set = (job) => r.items.find((it) => it.setJob === job);
+  assert.deepEqual(['R2', 'R1'].map((j) => set(j).status), ['protected', 'protected'], 'the two newest sets');
+  for (const j of ['D3', 'D2', 'D1']) {
+    const s = set(j);
+    assert.equal(s.status, 'eligible', j);
+    assert.equal(s.kind, 'group');
+    assert.deepEqual(s.members.map((m) => m.path).sort(), [`/etc/environment.pre-${j}`, `/etc/systemd/system/mock2-dev.service.pre-${j}`, `/var/backups/proxypilot-db/app-pre-deploy-${j}.sql`].sort(), 'dump, environment and unit copies go together');
+  }
+  assert.deepEqual(set('R2').members.map((m) => m.path).sort(), ['/etc/environment.pre-restore-R2', '/var/backups/proxypilot-db/app-pre-restore-R2.sql']);
+  assert.equal(set('OPEN').status, 'protected', 'a set whose job is still open is kept');
+  assert.equal(set('OPEN').reason, 'Belongs to a job that is running.');
+  assert.match(set('D3').label, /^Copies taken before a deploy \(job D3\): database, service unit, environment$/);
+  // No kept dump ever loses its environment copy: every protected dump's set is protected.
+  for (const it of r.items) for (const m of it.members || []) if (/app-pre-/.test(m.path)) assert.equal(it.status === 'protected', ['R2', 'R1', 'OPEN'].includes(it.setJob));
+  // The automatic history rule removes whole old sets only.
+  const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  assert.deepEqual(sel.items.map((id) => r.items.find((x) => x.id === id).setJob).sort(), ['D1', 'D2', 'D3']);
+});
+
+/* ---- review finding 9: host transfer bundles belong to the application their name names ---- */
+
+test('two applications: an attributed bundle is only its own application\'s; an unattributed one is shared and counted by neither', () => {
+  const TR = '/var/lib/proxypilot/application-release-transfers';
+  const old = NOW - 30 * W.DAY;
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: TR, role: 'host-transfers' }], items: [
+    { path: `${TR}/bundle-app1-Xy12Ab`, r: 0, type: 'dir', allocatedBytes: 1000, mtimeMs: old, newestMtimeMs: old },
+    { path: `${TR}/bundle-app2-Zz99Qq`, r: 0, type: 'dir', allocatedBytes: 2000, mtimeMs: old, newestMtimeMs: old },
+    { path: `${TR}/bundle-a1b2c3`, r: 0, type: 'dir', allocatedBytes: 4000, mtimeMs: old, newestMtimeMs: old },
+  ] } };
+  const app1 = { ...appTarget, key: 'application:1', id: 1 };
+  const app2 = { ...appTarget, key: 'application:2', id: 2 };
+  const one = run(app1, facts([], []), { host });
+  const two = run(app2, facts([], []), { host });
+  assert.equal(one.at(`${TR}/bundle-app1-Xy12Ab`).status, 'eligible');
+  assert.equal(one.at(`${TR}/bundle-app2-Zz99Qq`), undefined, 'another application\'s bundle is not listed');
+  assert.equal(two.at(`${TR}/bundle-app2-Zz99Qq`).status, 'eligible');
+  assert.equal(two.at(`${TR}/bundle-app1-Xy12Ab`), undefined);
+  for (const r of [one, two]) {
+    const shared = r.at(`${TR}/bundle-a1b2c3`);
+    assert.deepEqual([shared.status, shared.sub, shared.sharedHost, shared.action], ['investigate', 'shared', true, null]);
+    assert.match(shared.reason, /does not say which application left it/);
+    const archives = r.categories.find((c) => c.key === 'archives');
+    assert.equal(archives.sharedHostBytes, 4000);
+  }
+  assert.equal(one.categories.find((c) => c.key === 'archives').allocatedBytes, 1000, 'the shared bundle is in no application\'s total');
+  assert.equal(two.categories.find((c) => c.key === 'archives').allocatedBytes, 2000);
+  const eligibleSum = [one, two].reduce((n, r) => n + r.categories.find((c) => c.key === 'archives').eligibleBytes, 0);
+  assert.equal(eligibleSum, 3000, 'across the overview every bundle is counted once at most');
+});
+
+/* ------------------------- labels, hints and held items ------------------------- */
+
+test('a pattern split by status gives groups with their own labels and ids; the label keeps the real separator and says files or folders', () => {
+  const items = [];
+  for (let i = 0; i < GROUP_THRESHOLD; i += 1) items.push({ path: `/tmp/tmp.Ab${i}cD9`, r: 0, type: 'file' });
+  for (let i = 0; i < GROUP_THRESHOLD; i += 1) items.push({ path: `/tmp/tmp.Fr${i}eS9`, r: 0, type: 'file', newestMtimeMs: NOW - 60_000 });
+  const r = run(appTarget, facts([{ path: '/tmp', depth: 1, role: 'temp' }], items));
+  const groups = r.items.filter((it) => it.kind === 'group');
+  assert.equal(groups.length, 2);
+  const byStatus = Object.fromEntries(groups.map((g) => [g.status, g]));
+  assert.equal(byStatus.eligible.label, `/tmp/tmp.* (${GROUP_THRESHOLD} files)`);
+  assert.equal(byStatus.protected.label, `/tmp/tmp.* (${GROUP_THRESHOLD} files, kept)`);
+  assert.notEqual(groups[0].label, groups[1].label);
+  assert.notEqual(groups[0].id, groups[1].id, 'two groups never share an id');
+  assert.deepEqual(groups.map((g) => g.memberKind), ['files', 'files']);
+  assert.equal(namePattern('tmp.Ab12Cd'), 'tmp.*');
+  assert.equal(namePattern('pw_profile_Ab12Cd'), 'pw_profile_*');
+});
+
+test('a memory-backed temp item carries the flag once and no repeated hint', () => {
+  const r = run(appTarget, facts([{ path: '/tmp', depth: 1, role: 'temp' }], [{ path: '/tmp/build-cache', r: 0, memoryBacked: true }]));
+  const it = r.at('/tmp/build-cache');
+  assert.equal(it.memoryBacked, true);
+  assert.equal(it.hint, null);
+});
+
+test('files a cleanup set aside (.pp-cleanup-hold-*) always need a look, wherever they are', () => {
+  const HOLD = '.pp-cleanup-hold-cln_00000000-0000-4000-8000-000000000009-3';
+  const roots = [
+    { path: '/tmp', depth: 1, role: 'temp' },
+    { path: '/opt/r/.staging', depth: 1, role: 'staging' },
+    { path: '/opt/r', depth: 1, role: 'release-root' },
+    { path: '/var/backups/proxypilot-db', depth: 1, role: 'db-dump' },
+  ];
+  const f = facts(roots, [
+    { path: `/tmp/${HOLD}`, r: 0, uid: 989 },
+    { path: `/opt/r/.staging/${HOLD}`, r: 1 },
+    { path: `/opt/r/${HOLD}`, r: 2 },
+    { path: `/var/backups/proxypilot-db/${HOLD}`, r: 3, type: 'file' },
+  ], { service: { unit: 'app.service', user: 'app', uid: 989, home: '/var/lib/app' } });
+  const TR = '/var/lib/proxypilot/application-release-transfers';
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: TR, role: 'host-transfers' }], items: [{ path: `${TR}/${HOLD}`, r: 0, type: 'dir', mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const target = { ...appTarget, profile: { ...appTarget.profile, releaseRoot: '/opt/r' } };
+  const r = run(target, f, { host });
+  for (const p of [`/tmp/${HOLD}`, `/opt/r/.staging/${HOLD}`, `/opt/r/${HOLD}`, `/var/backups/proxypilot-db/${HOLD}`, `${TR}/${HOLD}`]) {
+    const it = r.at(p);
+    assert.ok(it, p);
+    assert.deepEqual([it.status, it.sub, it.action], ['investigate', 'held', null], p);
+    assert.equal(it.reason, 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.');
+  }
+  assert.equal(r.at(`${TR}/${HOLD}`).location, 'host');
+  // No policy selection ever picks one.
+  const every = JSON.parse(JSON.stringify(DEFAULT_POLICY));
+  for (const cfg of Object.values(every.rules)) if (cfg && typeof cfg === 'object') cfg.enabled = true;
+  const sel = policySelection({ items: r.items }, every, NOW);
+  const held = r.items.filter((it) => it.sub === 'held').map((it) => it.id);
+  assert.equal(held.length, 5);
+  assert.deepEqual(sel.items.filter((id) => held.includes(id)), []);
+});
+
+test('the snapshot note says in plain words why the figures add up to less', () => {
+  const host = { status: 'Running', running: true, unmeasured: [], exports: [], snapshots: [{ name: 's1', createdAt: new Date(NOW - W.DAY).toISOString(), usedBytes: 1000 }] };
+  const r = run(appTarget, facts([], []), { host });
+  const note = r.notes.find((n) => /figure/.test(n));
+  assert.equal(note, "Each snapshot's figure is the space only that snapshot holds. Space that several snapshots share is freed only when all of them are deleted, so the figures add up to less than the total held by snapshots.");
+  assert.doesNotMatch(r.notes.join(' '), /blocks/);
+});
+
+test('a snapshot that holds 0 bytes of its own is 0, exact, with no "could not be read" hint', () => {
+  const host = { status: 'Running', running: true, unmeasured: [], exports: [], snapshots: [{ name: 'fresh', createdAt: new Date(NOW - 60_000).toISOString(), usedBytes: 0 }, { name: 'unknown', createdAt: new Date(NOW - W.DAY).toISOString(), usedBytes: null }] };
+  const r = run(appTarget, facts([], []), { host });
+  const fresh = r.items.find((it) => it.kind === 'snapshot' && it.label === 'fresh');
+  assert.deepEqual([fresh.allocatedBytes, fresh.precision, fresh.hint], [0, 'exact', null]);
+  const unknown = r.items.find((it) => it.kind === 'snapshot' && it.label === 'unknown');
+  assert.deepEqual([unknown.precision, unknown.hint], ['estimate', 'The space only this snapshot holds could not be read.']);
+});
+
+test('a staging attempt of an interrupted job that needs recovery is kept with that reason, not "left behind by a build that has ended"', () => {
+  const A = '0f0e0d0c-0b0a-4000-8000-000000000001-2';
+  const f = facts([{ path: '/opt/r/.staging', depth: 1, role: 'staging' }, { path: '/srv/app/test-results', role: 'test-report' }], [{ path: `/opt/r/.staging/${A}`, r: 0 }, { path: '/srv/app/test-results', r: 1 }], { tracked: { '/srv/app': { ok: true, paths: [] } } });
+  const TR = '/var/lib/proxypilot/application-release-transfers';
+  const host = { status: 'Running', running: true, unmeasured: [], snapshots: [], exports: [], hostFiles: { roots: [{ i: 0, path: TR, role: 'host-transfers' }], items: [{ path: `${TR}/bundle-app2-a1b2c3`, r: 0, type: 'dir', mtimeMs: NOW - 30 * W.DAY, newestMtimeMs: NOW - 30 * W.DAY }] } };
+  const target = { ...appTarget, profile: { ...appTarget.profile, releaseRoot: '/opt/r' } };
+  const r = run(target, f, { host, context: { activeAttempts: [A], recoveryAttempts: [A], anyApplicationJobOpen: true, buildActive: true } });
+  assert.deepEqual([r.at(`/opt/r/.staging/${A}`).status, r.at(`/opt/r/.staging/${A}`).reason], ['protected', 'Belongs to a build that was interrupted and still needs recovery.']);
+  assert.deepEqual([r.at('/srv/app/test-results').status, r.at('/srv/app/test-results').reason], ['protected', 'A build was interrupted and still needs recovery.']);
+  assert.deepEqual([r.at(`${TR}/bundle-app2-a1b2c3`).status, r.at(`${TR}/bundle-app2-a1b2c3`).reason], ['protected', 'An application build is running or waiting for recovery; transfer copies may be in use.']);
+});
+
+/* --------------- release roles: describeReleases is the only definition --------------- */
+
+test('the rollback is the release the deploy history says ran before, never the newest folder', async (t) => {
+  const R = W.RELEASE_ROOT;
+  // The older release's folder was touched last; the history names the other one.
+  const { at, result } = await nodusCheck(t, { mutate: (root) => W.age(`${root}${R}/${W.OLD}`, NOW - 60_000) });
+  assert.deepEqual([at(`${R}/${W.ROLLBACK}`).status, at(`${R}/${W.ROLLBACK}`).sub], ['protected', 'rollback']);
+  assert.deepEqual([at(`${R}/${W.OLD}`).status, at(`${R}/${W.OLD}`).action], ['eligible', 'remove-release']);
+  assert.equal(result.context.rollbackRelease, `${R}/${W.ROLLBACK}`);
+  assert.equal(result.context.rollbackUnknown, false);
+});
+
+test('when nothing records the previous release, every sealed release is kept with a plain reason', async (t) => {
+  const R = W.RELEASE_ROOT;
+  const { at, result } = await nodusCheck(t, { history: false });
+  for (const name of [W.OLD, W.ROLLBACK]) {
+    const it = at(`${R}/${name}`);
+    assert.deepEqual([it.status, it.sub, it.action], ['protected', 'rollback-unknown', null], name);
+    assert.equal(it.reason, 'The previous release could not be identified, so no release is removed until the next deployment records it.');
+  }
+  assert.equal(at(`${R}/${W.LIVE}`).sub, 'live');
+  assert.equal(at(`${R}/${W.CANDIDATE}`).sub, 'candidate');
+  assert.equal(result.items.filter((it) => it.category === 'releases' && it.status === 'eligible').length, 0);
+  assert.ok(result.notes.includes('The previous release could not be identified, so no release is removed until the next deployment records it.'));
+  assert.equal(result.context.rollbackUnknown, true);
+});
+
+test('when the release roles cannot be described (the application does not run through a link), no release is cleanable', async (t) => {
+  const R = W.RELEASE_ROOT;
+  const { at, result } = await nodusCheck(t, { mutate: (root) => {
+    // /opt/nodus becomes a real folder instead of the link into the release root.
+    rmSync(`${root}/opt/nodus`, { force: true }); mkdirSync(`${root}/opt/nodus`, { recursive: true });
+  } });
+  for (const name of [W.OLD, W.ROLLBACK, W.CANDIDATE]) {
+    const it = at(`${R}/${name}`);
+    assert.deepEqual([it.status, it.sub], ['protected', 'unknown'], name);
+    assert.equal(it.reason, 'The application does not run through a link into its release folder, so which release is which cannot be told; no release is cleaned up.');
+  }
+  assert.equal(result.items.filter((it) => it.category === 'releases' && it.status === 'eligible').length, 0);
+});
+
+test('facts without describeReleases\' answer never make a release cleanable', () => {
+  const name = 'a'.repeat(40) + '-p1-' + '0'.repeat(8) + '-0000-4000-8000-' + '0'.repeat(12);
+  const target = { ...appTarget, profile: { ...appTarget.profile, sourceDir: '/opt/app', releaseRoot: '/opt/r' } };
+  const r = run(target, facts([{ path: '/opt/r', depth: 1, role: 'release-root', marker: true }], [{ path: `/opt/r/${name}`, r: 0, marker: { present: true, sha: 'a'.repeat(40) } }]));
+  assert.deepEqual([r.at(`/opt/r/${name}`).status, r.at(`/opt/r/${name}`).sub], ['protected', 'unknown']);
+  assert.match(r.at(`/opt/r/${name}`).reason, /could not be worked out/);
+});
+
+test('a sealed release whose validation has not passed is kept (describeReleases\' pending), not cleanable', async (t) => {
+  const R = W.RELEASE_ROOT;
+  const { at } = await nodusCheck(t, { mutate: (root, world) => {
+    world.candidates.push({ sha: W.OLD_SHA, checkpointAt: new Date(NOW - 6 * W.DAY).toISOString(), validation: { passed: false, releasePath: `${R}/${W.OLD}`, validatedAt: null } });
+  } });
+  const old = at(`${R}/${W.OLD}`);
+  assert.deepEqual([old.status, old.sub, old.action], ['protected', 'pending', null]);
+  assert.equal(old.reason, 'Its validation has not passed (it may still be running), so it is kept.');
 });

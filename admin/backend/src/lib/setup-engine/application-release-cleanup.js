@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { safeRemover, SAFE_REMOVE_SOURCE } from './safe-remove.js';
 
 export const APPLICATION_RELEASE_RETENTION = Object.freeze(JSON.parse(readFileSync(
   new URL('../mcp-policy/application-release-retention.json', import.meta.url), 'utf8',
@@ -44,48 +45,77 @@ export async function resolveReleaseRetention(source, targetId) {
 }
 
 const SHA_RE = /^[a-f0-9]{40}$/;
-// releaseContextFromApplication(app, { root }) → { previousSha, rollback,
-// protect } for the guest: the rollback release (the previous live
-// release's recorded path) and the newest validated candidate still waiting
-// to be deployed. Paths outside the release root are ignored; the guest
-// re-derives everything it can from the release markers anyway.
-export function releaseContextFromApplication(app, { root = null } = {}) {
+// What a stored release looks like to the guest when nothing identifies the
+// rollback release (the check shows this as the reason the releases are kept).
+export const ROLLBACK_UNKNOWN_REASON = 'The previous release could not be identified, so no release is removed until the next deployment records it.';
+
+// releaseContextFromApplication(app, { root, previousLive }) → the facts the
+// guest's describeReleases decides the release roles from:
+//   previousLive  { sha, path } | null from the deploy history
+//                 (lib/app-storage/release-history.js previousLiveRelease)
+//   previousSha, rollback
+//                 that release's sha and folder (under the release root). When
+//                 `previousLive` is supplied (null included) it is the one
+//                 answer: the history already reads the live record's
+//                 previousSha and skips a release rolled back from. Only a
+//                 caller with no history source gets the live record's own
+//                 previousSha (previousLive undefined).
+//   liveVerifiedAt, validated [{ sha, path, validatedAt }]
+//                 the passed validations, for the waiting candidate
+//   pending       folders whose validation has no result yet (recorded as not
+//                 passed while it runs): kept, never removed by the cap
+// Nothing here decides a role: describeReleases is the one definition.
+export function releaseContextFromApplication(app, { root = null, previousLive = undefined } = {}) {
   const live = app?.live || null;
   const under = x => typeof x === 'string' && x.startsWith('/') && !x.includes('/../') && (!root || x.startsWith(`${root}/`));
-  const previousSha = live && SHA_RE.test(live.previousSha || '') && live.previousSha !== live.sha ? live.previousSha : null;
   const candidates = Array.isArray(app?.candidates) ? app.candidates : [];
-  let rollback = null;
-  if (previousSha) {
-    const c = candidates.find(x => x?.sha === previousSha);
-    const p = c?.live?.releasePath || c?.validation?.releasePath;
-    if (under(p) && p !== live?.releasePath) rollback = p;
-  }
-  const liveAt = Date.parse(live?.verifiedAt || '');
-  const waiting = candidates
-    .filter(c => c?.validation?.passed === true && under(c.validation.releasePath) && c.validation.releasePath !== live?.releasePath && c.sha !== live?.sha)
-    .filter(c => !Number.isFinite(liveAt) || Date.parse(c.checkpointAt || '') > liveAt)
-    .sort((a, b) => (Date.parse(b.checkpointAt || '') || 0) - (Date.parse(a.checkpointAt || '') || 0))[0]?.validation.releasePath || null;
-  return { previousSha, rollback, protect: [...new Set([rollback, waiting].filter(Boolean))] };
+  const folderOf = sha => { const c = candidates.find(x => x?.sha === sha); const p = c?.live?.releasePath || c?.validation?.releasePath; return under(p) && p !== live?.releasePath ? p : null; };
+  const supplied = previousLive !== undefined;
+  const history = supplied && previousLive && SHA_RE.test(previousLive.sha || '') && previousLive.sha !== live?.sha ? { sha: previousLive.sha, path: under(previousLive.path) && previousLive.path !== live?.releasePath ? previousLive.path : null } : null;
+  const recorded = !supplied && live && SHA_RE.test(live.previousSha || '') && live.previousSha !== live.sha ? live.previousSha : null;
+  const previousSha = history ? history.sha : recorded;
+  const rollback = history ? (history.path || folderOf(history.sha)) : (recorded ? folderOf(recorded) : null);
+  const validated = candidates
+    .filter(c => c?.validation?.passed === true && SHA_RE.test(c.sha || '') && under(c.validation.releasePath))
+    .map(c => ({ sha: c.sha, path: c.validation.releasePath, validatedAt: c.validation.validatedAt || c.checkpointAt || null }));
+  const pending = candidates
+    .filter(c => c?.validation && c.validation.passed !== true && under(c.validation.releasePath))
+    .map(c => c.validation.releasePath);
+  return { previousSha, rollback, previousLive: supplied ? history : null, liveVerifiedAt: live?.verifiedAt || null, validated, pending };
 }
 
 // ── guest side ──────────────────────────────────────────────────────────
 //
 // The functions below are SERIALIZED into the contained guest programs (the
 // release program in application-deploy-op.js and the storage cleanup
-// program), so they reference nothing outside their own parameters. All paths
+// program), so they reference nothing outside their own parameters except
+// safeRemover (safe-remove.js), which RELEASE_CLEANUP_SOURCE embeds first:
+// every removal goes through that one fd-relative remover. All paths
 // come from the saved profile, the owning job and the stored cleanup row; the
 // guest lease fences the whole operation.
 
-// describeReleases(fs, p, a) → the release root's protected set as the guest
-// sees it NOW:
+// describeReleases(fs, p, a) → the release root's roles as the guest sees
+// them NOW. This is the ONE definition of the roles; the storage check, the
+// storage cleanup and the release job's retention all read its output.
 //   live      realpath of the profile's sourceDir (always kept, counted)
 //   candidate a.release, the release being validated (kept, never counted)
 //   backing   release-root children that physically hold a preserved or env
 //             path, through any symlink chain (kept, never counted)
-//   protect   a.protect: the recorded rollback and waiting candidate (kept)
-//   rollback  a.rollback when it is a sealed release, else the sealed release
-//             whose marker names a.previousSha, else the newest other sealed
-//             release by mtime (kept, counted)
+//   rollback  the release that ran before live: a.rollback (its recorded
+//             folder) when sealed, else the sealed release whose marker names
+//             a.previousSha, else a.previousLive (deploy history: its folder,
+//             else its sha) — never chosen by folder time (kept, counted).
+//             null when the previous release is known but not a sealed
+//             release here (for example the adopted original).
+//   rollbackUnknown  true when nothing identifies the previous release; then
+//             every sealed release is in `protect` and nothing is removed
+//   waiting   the newest passed validation (a.validated) made after the live
+//             release was recorded (a.liveVerifiedAt), sealed, not live and
+//             not the rollback (kept, never counted)
+//   pending   a.pending: sealed releases whose validation has no result yet
+//             (kept, never counted, never removed by the cap)
+//   protect   waiting + pending + a.protect (+ every sealed release when
+//             rollbackUnknown)
 //   sealed    recognised sealed releases, newest first
 export function describeReleases(fs, p, a) {
   const refuse = code => { throw new Error(code); };
@@ -132,26 +162,50 @@ export function describeReleases(fs, p, a) {
   sealed.sort((x, y) => (y.mtimeMs - x.mtimeMs) || (x.name < y.name ? 1 : x.name > y.name ? -1 : 0));
   const protect = new Set((Array.isArray(a.protect) ? a.protect : []).filter(x => typeof x === 'string' && p.dirname(x) === root));
   const isSealed = x => sealed.some(r => r.path === x);
+  const shaOk = x => typeof x === 'string' && /^[a-f0-9]{40}$/.test(x);
+  const bySha = sha => (sealed.find(r => r.sha === sha && r.path !== live && r.path !== candidate) || {}).path || null;
+  const history = a.previousLive && typeof a.previousLive === 'object' && shaOk(a.previousLive.sha) ? a.previousLive : null;
   let rollback = null;
   if (typeof a.rollback === 'string' && a.rollback !== live && isSealed(a.rollback)) rollback = a.rollback;
-  if (!rollback && /^[a-f0-9]{40}$/.test(a.previousSha || '')) rollback = (sealed.find(r => r.sha === a.previousSha && r.path !== live && r.path !== candidate) || {}).path || null;
-  if (!rollback) rollback = (sealed.find(r => r.path !== live && r.path !== candidate && !backing.has(r.path) && !protect.has(r.path)) || {}).path || null;
-  return { root, live, candidate, backing, protect, rollback, sealed };
+  if (!rollback && shaOk(a.previousSha)) rollback = bySha(a.previousSha);
+  if (!rollback && history) rollback = (typeof history.path === 'string' && history.path !== live && history.path !== candidate && isSealed(history.path)) ? history.path : bySha(history.sha);
+  // Known: the live record or the deploy history names the previous release
+  // (even when it is not a sealed release here). Unknown: keep everything.
+  const rollbackUnknown = !rollback && !shaOk(a.previousSha) && !history;
+  const liveAt = Date.parse(a.liveVerifiedAt || '');
+  const atOf = v => Date.parse(v.validatedAt || '') || 0;
+  const waiting = ((Array.isArray(a.validated) ? a.validated : [])
+    .filter(v => v && typeof v.path === 'string' && p.dirname(v.path) === root && v.path !== live && v.path !== rollback && isSealed(v.path))
+    .filter(v => !Number.isFinite(liveAt) || atOf(v) > liveAt)
+    .sort((x, y) => atOf(y) - atOf(x))[0] || {}).path || null;
+  if (waiting) protect.add(waiting);
+  const pending = (Array.isArray(a.pending) ? a.pending : []).filter(x => typeof x === 'string' && p.dirname(x) === root && x !== live && isSealed(x));
+  for (const x of pending) protect.add(x);
+  if (rollbackUnknown) for (const r of sealed) if (r.path !== live) protect.add(r.path);
+  return { root, live, candidate, backing, protect, rollback, rollbackUnknown, waiting, pending, sealed };
 }
 
 // cleanupReleaseArtifacts(fs, p, a) → { stagesRemoved, bundlesRemoved,
-// releasesRemoved }. Counting: the live release and the rollback release are
-// counted, then the newest other sealed releases until `keepReleases` are
-// kept; the release being validated, the waiting candidate (a.protect) and
-// backing roots are kept and never counted. So `keepReleases: 2` keeps live +
-// rollback, and the release under validation never pushes the rollback out.
+// releasesRemoved, rollbackUnknown? }. Counting: the live release and the
+// rollback release are counted, then the newest other sealed releases until
+// `keepReleases` are kept; the release being validated, the waiting candidate
+// and backing roots are kept and never counted. So `keepReleases: 2` keeps
+// live + rollback, and the release under validation never pushes the rollback
+// out. The cap removes the oldest releases outside the protected set first
+// (the release being validated, the waiting candidate, releases whose
+// validation has no result yet, backing roots). When the rollback is unknown
+// every sealed release is protected and no release is removed (workspaces and
+// bundles still are).
 export function cleanupReleaseArtifacts(fs, p, a) {
   const refuse = message => { throw new Error(message); };
   const d = describeReleases(fs, p, a);
   const keepCount = a.retention?.keepReleases;
   if (!Number.isInteger(keepCount) || keepCount < 2 || keepCount > 20) refuse('INVALID_RELEASE_RETENTION');
   const stageRoot = p.join(d.root, '.staging');
-  const out = { stagesRemoved: 0, bundlesRemoved: 0, releasesRemoved: 0 };
+  const out = { stagesRemoved: 0, bundlesRemoved: 0, releasesRemoved: 0, ...(d.rollbackUnknown ? { rollbackUnknown: true } : {}) };
+  // Workspaces are written by the service user while a build runs: removed
+  // only through the fd-relative remover, never by path.
+  const remover = safeRemover(fs, p);
   const attemptName = /^[a-f0-9-]{36}-[1-9][0-9]*(?:\.bundle)?$/;
   if (fs.existsSync(stageRoot)) {
     const stat = fs.lstatSync(stageRoot);
@@ -164,7 +218,7 @@ export function cleanupReleaseArtifacts(fs, p, a) {
       if (p.dirname(target) !== stageRoot || !fs.existsSync(target)) continue;
       const stat = fs.lstatSync(target);
       if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) continue;
-      fs.rmSync(target, { recursive: stat.isDirectory(), force: false });
+      remover.removePath(target);
       if (entry.endsWith('.bundle')) out.bundlesRemoved += 1; else out.stagesRemoved += 1;
     }
   }
@@ -181,7 +235,7 @@ export function cleanupReleaseArtifacts(fs, p, a) {
     if (keep.has(release.path)) continue;
     // Read back the live pointer immediately before each destructive command.
     if (fs.realpathSync(a.profile.sourceDir) !== d.live) refuse('LIVE_RELEASE_CHANGED_DURING_CLEANUP');
-    fs.rmSync(release.path, { recursive: true, force: false });
+    remover.removePath(release.path);
     out.releasesRemoved += 1;
   }
   return out;
@@ -191,8 +245,9 @@ export function cleanupReleaseArtifacts(fs, p, a) {
 // The user-selected removal of ONE release (a.path), with the same
 // predicates as the retention above: a recognised sealed release directly in
 // the root whose marker still names a.markerSha (when given), and not live,
-// rollback, candidate, waiting candidate or backing root as derived now. The live pointer is read back right before `remove`
-// (the caller's verified, non-following removal; plain rmSync otherwise).
+// rollback, candidate, waiting candidate or backing root as derived now. The
+// live pointer is read back right before `remove` (the caller's verified,
+// quarantining removal; the fd-relative remover otherwise).
 export function removeSelectedRelease(fs, p, a, remove) {
   const refuse = message => { throw new Error(message); };
   const d = describeReleases(fs, p, a);
@@ -204,13 +259,15 @@ export function removeSelectedRelease(fs, p, a, remove) {
   if (/^[a-f0-9]{40}$/.test(a.markerSha || '') && entry.sha !== a.markerSha) refuse('CHANGED_SINCE_CHECK');
   if (target === d.live) refuse('RELEASE_IS_LIVE');
   if (target === d.rollback) refuse('RELEASE_IS_ROLLBACK');
+  if (d.rollbackUnknown) refuse('ROLLBACK_UNKNOWN');
   if (target === d.candidate || d.protect.has(target)) refuse('RELEASE_IS_CANDIDATE');
   if (d.backing.has(target)) refuse('RELEASE_HOLDS_SHARED_DATA');
   if (fs.realpathSync(a.profile.sourceDir) !== d.live) refuse('LIVE_RELEASE_CHANGED_DURING_CLEANUP');
-  const result = typeof remove === 'function' ? remove(target) : (fs.rmSync(target, { recursive: true, force: false }), {});
+  const result = typeof remove === 'function' ? remove(target) : safeRemover(fs, p).removePath(target);
   return { removed: target, ...(result || {}) };
 }
 
-// The guest-side source both programs embed, in dependency order.
-export const RELEASE_CLEANUP_SOURCE = [describeReleases, cleanupReleaseArtifacts, removeSelectedRelease]
-  .map(fn => `const ${fn.name}=${fn.toString()};`).join('\n');
+// The guest-side source both programs embed, in dependency order: the one
+// remover first, then the release functions that use it.
+export const RELEASE_CLEANUP_SOURCE = [SAFE_REMOVE_SOURCE, ...[describeReleases, cleanupReleaseArtifacts, removeSelectedRelease]
+  .map(fn => `const ${fn.name}=${fn.toString()};`)].join('\n');

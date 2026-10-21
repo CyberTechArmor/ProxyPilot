@@ -5,7 +5,8 @@
 
 import { performCheck as defaultPerformCheck, newCheckId, publicTarget, CHECK_RESULT_VERSION } from './perform-check.js';
 import { AppStorageError } from './targets.js';
-import { SEPARATE_CATEGORIES } from './categories.js';
+import { FIGURE_SOURCES } from './accounting.js';
+import { summarizeCheckResult } from './store.js';
 
 /** A cleanup needs a check at most this old (DESIGN §3.1). */
 export const CHECK_MAX_AGE_MS = 60 * 60 * 1000;
@@ -41,8 +42,13 @@ export function checkView(row) {
   };
 }
 
+/** What can be cleaned up from the files, on disk only (snapshots and exports apart). One definition: the stored summary's. */
 export function eligibleBytesOf(result) {
-  return (result?.categories || []).filter((c) => !SEPARATE_CATEGORIES.includes(c.key)).reduce((s, c) => s + Number(c.eligibleBytes || 0), 0);
+  return summarizeCheckResult(result)?.eligibleBytes ?? 0;
+}
+/** The same for memory-backed (tmpfs) files: memory, not disk. */
+export function eligibleMemoryBytesOf(result) {
+  return summarizeCheckResult(result)?.eligibleMemoryBytes ?? 0;
 }
 
 export function createCheckService({
@@ -119,7 +125,8 @@ export function createCheckService({
     try { guests = listGuests ? await listGuests() : null; } catch { guests = null; }
     const targets = [];
     for (const t of listTargets()) {
-      const last = store.latestCheck(t.key, { statuses: ['complete', 'partial', 'failed'] });
+      // The stored summary, never the full result (which can hold 20 000 items).
+      const last = store.latestCheckSummary(t.key, { statuses: ['complete', 'partial', 'failed'] });
       const running = store.runningCheck(t.key, { maxAgeMs: RUNNING_CHECK_STALE_MS });
       const g = guests?.get?.(t.guest) || null;
       const sample = g ? null : store.latestSample(t.key);
@@ -128,8 +135,9 @@ export function createCheckService({
       targets.push({
         key: t.key, kind: t.kind, id: t.id, name: t.name, guest: t.guest,
         guestStatus: g?.status || null,
-        usage: g?.usedBytes != null ? { usedBytes: g.usedBytes, sampledAt: guests.checkedAt || checkedAt } : sample ? { usedBytes: sample.usedBytes, sampledAt: sample.sampledAt } : null,
-        lastCheck: last ? { checkId: last.id, finishedAt: last.finishedAt, status: last.status, totals: last.result?.totals || null, eligibleBytes: eligibleBytesOf(last.result) } : null,
+        usage: g?.usedBytes != null ? { usedBytes: g.usedBytes, sampledAt: guests.checkedAt || checkedAt, source: 'incus-root-usage', label: FIGURE_SOURCES['incus-root-usage'] }
+          : sample ? { usedBytes: sample.usedBytes, sampledAt: sample.sampledAt, source: 'monitor-sample', label: FIGURE_SOURCES['monitor-sample'] } : null,
+        lastCheck: last ? { checkId: last.id, finishedAt: last.finishedAt, status: last.status, totals: last.summary?.totals || null, eligibleBytes: Number(last.summary?.eligibleBytes || 0), eligibleMemoryBytes: Number(last.summary?.eligibleMemoryBytes || 0) } : null,
         runningCheckId: running?.id || null,
         alerts: (alertsFor(t.key) || []).map((a) => ({ key: a.key, level: a.level, title: a.title })),
         policy: pol ? { source: pol.source, enabledRules: pol.enabledRules || [], proposedRules: pol.proposedRules || [] } : null,

@@ -22,7 +22,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { setSnapshotLimitsProvider } from '../snapshot-retention.js';
+import { setSnapshotLimitsProvider, memoizeLimits } from '../snapshot-retention.js';
 import { getJob } from '../setup-engine/store.js';
 import { createExportStore } from '../lxc-exports.js';
 import { createCleanupService } from './cleanup-service.js';
@@ -32,6 +32,7 @@ import { resolveTarget, activityFor } from './targets.js';
 import { resolvePolicy, effectiveReleaseRetention, effectiveSnapshotLimits } from './policy.js';
 import { performCheck, newCheckId } from './perform-check.js';
 import { postCleanupAlert } from './monitor.js';
+import { previousLiveRelease } from './release-history.js';
 import { checkView } from './check-service.js';
 import { exportsFor } from './host-measures.js';
 
@@ -109,6 +110,7 @@ export function createBackendCleanupService({ storage, mainDb, logAudit, now = (
     monitor: { postCleanupAlert: (key, outcome, opts) => storage.postCleanupAlert(key, outcome, opts) },
     getJob: id => getJob(mainDb, id),
     listEvents: newestEvents(mainDb),
+    log: (...a) => console.error('[app-storage]', ...a),
   });
 }
 
@@ -118,9 +120,13 @@ export function createBackendCleanupService({ storage, mainDb, logAudit, now = (
 // rules through storage.runCheck and storage.cleanupService() — the shared
 // instances, never second copies. → stop()
 export function startAppStorageAutomation({ storage, reconcileSnapshots = null, log = console.log, env = process.env }) {
-  setSnapshotLimitsProvider(() => storage.effectiveSnapshotLimits());
+  // Re-read at most every 30 s (each read scans the targets' policies), and
+  // at once after a policy is saved.
+  const limits = memoizeLimits(() => storage.effectiveSnapshotLimits());
+  const unsubscribe = typeof storage.onPolicyChange === 'function' ? storage.onPolicyChange(() => limits.invalidate()) : () => {};
+  setSnapshotLimitsProvider(limits);
   try { reconcileSnapshots?.(); } catch { /* the listener reconciles on its own */ }
-  if (env.PROXYPILOT_DISABLE_CRONS === '1') return () => { setSnapshotLimitsProvider(null); };
+  if (env.PROXYPILOT_DISABLE_CRONS === '1') return () => { unsubscribe(); setSnapshotLimitsProvider(null); };
   const scheduler = createRetentionScheduler({
     listTargets: () => storage.listTargets(),
     resolveTarget: key => storage.resolveTarget(key),
@@ -132,7 +138,7 @@ export function startAppStorageAutomation({ storage, reconcileSnapshots = null, 
     log, env,
   });
   scheduler.start().catch(() => {});
-  return () => { scheduler.stop(); setSnapshotLimitsProvider(null); };
+  return () => { scheduler.stop(); unsubscribe(); setSnapshotLimitsProvider(null); };
 }
 
 // ── the host runner ─────────────────────────────────────────────────────
@@ -151,14 +157,21 @@ function hostExec(argv, { timeoutMs = 120_000 } = {}) {
 }
 
 // The export store over the runner's own main DB (no db.js singleton here).
-export function runnerExportStore(mainDb) {
+export function runnerExportStore(mainDb, { log = (...a) => console.error(...a) } = {}) {
   return createExportStore({
     getDb: () => mainDb,
     runHost: (bin, args, opts) => hostExec([bin, ...args], opts),
     hostSh: (script, argv = [], opts = {}) => hostExec(['sh', '-c', script, 'sh', ...argv], { timeoutMs: 60000, ...opts }),
     exportsDir: async () => '/var/lib/proxypilot/mcp-exports',
     getSetting: key => { try { return mainDb.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value ?? null; } catch { return null; } },
-    logAudit: (userId, action, resourceType, resourceId, details, ip) => auditInto(mainDb, { resourceType })({ userId, action, targetKey: resourceId, details, ip }),
+    // The runner acts for no dashboard user: audit_log.user_id references
+    // users(id) (foreign keys are on in better-sqlite3), so the row carries
+    // NULL like other system audits and names the actor in its details. A
+    // failure is logged here; the export store itself would swallow it.
+    logAudit: (actor, action, resourceType, resourceId, details, ip) => {
+      try { auditInto(mainDb, { resourceType })({ userId: null, action, targetKey: resourceId, details: { ...(details || {}), actor: actor ?? 'system' }, ip }); }
+      catch (e) { log(`[app-storage] audit ${action} could not be written:`, e?.message || e); throw e; }
+    },
     hasBinary: async () => true,
   });
 }
@@ -187,6 +200,8 @@ export function cleanupDepsFor({ mainDb, mock2Db, now = () => Date.now(), bell =
     monitor: { postCleanupAlert: (key, outcome, opts = {}) => postCleanupAlert(key, outcome, { ...opts, notifications: bell }) },
     audit: auditInto(mainDb),
     exports,
+    // The release that ran before the live one (deploy history; null = unknown).
+    previousLive: target => (target?.kind === 'application' ? previousLiveRelease(mock2Db, target.id) : null),
   };
 }
 
@@ -208,10 +223,16 @@ export function runnerAppStorage({ mainDb, mock2DbPath, openDb = null, log = () 
       return effectiveReleaseRetention(targetId, { mock2Db: db2 });
     },
     async cleanup() { return cleanupDepsFor({ mainDb, mock2Db: await mock2Db() }); },
+    // For release jobs: the deploy history's previous release; null (no
+    // release is removed) when mock2.db cannot be read.
+    async previousLive(applicationId) {
+      try { return previousLiveRelease(await mock2Db(), applicationId); } catch (e) { log('previous release unknown:', e?.message || e); return null; }
+    },
     // The policy-fed snapshot limits for this runner's own snapshot jobs.
     async installSnapshotLimits() {
       const db2 = await mock2Db();
-      setSnapshotLimitsProvider(() => effectiveSnapshotLimits({ mock2Db: db2, mainDb }));
+      // The runner cannot hear the backend's policy saves: a 30 s re-read.
+      setSnapshotLimitsProvider(memoizeLimits(() => effectiveSnapshotLimits({ mock2Db: db2, mainDb })));
       return true;
     },
     mock2DbPath: path.resolve(mock2DbPath),

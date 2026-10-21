@@ -208,7 +208,7 @@ export function removalRules(item, target) {
       break;
     case 'workspaces': if (releaseRoot) add(`${releaseRoot}/.staging`, ATTEMPT_RE); break;
     case 'archives':
-      if (item?.location === 'host') add(HOST_TRANSFER_ROOT, /^bundle-[A-Za-z0-9]{1,40}$/);
+      if (item?.location === 'host') add(HOST_TRANSFER_ROOT, /^bundle-app[1-9][0-9]{0,15}-[A-Za-z0-9]{1,40}$/);
       else if (releaseRoot) add(`${releaseRoot}/.staging`, BUNDLE_RE);
       break;
     case 'releases': if (releaseRoot && item?.action === 'remove-release') add(releaseRoot, RELEASE_RE); break;

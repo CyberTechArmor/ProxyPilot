@@ -1,5 +1,5 @@
 // Per-application storage and growth alerts: dedupe (out-of-band dispatch
-// only when an alert is new), resolution with hysteresis, the growth window,
+// when an alert is new or escalates), resolution with hysteresis, the growth window,
 // the cleanup and health alerts the cleanup job posts, and the active set
 // rebuilt from the bell rows after a restart.
 
@@ -19,7 +19,10 @@ function bell() {
     rows, dispatched, posts,
     post(n) { posts.push(n); rows.set(n.dedupe_key, { ...rows.get(n.dedupe_key), ...n, dismissed: false }); },
     resolve(key, { reason } = {}) { const r = rows.get(key); if (r && !r.dismissed) { r.dismissed = true; r.reason = reason; return true; } return false; },
-    list() { return [...rows.values()].filter((r) => !r.dismissed).map((r) => ({ dedupe_key: r.dedupe_key, level: r.level, title: r.title })); },
+    // The real listNotifications shape: dismissed rows only with includeDismissed,
+    // dismissed_at set, and "auto-resolved: <reason>" as the body of a resolved row.
+    list({ includeDismissed = false } = {}) { return [...rows.values()].filter((r) => includeDismissed || !r.dismissed).map((r) => ({ dedupe_key: r.dedupe_key, level: r.level, title: r.title, body: r.dismissed && r.reason ? `auto-resolved: ${r.reason}` : (r.body ?? null), dismissed_at: r.dismissed ? '2026-10-20 00:00:00' : null })); },
+    dismiss(key) { const r = rows.get(key); if (r) r.dismissed = true; },
     async dispatch(m) { dispatched.push(m); },
   };
 }
@@ -64,7 +67,7 @@ test('a usage alert is posted once to the channels, refreshed in the bell, kept 
   w.set(15.5e9);
   await w.monitor.runOnce();
   assert.equal(w.bell.rows.get(key).level, 'error', 'escalates at 1.5× the warning level');
-  assert.equal(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').length, 1, 'the channels hear about a condition once');
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning', 'error'], 'the channels hear about the condition once, and again when it escalates');
   assert.equal(w.bell.dispatched.filter((d) => d.event === 'appstorage.growth').length, 1, 'the 5.1 GB jump is also growth');
   w.clock.advance(15 * 60_000); w.set(9.7e9);
   await w.monitor.runOnce();
@@ -101,6 +104,43 @@ test('alerts turned off: no samples, and open alerts are resolved', async () => 
   w.guests.clear();
   w.policy.alerts.enabled = true;
   assert.equal((await w.monitor.runOnce()).sampled, 0, 'a guest without usage is not sampled');
+});
+
+test('a usage warning that escalates to an error is delivered to the channels again; going back down and up is not repeated', async () => {
+  const w = world();
+  w.set(10.4e9);
+  await w.monitor.runOnce();
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning']);
+  w.clock.advance(15 * 60_000); w.set(15.5e9);
+  await w.monitor.runOnce();
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning', 'error'], 'the escalation reaches the channels');
+  w.clock.advance(15 * 60_000); w.set(14e9);
+  await w.monitor.runOnce();
+  w.clock.advance(15 * 60_000); w.set(15.5e9);
+  await w.monitor.runOnce();
+  assert.equal(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').length, 2, 'an error that was already delivered is not delivered again');
+});
+
+test('after a restart, an alert an administrator dismissed while it is still active is not delivered again; one the monitor resolved is not taken', async () => {
+  const w = world();
+  w.set(10.4e9);
+  await w.monitor.runOnce();
+  assert.equal(w.bell.dispatched.length, 1);
+  w.bell.dismiss('appstorage:usage:application:1');
+  w.bell.post({ level: 'warning', title: 'over', source: 'app-storage', dedupe_key: 'appstorage:growth:application:2' });
+  w.bell.resolve('appstorage:growth:application:2', { reason: 'growth fell below the threshold' });
+  // A restart: a new monitor over the same bell.
+  const again = createAppStorageMonitor({ store: w.store, listTargets: () => [w.target], listGuests: async () => w.guests, policyFor: () => ({ policy: w.policy }), notifications: w.bell, now: w.clock.now, logger: null });
+  assert.equal(await again.hydrate(), 1);
+  assert.equal(again.active.has('appstorage:usage:application:1'), true, 'dismissed by a person, still taken');
+  assert.equal(again.active.has('appstorage:growth:application:2'), false, 'auto-resolved rows are over');
+  w.clock.advance(15 * 60_000);
+  await again.runOnce();
+  assert.equal(w.bell.dispatched.length, 1, 'no second delivery after the restart');
+  // It still escalates.
+  w.clock.advance(15 * 60_000); w.set(15.5e9);
+  await again.runOnce();
+  assert.deepEqual(w.bell.dispatched.filter((d) => d.event === 'appstorage.usage').map((d) => d.level), ['warning', 'error']);
 });
 
 test('after a restart the active set comes back from the bell rows, so a recovered condition still resolves', async () => {
@@ -165,4 +205,37 @@ test('guest list parsing and the cached lister', async () => {
   assert.equal(calls, 2, 'cached');
   t = 5000; await lister();
   assert.equal(calls, 4);
+});
+
+test('every run applies the retention limits and drops the rows and alerts of gone targets; an unreadable record list drops nothing', async () => {
+  const w = world();
+  const t0 = w.clock.now();
+  // A target that was deleted long ago: its samples were never pruned on insert again.
+  w.store.addSample('project:9', 5e9, t0 - 1000);
+  w.db.prepare('INSERT INTO mock2_storage_samples (target_key, sampled_at, used_bytes) VALUES (?, ?, ?)').run('project:9', new Date(t0 - 40 * 86_400_000).toISOString(), 5e9);
+  w.store.insertCheck({ id: 'chk_gone', targetKey: 'project:9' }); w.store.finishCheck('chk_gone', { status: 'complete', result: { n: 1 } });
+  w.store.putPolicy('project:9', { policy: { version: 1 } });
+  w.bell.post({ level: 'warning', title: 'old', source: 'app-storage', dedupe_key: 'appstorage:usage:project:9' });
+  let known = null;
+  const m = createAppStorageMonitor({ store: w.store, listTargets: () => [w.target], listGuests: async () => w.guests, policyFor: () => ({ policy: w.policy }), notifications: w.bell, now: w.clock.now, logger: null, knownTargetKeys: () => known });
+  await m.hydrate();
+  const first = await m.runOnce();
+  assert.equal(first.pruned.samples, 1, 'the 40-day-old sample of a target no longer sampled is pruned');
+  assert.ok(w.store.getCheck('chk_gone'), 'records unreadable: nothing is dropped');
+  assert.equal(w.bell.rows.get('appstorage:usage:project:9').dismissed, false);
+  known = new Set(['application:1']);
+  w.clock.advance(15 * 60_000);
+  const second = await m.runOnce();
+  assert.deepEqual(second.dropped, { checks: 1, samples: 1, cleanups: 0, policies: 1 });
+  assert.equal(w.store.getCheck('chk_gone'), null);
+  assert.equal(w.store.getPolicy('project:9'), null);
+  assert.equal(w.bell.rows.get('appstorage:usage:project:9').dismissed, true, 'the alert of a gone target is resolved');
+  assert.ok(second.resolved.includes('appstorage:usage:project:9'));
+  assert.equal(w.store.samplesSince('application:1', 0).length, 2, 'the live target keeps its samples');
+  // A listed target missing from the records means the reads disagree: nothing is dropped.
+  w.store.insertCheck({ id: 'chk_gone2', targetKey: 'project:9' }); w.store.finishCheck('chk_gone2', { status: 'complete', result: {} });
+  known = new Set(['project:4']);
+  const third = await m.runOnce();
+  assert.equal(third.dropped, undefined);
+  assert.ok(w.store.getCheck('chk_gone2'));
 });

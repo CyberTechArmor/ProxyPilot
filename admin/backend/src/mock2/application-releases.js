@@ -39,7 +39,10 @@ export function createApplicationReleaseService({db,host,transport,getConnector,
     if(app.profile.digest!==evidence.profileDigest)failApplicationRelease('STALE_PROFILE','Profile changed.');
     if(!fullSha(evidence.sha)||(!candidate?.validation?.passed&&!evidence.restored)||!proofDigest(evidence.evidenceDigest)||!String(evidence.jobId||'')||typeof evidence.releasePath!=='string') failApplicationRelease('INVALID_EVIDENCE','Live state requires a passed candidate or verified restoration and a durable job receipt.',400);
     if(evidence.previousSha&&!fullSha(evidence.previousSha)) failApplicationRelease('INVALID_EVIDENCE','Invalid previous commit identity.',400);
-    const record={sha:evidence.sha,profileDigest:app.profile.digest,jobId:String(evidence.jobId),releasePath:evidence.releasePath,previousSha:evidence.previousSha||null,evidenceDigest:evidence.evidenceDigest,verifiedAt:stamp(),restored:!!evidence.restored};
+    if(evidence.rollbackOf&&!fullSha(evidence.rollbackOf)) failApplicationRelease('INVALID_EVIDENCE','Invalid rolled-back commit identity.',400);
+    // rollbackOf: the release this one replaced by rolling back (the deploy
+    // history never counts that release as the one live before).
+    const record={sha:evidence.sha,profileDigest:app.profile.digest,jobId:String(evidence.jobId),releasePath:evidence.releasePath,previousSha:evidence.previousSha||null,evidenceDigest:evidence.evidenceDigest,verifiedAt:stamp(),restored:!!evidence.restored,...(evidence.rollbackOf?{rollbackOf:evidence.rollbackOf}:{})};
     if(candidate)store.record(id,evidence.sha,'live',record,app.profile.digest);
     return store.recordObservedLive(id,record,app.profile.digest);
   }

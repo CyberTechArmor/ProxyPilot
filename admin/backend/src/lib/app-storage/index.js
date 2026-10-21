@@ -6,15 +6,18 @@
 // an install with Dev Studio enabled (mock2.db exists there).
 
 import { createStorageStore, readInstalledAt } from './store.js';
-import { listTargets, resolveTarget, activityFor, AppStorageError } from './targets.js';
+import { listTargets, resolveTarget, activityFor, existingTargetKeys, AppStorageError } from './targets.js';
 import { createCheckService } from './check-service.js';
 import { createAppStorageMonitor, createGuestLister, registerMonitor, unregisterMonitor } from './monitor.js';
 import { backendExec, exportsFor } from './host-measures.js';
 import { estimateSelection } from './accounting.js';
 import {
   RULES, RULE_KEYS, DEFAULT_POLICY, resolvePolicy, ruleStates, proposedAfterEdit, validatePolicy, policyDiff, policyEffects,
-  effectiveReleaseRetention, effectiveSnapshotLimits,
+  effectiveReleaseRetention, effectiveSnapshotLimits, defaultPolicyFor,
 } from './policy.js';
+
+/** The audit origin of a new project's defaults, recorded once. */
+export const NEW_PROJECT_DEFAULTS_ORIGIN = 'defaults-for-new-project';
 
 /** Until the cleanup service is wired (WS2), cleanup requests answer 503 and reads come from the store. */
 export function unavailableCleanupService(store = null) {
@@ -30,7 +33,7 @@ export function unavailableCleanupService(store = null) {
 
 export function createAppStorage({
   mock2Db, mainDb = null, exec = null, now = () => Date.now(), notifications = null, listGuests = null,
-  logger = console, cleanupService = null, performCheck = undefined,
+  logger = console, cleanupService = null, performCheck = undefined, audit = null,
 } = {}) {
   if (!mock2Db) throw new TypeError('createAppStorage needs the mock2 database');
   const executor = exec || backendExec();
@@ -39,20 +42,46 @@ export function createAppStorage({
   const resolve = (key) => resolveTarget(key, { mock2Db });
   const activity = (target, opts = {}) => activityFor(target, { mainDb, mock2Db, now: now(), ...opts });
   const limitOf = (targetKey) => {
-    try { return store.latestCheck(targetKey)?.result?.totals?.limit?.bytes ?? null; } catch { return null; }
+    try { return store.latestCheckSummary(targetKey)?.summary?.totals?.limit?.bytes ?? null; } catch { return null; }
+  };
+  /**
+   * A Dev Studio project created after installation starts with the
+   * documented defaults on. The first time its policy is resolved, those
+   * defaults are stored as its policy (source 'defaults-new', revision 1) and
+   * one audit entry records it: STORAGE_POLICY_CHANGED, details { origin:
+   * 'defaults-for-new-project', source, revision, rulesOn }. Once stored, the
+   * row decides (a later change of the defaults does not change it), and
+   * this never runs again for that project. Registered applications and
+   * earlier projects are never recorded here (their rules are proposals).
+   */
+  const recordNewProjectDefaults = (target) => {
+    if (target?.kind !== 'project') return null;
+    try { if (store.getPolicy(target.key)) return null; } catch { return null; }
+    const d = defaultPolicyFor(target, { installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
+    if (d.source !== 'defaults-new') return null;
+    let saved;
+    // The policy listeners are not told: the stored rules are the defaults
+    // that were already in force, so no limit changes.
+    try { saved = store.putPolicy(target.key, { policy: d.policy, source: 'defaults-new', updatedBy: null, expectedRevision: 0, proposedRules: [] }); } catch { return null; } // another writer was first
+    const rulesOn = RULE_KEYS.filter((k) => d.policy.rules?.[k]?.enabled);
+    try { audit?.({ action: 'STORAGE_POLICY_CHANGED', targetKey: target.key, detail: { origin: NEW_PROJECT_DEFAULTS_ORIGIN, source: 'defaults-new', revision: saved?.revision ?? 1, rulesOn } }); } catch (e) { logger?.error?.('[app-storage] audit of new-project defaults failed', e?.message || e); }
+    return saved;
   };
   const policyFor = (target) => {
+    recordNewProjectDefaults(target);
     const r = resolvePolicy(target, { store, installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
     return { ...r, ...ruleStates(r.policy, r.source, r.stored ? r.proposedRules : null) };
   };
   const guestLister = listGuests || createGuestLister(executor, { now });
-  const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger });
+  const monitor = createAppStorageMonitor({ store, listTargets: list, listGuests: guestLister, policyFor, notifications, now, logger, knownTargetKeys: () => existingTargetKeys({ mock2Db }) });
   const checks = createCheckService({
     store, exec: executor, mainDb, now, resolveTarget: resolve, listTargets: list, activityFor: (t) => activity(t), policyFor,
     listExports: (guest) => exportsFor(mainDb, guest), listGuests: guestLister, alertsFor: (key) => monitor.alertsFor(key), logger,
     ...(performCheck ? { performCheck } : {}),
   });
   let cleanup = cleanupService || unavailableCleanupService(store);
+  // Told after every saved policy (the snapshot-limit memo is dropped then).
+  const policyListeners = new Set();
 
   function getPolicy(targetKey) {
     const target = resolve(targetKey);
@@ -75,6 +104,7 @@ export function createAppStorage({
     const changed = policyDiff(before.policy, policy);
     const proposedRules = proposedAfterEdit(before.proposedRules, policy);
     const row = store.putPolicy(target.key, { policy, source: 'edited', updatedBy: userId == null ? null : String(userId), expectedRevision, proposedRules });
+    for (const fn of policyListeners) { try { fn(target.key); } catch (e) { logger?.error?.('[app-storage] policy listener failed', e?.message || e); } }
     return { targetKey: target.key, policy: row.policy, revision: row.revision, source: row.source, proposedRules, changed, previousRevision: before.revision, previousSource: before.source };
   }
 
@@ -109,10 +139,15 @@ export function createAppStorage({
     targetDetail, getPolicy, putPolicy,
     estimateSelection: (checkId, selection) => estimateSelection(checks.getCheck(checkId), selection),
     effectiveReleaseRetention: (targetId) => effectiveReleaseRetention(targetId, { mock2Db }),
-    effectiveSnapshotLimits: () => effectiveSnapshotLimits({ mock2Db, mainDb }),
+    effectiveSnapshotLimits: () => {
+      // A new project's defaults are recorded before they first decide anything.
+      try { for (const t of list()) recordNewProjectDefaults(t); } catch { /* the limits fall back on their own */ }
+      return effectiveSnapshotLimits({ mock2Db, mainDb });
+    },
     postCleanupAlert: (targetKey, outcome, opts) => monitor.postCleanupAlert(targetKey, outcome, opts),
     cleanupService: () => cleanup,
     setCleanupService(svc) { cleanup = svc || unavailableCleanupService(store); },
+    onPolicyChange(fn) { policyListeners.add(fn); return () => policyListeners.delete(fn); },
     RULE_KEYS, DEFAULT_POLICY,
   };
 }
@@ -129,6 +164,7 @@ export function getAppStorage() {
       return createAppStorage({
         mock2Db: getMock2Db(), mainDb: db.getDb(),
         notifications: { post: bell.postNotification, resolve: bell.resolveNotification, list: bell.listNotifications, dispatch: dispatch.dispatchToChannels },
+        audit: ({ action, targetKey, detail }) => db.logAudit(null, action, 'app_storage', String(targetKey), detail, null),
       });
     })();
     singleton.catch(() => { singleton = null; });

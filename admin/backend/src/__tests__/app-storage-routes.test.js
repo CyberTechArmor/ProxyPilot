@@ -12,7 +12,7 @@ import * as W from './helpers/app-storage-world.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 
-function fixture(t, { cleanupService = null, now = () => NOW } = {}) {
+function fixture(t, { cleanupService = null, now = () => NOW, logs = [] } = {}) {
   const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
   const world = W.buildNodusGuest(root, NOW);
   const { mock2Db, mainDb } = W.databases();
@@ -23,7 +23,7 @@ function fixture(t, { cleanupService = null, now = () => NOW } = {}) {
   const routes = new Map(); const audits = [];
   const router = Object.fromEntries(['get', 'post', 'put'].map((m) => [m, (path, ...handlers) => routes.set(`${m} ${path}`, handlers)]));
   const requireAdmin = (_req, _res, next) => next(); const requireSudo = (_req, _res, next) => next();
-  registerAppStorageRoutes(router, { storage: () => storage, requireAdmin, requireSudo, audit: (req, action, key, detail) => audits.push([action, key, detail]), now });
+  registerAppStorageRoutes(router, { storage: () => storage, requireAdmin, requireSudo, audit: (req, action, key, detail) => audits.push([action, key, detail]), now, log: (...a) => logs.push(a) });
   async function request(method, path, extra = {}) {
     const handlers = routes.get(`${method} ${path}`); assert.ok(handlers, path);
     let status = 200; let body;
@@ -157,7 +157,7 @@ test('policy: read with defaults and effects; edit needs a valid whole document,
   assert.equal(g.body.source, 'preserved');
   const next = JSON.parse(JSON.stringify(g.body.policy));
   next.rules.tempFiles.enabled = true;
-  const bad = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: { policy: { ...next, rules: { ...next.rules, caches: { enabled: true, maxAgeDays: 0 } } } } });
+  const bad = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: { policy: { ...next, rules: { ...next.rules, caches: { enabled: true, maxAgeDays: 0 } } }, expectedRevision: 0 } });
   assert.deepEqual([bad.status, bad.body.error.code], [400, 'INVALID_POLICY']);
   assert.ok(bad.body.error.issues.some((i) => i.path === 'rules.caches.maxAgeDays'));
   const put = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: { policy: next, expectedRevision: 0 } });
@@ -169,4 +169,38 @@ test('policy: read with defaults and effects; edit needs a valid whole document,
   assert.deepEqual([lost.status, lost.body.error.code], [409, 'POLICY_CHANGED']);
   const shape = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: next });
   assert.equal(shape.status, 400, 'the body is { policy, expectedRevision }');
+});
+
+test('PUT /policy requires expectedRevision, so a lost update is always detected', async (t) => {
+  const f = fixture(t);
+  const g = await f.request('get', '/targets/:kind/:id/policy', f.app);
+  const next = JSON.parse(JSON.stringify(g.body.policy));
+  next.rules.tempFiles.enabled = true;
+  const missing = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: { policy: next } });
+  assert.deepEqual([missing.status, missing.body.error.code], [400, 'INVALID_REQUEST']);
+  assert.match(missing.body.error.message, /expectedRevision is required/);
+  assert.equal(f.storage.getPolicy('application:1').revision, g.body.revision, 'nothing was saved');
+  const notNumber = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: { policy: next, expectedRevision: '0' } });
+  assert.equal(notNumber.status, 400);
+  const ok = await f.request('put', '/targets/:kind/:id/policy', { ...f.app, body: { policy: next, expectedRevision: g.body.revision } });
+  assert.equal(ok.status, 200);
+});
+
+test('only a typed error reaches the caller; a database or other error is a generic 500, logged on the server', async (t) => {
+  const logs = [];
+  const f = fixture(t, { logs });
+  f.storage.overview = () => { throw Object.assign(new Error('SQLITE_BUSY: database is locked (mock2_storage_checks)'), { code: 'SQLITE_BUSY' }); };
+  const busy = await f.request('get', '/overview');
+  assert.deepEqual(busy, { status: 500, body: { error: { code: 'APP_STORAGE_FAILED', message: 'The storage request failed.' } } });
+  assert.equal(logs.length, 1);
+  assert.match(String(logs[0].at(-1)), /database is locked/, 'the detail is in the server log only');
+  f.storage.overview = () => { throw new TypeError('x is not a function'); };
+  assert.deepEqual((await f.request('get', '/overview')).body.error, { code: 'APP_STORAGE_FAILED', message: 'The storage request failed.' });
+  f.storage.overview = () => { throw Object.assign(new Error('weird'), { code: 'SOMETHING', status: 'bad' }); };
+  assert.equal((await f.request('get', '/overview')).status, 500);
+  // A typed error keeps its status, code and plain message.
+  const unknown = await f.request('get', '/targets/:kind/:id', { params: { kind: 'application', id: '999' } });
+  assert.equal(unknown.status, 404);
+  assert.equal(typeof unknown.body.error.code, 'string');
+  assert.notEqual(unknown.body.error.code, 'APP_STORAGE_FAILED');
 });

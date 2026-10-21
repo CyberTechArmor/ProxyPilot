@@ -17,6 +17,7 @@
 // feature was installed starts with every rule on. Nodus keeps its settings.
 
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { createStorageStore, readInstalledAt } from './store.js';
 import { listTargets, AppStorageError } from './targets.js';
@@ -252,6 +253,65 @@ export function effectiveReleaseRetention(targetId, { mock2Db = null, staticRete
   return stored.policy.rules.releases.enabled ? releaseRetentionOf(stored.policy.rules, 'policy') : null;
 }
 
+/* --------------------- a new project's defaults, recorded --------------------- */
+
+/** The audit origin of a new project's defaults, recorded once. */
+export const NEW_PROJECT_DEFAULTS_ORIGIN = 'defaults-for-new-project';
+
+/**
+ * An audit writer over a main DB handle (db.js logAudit's columns): user
+ * NULL (the side recording it acts for no dashboard user), the actor in the
+ * details. null without a handle.
+ */
+export function auditLogWriter(mainDb) {
+  if (!mainDb || typeof mainDb.prepare !== 'function') return null;
+  return ({ action, targetKey, detail }) => {
+    mainDb.prepare('INSERT INTO audit_log (id, user_id, action, resource_type, resource_id, details, ip_address) VALUES (?, NULL, ?, ?, ?, ?, NULL)')
+      .run(randomUUID(), action, 'app_storage', String(targetKey), JSON.stringify(detail ?? {}));
+  };
+}
+
+/**
+ * recordNewProjectDefaults(target, { mock2Db, audit, actor, installedAt,
+ * diskLimitBytes, logger }) → the stored policy row, or null.
+ *
+ * The one place a Dev Studio project created after installation gets its
+ * documented defaults stored as its policy (source 'defaults-new', revision
+ * 1, no proposals) with one audit entry, STORAGE_POLICY_CHANGED on
+ * app_storage <targetKey>, details { origin: 'defaults-for-new-project',
+ * source, revision, rulesOn, actor }. Whichever side resolves the policy
+ * first records it — the backend (page, overview, monitor, scheduler,
+ * snapshot limits) or the host runner (its snapshot limits) — and every
+ * later call is a no-op:
+ *   - a stored row already exists → null;
+ *   - two sides racing: the insert of revision 1 succeeds once, the other
+ *     gets null and writes no audit;
+ *   - nothing is recorded without an audit sink, and when the audit cannot
+ *     be written the stored row is taken back, so a stored new-project
+ *     default always has its audit entry and a later call tries again.
+ * Registered applications and earlier projects are never recorded (their
+ * rules stay proposals).
+ */
+export function recordNewProjectDefaults(target, { mock2Db, audit = null, actor = 'system', installedAt = undefined, diskLimitBytes = null, logger = null, now = undefined } = {}) {
+  if (target?.kind !== 'project' || !mock2Db || typeof audit !== 'function') return null;
+  let store;
+  try { store = createStorageStore(mock2Db, now ? { now } : {}); if (store.getPolicy(target.key)) return null; } catch { return null; }
+  const installed = installedAt === undefined ? readInstalledAt(mock2Db) : installedAt;
+  const d = defaultPolicyFor(target, { installedAt: installed, diskLimitBytes });
+  if (d.source !== 'defaults-new') return null;
+  let saved;
+  try { saved = store.putPolicy(target.key, { policy: d.policy, source: 'defaults-new', updatedBy: null, expectedRevision: 0, proposedRules: [] }); } catch { return null; } // the other side was first
+  const rulesOn = RULE_KEYS.filter((k) => d.policy.rules?.[k]?.enabled);
+  try {
+    audit({ action: 'STORAGE_POLICY_CHANGED', targetKey: target.key, detail: { origin: NEW_PROJECT_DEFAULTS_ORIGIN, source: 'defaults-new', revision: saved?.revision ?? 1, rulesOn, actor: String(actor || 'system') } });
+  } catch (e) {
+    logger?.error?.('[app-storage] the audit of a new project\'s defaults could not be written; they stay unrecorded for now', e?.message || e);
+    try { mock2Db.prepare("DELETE FROM mock2_storage_policies WHERE target_key = ? AND revision = 1 AND source = 'defaults-new'").run(String(target.key)); } catch { /* the stored defaults equal the computed ones */ }
+    return null;
+  }
+  return saved;
+}
+
 /**
  * Snapshot limits for snapshot-retention.js: { <guest>: keep }.
  * - A target with a stored policy: its snapshots rule decides (off = no
@@ -260,16 +320,23 @@ export function effectiveReleaseRetention(targetId, { mock2Db = null, staticRete
  *   file; a new Dev Studio project's 3; an existing target's proposal = none).
  * - A static entry for a guest that is no target at all still applies.
  * - mock2.db cannot be read → the static file (fail-safe). Never throws.
+ * - A new project's defaults are recorded first (recordNewProjectDefaults).
  */
-export function effectiveSnapshotLimits({ mock2Db = null, mainDb = null, staticLimits = STATIC_SNAPSHOT_RETENTION, installedAt = undefined } = {}) { // eslint-disable-line no-unused-vars
+export function effectiveSnapshotLimits({ mock2Db = null, mainDb = null, staticLimits = STATIC_SNAPSHOT_RETENTION, installedAt = undefined, audit = undefined, actor = 'host-runner', logger = null } = {}) {
   const fallback = () => Object.freeze({ ...(staticLimits || {}) });
   if (!mock2Db) return fallback();
   const limits = {};
   const covered = new Set();
+  // A new project's defaults are recorded (stored + audited) before they
+  // first decide anything, on whichever side gets here first. The backend
+  // instance passes its own audit and actor; the host runner, the only other
+  // caller, writes the audit row into its main DB with user NULL.
+  const sink = audit === undefined ? auditLogWriter(mainDb) : audit;
   try {
     const installed = installedAt === undefined ? readInstalledAt(mock2Db) : installedAt;
     for (const target of listTargets({ mock2Db })) {
       covered.add(target.guest);
+      if (target.kind === 'project') recordNewProjectDefaults(target, { mock2Db, audit: sink, actor, installedAt: installed, logger });
       const stored = storedPolicyOf(mock2Db, target.key);
       const policy = stored && !stored.invalid ? stored.policy : defaultPolicyFor(target, { installedAt: installed, staticSnapshotRetention: staticLimits }).policy;
       if (policy.rules.snapshots.enabled) limits[target.guest] = policy.rules.snapshots.keep;

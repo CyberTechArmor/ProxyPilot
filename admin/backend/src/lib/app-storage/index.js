@@ -13,11 +13,10 @@ import { backendExec, exportsFor } from './host-measures.js';
 import { estimateSelection } from './accounting.js';
 import {
   RULES, RULE_KEYS, DEFAULT_POLICY, resolvePolicy, ruleStates, proposedAfterEdit, validatePolicy, policyDiff, policyEffects,
-  effectiveReleaseRetention, effectiveSnapshotLimits, defaultPolicyFor,
+  effectiveReleaseRetention, effectiveSnapshotLimits, recordNewProjectDefaults as recordDefaultsOnce, auditLogWriter, NEW_PROJECT_DEFAULTS_ORIGIN,
 } from './policy.js';
 
-/** The audit origin of a new project's defaults, recorded once. */
-export const NEW_PROJECT_DEFAULTS_ORIGIN = 'defaults-for-new-project';
+export { NEW_PROJECT_DEFAULTS_ORIGIN };
 
 /** Until the cleanup service is wired (WS2), cleanup requests answer 503 and reads come from the store. */
 export function unavailableCleanupService(store = null) {
@@ -44,29 +43,13 @@ export function createAppStorage({
   const limitOf = (targetKey) => {
     try { return store.latestCheckSummary(targetKey)?.summary?.totals?.limit?.bytes ?? null; } catch { return null; }
   };
-  /**
-   * A Dev Studio project created after installation starts with the
-   * documented defaults on. The first time its policy is resolved, those
-   * defaults are stored as its policy (source 'defaults-new', revision 1) and
-   * one audit entry records it: STORAGE_POLICY_CHANGED, details { origin:
-   * 'defaults-for-new-project', source, revision, rulesOn }. Once stored, the
-   * row decides (a later change of the defaults does not change it), and
-   * this never runs again for that project. Registered applications and
-   * earlier projects are never recorded here (their rules are proposals).
-   */
-  const recordNewProjectDefaults = (target) => {
-    if (target?.kind !== 'project') return null;
-    try { if (store.getPolicy(target.key)) return null; } catch { return null; }
-    const d = defaultPolicyFor(target, { installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
-    if (d.source !== 'defaults-new') return null;
-    let saved;
-    // The policy listeners are not told: the stored rules are the defaults
-    // that were already in force, so no limit changes.
-    try { saved = store.putPolicy(target.key, { policy: d.policy, source: 'defaults-new', updatedBy: null, expectedRevision: 0, proposedRules: [] }); } catch { return null; } // another writer was first
-    const rulesOn = RULE_KEYS.filter((k) => d.policy.rules?.[k]?.enabled);
-    try { audit?.({ action: 'STORAGE_POLICY_CHANGED', targetKey: target.key, detail: { origin: NEW_PROJECT_DEFAULTS_ORIGIN, source: 'defaults-new', revision: saved?.revision ?? 1, rulesOn } }); } catch (e) { logger?.error?.('[app-storage] audit of new-project defaults failed', e?.message || e); }
-    return saved;
-  };
+  // A new project's defaults are recorded once, by the shared
+  // recordNewProjectDefaults (policy.js) on whichever side resolves the policy
+  // first; here with the backend's audit (user NULL, actor 'backend'). The
+  // policy listeners are not told: the stored rules are the defaults that
+  // were already in force, so no limit changes.
+  const auditSink = typeof audit === 'function' ? (e) => audit(e) : auditLogWriter(mainDb);
+  const recordNewProjectDefaults = (target) => recordDefaultsOnce(target, { mock2Db, audit: auditSink, actor: 'backend', diskLimitBytes: limitOf(target?.key), logger, now });
   const policyFor = (target) => {
     recordNewProjectDefaults(target);
     const r = resolvePolicy(target, { store, installedAt: readInstalledAt(mock2Db), diskLimitBytes: limitOf(target.key) });
@@ -140,9 +123,8 @@ export function createAppStorage({
     estimateSelection: (checkId, selection) => estimateSelection(checks.getCheck(checkId), selection),
     effectiveReleaseRetention: (targetId) => effectiveReleaseRetention(targetId, { mock2Db }),
     effectiveSnapshotLimits: () => {
-      // A new project's defaults are recorded before they first decide anything.
-      try { for (const t of list()) recordNewProjectDefaults(t); } catch { /* the limits fall back on their own */ }
-      return effectiveSnapshotLimits({ mock2Db, mainDb });
+      // A new project's defaults are recorded (inside) before they first decide anything.
+      return effectiveSnapshotLimits({ mock2Db, mainDb, audit: auditSink, actor: 'backend', logger });
     },
     postCleanupAlert: (targetKey, outcome, opts) => monitor.postCleanupAlert(targetKey, outcome, opts),
     cleanupService: () => cleanup,

@@ -202,7 +202,7 @@ test('a new Dev Studio project\'s defaults are stored and audited once, the firs
   assert.deepEqual(p.proposedRules, []);
   const rulesOn = ['releases', 'snapshots', 'workspaces', 'caches', 'tempFiles', 'testArtifacts', 'logs', 'history'].filter((k) => p.policy.rules[k]?.enabled);
   assert.ok(rulesOn.length >= 6, 'the documented defaults are on');
-  assert.deepEqual(audits, [{ action: 'STORAGE_POLICY_CHANGED', targetKey: 'project:7', detail: { origin: 'defaults-for-new-project', source: 'defaults-new', revision: 1, rulesOn: p.enabledRules } }]);
+  assert.deepEqual(audits, [{ action: 'STORAGE_POLICY_CHANGED', targetKey: 'project:7', detail: { origin: 'defaults-for-new-project', source: 'defaults-new', revision: 1, rulesOn: p.enabledRules, actor: 'backend' } }]);
   assert.deepEqual([...p.enabledRules].sort(), [...rulesOn].sort());
   // Read again, through every path: never recorded twice.
   s.getPolicy('project:7'); await s.overview(); s.effectiveSnapshotLimits(); s.policyFor(s.resolveTarget('project:7'));
@@ -235,3 +235,57 @@ test('the snapshot limits record a new project\'s defaults before they decide an
   s.store.finishCheck('chk_00000000-0000-4000-8000-0000000000aa', { status: 'complete', result: { totals: { limit: { bytes: 50e9 } }, categories: [] } });
   assert.equal(s.policyFor(s.resolveTarget('project:8')).policy.alerts.warnBytes, 40e9);
 });
+
+/* ---- re-review N3: whichever side resolves a new project's policy first records it ---- */
+
+test('the host runner resolving a new project\'s snapshot limits first records its defaults once (user NULL, actor in details); the backend reading later adds no second audit', async (t) => {
+  const { runnerAppStorage } = await import('../lib/app-storage/cleanup-deps.js');
+  const { currentSnapshotLimits, setSnapshotLimitsProvider } = await import('../lib/snapshot-retention.js');
+  const { effectiveSnapshotLimits } = await import('../lib/app-storage/policy.js');
+  t.after(() => setSnapshotLimitsProvider(null));
+  const { mock2Db, mainDb } = W.databases({ installedAt: '2026-10-20T22:00:00.000Z' });
+  mainDb.exec('CREATE TABLE audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (9, 'Brand new', 'm2-9', 'active', '/x/9.git', '2026-10-20 22:50:00')").run();
+  // The runner, exactly as it installs its limits.
+  const runner = runnerAppStorage({ mainDb, mock2DbPath: '/nonexistent/mock2.db', openDb: () => mock2Db });
+  await runner.installSnapshotLimits();
+  assert.equal(currentSnapshotLimits()['m2-9'], 3, 'the recorded default decides');
+  const audits = () => mainDb.prepare('SELECT * FROM audit_log').all();
+  assert.equal(audits().length, 1);
+  const row = audits()[0];
+  assert.deepEqual([row.user_id, row.action, row.resource_type, row.resource_id], [null, 'STORAGE_POLICY_CHANGED', 'app_storage', 'project:9']);
+  const detail = JSON.parse(row.details);
+  assert.deepEqual([detail.origin, detail.source, detail.revision, detail.actor], ['defaults-for-new-project', 'defaults-new', 1, 'host-runner']);
+  assert.ok(detail.rulesOn.includes('snapshots'));
+  assert.equal(s0(mock2Db).revision, 1);
+  // The runner again: no second record.
+  effectiveSnapshotLimits({ mock2Db, mainDb });
+  assert.equal(audits().length, 1);
+  // The backend later, through every path that resolves a policy: no second audit.
+  const backendAudits = [];
+  const s = createAppStorage({ mock2Db, mainDb, exec: { host: async () => ({ code: 1 }), guest: async () => ({ code: 1 }) }, now: () => NOW, notifications: bell(), listGuests: async () => new Map(), logger: null, audit: (e) => backendAudits.push(e) });
+  const p = s.getPolicy('project:9');
+  s.effectiveSnapshotLimits(); await s.overview(); await s.monitor.runOnce();
+  assert.deepEqual([p.source, p.stored, p.revision], ['defaults-new', true, 1]);
+  assert.equal(backendAudits.length, 0);
+  assert.equal(audits().length, 1);
+});
+
+test('defaults are never stored without their audit: when the audit cannot be written nothing is recorded, and the next side records it once', async (t) => {
+  const { effectiveSnapshotLimits, recordNewProjectDefaults } = await import('../lib/app-storage/policy.js');
+  const { mock2Db, mainDb } = W.databases({ installedAt: '2026-10-20T22:00:00.000Z' });
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (9, 'Brand new', 'm2-9', 'active', '/x/9.git', '2026-10-20 22:50:00')").run();
+  // No audit_log table in this main DB: the runner's audit fails.
+  const limits = effectiveSnapshotLimits({ mock2Db, mainDb });
+  assert.equal(limits['m2-9'], 3, 'the defaults still apply');
+  assert.equal(s0(mock2Db), null, 'but they are not stored without their audit');
+  const audits = [];
+  const target = { key: 'project:9', kind: 'project', id: 9, guest: 'm2-9', createdAt: '2026-10-20 22:50:00' };
+  assert.equal(recordNewProjectDefaults(target, { mock2Db, audit: null }), null, 'no audit sink: nothing recorded');
+  assert.ok(recordNewProjectDefaults(target, { mock2Db, audit: (e) => audits.push(e), actor: 'backend' }));
+  assert.equal(recordNewProjectDefaults(target, { mock2Db, audit: (e) => audits.push(e), actor: 'backend' }), null, 'idempotent');
+  assert.equal(audits.length, 1);
+  assert.equal(recordNewProjectDefaults({ ...target, key: 'project:4', id: 4, createdAt: '2026-10-01 10:00:00' }, { mock2Db, audit: (e) => audits.push(e) }), null, 'an earlier project is never recorded');
+});
+
+function s0(mock2Db) { return mock2Db.prepare("SELECT revision, source FROM mock2_storage_policies WHERE target_key = 'project:9'").get() || null; }

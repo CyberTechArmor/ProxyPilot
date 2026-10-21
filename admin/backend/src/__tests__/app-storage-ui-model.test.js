@@ -398,8 +398,11 @@ test('"Some can be cleaned up" only when a category has something that can be (r
 test('groups say files or folders from their members; the memory note is not repeated as a hint (review 18)', () => {
   assert.equal(groupMemberNoun(byLabel('nodus-embed-* (263 folders)')), 'folders');
   assert.equal(groupMemberNoun({ members: [{ kind: 'file' }, { kind: 'file' }] }), 'files');
-  assert.equal(groupMemberNoun({ members: [{ kind: 'file' }, { kind: 'directory' }] }), 'items');
-  assert.equal(groupMemberNoun({}), 'items');
+  assert.equal(groupMemberNoun({ members: [{ kind: 'file' }, { kind: 'directory' }] }), 'entries');
+  assert.equal(groupMemberNoun({}), 'entries');
+  assert.equal(groupMemberNoun({ memberKind: 'files', members: [{ kind: 'directory' }] }), 'files', "the check's memberKind wins");
+  assert.equal(groupMemberNoun({ memberKind: 'entries' }), 'entries');
+  assert.equal(groupMemberNoun({ memberKind: 'nonsense', members: [{ kind: 'file' }] }), 'files', 'an unknown memberKind falls back to the members');
   assert.equal(TEXT.showMembers(6, 6, 'files'), 'Show all 6 files');
   assert.equal(TEXT.showMembers(50, 263, 'folders'), 'Show 50 of 263 folders');
   assert.equal(TEXT.hideMembers('files'), 'Hide files');

@@ -144,9 +144,9 @@ export const TEXT = {
   about: 'about',
   fileSizesAddUp: (size) => `files add up to ${size}`,
   insideRelease: 'Inside this release',
-  // noun: 'files' | 'folders' | 'items' (app-storage-model.mjs groupMemberNoun).
-  showMembers: (shown, total, noun = 'items') => `Show ${shown === total ? 'all' : `${shown} of`} ${total} ${noun}`,
-  hideMembers: (noun = 'items') => `Hide ${noun}`,
+  // noun: 'files' | 'folders' | 'entries' (app-storage-model.mjs groupMemberNoun).
+  showMembers: (shown, total, noun = 'entries') => `Show ${shown === total ? 'all' : `${shown} of`} ${total} ${noun}`,
+  hideMembers: (noun = 'entries') => `Hide ${noun}`,
   membersMore: (n) => `${n.toLocaleString()} more not shown. They are cleaned up together with the ones shown.`,
   selectItem: (label) => `Select ${label}`,
   host: 'On the host',

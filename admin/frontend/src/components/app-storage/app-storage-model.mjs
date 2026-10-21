@@ -122,15 +122,19 @@ function summarizeStatus(items) {
   return s.has('investigate') ? 'investigate' : 'protected';
 }
 
-/** 'files' | 'folders' | 'items' for a group, from its members' kind. */
+/**
+ * 'files' | 'folders' | 'entries' for a group: the check's own `memberKind`
+ * (WS1, ws/check-fixes f7807cb6) when present, else from its members' kind.
+ */
 export function groupMemberNoun(item) {
+  if (['files', 'folders', 'entries'].includes(item?.memberKind)) return item.memberKind;
   const kinds = new Set((Array.isArray(item?.members) ? item.members : []).map((m) => m?.kind).filter(Boolean));
   if (kinds.size === 1) {
     const [k] = kinds;
     if (k === 'file') return 'files';
     if (k === 'directory' || k === 'dir') return 'folders';
   }
-  return 'items';
+  return 'entries';
 }
 
 /** An item's hint, unless it only repeats the "Uses memory, not disk" chip. */

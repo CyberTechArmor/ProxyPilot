@@ -187,3 +187,51 @@ test('the overview and the policy limits read the stored summary, never a full c
   await s.monitor.runOnce();
   assert.equal(fullReads, 0, 'nor by the monitor');
 });
+
+test('a new Dev Studio project\'s defaults are stored and audited once, the first time its policy is read; earlier projects and applications are not', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const { mock2Db, mainDb } = W.databases({ installedAt: '2026-10-20T22:00:00.000Z' });
+  W.registerNodus(mock2Db, W.buildNodusGuest(root, NOW));
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (4, 'Shop', 'm2-4', 'active', '/x/4.git', '2026-10-01 10:00:00')").run();
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (7, 'Fresh', 'm2-7', 'active', '/x/7.git', '2026-10-20 22:30:00')").run();
+  const audits = [];
+  const s = createAppStorage({ mock2Db, mainDb, exec: W.scriptedExec({ prefix: root }), now: () => NOW, notifications: bell(), listGuests: async () => new Map(), logger: null, audit: (e) => audits.push(e) });
+  assert.equal(s.store.getPolicy('project:7'), null, 'nothing is stored before the policy is first read');
+  const p = s.getPolicy('project:7');
+  assert.deepEqual([p.source, p.stored, p.revision], ['defaults-new', true, 1]);
+  assert.deepEqual(p.proposedRules, []);
+  const rulesOn = ['releases', 'snapshots', 'workspaces', 'caches', 'tempFiles', 'testArtifacts', 'logs', 'history'].filter((k) => p.policy.rules[k]?.enabled);
+  assert.ok(rulesOn.length >= 6, 'the documented defaults are on');
+  assert.deepEqual(audits, [{ action: 'STORAGE_POLICY_CHANGED', targetKey: 'project:7', detail: { origin: 'defaults-for-new-project', source: 'defaults-new', revision: 1, rulesOn: p.enabledRules } }]);
+  assert.deepEqual([...p.enabledRules].sort(), [...rulesOn].sort());
+  // Read again, through every path: never recorded twice.
+  s.getPolicy('project:7'); await s.overview(); s.effectiveSnapshotLimits(); s.policyFor(s.resolveTarget('project:7'));
+  assert.equal(audits.length, 1);
+  assert.equal(s.store.getPolicy('project:7').revision, 1);
+  // An earlier project and a registered application start with proposals: nothing stored, nothing audited.
+  assert.equal(s.store.getPolicy('project:4'), null);
+  assert.equal(s.store.getPolicy('application:1'), null);
+  assert.equal(s.getPolicy('project:4').source, 'defaults-existing');
+  // A person's edit afterwards is an ordinary edit.
+  const next = JSON.parse(JSON.stringify(p.policy)); next.rules.logs.enabled = false;
+  const edited = s.putPolicy('project:7', next, { userId: 3, expectedRevision: 1 });
+  assert.deepEqual([edited.source, edited.revision, edited.previousSource], ['edited', 2, 'defaults-new']);
+  assert.equal(audits.length, 1, 'the route audits the edit itself');
+});
+
+test('the snapshot limits record a new project\'s defaults before they decide anything; the recorded alert level still follows the disk limit', async (t) => {
+  const root = W.makeRoot(); t.after(() => W.cleanupRoot(root));
+  const { mock2Db, mainDb } = W.databases({ installedAt: '2026-10-20T22:00:00.000Z' });
+  mock2Db.prepare("INSERT INTO mock2_projects (id, name, container_name, lifecycle, repo_path, created_at) VALUES (8, 'Newer', 'm2-8', 'active', '/x/8.git', '2026-10-20 22:40:00')").run();
+  const audits = [];
+  const s = createAppStorage({ mock2Db, mainDb, exec: W.scriptedExec({ prefix: root }), now: () => NOW, notifications: bell(), listGuests: async () => new Map(), logger: null, audit: (e) => audits.push(e) });
+  const limits = s.effectiveSnapshotLimits();
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].detail.origin, 'defaults-for-new-project');
+  assert.equal(s.store.getPolicy('project:8').source, 'defaults-new');
+  assert.ok(Number.isInteger(limits['m2-8']), 'the recorded snapshot rule decides');
+  // The first check gives the disk limit: the untouched defaults' warning level follows it.
+  s.store.insertCheck({ id: 'chk_00000000-0000-4000-8000-0000000000aa', targetKey: 'project:8' });
+  s.store.finishCheck('chk_00000000-0000-4000-8000-0000000000aa', { status: 'complete', result: { totals: { limit: { bytes: 50e9 } }, categories: [] } });
+  assert.equal(s.policyFor(s.resolveTarget('project:8')).policy.alerts.warnBytes, 40e9);
+});

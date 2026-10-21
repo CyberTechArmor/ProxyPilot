@@ -166,7 +166,12 @@ export function resolvePolicy(target, { store, installedAt = null, diskLimitByte
   try { row = store ? store.getPolicy(target.key) : null; } catch { row = null; }
   if (row) {
     try {
-      return { policy: validatePolicy(row.policy), source: row.source, revision: row.revision, stored: true, defaults, updatedAt: row.updatedAt, updatedBy: row.updatedBy, proposedRules: row.proposedRules ?? null };
+      const policy = validatePolicy(row.policy);
+      // A new project's recorded defaults that nobody has edited: the rules are
+      // the stored ones, and the alert level keeps following the disk limit
+      // as the defaults do (the first check gives the limit).
+      if (row.source === 'defaults-new' && defaults.source === 'defaults-new') policy.alerts = { ...policy.alerts, warnBytes: defaults.policy.alerts.warnBytes };
+      return { policy, source: row.source, revision: row.revision, stored: true, defaults, updatedAt: row.updatedAt, updatedBy: row.updatedBy, proposedRules: row.proposedRules ?? null };
     } catch {
       return { policy: defaults.policy, source: defaults.source, revision: row.revision, stored: true, invalidStored: true, defaults, updatedAt: row.updatedAt, updatedBy: row.updatedBy };
     }

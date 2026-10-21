@@ -30,6 +30,13 @@ export const GROUP_THRESHOLD = 5;
 const TEMP_MIN_AGE_MS = DAY;
 const WORKSPACE_MIN_AGE_MS = HOUR;
 const ROTATED_MIN_AGE_MS = 7 * DAY;
+// A current (not rotated) log nothing has written for this long and nothing
+// holds open is a leftover worth a look (never cleaned up automatically).
+export const IDLE_LOG_MS = 14 * DAY;
+// The system's own records stay protected however quiet they are: the
+// package manager's and installer's logs, and the login records (no .log).
+const SYSTEM_LOG_NAMES = new Set(['dpkg.log', 'alternatives.log', 'bootstrap.log', 'cloud-init.log', 'cloud-init-output.log', 'fontconfig.log']);
+const SYSTEM_LOG_DIRS = new Set(['/var/log/apt', '/var/log/installer', '/var/log/unattended-upgrades', '/var/log/dist-upgrade']);
 const EVIDENCE_MIN_AGE_MS = 14 * DAY;
 const HISTORY_KEEP = 2;
 
@@ -402,7 +409,12 @@ function classifyLog(it, { now }) {
     if (tooYoung(it, now, ROTATED_MIN_AGE_MS)) return { category: 'logs', status: 'protected', sub: 'rotated', reason: 'A recently rotated log.' };
     return { category: 'logs', status: 'eligible', sub: 'rotated', reason: 'An old rotated copy of a log.' };
   }
-  return { category: 'logs', status: 'protected', sub: 'current', reason: it.inUse ? 'Being written now.' : 'A current log; only old rotated copies are cleaned up.' };
+  if (it.inUse) return { category: 'logs', status: 'protected', sub: 'current', reason: 'Being written now.' };
+  // A log file nothing writes to any more (an application's one-off logs):
+  // Needs a look, never cleanable by a rule.
+  const systemRecord = SYSTEM_LOG_NAMES.has(name) || SYSTEM_LOG_DIRS.has(dirname(it.path)) || !/\.log$/.test(name);
+  if (!systemRecord && !tooYoung(it, now, IDLE_LOG_MS)) return { category: 'logs', status: 'investigate', sub: 'idle', reason: 'A log file nothing writes to any more; check it before removing it by hand.' };
+  return { category: 'logs', status: 'protected', sub: 'current', reason: 'A current log; only old rotated copies are cleaned up.' };
 }
 
 function classifyOther(it, { target }) {

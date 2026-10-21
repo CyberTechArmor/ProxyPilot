@@ -150,7 +150,7 @@ test('caches, logs and execution history follow their rules', async (t) => {
   assert.equal(at('/root/.cache/Microsoft').status, 'eligible');
   assert.equal(at('/var/cache/apt/archives/nodejs_22.deb').status, 'eligible');
   assert.equal(result_items_have(at, '/var/cache/apt/archives/lock'), false, 'apt lock is not a cache item');
-  assert.equal(at('/var/log/nodus-image-e2e.log').status, 'protected', 'a current .log is never cleaned up, however old');
+  assert.deepEqual([at('/var/log/nodus-image-e2e.log').status, at('/var/log/nodus-image-e2e.log').sub], ['investigate', 'idle'], 'a one-off log nothing wrote for 20 days needs a look');
   assert.equal(at('/var/log/syslog.2.gz').status, 'eligible');
   assert.equal(at('/var/log/dpkg.log').status, 'protected');
   assert.equal(at('/var/log/postgresql/postgresql-17-main.log').status, 'protected');
@@ -432,10 +432,11 @@ test('logs: current logs (package history, bootstrap, alternatives, an applicati
     { path: '/var/log/busy.log.1', r: 1, type: 'file', inUse: true, mtimeMs: old, newestMtimeMs: old },
   ]);
   const r = run(appTarget, f);
-  for (const p of ['/var/log/apt/history.log', '/var/log/apt/term.log', '/var/log/dpkg.log', '/var/log/alternatives.log', '/var/log/bootstrap.log', '/var/log/nodus-image-e2e.log', '/var/log/wtmp']) {
+  for (const p of ['/var/log/apt/history.log', '/var/log/apt/term.log', '/var/log/dpkg.log', '/var/log/alternatives.log', '/var/log/bootstrap.log', '/var/log/wtmp']) {
     assert.equal(r.at(p).status, 'protected', p);
   }
   assert.equal(r.at('/var/log/dpkg.log').reason, 'A current log; only old rotated copies are cleaned up.');
+  assert.equal(r.at('/var/log/nodus-image-e2e.log').status, 'investigate', 'a one-off log nothing writes to any more needs a look (never eligible)');
   for (const p of ['/var/log/apt/history.log.1.gz', '/var/log/apt/history.log.2.gz', '/var/log/dpkg.log.1', '/var/log/syslog-20261001', '/var/log/syslog-20261001.gz', '/var/log/kern.log.old']) {
     assert.deepEqual([r.at(p).status, r.at(p).sub], ['eligible', 'rotated'], p);
   }
@@ -655,4 +656,36 @@ test('a sealed release whose validation has not passed is kept (describeReleases
   const old = at(`${R}/${W.OLD}`);
   assert.deepEqual([old.status, old.sub, old.action], ['protected', 'pending', null]);
   assert.equal(old.reason, 'Its validation has not passed (it may still be running), so it is kept.');
+});
+
+/* ---- re-review N1: an application's one-off logs are a leftover worth a look ---- */
+
+test('a current log nothing writes to for 14 days and nothing holds open needs a look; recent, open or system logs stay protected', () => {
+  const at = (days) => NOW - days * W.DAY;
+  const f = facts([{ path: '/var/log/apt', depth: 1, role: 'log' }, { path: '/var/log', depth: 1, role: 'log' }, { path: '/var/log/postgresql', depth: 1, role: 'log' }], [
+    { path: '/var/log/apt/history.log', r: 0, type: 'file', mtimeMs: at(90), newestMtimeMs: at(90) },
+    { path: '/var/log/nodus-image-e2e.log', r: 1, type: 'file', mtimeMs: at(20), newestMtimeMs: at(20) },
+    { path: '/var/log/nodus-check.log', r: 1, type: 'file', mtimeMs: at(15), newestMtimeMs: at(15) },
+    { path: '/var/log/nodus-relay.log', r: 1, type: 'file', mtimeMs: at(30), newestMtimeMs: at(30), inUse: true },
+    { path: '/var/log/nodus-voice.log', r: 1, type: 'file', mtimeMs: at(13), newestMtimeMs: at(13) },
+    { path: '/var/log/dpkg.log', r: 1, type: 'file', mtimeMs: at(90), newestMtimeMs: at(90) },
+    { path: '/var/log/bootstrap.log', r: 1, type: 'file', mtimeMs: at(400), newestMtimeMs: at(400) },
+    { path: '/var/log/wtmp', r: 1, type: 'file', mtimeMs: at(90), newestMtimeMs: at(90) },
+    { path: '/var/log/old.log.1', r: 1, type: 'file', mtimeMs: at(20), newestMtimeMs: at(20) },
+    { path: '/var/log/postgresql/postgresql-15-main.log', r: 2, type: 'file', mtimeMs: at(60), newestMtimeMs: at(60) },
+  ]);
+  const r = run(appTarget, f);
+  const REASON = 'A log file nothing writes to any more; check it before removing it by hand.';
+  for (const p of ['/var/log/nodus-image-e2e.log', '/var/log/nodus-check.log', '/var/log/postgresql/postgresql-15-main.log']) {
+    assert.deepEqual([r.at(p).status, r.at(p).sub, r.at(p).action, r.at(p).reason], ['investigate', 'idle', null, REASON], p);
+  }
+  assert.deepEqual([r.at('/var/log/nodus-relay.log').status, r.at('/var/log/nodus-relay.log').reason], ['protected', 'Being written now.'], 'held open');
+  assert.equal(r.at('/var/log/nodus-voice.log').status, 'protected', 'written within 14 days');
+  for (const p of ['/var/log/apt/history.log', '/var/log/dpkg.log', '/var/log/bootstrap.log', '/var/log/wtmp']) assert.equal(r.at(p).status, 'protected', `${p}: the system's own record`);
+  assert.deepEqual([r.at('/var/log/old.log.1').status, r.at('/var/log/old.log.1').sub], ['eligible', 'rotated'], 'rotated logs are unchanged');
+  // No rule ever selects one, with every rule on.
+  const every = JSON.parse(JSON.stringify(DEFAULT_POLICY));
+  for (const cfg of Object.values(every.rules)) if (cfg && typeof cfg === 'object') cfg.enabled = true;
+  const picked = policySelection({ items: r.items }, every, NOW).items.map((id) => r.items.find((x) => x.id === id).path);
+  assert.deepEqual(picked, ['/var/log/old.log.1']);
 });

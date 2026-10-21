@@ -2,24 +2,32 @@
 
 ## Where the limits come from
 
-The limit for a guest in the default Incus project is, in this order:
+The limit for a guest in the default Incus project comes from
+`effectiveSnapshotLimits` (`lib/app-storage/policy.js`):
 
-1. Its application's **storage policy** (Application storage → Retention),
-   when the policy's *Snapshots* rule is turned on: keep the newest `keep`
-   (1–1000) snapshots.
-2. Otherwise `admin/backend/src/lib/mcp-policy/snapshot-retention.json`.
-   Nodus is listed there with three; the Nodus policy is created from the same
-   number, so Nodus keeps its newest three exactly as before.
+1. Its application's **stored storage policy** (Application storage → Cleanup
+   rules) decides whenever one exists: with the *Snapshots* rule on, keep the
+   newest `keep` (1–1000) snapshots; with it off, the guest has no limit and
+   nothing is pruned. A new Dev Studio project (created empty after this
+   feature was installed) has its default rules stored and audited the first
+   time either the backend or the host runner resolves them; a registered,
+   cloned or older application starts with the rule proposed (off).
+2. Only when no policy is stored, the stored row is invalid, or mock2.db cannot
+   be read, `admin/backend/src/lib/mcp-policy/snapshot-retention.json` applies.
+   Nodus is listed there with three, and its stored policy was seeded from the
+   same number, so Nodus keeps its newest three exactly as before until
+   someone changes its rules.
 3. Otherwise no limit: the guest's snapshots are never pruned by count.
 
 The backend and the host runner each install a provider for these limits at
-start (`setSnapshotLimitsProvider`), and the limits are **re-read on every
-use** — each snapshot creation, each lifecycle event, each pruning round — so
-turning a rule on, off or changing its number applies to the next snapshot
-without a restart. A provider that cannot be read prunes nothing (the result
-says `retention limits unavailable`) rather than fall back to a guessed number.
-Turning a rule on reconciles that guest at once (`reconcile()`), not only at
-its next snapshot.
+start (`setSnapshotLimitsProvider`). The limits are cached for at most 30
+seconds (`memoizeLimits`); a saved policy drops the backend's cache at once,
+so turning a rule on, off or changing its number applies to the next snapshot
+without a restart. An "unavailable" answer is never cached, and a provider that
+cannot be read prunes nothing (the result says `retention limits unavailable`)
+rather than guess a number. Turning a rule on reconciles that guest at once
+(`reconcile()`), not only at its next snapshot, and the limits are applied
+again at every backend start.
 
 ## How pruning works
 

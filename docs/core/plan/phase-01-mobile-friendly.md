@@ -341,3 +341,13 @@ are scripted fixtures; these checks do not prove production execution.
 ## General browser UI-first slice — 2026-10-04
 
 Projects/Overview, four-step browser setup, active Flightdeck, Agents overview and project-scoped connection plans use mobile-first layout at360/375/390/768/1280/1920. Per-slice browser fixtures record guard-disabled overflow,44px primary controls, keyboard/focus and axe0; mobile Lighthouse100 was measured for Agents and the connection pages/dialog. Integrated stepper/whole-word label corrections, all four setup Lighthouse100 audits and independent source68c8c18a review passed. Publication and exact-head CI remain blocked release gates. Original Library pixels were retrieved and inspected in cloud. These are scripted fixture results, not owner deployment or real-provider acceptance. See fractionate-ui-first-release-20261004 and current UI tracker.
+
+## Application storage — 2026-10-21
+
+The Application storage page (`/storage/applications`), the check detail, the cleanup review and result, and the
+Cleanup rules tab use mobile-first layouts: cards collapse to one column, dialogs are full-screen below `sm`, and
+every button below 640 px is at least 44 px. Fixture journey (`app-storage.browser.mjs`, 34 checks) and the
+real-backend journey (`app-storage-real.browser.mjs`, 18 checks, against the real routers, store, cleanup job and
+a scripted container) found no horizontal scroll at 360/375/768/1280 px, and the fixtures also at 1536/1920 px.
+Lighthouse mobile accessibility scored 100 on all four pages (`app-storage-lighthouse.mjs`). The container,
+Incus and ZFS answers are scripted; these checks do not prove a run on a real container.

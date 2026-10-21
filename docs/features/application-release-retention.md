@@ -2,23 +2,24 @@
 
 ## Where the setting comes from
 
-An application's release retention is read for each release job, in this
-order:
+An application's release retention is read for each release job
+(`effectiveReleaseRetention` in `lib/app-storage/policy.js`):
 
-1. Its **storage policy** (Application storage → Retention), when the
-   policy's *Releases* rule is turned on: `keepReleases` (2–20) and the
-   `trimBeforeSeal` list. Its *Build workspaces* rule decides whether a
-   validation also sweeps other abandoned staging attempts.
-2. Otherwise the static opt-in in
-   `admin/backend/src/lib/mcp-policy/application-release-retention.json`.
-   Nodus is listed there with `keepReleases: 2` and `trimBuildCache: true`
-   (= `trimBeforeSeal: [".cache"]`). The Nodus policy is created from these
-   same numbers, so Nodus behaves exactly as before.
-3. Otherwise nothing: an application with no enabled rule and no static entry
-   keeps every release, as it always has.
-
-A policy that cannot be read applies no retention to that job (it says so in
-a `retention_unavailable` job event) rather than a guessed one.
+1. Its **stored storage policy** (Application storage → Cleanup rules) decides
+   whenever one exists. With the *Releases* rule on: `keepReleases` (2–20) and
+   the `trimBeforeSeal` list; its *Build workspaces* rule decides whether a
+   validation also sweeps other abandoned staging attempts. With the rule off,
+   no release is removed — turning a rule off on the page really stops it.
+2. Only when no policy is stored, the stored row is invalid, or mock2.db cannot
+   be read, the static opt-in in
+   `admin/backend/src/lib/mcp-policy/application-release-retention.json`
+   applies. Nodus is listed there with `keepReleases: 2` and
+   `trimBuildCache: true` (= `trimBeforeSeal: [".cache"]`), and its stored
+   policy was seeded from these same numbers, so Nodus behaves exactly as
+   before until someone changes its rules.
+3. Otherwise nothing: an application with no stored policy and no static entry
+   keeps every release, as it always has. A registered application's policy
+   starts as proposals, so nothing is removed until a person turns a rule on.
 
 Cleanup runs under the application's existing guest lease.
 

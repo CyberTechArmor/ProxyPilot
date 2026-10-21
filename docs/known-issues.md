@@ -447,3 +447,25 @@ provider is required.") until the coordinator gets past that step.
 `continue_platform_setup({ service })` refuses such a retry with the reason;
 the dashboard's Apply button does not. Fix: prepare those records after the SSO
 record is saved, or gate the per-service Apply on the observer.
+
+## Application storage: what is not proven yet (2026-10-21)
+
+The storage check, cleanup, retention and alerts (`docs/features/application-storage.md`) are tested against
+scripted containers only. Before turning destructive rules on for an existing application, run a storage check on
+it and read the proposed rules' effects. The first real release validation after deploying this is also the first
+real run of the step that stops the build's leftover processes before the seal (`stop_build_processes`,
+`reapAttemptScriptsScript`); a survivor fails the validation with `BUILD_PROCESS_ALIVE` rather than sealing.
+Known gaps: a same-filesystem bind mount created inside an item mid-removal is not detected (needs root in the
+container); a filter driver the repository configures can run as the repository's owner or `nobody` (never root);
+transfer bundles made before 2026-10 (`bundle-<random>`) carry no application and stay "Needs a look"; leftover
+working copies (e.g. `/opt/nodus-w48`) have no in-product removal by design; `project_origin.<id>` settings keys
+stay behind when a project is deleted.
+
+## Flaky: migration-service "the view never carries the secret"
+
+`migration-service.test.js` ("create: validates, mints one token, …") checks that
+`r.token.split('_')[2]` does not appear in the migration view. The token's secret is base64url
+(`lib/migration/token.js`), which can itself contain `_`, so the split sometimes yields a short fragment that
+occurs in the JSON by chance. Seen once in a full run on 2026-10-21; the file passes alone. Fix: take everything
+after the second `_` (`r.token.split('_').slice(2).join('_')`).
+

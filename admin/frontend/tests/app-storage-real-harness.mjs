@@ -103,7 +103,9 @@ export async function startRealBackend({ jobDelayMs = 2500 } = {}) {
   ensureSetupEngineSchema(mainDb);
   mainDb.exec(`CREATE TABLE audit_log (id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, resource_type TEXT, resource_id TEXT, details TEXT, ip_address TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE notifications (id TEXT PRIMARY KEY, level TEXT NOT NULL, title TEXT NOT NULL, body TEXT, source TEXT NOT NULL, source_id TEXT, dedupe_key TEXT, seen_count INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, read_at TEXT, dismissed_at TEXT);
-    CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);`);
+    CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+    CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL);`);
+  mainDb.prepare('INSERT INTO users (id, username) VALUES (?, ?)').run(String(USER.id), USER.username);
   const appId = registerNodus(mock2Db, world);
   // The deploy history, as app-storage-cleanup-e2e.test.js records it: the
   // rollback release was live before the current one.

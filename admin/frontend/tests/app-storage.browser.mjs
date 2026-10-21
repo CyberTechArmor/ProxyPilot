@@ -209,7 +209,7 @@ try {
     await held.getByText('Set aside by a cleanup', { exact: true }).waitFor();
     await held.getByText('Needs a look', { exact: true }).waitFor();
     assert.equal(await held.locator('input[type=checkbox]').count(), 0);
-    await page.locator(`[data-item="${byLabel('Release 7b7b7b7b (validation not passed)').id}"]`).getByText('Waiting for its validation result', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('Release 7b7b7b7b (being validated)').id}"]`).getByText('Being validated', { exact: true }).waitFor();
     const sharedBundle = page.locator(`[data-item="${byLabel('Transfer copy bundle-k9x2').id}"]`);
     await sharedBundle.getByText('Shared by all applications', { exact: true }).waitFor();
     assert.equal(await sharedBundle.locator('input[type=checkbox]').count(), 0, 'a bundle no application claims cannot be selected here');
@@ -359,7 +359,7 @@ try {
     assert.equal(world.state.policyPuts[0].body.policy.rules.caches.enabled, true);
     assert.equal(world.state.policyPuts[0].body.policy.rules.tempFiles.enabled, false, 'other rules unchanged');
     await page.locator('[data-rule="tempFiles"]').getByText('Proposed', { exact: true }).waitFor();
-    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by user #1\.$/).waitFor();
+    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by admin\.$/).waitFor();
     // An out-of-range value cannot be saved.
     const keep = page.locator('[data-rule="releases"]').getByLabel('Releases to keep (2 to 20)');
     await keep.fill('1');

@@ -76,7 +76,7 @@ export const FIGURE_LABELS = {
 // A short note for item `sub` values whose status alone does not say why
 // (WS1 contract 2026-10-21 §3, §4). Others need no chip.
 export const SUB_LABELS = {
-  pending: 'Waiting for its validation result',
+  pending: 'Being validated',
   'rollback-unknown': 'Kept until the previous release is known',
   kept: 'Kept by the release rules',
   unknown: 'Release not identified',
@@ -85,6 +85,7 @@ export const SUB_LABELS = {
   'recovery-set': 'Kept or removed together',
   current: 'Current log',
   rotated: 'Old rotated copy',
+  idle: 'Nothing writes to it any more',
 };
 
 export const KIND_LABELS = {
@@ -398,7 +399,7 @@ export const POLICY_TEXT = {
   revisionConflict: 'Someone else changed these rules. The latest version is shown; make your change again.',
   loadFailed: 'Could not load the rules.',
   loading: 'Loading the rules…',
-  changed: (age, date, who) => `Last changed ${age} (${date})${who ? ` by user #${who}` : ''}.`,
+  changed: (age, date, who) => `Last changed ${age} (${date})${who ? ` by ${who}` : ''}.`,
   neverChanged: 'Not changed here yet.',
   defaultsNewRecorded: 'These rules were turned on when the project was created (the documented defaults).',
   noCheckTitle: 'No storage check has run yet',

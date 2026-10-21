@@ -146,7 +146,7 @@ async function journey(width, { sweep }) {
     assert.equal(await summary(page), '0 selected');
     assert.equal(await page.getByRole('button', { name: 'Review cleanup' }).isDisabled(), true);
     await plainCheck(page, `real detail ${width}`);
-    const SUB_CHIPS = { pending: 'Waiting for its validation result', 'rollback-unknown': 'Kept until the previous release is known', kept: 'Kept by the release rules', unknown: 'Release not identified', held: 'Set aside by a cleanup', shared: 'Shared by all applications', 'recovery-set': 'Kept or removed together', current: 'Current log', rotated: 'Old rotated copy' };
+    const SUB_CHIPS = { pending: 'Being validated', 'rollback-unknown': 'Kept until the previous release is known', kept: 'Kept by the release rules', unknown: 'Release not identified', held: 'Set aside by a cleanup', shared: 'Shared by all applications', 'recovery-set': 'Kept or removed together', current: 'Current log', rotated: 'Old rotated copy', idle: 'Nothing writes to it any more' };
     const withSub = check.items.filter((it) => SUB_CHIPS[it.sub]);
     for (const it of withSub) await page.locator(`[data-item="${it.id}"]`).getByText(SUB_CHIPS[it.sub], { exact: true }).waitFor();
     ok(`${width}px: the detail renders the real check — header figures, notes, ${check.categories.filter((c) => c.itemCount > 0).length} categories with their statuses, all ${check.items.length} items with status, reason and size (${withSub.length} with a note for their kind: ${[...new Set(withSub.map((i) => i.sub))].join(', ')}); ${boxes} checkboxes, none preselected; no tool names or jargon on screen`);
@@ -280,8 +280,8 @@ async function journey(width, { sweep }) {
     await page.locator('[data-rule="caches"]').getByText('Proposed', { exact: true }).waitFor();
     await temp.getByTestId('rule-effect').waitFor();
     assert.equal(await page.getByTestId('policy-source').innerText(), 'Changed by an administrator');
-    assert.ok(now.updatedAt && now.updatedBy === '1', 'the backend records who and when');
-    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by user #1\.$/).waitFor();
+    assert.ok(now.updatedAt && now.updatedBy === '1' && now.updatedByName === 'admin', 'the backend records who and when, by name');
+    await page.getByTestId('policy-changed').getByText(/^Last changed just now \(.+\) by admin\.$/).waitFor();
     ok(`${width}px: rules — Nodus's kept settings, the proposed "Temporary files" rule with its real effects preview; Turn on sent one PUT with expectedRevision ${before.revision}; the backend stored revision ${now.revision} and kept the other proposals proposed`);
 
     assert.deepEqual(errors, [], 'no page errors');

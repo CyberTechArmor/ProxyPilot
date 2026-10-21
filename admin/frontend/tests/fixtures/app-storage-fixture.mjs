@@ -143,7 +143,7 @@ export function nodusCheck(now = Date.now(), { checkId = CHECK_ID, ageMs = 5 * 6
     // WS1 sub values (contract 2026-10-21 §3, §4): a set-aside entry, a
     // release whose validation has not passed, a bundle no application name claims.
     I({ category: 'other', label: '/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1', path: '/opt/nodus-releases/.pp-cleanup-hold-3e9a7c12-1', sub: 'held', status: 'investigate', reason: 'Set aside by an earlier cleanup because it changed while the cleanup ran; check it before removing it.', alloc: 8192, files: 2, ageMs: 3 * HOUR }),
-    I({ category: 'releases', label: 'Release 7b7b7b7b (validation not passed)', path: '/opt/nodus-releases/7b7b7b7b00000000000000000000000000000000-p6-7b7b7b7b-1111-4111-8111-111111111111', kind: 'release', sub: 'pending', status: 'protected', reason: 'Its validation has not passed (it may still be running), so it is kept.', alloc: 488e6, logical: 900e6, files: 47800, ageMs: HOUR }),
+    I({ category: 'releases', label: 'Release 7b7b7b7b (being validated)', path: '/opt/nodus-releases/7b7b7b7b00000000000000000000000000000000-p6-7b7b7b7b-1111-4111-8111-111111111111', kind: 'release', sub: 'pending', status: 'protected', reason: 'Its validation has no result yet, so it is kept.', alloc: 488e6, logical: 900e6, files: 47800, ageMs: HOUR }),
     I({ category: 'archives', label: 'Transfer copy bundle-k9x2', path: '/var/lib/proxypilot/application-release-transfers/bundle-k9x2', location: 'host', sub: 'shared', sharedHost: true, status: 'investigate', reason: 'A transfer copy no application name claims; it may belong to another application.', alloc: 21e6, files: 1, ageMs: 5 * DAY }),
     I({ category: 'other', label: '/var/lib/nodus-publication', path: '/var/lib/nodus-publication', status: 'investigate', reason: 'Not claimed by any rule.', alloc: 12e6, files: 340, ageMs: 6 * DAY }),
     I({ category: 'other', label: 'Not measured individually (operating system and other files)', path: null, kind: 'pseudo', status: 'investigate', reason: 'The rest of the used space; it is not attributed to a folder.', alloc: 238e6, files: 0, precision: 'estimate', ageMs: 0 }),
@@ -277,8 +277,8 @@ export function targetDetail(now = Date.now(), { check = nodusCheck(now), runnin
   };
 }
 
-export function policyResponse({ policy = nodusPolicy(), revision = 1, source = 'preserved', updatedAt = null, updatedBy = null, checkId = CHECK_ID } = {}) {
-  return { policy, defaults: DEFAULT_POLICY, source, revision, updatedAt, updatedBy, checkId, effects: nodusEffects() };
+export function policyResponse({ policy = nodusPolicy(), revision = 1, source = 'preserved', updatedAt = null, updatedBy = null, updatedByName = null, checkId = CHECK_ID } = {}) {
+  return { policy, defaults: DEFAULT_POLICY, source, revision, updatedAt, updatedBy, updatedByName, checkId, effects: nodusEffects() };
 }
 
 /** GET /cleanups/:id for a finished cleanup of the requested ids: one skipped with its reason. */

@@ -417,7 +417,7 @@ test('used figures are named by what they measure; rules say who changed them an
   assert.equal(TEXT.usedSize('3.6 GB'), '3.6 GB of files in the container');
   assert.equal(TEXT.used, 'Used by files');
   assert.equal(TEXT.onDisk, 'On disk, with snapshots');
-  assert.equal(POLICY_TEXT.changed('5 minutes ago', 'Oct 21, 2026, 1:00 AM', '1'), 'Last changed 5 minutes ago (Oct 21, 2026, 1:00 AM) by user #1.');
+  assert.equal(POLICY_TEXT.changed('5 minutes ago', 'Oct 21, 2026, 1:00 AM', 'admin'), 'Last changed 5 minutes ago (Oct 21, 2026, 1:00 AM) by admin.');
   assert.equal(POLICY_TEXT.changed('just now', 'x', null), 'Last changed just now (x).');
   assert.match(POLICY_TEXT.noCheckNudge, /you can still turn a rule on/);
   assert.equal(RULE_STATE_HINTS.on(RULE_TEXT.snapshots.when), 'On: it runs whenever a snapshot is taken, and each time ProxyPilot starts.');
@@ -486,8 +486,9 @@ test('several snapshots (not all) free at least their figures; new-project defau
 });
 
 test('new item kinds get a plain note; figure labels name no tools (WS1 §3, §4; review N4)', () => {
-  assert.deepEqual(Object.keys(SUB_LABELS).sort(), ['current', 'held', 'kept', 'pending', 'recovery-set', 'rollback-unknown', 'rotated', 'shared', 'unknown']);
-  assert.equal(SUB_LABELS.pending, 'Waiting for its validation result');
+  assert.deepEqual(Object.keys(SUB_LABELS).sort(), ['current', 'held', 'idle', 'kept', 'pending', 'recovery-set', 'rollback-unknown', 'rotated', 'shared', 'unknown']);
+  assert.equal(SUB_LABELS.pending, 'Being validated');
+  assert.equal(SUB_LABELS.idle, 'Nothing writes to it any more');
   for (const label of [...Object.values(SUB_LABELS), ...Object.values(FIGURE_LABELS)]) {
     assert.equal(/\b(ZFS|dataset|referenced|df|Incus)\b/i.test(label), false, label);
   }

@@ -62,8 +62,9 @@ export const ROLLBACK_UNKNOWN_REASON = 'The previous release could not be identi
 //                 previousSha (previousLive undefined).
 //   liveVerifiedAt, validated [{ sha, path, validatedAt }]
 //                 the passed validations, for the waiting candidate
-//   pending       folders whose validation has no result yet (recorded as not
-//                 passed while it runs): kept, never removed by the cap
+//   pending       folders whose validation has no result yet (passed null or
+//                 missing): kept, never removed by the cap. A failed validation
+//                 (passed false) is a rejection and gets no protection.
 // Nothing here decides a role: describeReleases is the one definition.
 export function releaseContextFromApplication(app, { root = null, previousLive = undefined } = {}) {
   const live = app?.live || null;
@@ -78,8 +79,10 @@ export function releaseContextFromApplication(app, { root = null, previousLive =
   const validated = candidates
     .filter(c => c?.validation?.passed === true && SHA_RE.test(c.sha || '') && under(c.validation.releasePath))
     .map(c => ({ sha: c.sha, path: c.validation.releasePath, validatedAt: c.validation.validatedAt || c.checkpointAt || null }));
+  // pending: a validation with no result yet (passed null/undefined). A
+  // failed validation (passed false) is a rejection: no protection.
   const pending = candidates
-    .filter(c => c?.validation && c.validation.passed !== true && under(c.validation.releasePath))
+    .filter(c => c?.validation && (c.validation.passed === null || c.validation.passed === undefined) && under(c.validation.releasePath))
     .map(c => c.validation.releasePath);
   return { previousSha, rollback, previousLive: supplied ? history : null, liveVerifiedAt: live?.verifiedAt || null, validated, pending };
 }
@@ -137,28 +140,33 @@ export function describeReleases(fs, p, a) {
     const relative = p.relative(root, resolved);
     if (relative && !relative.startsWith('..' + p.sep) && relative !== '..' && !p.isAbsolute(relative)) backing.add(p.join(root, relative.split(p.sep)[0]));
   }
-  const markerSha = file => {
-    let fd = null;
-    try {
-      fd = fs.openSync(file, 'r');
-      const buffer = Buffer.alloc(4096);
-      const n = fs.readSync(fd, buffer, 0, 4096, 0);
-      const sha = JSON.parse(buffer.subarray(0, n).toString('utf8')).sha;
-      return /^[a-f0-9]{40}$/.test(sha || '') ? sha : null;
-    } catch { return null; } finally { if (fd !== null) fs.closeSync(fd); }
-  };
+  // Release markers are read through the fd-relative helpers (safe-remove.js):
+  // the release root is opened from / with no link on the way, each release
+  // folder O_NOFOLLOW from it (its fstat must match the lstat just taken), and
+  // the marker O_NOFOLLOW from that folder — a regular file of at most 4 KiB.
+  if (typeof safeRemover !== 'function') refuse('NO_SAFE_REMOVER');
+  const walker = safeRemover(fs, p);
   const sealed = [];
-  for (const name of fs.readdirSync(root)) {
-    if (!/^[a-f0-9]{40}-p[1-9][0-9]*-[a-f0-9-]{36}$/.test(name)) continue;
-    const file = p.join(root, name);
-    const stat = fs.lstatSync(file);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022)) continue;
-    const marker = p.join(file, '.proxypilot-release.json');
-    let mstat = null;
-    try { mstat = fs.lstatSync(marker); } catch { mstat = null; }
-    if (!mstat || !mstat.isFile() || mstat.isSymbolicLink()) continue;
-    sealed.push({ path: file, name, mtimeMs: stat.mtimeMs, sha: markerSha(marker) });
-  }
+  const rootFd = walker.openDir(root);
+  try {
+    for (const raw of walker.listAt(rootFd)) {
+      const name = raw.toString();
+      if (!/^[a-f0-9]{40}-p[1-9][0-9]*-[a-f0-9-]{36}$/.test(name)) continue;
+      const file = p.join(root, name);
+      const stat = walker.lstatAt(rootFd, name);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022)) continue;
+      let relFd = null, marker = null;
+      try {
+        relFd = walker.openDirAt(rootFd, name);
+        if (!walker.same(fs.fstatSync(relFd), stat)) continue;
+        marker = walker.readFileAt(relFd, '.proxypilot-release.json', 4096);
+      } catch { marker = null; } finally { if (relFd !== null) walker.close(relFd); }
+      if (!marker) continue;
+      let sha = null;
+      try { const v = JSON.parse(marker.data.toString('utf8')).sha; sha = /^[a-f0-9]{40}$/.test(v || '') ? v : null; } catch { sha = null; }
+      sealed.push({ path: file, name, mtimeMs: stat.mtimeMs, sha });
+    }
+  } finally { walker.close(rootFd); }
   sealed.sort((x, y) => (y.mtimeMs - x.mtimeMs) || (x.name < y.name ? 1 : x.name > y.name ? -1 : 0));
   const protect = new Set((Array.isArray(a.protect) ? a.protect : []).filter(x => typeof x === 'string' && p.dirname(x) === root));
   const isSealed = x => sealed.some(r => r.path === x);

@@ -172,8 +172,10 @@ test('release context: the facts describeReleases decides from (recorded previou
   assert.deepEqual(releaseContextFromApplication(app, { root }), {
     previousSha: '2'.repeat(40), rollback: `${root}/prev`, previousLive: null, liveVerifiedAt: '2026-10-20T10:00:00Z',
     validated: [{ sha: '2'.repeat(40), path: `${root}/prev`, validatedAt: '2026-10-19T10:00:00Z' }, { sha: '3'.repeat(40), path: `${root}/waiting`, validatedAt: '2026-10-20T11:00:00Z' }],
-    pending: [`${root}/failed`],
-  }, 'without a history source the live record names the previous release; folders outside the release root are not passed on');
+    pending: [],
+  }, 'without a history source the live record names the previous release; a failed validation is not pending; folders outside the release root are not passed on');
+  const running = releaseContextFromApplication({ ...app, candidates: [...app.candidates, { sha: '7'.repeat(40), validation: { passed: null, releasePath: `${root}/running` } }, { sha: '8'.repeat(40), validation: { releasePath: `${root}/unknown` } }] }, { root });
+  assert.deepEqual(running.pending, [`${root}/running`, `${root}/unknown`], 'pending means no result yet (passed null or missing)');
   assert.deepEqual(releaseContextFromApplication({ live: null, candidates: [] }, { root }), { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [], pending: [] });
   // A supplied history is the one answer, even against the live record's previousSha (a release rolled back from).
   const history = releaseContextFromApplication(app, { root, previousLive: { sha: '6'.repeat(40), path: `${root}/before` } });
@@ -199,6 +201,34 @@ test('the cap removes the oldest releases outside the protected set; the release
   for (const kept of [f.live, f.obsolete, f.candidate, waiting, pending, old2]) assert.equal(fs.existsSync(kept), true, kept);
   assert.equal(fs.existsSync(old1), false, 'the oldest release outside the protected set is the one removed');
   assert.throws(() => removeSelectedRelease(fs, path, { ...f.a, ...facts, path: pending }, () => { throw new Error('must not remove'); }), /RELEASE_IS_CANDIDATE/);
+});
+
+test('a failed validation is a rejection: removed oldest-first by the cap like any other release, while one without a result stays', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  const rejectedOld = f.create(4); fs.utimesSync(rejectedOld, f.at(0), f.at(0));
+  const noResult = f.create(5); fs.utimesSync(noResult, f.at(1), f.at(1));
+  const app = { live: { sha: '1'.repeat(40), releasePath: f.live, verifiedAt: '2026-10-20T12:00:00Z' }, candidates: [
+    { sha: '4'.repeat(40), validation: { passed: false, releasePath: rejectedOld } },
+    { sha: '5'.repeat(40), validation: { passed: null, releasePath: noResult } },
+  ] };
+  const ctx = releaseContextFromApplication(app, { root: f.root, previousLive: f.a.previousLive });
+  assert.deepEqual(ctx.pending, [noResult]);
+  const result = cleanupReleaseArtifacts(fs, path, { ...f.a, ...ctx });
+  assert.equal(result.releasesRemoved, 1);
+  assert.equal(fs.existsSync(rejectedOld), false, 'the rejected release went, oldest first');
+  for (const kept of [f.live, f.obsolete, f.candidate, noResult]) assert.equal(fs.existsSync(kept), true, kept);
+});
+
+test('release markers are read through the pinned folders: a marker that is a link or too large is not a release marker', { skip: process.platform === 'win32' }, t => {
+  const f = fixture(t);
+  const linked = f.create(4); fs.rmSync(path.join(linked, '.proxypilot-release.json'));
+  const outside = path.join(f.parent, 'outside-marker.json'); fs.writeFileSync(outside, JSON.stringify({ sha: '4'.repeat(40) }));
+  fs.symlinkSync(outside, path.join(linked, '.proxypilot-release.json'));
+  const big = f.create(5); fs.writeFileSync(path.join(big, '.proxypilot-release.json'), JSON.stringify({ sha: '5'.repeat(40), pad: 'x'.repeat(5000) }));
+  const d = describeReleases(fs, path, f.a);
+  assert.equal(d.sealed.some(r => r.path === linked), false, 'a linked marker is never followed');
+  assert.equal(d.sealed.some(r => r.path === big), false, 'a marker over 4 KiB is not read');
+  assert.ok(d.sealed.find(r => r.path === f.obsolete).sha, 'ordinary markers still read');
 });
 
 test('a release containing the live application model data is never pruned', { skip: process.platform === 'win32' }, t => {

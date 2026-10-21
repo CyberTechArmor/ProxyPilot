@@ -458,8 +458,7 @@ real run of the step that stops the build's leftover processes before the seal (
 Known gaps: a same-filesystem bind mount created inside an item mid-removal is not detected (needs root in the
 container); a filter driver the repository configures can run as the repository's owner or `nobody` (never root);
 transfer bundles made before 2026-10 (`bundle-<random>`) carry no application and stay "Needs a look"; leftover
-working copies (e.g. `/opt/nodus-w48`) have no in-product removal by design; `project_origin.<id>` settings keys
-stay behind when a project is deleted.
+working copies (e.g. `/opt/nodus-w48`) have no in-product removal by design.
 
 ## Flaky: migration-service "the view never carries the secret"
 

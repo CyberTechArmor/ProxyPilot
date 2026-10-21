@@ -151,6 +151,13 @@ export function buildContext({ target, activity = {}, facts = null } = {}) {
     ctx.rollbackUnknown = !!rel.rollbackUnknown;
     ctx.keptReleases = [...(rel.protect || [])];
     ctx.pendingReleases = [...(rel.pending || [])];
+    // A validation still running is recorded as not passed until it ends;
+    // while its job is open the release is being validated, not rejected.
+    const open = new Set(ctx.openJobIds);
+    for (const c of target.candidates || []) {
+      const v = c?.validation;
+      if (v && v.passed !== true && v.jobId && open.has(v.jobId) && typeof v.releasePath === 'string' && !ctx.pendingReleases.includes(v.releasePath)) ctx.pendingReleases.push(v.releasePath);
+    }
     ctx.sealedReleases = (rel.sealed || []).map((r) => r.path);
     return ctx;
   }

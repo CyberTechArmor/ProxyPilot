@@ -662,6 +662,14 @@ test('a sealed release whose validation has no result yet is kept (describeRelea
   assert.equal(rejected.at(`${R}/${W.OLD}`).status, 'eligible', 'a failed validation is a rejection (WS2), not pending');
 });
 
+test('a release whose validation job is still open is being validated, not rejected (final review O1)', () => {
+  const path = '/opt/r/' + 'b'.repeat(40) + '-p1-job';
+  const target = { kind: 'application', profile: { sourceDir: '/opt/app', releaseRoot: '/opt/r' }, candidates: [{ sha: 'b'.repeat(40), validation: { passed: false, releasePath: path, jobId: 'job-running' } }] };
+  const facts = { releases: { ok: true, live: null, rollback: null, pending: [], protect: [], backing: [], sealed: [{ path }] } };
+  assert.deepEqual(buildContext({ target, activity: { openJobIds: ['job-running'] }, facts }).pendingReleases, [path]);
+  assert.deepEqual(buildContext({ target, activity: { openJobIds: [] }, facts }).pendingReleases, [], 'once its job ended, passed:false is a rejection');
+});
+
 /* ---- re-review N1: an application's one-off logs are a leftover worth a look ---- */
 
 test('a current log nothing writes to for 14 days and nothing holds open needs a look; recent, open or system logs stay protected', () => {

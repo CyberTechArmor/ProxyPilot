@@ -284,6 +284,18 @@ test('a project the host created empty after installation gets the defaults; a c
   assert.equal('m2-12' in limits, false, 'a clone prunes no snapshots until someone turns the rule on');
 });
 
+test('deleting a project removes its origin and storage records, so a reused id inherits nothing (final review O3)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../mock2/projects.js', import.meta.url), 'utf8');
+  // Inside deleteProject's transaction, before the project row goes.
+  const body = src.slice(src.indexOf('export function deleteProject('), src.indexOf('DELETE FROM mock2_projects WHERE id = ?'));
+  assert.match(body, /db\.transaction\(/);
+  assert.match(body, /DELETE FROM mock2_settings WHERE key = \?`\)\.run\(`\$\{PROJECT_ORIGIN_KEY_PREFIX\}\$\{id\}`\)/);
+  assert.match(body, /const key = `project:\$\{id\}`/);
+  for (const table of ['mock2_storage_samples', 'mock2_storage_policies', 'mock2_storage_checks', 'mock2_storage_cleanups']) assert.match(body, new RegExp(`DELETE FROM ${table} WHERE target_key = \\?`), table);
+  assert.match(body, /mock2_storage_checks WHERE target_key = \? AND status <> 'running'/, 'a running check is never removed');
+});
+
 test('both clone paths (dashboard route and clone_project) record the origin with the project row', async () => {
   const { readFileSync } = await import('node:fs');
   const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');

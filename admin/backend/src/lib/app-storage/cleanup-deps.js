@@ -22,7 +22,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { setSnapshotLimitsProvider } from '../snapshot-retention.js';
+import { setSnapshotLimitsProvider, memoizeLimits } from '../snapshot-retention.js';
 import { getJob } from '../setup-engine/store.js';
 import { createExportStore } from '../lxc-exports.js';
 import { createCleanupService } from './cleanup-service.js';
@@ -120,9 +120,13 @@ export function createBackendCleanupService({ storage, mainDb, logAudit, now = (
 // rules through storage.runCheck and storage.cleanupService() — the shared
 // instances, never second copies. → stop()
 export function startAppStorageAutomation({ storage, reconcileSnapshots = null, log = console.log, env = process.env }) {
-  setSnapshotLimitsProvider(() => storage.effectiveSnapshotLimits());
+  // Re-read at most every 30 s (each read scans the targets' policies), and
+  // at once after a policy is saved.
+  const limits = memoizeLimits(() => storage.effectiveSnapshotLimits());
+  const unsubscribe = typeof storage.onPolicyChange === 'function' ? storage.onPolicyChange(() => limits.invalidate()) : () => {};
+  setSnapshotLimitsProvider(limits);
   try { reconcileSnapshots?.(); } catch { /* the listener reconciles on its own */ }
-  if (env.PROXYPILOT_DISABLE_CRONS === '1') return () => { setSnapshotLimitsProvider(null); };
+  if (env.PROXYPILOT_DISABLE_CRONS === '1') return () => { unsubscribe(); setSnapshotLimitsProvider(null); };
   const scheduler = createRetentionScheduler({
     listTargets: () => storage.listTargets(),
     resolveTarget: key => storage.resolveTarget(key),
@@ -134,7 +138,7 @@ export function startAppStorageAutomation({ storage, reconcileSnapshots = null, 
     log, env,
   });
   scheduler.start().catch(() => {});
-  return () => { scheduler.stop(); setSnapshotLimitsProvider(null); };
+  return () => { scheduler.stop(); unsubscribe(); setSnapshotLimitsProvider(null); };
 }
 
 // ── the host runner ─────────────────────────────────────────────────────
@@ -227,7 +231,8 @@ export function runnerAppStorage({ mainDb, mock2DbPath, openDb = null, log = () 
     // The policy-fed snapshot limits for this runner's own snapshot jobs.
     async installSnapshotLimits() {
       const db2 = await mock2Db();
-      setSnapshotLimitsProvider(() => effectiveSnapshotLimits({ mock2Db: db2, mainDb }));
+      // The runner cannot hear the backend's policy saves: a 30 s re-read.
+      setSnapshotLimitsProvider(memoizeLimits(() => effectiveSnapshotLimits({ mock2Db: db2, mainDb })));
       return true;
     },
     mock2DbPath: path.resolve(mock2DbPath),

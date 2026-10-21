@@ -136,7 +136,7 @@ test('caches, logs and execution history follow their rules', async (t) => {
   assert.equal(at('/root/.cache/Microsoft').status, 'eligible');
   assert.equal(at('/var/cache/apt/archives/nodejs_22.deb').status, 'eligible');
   assert.equal(result_items_have(at, '/var/cache/apt/archives/lock'), false, 'apt lock is not a cache item');
-  assert.equal(at('/var/log/nodus-image-e2e.log').status, 'eligible');
+  assert.equal(at('/var/log/nodus-image-e2e.log').status, 'protected', 'a current .log is never cleaned up, however old');
   assert.equal(at('/var/log/syslog.2.gz').status, 'eligible');
   assert.equal(at('/var/log/dpkg.log').status, 'protected');
   assert.equal(at('/var/log/postgresql/postgresql-17-main.log').status, 'protected');
@@ -404,4 +404,28 @@ test('on real files, a check cut by its budget makes nothing eligible through an
   assert.ok(r.items.some((it) => it.status === 'investigate' && /how recently it changed is unknown/.test(it.reason)));
   const sel = policySelection(r, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
   assert.ok(sel.items.every((id) => r.items.find((x) => x.id === id).precision !== 'at-least'));
+});
+
+/* ---- review finding 5: only rotated copies of logs are cleanable ---- */
+
+test('logs: current logs (package history, bootstrap, alternatives, an application\'s own) are protected; old rotated copies are eligible', () => {
+  const old = NOW - 60 * W.DAY;
+  const f = facts([{ path: '/var/log/apt', depth: 1, role: 'log' }, { path: '/var/log', depth: 1, role: 'log' }], [
+    ...['history.log', 'term.log', 'history.log.1.gz', 'history.log.2.gz'].map((n) => ({ path: `/var/log/apt/${n}`, r: 0, type: 'file', mtimeMs: old, newestMtimeMs: old })),
+    ...['dpkg.log', 'alternatives.log', 'bootstrap.log', 'nodus-image-e2e.log', 'wtmp', 'dpkg.log.1', 'syslog-20261001', 'syslog-20261001.gz', 'kern.log.old', 'fresh.log.1'].map((n) => ({ path: `/var/log/${n}`, r: 1, type: 'file', mtimeMs: n === 'fresh.log.1' ? NOW - W.DAY : old, newestMtimeMs: n === 'fresh.log.1' ? NOW - W.DAY : old })),
+    { path: '/var/log/busy.log.1', r: 1, type: 'file', inUse: true, mtimeMs: old, newestMtimeMs: old },
+  ]);
+  const r = run(appTarget, f);
+  for (const p of ['/var/log/apt/history.log', '/var/log/apt/term.log', '/var/log/dpkg.log', '/var/log/alternatives.log', '/var/log/bootstrap.log', '/var/log/nodus-image-e2e.log', '/var/log/wtmp']) {
+    assert.equal(r.at(p).status, 'protected', p);
+  }
+  assert.equal(r.at('/var/log/dpkg.log').reason, 'A current log; only old rotated copies are cleaned up.');
+  for (const p of ['/var/log/apt/history.log.1.gz', '/var/log/apt/history.log.2.gz', '/var/log/dpkg.log.1', '/var/log/syslog-20261001', '/var/log/syslog-20261001.gz', '/var/log/kern.log.old']) {
+    assert.deepEqual([r.at(p).status, r.at(p).sub], ['eligible', 'rotated'], p);
+  }
+  assert.equal(r.at('/var/log/fresh.log.1').status, 'protected', 'rotated within the week');
+  assert.equal(r.at('/var/log/busy.log.1').status, 'protected', 'still being written');
+  const sel = policySelection({ items: r.items }, JSON.parse(JSON.stringify(DEFAULT_POLICY)), NOW);
+  const picked = sel.items.map((id) => r.items.find((x) => x.id === id).path).sort();
+  assert.deepEqual(picked, ['/var/log/apt/history.log.1.gz', '/var/log/apt/history.log.2.gz', '/var/log/dpkg.log.1', '/var/log/kern.log.old', '/var/log/syslog-20261001', '/var/log/syslog-20261001.gz']);
 });

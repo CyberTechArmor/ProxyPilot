@@ -29,7 +29,6 @@ export const GROUP_THRESHOLD = 5;
 const TEMP_MIN_AGE_MS = DAY;
 const WORKSPACE_MIN_AGE_MS = HOUR;
 const ROTATED_MIN_AGE_MS = 7 * DAY;
-const FINISHED_LOG_MIN_AGE_MS = 14 * DAY;
 const EVIDENCE_MIN_AGE_MS = 14 * DAY;
 const HISTORY_KEEP = 2;
 
@@ -345,22 +344,27 @@ function classifyTemp(it, { now }, svcUid) {
   return { ...base, status: 'eligible', reason: it.type === 'link' ? 'A temporary link nothing is using (the link only; never followed).' : 'Temporary files nothing is using that have not changed for over a day.' };
 }
 
-const ROTATED_RE = /(\.[0-9]+(\.(gz|xz|bz2|zst))?|\.(gz|xz|bz2|zst)|\.old)$/;
+// Rotated copies only: name.1 … name.N, compressed copies (.gz .xz .bz2 .zst),
+// .old, and date-stamped copies (name-YYYYMMDD[HH]), each optionally
+// compressed. Current logs — dpkg.log, apt/history.log, alternatives.log,
+// bootstrap.log, an application's own .log — are never cleaned up here: they
+// are the record of what happened, and logrotate already manages them.
+export const ROTATED_RE = /(\.[0-9]+|\.old|-[0-9]{8}(?:[0-9]{2})?)?(?:\.(?:gz|xz|bz2|zst))?$/;
+export function isRotatedLog(name) {
+  const m = ROTATED_RE.exec(String(name || ''));
+  return !!m && m[0].length > 0 && m.index > 0;
+}
 
 function classifyLog(it, { now }) {
   const name = it.name || basename(it.path);
   if (it.type === 'dir') return { category: 'logs', status: 'protected', reason: 'A log folder; its files are not checked one by one.' };
   if (it.type !== 'file') return { category: 'logs', status: 'protected', reason: 'A system log entry.' };
-  if (ROTATED_RE.test(name)) {
+  if (isRotatedLog(name)) {
+    if (it.inUse) return { category: 'logs', status: 'protected', sub: 'rotated', reason: 'Being written now.' };
     if (tooYoung(it, now, ROTATED_MIN_AGE_MS)) return { category: 'logs', status: 'protected', sub: 'rotated', reason: 'A recently rotated log.' };
-    return { category: 'logs', status: 'eligible', sub: 'rotated', reason: 'An old rotated log.' };
+    return { category: 'logs', status: 'eligible', sub: 'rotated', reason: 'An old rotated copy of a log.' };
   }
-  if (/\.log$/.test(name)) {
-    if (it.inUse) return { category: 'logs', status: 'protected', reason: 'Being written now.' };
-    if (tooYoung(it, now, FINISHED_LOG_MIN_AGE_MS)) return { category: 'logs', status: 'protected', reason: 'Recent.' };
-    return { category: 'logs', status: 'eligible', sub: 'finished', reason: 'A finished log nothing is writing to.' };
-  }
-  return { category: 'logs', status: 'protected', reason: 'A system log.' };
+  return { category: 'logs', status: 'protected', sub: 'current', reason: it.inUse ? 'Being written now.' : 'A current log; only old rotated copies are cleaned up.' };
 }
 
 function classifyOther(it, { target }) {

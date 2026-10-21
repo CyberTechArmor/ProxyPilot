@@ -479,7 +479,7 @@ async function runFailureDiagnosis({ project, cycle, ready, smokeReport, changed
 // cycle and injected as a labeled user turn after the task. A fresh (non-resume)
 // build passes null, which also expires any dangling one-time authorizations so a
 // stale grant can never apply to an unrelated later build ("expires with the cycle").
-export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, requestId = null, segment = null, task = null, buildMode = null, escalate = false, escalateModel = null, escalateEffort = null, escalateThinking = null }) {
+export async function startCycle({ project, instruction, initiatedBy, actingAsAdmin = 0, resumeContext = null, recovery = '', requestId = null, segment = null, task = null, buildMode = null, escalate = false, escalateModel = null, escalateEffort = null, escalateThinking = null }) {
   const projectId = Number(project.id);
   if (!resumeContext) { try { expireStaleAuthorizations(projectId); } catch { /* best effort */ } }
   // Refresh the base app BEFORE the build reads the tree, so the cycle works
@@ -737,8 +737,15 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     requestId: reqId, segment: seg,
   });
   // Persist the resume context (operator guidance) so runCycle injects it as a
-  // labeled turn after the task.
-  if (resumeContext) updateCycle(cycle.id, { resume_context_json: JSON.stringify(resumeContext) });
+  // labeled turn after the task. The task recovery section (retryCycle) rides
+  // with it; on a BARE resume it is stored alone, marked bare, so everything
+  // that treats "no guidance" as a fresh start keeps doing so and the model
+  // sees only the checkpoint text.
+  const rec = String(recovery || '').trim();
+  const persistedResume = resumeContext
+    ? { ...resumeContext, ...(rec ? { recovery: rec } : {}) }
+    : (rec ? { recovery: rec, bare: true } : null);
+  if (persistedResume) updateCycle(cycle.id, { resume_context_json: JSON.stringify(persistedResume) });
   // Stamp the routing decision on the cycle (reviewable; the outcome recorder
   // and the Build panel read it back).
   if (routing) {
@@ -829,6 +836,14 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
   // the build runs exactly as before. Fresh (non-resume) quick cycles only.
   const wantsPrepass = modeStr === BUILD_MODE_QUICK && !resumeContext && prepassEnabled(routingEnv());
   const driveCycle = async () => {
+    // Task continuity: the cycle holds the lock now, so its task's portable
+    // files (state/tasks/<key>/) go into the working tree BEFORE the model's
+    // first turn — written, not committed (this cycle's checkpoint commits
+    // them). Bounded and best-effort: it never fails or holds up the build.
+    try {
+      const { writeTaskFilesForCycle } = await import('./task-sync.js');
+      await writeTaskFilesForCycle({ cycle: getCycle(cycle.id) || cycle, project, containerName });
+    } catch (e) { console.warn('[mock2] task files before the build skipped:', e?.message); }
     if (wantsPrepass) {
       try {
         setJob(cycle.id, { phase: 'starting', message: 'Sizing the request…' });
@@ -924,12 +939,26 @@ export async function retryCycle({ project, cycle, initiatedBy, actingAsAdmin = 
       }
     }
   } catch { gateFindings = []; }
+  // Task continuity: a resumed build reads its task checkpoint — goal, last
+  // verified step, what is left, and every operation whose outcome is
+  // uncertain (a deploy or command the stopped segment never saw finish) —
+  // before its tools run, so it inspects instead of repeating blindly. Every
+  // resume path comes through here (Retry, Restart build, a "continue" in the
+  // chat, the task's Resume button). '' when the cycle has no task.
+  let recovery = '';
+  try {
+    const { recoveryForCycle } = await import('./task-sync.js');
+    recovery = await recoveryForCycle(cycle);
+  } catch (e) { console.warn('[mock2] task recovery section skipped:', e?.message); recovery = ''; }
+  // The recovery section rides SEPARATELY from the guidance: a bare resume
+  // stays a bare resume (resumeContext null — same start path, same
+  // re-halt-rather-than-loop behaviour); it only gains the checkpoint text.
   const resumeContext = (msg || selectedOption || authorizations.length || grantedWaivers.length || gateFindings.length)
     ? { message: msg, selectedOption, authorizations, waivers: grantedWaivers, findings: gateFindings }
     : null;
 
   // Cost-truth: the resume is a SEGMENT of the SAME request as the cycle being resumed.
-  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin, resumeContext, requestId: cycle.request_id ?? null, segment: 'resumed' });
+  return startCycle({ project, instruction: cycle.instruction, initiatedBy, actingAsAdmin, resumeContext, recovery, requestId: cycle.request_id ?? null, segment: 'resumed' });
 }
 
 // retryDeploy — re-run ONLY the deploy (install → migrate → build → start →
@@ -1211,7 +1240,13 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   let phasePlanBrief = '';
   {
     let verdict = null;
-    const isResume = !!getCycle(cycle.id)?.resume_context_json;
+    // A bare resume that only carries the task recovery section is not a
+    // guided resume (startCycle marks it `bare`) — the classifier runs as before.
+    let isResume = false;
+    try {
+      const rcJson = getCycle(cycle.id)?.resume_context_json;
+      isResume = !!rcJson && !JSON.parse(rcJson)?.bare;
+    } catch { isResume = true; }
     const isInventoryBuild = /approved design inventory/i.test(String(cycle.instruction || ''));
     if (contractClassifierMode(process.env) === 'on' && !isResume && !isInventoryBuild) {
       try {
@@ -1577,7 +1612,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     // Resume bridge: carry the previous cycle's diff-anchored checkpoint
     // summary so the resumed build doesn't re-pay orientation turns
     // rediscovering what was already done before acting on the guidance.
-    if (!resumeCtx.lastCheckpoint) {
+    if (!resumeCtx.lastCheckpoint && !resumeCtx.bare) {
       try {
         const last = lastChangeRecord(projectId);
         if (last) resumeCtx.lastCheckpoint = { seq: last.seq, summary: last.summary };
@@ -1586,7 +1621,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     const block = buildResumeContextBlock(resumeCtx);
     if (block) {
       transcript.push({ role: 'user', text: block });
-      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope), waivers: (resumeCtx.waivers || []).map((w) => w.rule), findings: (resumeCtx.findings || []).length } });
+      logEvent('resume_guidance', { role: 'user', content: block, meta: { message: resumeCtx.message || '', option: resumeCtx.selectedOption?.label || null, authorizations: (resumeCtx.authorizations || []).map((a) => a.scope), waivers: (resumeCtx.waivers || []).map((w) => w.rule), findings: (resumeCtx.findings || []).length, recovery: !!resumeCtx.recovery } });
     }
   }
 
@@ -1852,6 +1887,13 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
                 origin: 'system',
               });
               handoffQueued = true;
+              // Task continuity: what is left becomes the task's remaining
+              // list and next step, and the task waits for this continuation
+              // (it re-attaches to the SAME task, not a new one).
+              try {
+                const { onContextHandoff } = await import('./task-sync.js');
+                await onContextHandoff({ cycle, handoffText, run: nextRun });
+              } catch (e) { console.warn('[mock2] task handoff hook failed:', e?.message); }
               logEvent('ai_message', {
                 role: 'assistant',
                 content: `Context handoff written — continuation queued (run ${nextRun} of ${CONTEXT_HANDOFF_MAX_CHAIN}).\n\n${handoffText.slice(0, 1200)}`,
@@ -3717,6 +3759,15 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
     console.warn(`[mock2] db snapshot non-zero for cycle ${cycle.id}: ${(dbSnap.stdout || dbSnap.stderr || '').trim().slice(-300)}`);
   }
 
+  // 0b) Task continuity: the checks so far land on the task and its portable
+  //     files are refreshed BEFORE the commit below, so this checkpoint
+  //     carries them. Bounded, best-effort.
+  let taskSync = null;
+  try {
+    taskSync = await import('./task-sync.js');
+    await taskSync.beforeCheckpoint({ cycle, project, containerName, gateReports });
+  } catch (e) { console.warn('[mock2] task files before checkpoint skipped:', e?.message); }
+
   // 1) Commit + push into the bare repo (over the ADR-011 mount).
   const commitScript = buildCheckpointScript({ appDir: APP_DIR, message: summary || 'checkpoint: mock2 cycle' });
   const cp = await containerSh(containerName, commitScript, { timeoutMs: 120000 });
@@ -3726,6 +3777,10 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
   // 2) Read the checkpoint commit sha.
   const sha = await execInContainer(containerName, `git -C ${APP_DIR} rev-parse HEAD 2>/dev/null`);
   const commitSha = (sha.stdout || '').trim().split('\n').pop() || null;
+  // The checkpoint is the task's verified step ("Checkpoint 1a2b3c4 committed").
+  if (taskSync && cp.code === 0 && commitSha) {
+    void taskSync.afterCheckpoint({ cycle, commitSha }).catch(() => {});
+  }
 
   // 2b) The commit's own diff --stat rides in the record (cycle-94 lesson: the
   //     record must be accountable to the diff — a reader sees exactly what THIS

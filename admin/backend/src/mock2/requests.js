@@ -37,7 +37,11 @@ export function latestOpenRequestId(projectId) {
   return row ? Number(row.id) : null;
 }
 
-export function insertRequest({ projectId, instruction, initiatedBy = null, actingAsAdmin = 0, attachments = null, buildMode = 'full' }) {
+// `origin` (build-queue BUILD_ORIGINS) and `taskGoal` are not stored here —
+// they feed the task hook: whether a 'system' request may be the harness
+// continuing work it already holds a task for (a context handoff's
+// continuation), and the person's own words for the task's goal.
+export function insertRequest({ projectId, instruction, initiatedBy = null, actingAsAdmin = 0, attachments = null, buildMode = 'full', origin = null, taskGoal = null }) {
   const info = getMock2Db()
     .prepare(
       `INSERT INTO mock2_requests (project_id, instruction, status, initiated_by, acting_as_admin, created_at, attachments_json, build_mode)
@@ -46,7 +50,15 @@ export function insertRequest({ projectId, instruction, initiatedBy = null, acti
     .run(Number(projectId), instruction == null ? null : String(instruction), initiatedBy ?? null, actingAsAdmin ? 1 : 0, nowIso(),
       Array.isArray(attachments) && attachments.length ? JSON.stringify(attachments) : null,
       ['mvp', 'quick'].includes(buildMode) ? buildMode : 'full');
-  return getRequest(info.lastInsertRowid);
+  const request = getRequest(info.lastInsertRowid);
+  // Task continuity hook: one build task per request (task-sync.js), except a
+  // context-handoff continuation, which re-attaches to the ORIGINAL task.
+  // Dynamic import (task-sync sits above this module) and fire-and-forget:
+  // opening a request must never fail on task bookkeeping.
+  import('./task-sync.js')
+    .then((m) => m.onRequestCreated(request, { origin, goal: taskGoal }))
+    .catch((e) => console.warn('[mock2] task request hook failed:', e?.message));
+  return request;
 }
 
 // Set a request's final status (succeeded / failed / abandoned) + stamp finished_at.

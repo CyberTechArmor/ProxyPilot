@@ -85,6 +85,19 @@ Per project (`localStorage`): panel sizes + collapse state
 (`mock2:flightdeck-layout:<id>`) and the view choice (`mock2:flightdeck:<id>`).
 Chat history and model selection persist server-side (existing behavior).
 
+## Task continuity (2026-10)
+
+Flightdeck remembers each build request and each Ask/Plan/Research run as a
+**task** in mock2.db, apart from the chat:
+- "continue" / "try again" resume the unfinished build with its recovery
+  checkpoint, and "stop" / "only explain" are honoured — all decided before any
+  model receives tools;
+- the task strip above the composer shows the recovered task ("Resuming build: …");
+- every task is mirrored as `state/tasks/<key>/task.json` + `handoff.md` in the
+  project repo.
+
+See `docs/features/task-continuity.md`.
+
 ## Not verified in this build
 
 The frontend was authored to the repo's conventions but **could not be compiled

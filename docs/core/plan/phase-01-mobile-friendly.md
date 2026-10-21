@@ -351,3 +351,13 @@ real-backend journey (`app-storage-real.browser.mjs`, 18 checks, against the rea
 a scripted container) found no horizontal scroll at 360/375/768/1280 px, and the fixtures also at 1536/1920 px.
 Lighthouse mobile accessibility scored 100 on all four pages (`app-storage-lighthouse.mjs`). The container,
 Incus and ZFS answers are scripted; these checks do not prove a run on a real container.
+
+## Task strip (task continuity) — 2026-10-21
+
+The build chat's task strip (`components/mock2/TaskStrip.jsx`) is one full-width status line with the actions on a
+second line: buttons never share the status row on a phone, so "Interrupted" is never cut. Every action button
+below 640 px is at least 44 px. The fixture journey (`task-strip.browser.mjs`) renders every state, as editor and
+as viewer, plus the real `BuildChat` over a stubbed API. It found no horizontal scroll at 360/375/768/1280 px with
+the overflow guard disabled. axe (WCAG 2 A/AA) reported nothing new; the Midnight theme's primary-button contrast
+is pre-existing and app-wide. Lighthouse was not run. The API answers are scripted; these checks do not prove a run
+against a real project.

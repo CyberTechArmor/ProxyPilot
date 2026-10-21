@@ -61,6 +61,24 @@ npm run build      # production build (parallelism deliberately limited for low-
 
 **LXC Workspace (2026-09):** the container dialog's **Workspace** tab (it replaced the Terminal and Files tabs) is Flightdeck's explorer/editor/preview/terminal over one container: `components/lxc/LxcWorkspace.jsx` reuses `FlightdeckFileTree`/`FlightdeckEditor` through the `fs` adapter in `lib/flightdeck.js` (`mock2FlightdeckFs` / `lxcWorkspaceFs`), backed by `routes/lxc-workspace.js` (`/api/lxc/containers/:name/workspace/*`, operator-chosen absolute root). Doc: `docs/features/lxc/workspace.md`.
 
+**Task continuity (2026-10):** Dev Studio remembers each build request and each Ask/Plan/Research run as a **task**.
+- **Where it lives.** mock2.db migration 562 `mock2_tasks` is authoritative. In `mock2/`:
+  `task-logic.js` (pure), `tasks.js` (store), `task-files.js`, `task-sync.js` (hooks, routing, resume/stop),
+  `task-routes.js` (`/api/mock2/projects/:id/tasks*`). The UI is `components/mock2/TaskStrip.jsx` above the build
+  chat composer.
+- **Routing.** `POST /ask` and `POST /cycles` resolve "continue / try again / stop / only explain" against the
+  project's tasks before any model gets tools. A build a person started resumes through `retryCycle`; an
+  investigation continues read-only and never authorizes a build. Plan/Design send the person's own words as `said`.
+- **Recovery.** Every `retryCycle` attaches the task's recovery checkpoint, including the "verify before repeating"
+  list of operations a stopped segment never saw finish, recorded by `sweepTasksOnBoot` and the stall path.
+- **Portable files.** Every task is mirrored as `state/tasks/<key>/task.json` (`mock2-task@1`) + `handoff.md` in the
+  project repo. These files authorize nothing. They are written in-cycle (the checkpoint commits them) or by an idle
+  path-scoped commit.
+- **Mock2 convention.** The seed adds `AGENTS.md`, `state/work.md`, `state/handoff.md` and `state/tasks/README.md`
+  (`mock2/continuity-convention.js`), plus constitution §15. Existing projects get only the missing `AGENTS.md` /
+  `state/tasks/README.md`, never inside a build's diff.
+- Doc: `docs/features/task-continuity.md`.
+
 **PWA:** the dashboard is installable (`public/manifest.webmanifest`, `src/sw-template.js` emitted as `/sw.js` by `vite.config.js`, helpers in `src/lib/pwa.js`). The install prompt is captured at startup in `main.jsx` and offered from Profile → Install app (`components/InstallApp.jsx`). The app icon is `public/logo.svg` (the sidebar rocket, primary green on navy); the `icon-*.png` set is rasterised from it, so change the SVG and re-render the PNGs together. Under custom branding the backend rewrites `/manifest.webmanifest` (name + icons → `/api/branding/icon`) so an installed app carries the operator's mark.
 
 ## Mandatory UI rule

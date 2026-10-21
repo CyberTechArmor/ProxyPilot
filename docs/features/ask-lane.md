@@ -7,6 +7,11 @@ audited cycle) and **Ask** — a question about the codebase or a bounded
 read-and-run task, answered in the chat with **no build ceremony**: no audit
 gate, no checkpoint, no deploy, no change record.
 
+Each ask is recorded as an **investigation task** (`docs/features/task-continuity.md`).
+Saying "continue" continues it, still read-only: an investigation never
+authorizes a build. Saying "try again" while a build is unfinished resumes that
+build, because the person authorized that build when they started it.
+
 What Ask can do:
 
 - answer questions about the project's code ("why does login 403?", "where is

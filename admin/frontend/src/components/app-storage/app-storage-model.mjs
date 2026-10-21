@@ -398,6 +398,22 @@ export function checkIsStale(check, now = Date.now()) {
 }
 
 export const isCheckRunning = (status) => status === 'running' || status === 'queued';
+
+// Job events that are bookkeeping, not something a person needs to read.
+const QUIET_EVENT_KINDS = new Set(['created', 'claimed', 'checkpoint', 'heartbeat', 'lease', 'progress', 'fence']);
+
+/** The cleanup job's events worth showing: plain messages only (no phase codes or bookkeeping). */
+export function cleanupEvents(job) {
+  return (Array.isArray(job?.events) ? job.events : [])
+    .filter((e) => e && typeof e.message === 'string' && e.message.trim() && !QUIET_EVENT_KINDS.has(e.kind) && !/^[a-z_]+(:[a-z_]+)+$/.test(e.message.trim()))
+    .slice(-20);
+}
+
+/** Space reclaimed as measured: a negative or missing figure is reported as no change measured yet. */
+export function reclaimedFigure(bytes) {
+  if (bytes == null || !Number.isFinite(Number(bytes))) return null;
+  return Math.max(0, Number(bytes));
+}
 export const isCheckFinished = (status) => TERMINAL_CHECK_STATUSES.has(status);
 export const isCleanupFinished = (status) => TERMINAL_CLEANUP_STATUSES.has(status);
 
@@ -425,17 +441,23 @@ export function headerFigures(check) {
 
 export const RULE_KEYS = ['releases', 'snapshots', 'workspaces', 'caches', 'tempFiles', 'testArtifacts', 'logs', 'history'];
 
-// Editable numeric fields per rule with their ranges (DESIGN §3.4).
+// Editable numeric fields per rule with their ranges: the same bounds as the
+// backend's policy schema (lib/app-storage/policy.js validatePolicy), so a
+// value the form accepts is never refused by the server.
 export const RULE_FIELDS = {
   releases: [{ key: 'keepReleases', min: 2, max: 20 }],
   snapshots: [{ key: 'keep', min: 1, max: 1000 }],
   workspaces: [{ key: 'abandonedAfterHours', min: 1, max: 720 }],
-  caches: [{ key: 'maxAgeDays', min: 1, max: 365 }],
-  tempFiles: [{ key: 'maxAgeDays', min: 1, max: 365 }],
-  testArtifacts: [{ key: 'maxAgeDays', min: 1, max: 365 }],
-  logs: [{ key: 'rotatedMaxAgeDays', min: 1, max: 365 }, { key: 'journalMaxMB', min: 16, max: 100000 }],
+  caches: [{ key: 'maxAgeDays', min: 1, max: 3650 }],
+  tempFiles: [{ key: 'maxAgeDays', min: 1, max: 3650 }],
+  testArtifacts: [{ key: 'maxAgeDays', min: 1, max: 3650 }],
+  logs: [{ key: 'rotatedMaxAgeDays', min: 1, max: 3650 }, { key: 'journalMaxMB', min: 16, max: 65536 }],
   history: [{ key: 'keepNewest', min: 1, max: 100 }, { key: 'maxAgeDays', min: 1, max: 3650 }],
 };
+
+// Alert thresholds in GB, bounded like the backend (warnBytes 1e8..1e15,
+// growthBytes 1e7..1e15, growthWindowHours 1..720).
+export const ALERT_LIMITS = { warnGb: { min: 0.1, max: 1e6 }, growthGb: { min: 0.01, max: 1e6 }, growthWindowHours: { min: 1, max: 720 } };
 
 /**
  * 'on' | 'proposed' | 'off'. A rule that is off is "proposed" when the server
@@ -501,11 +523,11 @@ export function alertsForm(policy) {
 
 export function validateAlertsForm(form) {
   const errors = {};
-  const pos = (v) => { const n = Number(String(v ?? '').trim()); return String(v ?? '').trim() !== '' && Number.isFinite(n) && n > 0; };
-  if (!pos(form?.warnGb)) errors.warnGb = 'positive';
-  if (!pos(form?.growthGb)) errors.growthGb = 'positive';
+  const inRange = (v, { min, max }) => { const raw = String(v ?? '').trim(); const n = Number(raw); return raw !== '' && Number.isFinite(n) && n >= min && n <= max; };
+  if (!inRange(form?.warnGb, ALERT_LIMITS.warnGb)) errors.warnGb = { gb: true, ...ALERT_LIMITS.warnGb };
+  if (!inRange(form?.growthGb, ALERT_LIMITS.growthGb)) errors.growthGb = { gb: true, ...ALERT_LIMITS.growthGb };
   const h = String(form?.growthWindowHours ?? '').trim();
-  if (!/^[0-9]+$/.test(h) || Number(h) < 1 || Number(h) > 720) errors.growthWindowHours = { min: 1, max: 720 };
+  if (!/^[0-9]+$/.test(h) || Number(h) < 1 || Number(h) > 720) errors.growthWindowHours = { ...ALERT_LIMITS.growthWindowHours };
   return errors;
 }
 
@@ -524,6 +546,17 @@ export function withAlerts(policy, form) {
 export function alertsFormChanged(policy, form) {
   const saved = alertsForm(policy);
   return saved.enabled !== Boolean(form.enabled) || ['warnGb', 'growthGb', 'growthWindowHours'].some((k) => Number(saved[k]) !== Number(form[k]));
+}
+
+/**
+ * The server's note on an effect, unless it only restates the item count and
+ * size the preview already shows ("Would remove 3 items, about 32.8 kB, now.",
+ * "Nothing to remove now.").
+ */
+export function effectNote(effect) {
+  const note = typeof effect?.note === 'string' ? effect.note.trim() : '';
+  if (!note || /^(would remove \d|nothing to remove|nothing would be removed)/i.test(note)) return null;
+  return note;
 }
 
 /** The effects-preview entry of one rule (DESIGN §3.6), or null. */

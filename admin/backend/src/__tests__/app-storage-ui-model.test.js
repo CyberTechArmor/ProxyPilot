@@ -14,7 +14,9 @@ import {
   parseTargetKey, targetKeyOf, storageHref, headerFigures, ruleState, ruleForm, validateRuleForm, withRule,
   ruleFormChanged, alertsForm, validateAlertsForm, withAlerts, alertsFormChanged, gbToBytes, bytesToGb,
   effectFor, isCheckRunning, isCheckFinished, isCleanupFinished, NOTHING_SELECTED, ALL_ELIGIBLE_SCOPE,
+  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure,
 } from '../../../frontend/src/components/app-storage/app-storage-model.mjs';
+import { validatePolicy } from '../lib/app-storage/policy.js';
 import {
   STATUS_LABELS, CATEGORY_LABELS, SNAPSHOT_WARNING, POLICY_SOURCE_LABELS, RULE_TEXT, TEXT,
 } from '../../../frontend/src/components/app-storage/app-storage-text.js';
@@ -314,7 +316,9 @@ test('policy: alert thresholds in GB and the effects preview', () => {
   const form = alertsForm(policy);
   assert.deepEqual(form, { enabled: true, warnGb: '10', growthGb: '2', growthWindowHours: '24' });
   assert.equal(alertsFormChanged(policy, form), false);
-  assert.deepEqual(validateAlertsForm({ ...form, warnGb: '0' }), { warnGb: 'positive' });
+  assert.deepEqual(validateAlertsForm({ ...form, warnGb: '0' }), { warnGb: { gb: true, min: 0.1, max: 1e6 } });
+  assert.deepEqual(validateAlertsForm({ ...form, warnGb: '0.05' }), { warnGb: { gb: true, min: 0.1, max: 1e6 } }, 'below the server minimum of 1e8 bytes');
+  assert.deepEqual(validateAlertsForm({ ...form, growthGb: '0.01' }), {});
   assert.deepEqual(validateAlertsForm({ ...form, growthWindowHours: '0' }), { growthWindowHours: { min: 1, max: 720 } });
   const next = withAlerts(policy, { ...form, warnGb: '12.5' });
   assert.equal(next.alerts.warnBytes, 12.5e9);
@@ -341,4 +345,42 @@ test('plain language: no jargon in the user-facing text', async () => {
   for (const jargon of ['eligible', 'dedupe', 'inode', 'allocated', 'tmpfs', 'logical']) {
     assert.deepEqual(strings.filter((s) => new RegExp(jargon, 'i').test(s)), [], jargon);
   }
+});
+
+test('the policy form accepts exactly what the backend schema accepts (bounds of every field)', () => {
+  const base = nodusPolicy();
+  const valid = (policy) => { try { validatePolicy(policy); return true; } catch { return false; } };
+  assert.equal(valid(base), true);
+  for (const [rule, fields] of Object.entries(RULE_FIELDS)) {
+    for (const f of fields) {
+      for (const [value, ok] of [[f.min, true], [f.max, true], [f.min - 1, false], [f.max + 1, false]]) {
+        const form = { ...ruleForm(base, rule), [f.key]: String(value) };
+        assert.equal(Object.keys(validateRuleForm(rule, form)).length === 0, ok, `form ${rule}.${f.key}=${value}`);
+        assert.equal(valid(withRule(base, rule, form)), ok, `server ${rule}.${f.key}=${value}`);
+      }
+    }
+  }
+  for (const [key, lim] of Object.entries(ALERT_LIMITS)) {
+    for (const [value, ok] of [[lim.min, true], [lim.max, true]]) {
+      const form = { ...alertsForm(base), [key]: String(value) };
+      assert.deepEqual(validateAlertsForm(form), {}, `form alerts.${key}=${value}`);
+      assert.equal(valid(withAlerts(base, form)), ok, `server alerts.${key}=${value}`);
+    }
+  }
+});
+
+test('effects notes that only restate the count are not repeated; job events are plain; reclaimed never negative', () => {
+  assert.equal(effectNote({ note: 'Would remove 3 items, about 32.8 kB, now.' }), null);
+  assert.equal(effectNote({ note: 'Nothing to remove now.' }), null);
+  assert.equal(effectNote({ note: 'Keeps the newest 3; there is nothing to delete now.' }), 'Keeps the newest 3; there is nothing to delete now.');
+  assert.equal(effectNote({}), null);
+  const events = cleanupEvents({ events: [
+    { kind: 'created', message: 'storage_cleanup for pp-nodus requested via ui by 1' }, { kind: 'claimed', message: null },
+    { kind: 'step', message: 'Cleaning up /tmp/nodus-embed-* (6 folders)' }, { kind: 'checkpoint', phase: 'cleanup:item', message: 'cleanup:item' },
+    { kind: 'step', message: 'Checking that the application is still healthy' }, { kind: 'finished', message: 'Storage cleanup succeeded: 3 removed, 0 skipped, 0 failed; health passed.' },
+  ] });
+  assert.deepEqual(events.map((e) => e.message), ['Cleaning up /tmp/nodus-embed-* (6 folders)', 'Checking that the application is still healthy', 'Storage cleanup succeeded: 3 removed, 0 skipped, 0 failed; health passed.']);
+  assert.equal(reclaimedFigure(-4096), 0);
+  assert.equal(reclaimedFigure(65536), 65536);
+  assert.equal(reclaimedFigure(null), null);
 });

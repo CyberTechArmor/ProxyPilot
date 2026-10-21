@@ -99,7 +99,7 @@ function safeReadlink(f){try{return fs.readlinkSync(f)}catch(e){return null}}
 ${DESCRIBE_RELEASES_SOURCE}
 if(a.releases&&typeof a.releases==='object'&&a.releases.profile){
   const roFs=Object.assign(Object.create(fs),{openSync:function(f){return fs.openSync(f,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0)|(fs.constants.O_NONBLOCK||0))}});
-  try{const d=describeReleases(roFs,p,a.releases);out.releases={ok:true,root:d.root,live:d.live,rollback:d.rollback||null,rollbackUnknown:!!d.rollbackUnknown,waiting:d.waiting||null,backing:Array.from(d.backing).sort(),protect:Array.from(d.protect).sort(),sealed:d.sealed.map(function(r){return{path:r.path,sha:r.sha||null}})}}
+  try{const d=describeReleases(roFs,p,a.releases);out.releases={ok:true,root:d.root,live:d.live,rollback:d.rollback||null,rollbackUnknown:!!d.rollbackUnknown,waiting:d.waiting||null,pending:Array.from(d.pending||[]).sort(),backing:Array.from(d.backing).sort(),protect:Array.from(d.protect).sort(),sealed:d.sealed.map(function(r){return{path:r.path,sha:r.sha||null}})}}
   catch(e){const m=String(e&&e.message||'');out.releases={ok:false,code:/^[A-Z_]{3,64}$/.test(m)?m:(e&&e.code==='ENOENT'?'RELEASE_ROOT_MISSING':'RELEASES_UNREADABLE')}}
 }
 // Open paths: /proc/<pid>/cwd and /proc/<pid>/fd/* link targets (ours excluded).

@@ -154,8 +154,10 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   // validations. With none of them the guest removes no release at all.
   let releaseContext = { previousSha: null, rollback: null, previousLive: null, liveVerifiedAt: null, validated: [] };
   if (retention && typeof service.getApplication === 'function') {
-    let previousLive = null;
-    try { previousLive = typeof releaseHistory === 'function' ? await releaseHistory(params.applicationId) : null; } catch { previousLive = null; }
+    // No history source: the live record's own previousSha (undefined). A
+    // source that fails: unknown (null), so no release is removed.
+    let previousLive;
+    if (typeof releaseHistory === 'function') { try { previousLive = (await releaseHistory(params.applicationId)) ?? null; } catch { previousLive = null; } }
     try { releaseContext = releaseContextFromApplication(await service.getApplication(params.applicationId), { root, previousLive }); } catch { /* no context: the guest removes no release */ }
   }
   const validation = candidate.validation || prepared.validation;
@@ -184,7 +186,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     if (observed.target !== prior.previousTarget) await guest('switch', { expected: prior.nextTarget, target: prior.previousTarget, jobId: attempt });
     else { const restarted = await exec.guest(container, containedScript(attempt, `systemctl restart ${quote(profile.serviceName)}\n`), { timeoutMs: 90000 }); if (restarted.code !== 0) throw safeError('RECOVERY_FAILED', 'The existing application service could not restart.'); }
     const proof = await verify(prior.previousTarget, prior.previousSha, prior.previousArtifactDigest);
-    await service.recordLive(params.applicationId, { sha: prior.previousSha, profileDigest: profile.digest, jobId: job.id, releasePath: prior.previousTarget, previousSha: prior.previousSha, evidenceDigest: digest(proof), restored: true });
+    await service.recordLive(params.applicationId, { sha: prior.previousSha, profileDigest: profile.digest, jobId: job.id, releasePath: prior.previousTarget, previousSha: prior.previousSha, evidenceDigest: digest(proof), restored: true, ...(/^[a-f0-9]{40}$/.test(prior.nextSha || '') && prior.nextSha !== prior.previousSha ? { rollbackOf: prior.nextSha } : {}) });
     mark('interrupted_release_recovered', { disruptive: false });
     return { ok: false, recovered: true, outcome: 'interrupted_release_rolled_back', verification: proof };
   }
@@ -252,8 +254,10 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     // the same release keeps its recorded previous release; a different one
     // (live changed outside a deployment) had the recorded one before it.
     const before = typeof service.getApplication === 'function' ? (await service.getApplication(params.applicationId))?.live || null : null;
-    const previousSha = before?.sha === candidate.sha ? (before.previousSha && before.previousSha !== candidate.sha ? before.previousSha : null) : (/^[a-f0-9]{40}$/.test(before?.sha || '') ? before.sha : null);
-    await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, ...(previousSha ? { previousSha } : {}), evidenceDigest: digest(proof) });
+    const same = before?.sha === candidate.sha;
+    const previousSha = same ? (before.previousSha && before.previousSha !== candidate.sha ? before.previousSha : null) : (/^[a-f0-9]{40}$/.test(before?.sha || '') ? before.sha : null);
+    const rollbackOf = same && /^[a-f0-9]{40}$/.test(before.rollbackOf || '') ? before.rollbackOf : null;
+    await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, ...(previousSha ? { previousSha } : {}), ...(rollbackOf ? { rollbackOf } : {}), evidenceDigest: digest(proof) });
     return { ok: true, outcome: 'live_verified', verification: proof };
   }
   if (previous.target === release) { const proof = await verify(release, candidate.sha, validation.artifactDigest); return { ok: true, outcome: 'already_live', verification: proof }; }
@@ -271,7 +275,10 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
   try {
     await guest('switch', { expected: previous.target, target: release, jobId: attempt });
     const proof = await verify(release, candidate.sha, validation.artifactDigest);
-    job.fence(); await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, previousSha: previous.identity.sha, evidenceDigest: digest(proof) });
+    // A rollback job records the release it rolled back FROM, so the deploy
+    // history never takes that one for the release live before this one.
+    const rolledBack = kind === 'application_rollback' && /^[a-f0-9]{40}$/.test(previous.identity.sha || '') && previous.identity.sha !== candidate.sha ? { rollbackOf: previous.identity.sha } : {};
+    job.fence(); await service.recordLive(params.applicationId, { sha: candidate.sha, profileDigest: profile.digest, jobId: job.id, releasePath: release, previousSha: previous.identity.sha, ...rolledBack, evidenceDigest: digest(proof) });
     disruptive = false; mark('live_verified', recovery);
     return { ok: true, outcome: 'live_verified', verification: proof };
   } catch (e) {
@@ -281,7 +288,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     if (current.target === release) await guest('switch', { expected: release, target: previous.target, jobId: attempt });
     else if (current.target !== previous.target) throw safeError('LIVE_TARGET_CHANGED', 'The live target changed during rollback; manual inspection is required.');
     const proof = await verify(previous.target, previous.identity.sha, previous.identity.artifactDigest);
-    await service.recordLive(params.applicationId, { sha: previous.identity.sha, profileDigest: profile.digest, jobId: job.id, releasePath: previous.target, previousSha: previous.identity.sha, evidenceDigest: digest(proof), restored: true });
+    await service.recordLive(params.applicationId, { sha: previous.identity.sha, profileDigest: profile.digest, jobId: job.id, releasePath: previous.target, previousSha: previous.identity.sha, evidenceDigest: digest(proof), restored: true, ...(candidate.sha !== previous.identity.sha ? { rollbackOf: candidate.sha } : {}) });
     disruptive = false; mark('rolled_back', recovery);
     return { ok: false, recovered: true, outcome: 'release_failed_rolled_back', verification: proof };
   }

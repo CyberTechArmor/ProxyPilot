@@ -67,7 +67,7 @@ export function scanPlanFor(target, { budget = { ms: 60_000, entries: 2_000_000 
       // The release roles are decided in the guest by describeReleases, the
       // one definition the release job and the cleanup also run, from the
       // records' facts (the previous release from the deploy history).
-      if (p.sourceDir) releases = { profile: { sourceDir: p.sourceDir, releaseRoot: p.releaseRoot, preservePaths: [...(p.preservePaths || [])], envFiles: [...(p.envFiles || [])] }, ...releaseContextFromApplication(target, { root: p.releaseRoot, previousLive: target.previousLive || null }) };
+      if (p.sourceDir) releases = { profile: { sourceDir: p.sourceDir, releaseRoot: p.releaseRoot, preservePaths: [...(p.preservePaths || [])], envFiles: [...(p.envFiles || [])] }, ...releaseContextFromApplication(target, { root: p.releaseRoot, ...('previousLive' in target ? { previousLive: target.previousLive ?? null } : {}) }) };
       add(p.releaseRoot, 1, 'release-root', { marker: true, breakdown: ['node_modules', 'release-evidence', 'test-results'] });
       add(`${p.releaseRoot}/.staging`, 1, 'staging');
       if (p.sourceDir) add(p.sourceDir, 0, 'live', { resolve: true, breakdown: ['node_modules', 'release-evidence', 'test-results'] });
@@ -124,7 +124,7 @@ export function isSealedRelease(it) {
  * What must stay, derived from the target's records and the facts:
  * { liveRelease, rollbackRelease, waitingCandidate, backingRoots,
  *   releasesKnown, releasesUnknown, rollbackUnknown, keptReleases,
- *   sealedReleases, activeAttempts, recoveryAttempts, buildActive,
+ *   pendingReleases, sealedReleases, activeAttempts, recoveryAttempts, buildActive,
  *   openRestoreJob, anyApplicationJobOpen, openJobIds }.
  * The release roles come only from describeReleases' answer in the facts
  * (facts.releases); without one, no release is cleanable and the live
@@ -143,6 +143,7 @@ export function buildContext({ target, activity = {}, facts = null } = {}) {
     ctx.backingRoots = [...(rel.backing || [])].sort();
     ctx.rollbackUnknown = !!rel.rollbackUnknown;
     ctx.keptReleases = [...(rel.protect || [])];
+    ctx.pendingReleases = [...(rel.pending || [])];
     ctx.sealedReleases = (rel.sealed || []).map((r) => r.path);
     return ctx;
   }
@@ -345,6 +346,7 @@ function classifyReleaseChild(it, { context }) {
     if (!context.releasesKnown) return { ...release, status: 'protected', sub: 'unknown', label: `Release ${sha8}`, reason: releasesUnknownReason(context.releasesUnknown) };
     if (it.path === context.rollbackRelease) return { ...release, status: 'protected', sub: 'rollback', label: `Release ${sha8} (rollback)`, reason: 'Kept so you can roll back to the previous version.' };
     if (it.path === context.waitingCandidate) return { ...release, status: 'protected', sub: 'candidate', label: `Release ${sha8} (waiting to deploy)`, reason: 'A validated release waiting to be deployed.' };
+    if ((context.pendingReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'pending', label: `Release ${sha8} (validation not passed)`, reason: 'Its validation has not passed (it may still be running), so it is kept.' };
     if (context.rollbackUnknown) return { ...release, status: 'protected', sub: 'rollback-unknown', label: `Release ${sha8}`, reason: ROLLBACK_UNKNOWN_REASON };
     if ((context.keptReleases || []).includes(it.path)) return { ...release, status: 'protected', sub: 'kept', label: `Release ${sha8}`, reason: 'Kept by the release process.' };
     return { ...release, status: 'eligible', sub: 'sealed', action: 'remove-release', label: `Release ${sha8}`, reason: 'An older release that is no longer needed for rollback.' };

@@ -11,6 +11,7 @@ import { performCheck } from '../lib/app-storage/perform-check.js';
 import { classify, buildContext, scanPlanFor, namePattern, isSealedRelease, GROUP_THRESHOLD } from '../lib/app-storage/classify.js';
 import * as W from './helpers/app-storage-world.js';
 import { policySelection, DEFAULT_POLICY } from '../lib/app-storage/policy.js';
+import { previousLiveFrom } from '../lib/app-storage/release-history.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const CHECK_ID = 'chk_00000000-0000-4000-8000-000000000001';
@@ -24,7 +25,11 @@ async function nodusCheck(t, { activity = {}, snapshots = [], snapshotUsed = {},
   t.after(release);
   await new Promise((r) => setTimeout(r, 150));
   const exec = W.scriptedExec({ prefix: root, snapshots, snapshotUsed });
-  const target = { ...W.nodusTarget(world), previousLive: history ? { ...W.DEPLOY_HISTORY } : null };
+  // The previous release as release-history.js finds it in production: the
+  // live record's previousSha first, else the deploy history (the rollback
+  // release's own live record when `history`).
+  const rows = [...world.candidates.map((c) => ({ sha: c.sha, live: c.live || null, validation: c.validation || null })), ...(history ? [{ sha: W.DEPLOY_HISTORY.sha, live: { sha: W.DEPLOY_HISTORY.sha, releasePath: W.DEPLOY_HISTORY.path, verifiedAt: new Date(NOW - 4 * W.DAY).toISOString() }, validation: null }] : [])];
+  const target = { ...W.nodusTarget(world), previousLive: previousLiveFrom(world.live, rows) };
   const result = await performCheck({ target, activity, exec, policy: null, now: NOW, checkId: CHECK_ID, listExports: () => exports });
   const at = (p) => result.items.find((it) => it.path === p);
   const label = (re) => result.items.find((it) => re.test(it.label));
@@ -640,4 +645,14 @@ test('facts without describeReleases\' answer never make a release cleanable', (
   const r = run(target, facts([{ path: '/opt/r', depth: 1, role: 'release-root', marker: true }], [{ path: `/opt/r/${name}`, r: 0, marker: { present: true, sha: 'a'.repeat(40) } }]));
   assert.deepEqual([r.at(`/opt/r/${name}`).status, r.at(`/opt/r/${name}`).sub], ['protected', 'unknown']);
   assert.match(r.at(`/opt/r/${name}`).reason, /could not be worked out/);
+});
+
+test('a sealed release whose validation has not passed is kept (describeReleases\' pending), not cleanable', async (t) => {
+  const R = W.RELEASE_ROOT;
+  const { at } = await nodusCheck(t, { mutate: (root, world) => {
+    world.candidates.push({ sha: W.OLD_SHA, checkpointAt: new Date(NOW - 6 * W.DAY).toISOString(), validation: { passed: false, releasePath: `${R}/${W.OLD}`, validatedAt: null } });
+  } });
+  const old = at(`${R}/${W.OLD}`);
+  assert.deepEqual([old.status, old.sub, old.action], ['protected', 'pending', null]);
+  assert.equal(old.reason, 'Its validation has not passed (it may still be running), so it is kept.');
 });

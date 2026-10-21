@@ -51,29 +51,37 @@ export const ROLLBACK_UNKNOWN_REASON = 'The previous release could not be identi
 
 // releaseContextFromApplication(app, { root, previousLive }) → the facts the
 // guest's describeReleases decides the release roles from:
-//   previousSha   the live record's previous release, when it names one
-//   rollback      that release's recorded folder (under the release root)
 //   previousLive  { sha, path } | null from the deploy history
 //                 (lib/app-storage/release-history.js previousLiveRelease)
+//   previousSha, rollback
+//                 that release's sha and folder (under the release root). When
+//                 `previousLive` is supplied (null included) it is the one
+//                 answer: the history already reads the live record's
+//                 previousSha and skips a release rolled back from. Only a
+//                 caller with no history source gets the live record's own
+//                 previousSha (previousLive undefined).
 //   liveVerifiedAt, validated [{ sha, path, validatedAt }]
 //                 the passed validations, for the waiting candidate
+//   pending       folders whose validation has no result yet (recorded as not
+//                 passed while it runs): kept, never removed by the cap
 // Nothing here decides a role: describeReleases is the one definition.
-export function releaseContextFromApplication(app, { root = null, previousLive = null } = {}) {
+export function releaseContextFromApplication(app, { root = null, previousLive = undefined } = {}) {
   const live = app?.live || null;
   const under = x => typeof x === 'string' && x.startsWith('/') && !x.includes('/../') && (!root || x.startsWith(`${root}/`));
-  const previousSha = live && SHA_RE.test(live.previousSha || '') && live.previousSha !== live.sha ? live.previousSha : null;
   const candidates = Array.isArray(app?.candidates) ? app.candidates : [];
-  let rollback = null;
-  if (previousSha) {
-    const c = candidates.find(x => x?.sha === previousSha);
-    const p = c?.live?.releasePath || c?.validation?.releasePath;
-    if (under(p) && p !== live?.releasePath) rollback = p;
-  }
-  const history = previousLive && SHA_RE.test(previousLive.sha || '') ? { sha: previousLive.sha, path: under(previousLive.path) ? previousLive.path : null } : null;
+  const folderOf = sha => { const c = candidates.find(x => x?.sha === sha); const p = c?.live?.releasePath || c?.validation?.releasePath; return under(p) && p !== live?.releasePath ? p : null; };
+  const supplied = previousLive !== undefined;
+  const history = supplied && previousLive && SHA_RE.test(previousLive.sha || '') && previousLive.sha !== live?.sha ? { sha: previousLive.sha, path: under(previousLive.path) && previousLive.path !== live?.releasePath ? previousLive.path : null } : null;
+  const recorded = !supplied && live && SHA_RE.test(live.previousSha || '') && live.previousSha !== live.sha ? live.previousSha : null;
+  const previousSha = history ? history.sha : recorded;
+  const rollback = history ? (history.path || folderOf(history.sha)) : (recorded ? folderOf(recorded) : null);
   const validated = candidates
     .filter(c => c?.validation?.passed === true && SHA_RE.test(c.sha || '') && under(c.validation.releasePath))
     .map(c => ({ sha: c.sha, path: c.validation.releasePath, validatedAt: c.validation.validatedAt || c.checkpointAt || null }));
-  return { previousSha, rollback, previousLive: history, liveVerifiedAt: live?.verifiedAt || null, validated };
+  const pending = candidates
+    .filter(c => c?.validation && c.validation.passed !== true && under(c.validation.releasePath))
+    .map(c => c.validation.releasePath);
+  return { previousSha, rollback, previousLive: supplied ? history : null, liveVerifiedAt: live?.verifiedAt || null, validated, pending };
 }
 
 // ── guest side ──────────────────────────────────────────────────────────
@@ -104,7 +112,10 @@ export function releaseContextFromApplication(app, { root = null, previousLive =
 //   waiting   the newest passed validation (a.validated) made after the live
 //             release was recorded (a.liveVerifiedAt), sealed, not live and
 //             not the rollback (kept, never counted)
-//   protect   waiting + a.protect (+ every sealed release when rollbackUnknown)
+//   pending   a.pending: sealed releases whose validation has no result yet
+//             (kept, never counted, never removed by the cap)
+//   protect   waiting + pending + a.protect (+ every sealed release when
+//             rollbackUnknown)
 //   sealed    recognised sealed releases, newest first
 export function describeReleases(fs, p, a) {
   const refuse = code => { throw new Error(code); };
@@ -168,8 +179,10 @@ export function describeReleases(fs, p, a) {
     .filter(v => !Number.isFinite(liveAt) || atOf(v) > liveAt)
     .sort((x, y) => atOf(y) - atOf(x))[0] || {}).path || null;
   if (waiting) protect.add(waiting);
+  const pending = (Array.isArray(a.pending) ? a.pending : []).filter(x => typeof x === 'string' && p.dirname(x) === root && x !== live && isSealed(x));
+  for (const x of pending) protect.add(x);
   if (rollbackUnknown) for (const r of sealed) if (r.path !== live) protect.add(r.path);
-  return { root, live, candidate, backing, protect, rollback, rollbackUnknown, waiting, sealed };
+  return { root, live, candidate, backing, protect, rollback, rollbackUnknown, waiting, pending, sealed };
 }
 
 // cleanupReleaseArtifacts(fs, p, a) → { stagesRemoved, bundlesRemoved,
@@ -178,8 +191,11 @@ export function describeReleases(fs, p, a) {
 // `keepReleases` are kept; the release being validated, the waiting candidate
 // and backing roots are kept and never counted. So `keepReleases: 2` keeps
 // live + rollback, and the release under validation never pushes the rollback
-// out. When the rollback is unknown every sealed release is protected and no
-// release is removed (workspaces and bundles still are).
+// out. The cap removes the oldest releases outside the protected set first
+// (the release being validated, the waiting candidate, releases whose
+// validation has no result yet, backing roots). When the rollback is unknown
+// every sealed release is protected and no release is removed (workspaces and
+// bundles still are).
 export function cleanupReleaseArtifacts(fs, p, a) {
   const refuse = message => { throw new Error(message); };
   const d = describeReleases(fs, p, a);

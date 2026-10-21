@@ -164,6 +164,8 @@ function prefixReleases(r, P) {
     rollback: P(r.rollback),
     previousLive: r.previousLive ? { ...r.previousLive, path: P(r.previousLive.path) } : null,
     validated: (r.validated || []).map((v) => ({ ...v, path: P(v.path) })),
+    pending: (r.pending || []).map(P),
+    protect: (r.protect || []).map(P),
   };
 }
 

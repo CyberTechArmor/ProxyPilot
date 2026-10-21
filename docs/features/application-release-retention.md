@@ -42,6 +42,10 @@ of 2 that is exactly live + rollback.
   3. else the deploy history: the other release most recently recorded live
      before the current one (`lib/app-storage/release-history.js`
      `previousLiveRelease`, passed in by the host runner).
+  A release that was rolled back FROM is never the rollback release: with
+  live R5 rolled back to R4, the previous release is R3, not the failed R5.
+  Rollback jobs and automatic restores record the release they replaced
+  (`rollbackOf` in the live record) for this.
 - Verifying a live release keeps its recorded previous release (before
   2026-10 `application_verify` dropped it).
 - **When nothing identifies the previous release, no release is removed.**
@@ -59,7 +63,8 @@ of 2 that is exactly live + rollback.
   removed the previous release before the new build had even passed.)
 - A **validated candidate still waiting to be deployed** (the newest passed
   validation made after the live release was recorded) is kept and not
-  counted.
+  counted, and so is a sealed release whose **validation has no result yet**.
+  The cap removes the oldest releases outside this protected set first.
 - Roots backing preserved shared models/data are always kept and not counted.
 
 So while a candidate waits for deployment the release root holds live,
@@ -68,7 +73,10 @@ live release becomes the rollback and the release before it is removed at the
 next validation.
 
 Only recognized sealed release directories are eligible; unknown files and
-staging symlinks are left alone. The live pointer is rechecked before each
+staging symlinks are left alone. Every removal (releases, workspaces,
+bundles, the pre-seal trim) goes through the one fd-relative remover
+(`lib/setup-engine/safe-remove.js`), which never follows a link and never
+enters another filesystem, even when the tree changes while it is removed. The live pointer is rechecked before each
 obsolete-release deletion. The same predicates decide a release a person
 selects in a storage cleanup (`removeSelectedRelease`): live, rollback,
 candidate and backing roots are refused there too, and so is every release

@@ -60,7 +60,18 @@ that neither it nor its control files (config, HEAD, info, hooks, …) are
 writable by a group or others. Otherwise: "The repository's git metadata
 changed during the build, so this release was not sealed." The freeze that
 makes the release read-only works through file descriptors and never follows
-a link.
+a link. It closes each folder to other users before it touches what is in
+it.
+
+A file that also has a name outside the build tree (a hard link, as a
+package manager's store in the service user's home makes) is never re-owned:
+the freeze copies its bytes into a new root-owned file in the same folder and
+puts the copy in its place, so the file outside keeps its owner, mode and
+content. If that file is written while it is copied, the release is not
+sealed: "The build output changed while it was being sealed, so this release
+was not sealed." A build tree nested more than 512 folders deep (fewer under
+a low open-file limit) is not sealed either: "The build left folders nested
+too deeply to seal safely, so this release was not sealed."
 
 Read-only git in these programs (`lib/setup-engine/safe-git.js`) never runs
 as root over a tree someone else could change: it runs as the repository's

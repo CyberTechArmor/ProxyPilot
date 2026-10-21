@@ -183,6 +183,9 @@ changed the rules and when.
   - The build's leftover processes are stopped before the seal.
   - Sealing refuses a `.git` that changed during the build.
   - The freeze that makes a release read-only works through open folders and never follows a link.
+  - A file hard-linked from outside the build (a package store in the service user's home) is copied, not
+    re-owned, so the outside file keeps its owner, mode and content.
+  - A build tree too deeply nested to walk safely is not sealed, with a plain reason.
 
 **Changed in this release:**
 - Release retention used to count the release being validated, so it deleted the rollback release at the start of

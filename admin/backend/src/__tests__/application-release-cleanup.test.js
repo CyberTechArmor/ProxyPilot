@@ -344,7 +344,7 @@ test('an already sealed tree is never trimmed', { skip: process.platform === 'wi
 });
 
 function opFixture({ targetId = 'nodus' } = {}) {
-  const calls = [];
+  const calls = [], hostCalls = [];
   const profile = { targetId, sourceDir: '/opt/app', releaseRoot: '/opt/app-releases', serviceName: 'app.service', healthUrl: 'http://127.0.0.1:3000/ready', installScript: 'deps', buildScript: 'build', validationScripts: ['test'], preservePaths: [], envFiles: [], revision: 1, digest: 'c'.repeat(64) };
   const candidate = { sha: 'a'.repeat(40), treeSha: 'b'.repeat(40) };
   const service = {
@@ -353,7 +353,7 @@ function opFixture({ targetId = 'nodus' } = {}) {
     getApplication: async () => ({ live: { sha: '1'.repeat(40), releasePath: '/opt/app-releases/live', previousSha: '2'.repeat(40), verifiedAt: '2026-10-20T10:00:00Z' }, candidates: [{ sha: '2'.repeat(40), live: { releasePath: '/opt/app-releases/prev' } }] }),
   };
   const exec = {
-    host: async argv => { if (argv.includes('bundle') && argv.includes('create')) fs.writeFileSync(argv[argv.indexOf('create') + 1], 'fixture'); return { code: 0, stdout: '' }; },
+    host: async argv => { hostCalls.push(argv); if (argv.includes('bundle') && argv.includes('create')) fs.writeFileSync(argv[argv.indexOf('create') + 1], 'fixture'); return { code: 0, stdout: '' }; },
     guest: async (container, script) => {
       if (script.includes('STALE_WRITERS:')) return { code: 0, stdout: 'STALE_WRITERS:0\n' };
       const body = Buffer.from(script.match(/printf '%s' '([^']+)' \| base64/)[1], 'base64').toString();
@@ -367,7 +367,7 @@ function opFixture({ targetId = 'nodus' } = {}) {
   };
   const job = { id: '11111111-1111-4111-8111-111111111111', app: `pp-${targetId}`, epoch: 1, fence() {}, checkpoint() {}, event() {} };
   const params = { applicationId: 1, profileRevision: 1, profileDigest: profile.digest, sha: candidate.sha, treeSha: candidate.treeSha };
-  return { calls, service, exec, job, params };
+  return { calls, hostCalls, service, exec, job, params };
 }
 
 test('validation applies the stored policy, passes rollback/candidate protection, and keeps Nodus on the static file', async t => {
@@ -390,6 +390,9 @@ test('validation applies the stored policy, passes rollback/candidate protection
   await runApplicationReleaseOperation({ kind: 'application_validate', params: failing.params, exec: failing.exec, job: failing.job, service: failing.service, hostRoot: temp, releaseRetention: async () => ({ keepReleases: 2 }), releaseHistory: async () => { throw new Error('db locked'); } });
   assert.equal(failing.calls.find(c => c.action === 'release_cleanup').previousLive, null, 'an unreadable history is unknown, never guessed');
   assert.deepEqual(f.calls.find(c => c.action === 'seal').retention.trimBeforeSeal, ['.cache', 'coverage']);
+  // The host transfer copy carries its application: bundle-app<id>-<random>.
+  const init = f.hostCalls.find(argv => argv[1] === 'init');
+  assert.match(path.basename(path.dirname(init[3])), /^bundle-app1-[A-Za-z0-9]{6}$/);
 
   const nodus = opFixture({ targetId: 'nodus' });
   await runApplicationReleaseOperation({ kind: 'application_validate', params: nodus.params, exec: nodus.exec, job: nodus.job, service: nodus.service, hostRoot: temp });

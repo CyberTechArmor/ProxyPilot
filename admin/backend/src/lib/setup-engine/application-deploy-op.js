@@ -209,7 +209,11 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     let transfer; let guestCleaned = false;
     try {
       await hostFs.mkdir(hostRoot, { recursive: true, mode: 0o700 });
-      transfer = await hostFs.mkdtemp(path.join(hostRoot, 'bundle-'));
+      // The transfer copy names its application (bundle-app<id>-<random>), so
+      // the storage check attributes it to this application only.
+      const appId = Number(params.applicationId);
+      if (!Number.isInteger(appId) || appId < 1) throw safeError('INVALID_REFERENCE', 'The application reference is not valid.');
+      transfer = await hostFs.mkdtemp(path.join(hostRoot, `bundle-app${appId}-`));
       const hostBundle = path.join(transfer, 'source.bundle');
       const transferRepo = path.join(transfer, 'source.git');
       mark('bundle');

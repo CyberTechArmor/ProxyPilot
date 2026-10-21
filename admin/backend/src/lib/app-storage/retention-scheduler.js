@@ -7,67 +7,45 @@
 // limit, through the same requestCleanup as a person's cleanup with
 // origin 'policy'. A proposed rule (enabled: false) never runs.
 //
-// Never: snapshots, exports or releases (those have their own retention or
-// are a person's explicit choice), and never anything the check did not mark
-// "Can be cleaned up". A busy application is skipped until the next round
-// without an alert; a failure is alerted. Ages are applied here as well as by
-// the policy's own selection (when given, the two must agree): an item whose
-// age is unknown is not selected.
+// Which eligible items a rule takes, by its own age limit, is policy.js
+// policySelection — one implementation, also behind the policy page's
+// effects. This module adds only the never-list as a guard: never snapshots,
+// exports or releases (they have their own retention or are a person's
+// explicit choice), and never anything the check did not mark "Can be
+// cleaned up". A busy application is skipped until the next round without an
+// alert; a failure is alerted.
 
-import { busyFrom } from './cleanup-service.js';
+import { busyFrom } from './cleanup-rows.js';
+import { policySelection as defaultPolicySelection } from './policy.js';
 
 export const DEFAULT_CRON = '23 */6 * * *';
-const DAY = 24 * 60 * 60 * 1000;
-const HOUR = 60 * 60 * 1000;
-const positive = v => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
-
-// rule → the categories it covers and the minimum age of an item it may take.
-export const PERIODIC_RULES = Object.freeze({
-  caches: { categories: ['caches'], minAgeMs: r => (positive(r.maxAgeDays) ? r.maxAgeDays * DAY : null) },
-  tempFiles: { categories: ['temp'], minAgeMs: r => (positive(r.maxAgeDays) ? r.maxAgeDays * DAY : null) },
-  testArtifacts: { categories: ['test_reports'], minAgeMs: r => (positive(r.maxAgeDays) ? r.maxAgeDays * DAY : null) },
-  logs: { categories: ['logs'], minAgeMs: (r, item) => (item.action === 'vacuum-journal' ? 0 : positive(r.rotatedMaxAgeDays) ? r.rotatedMaxAgeDays * DAY : null) },
-  history: { categories: ['history'], minAgeMs: r => (positive(r.maxAgeDays) ? r.maxAgeDays * DAY : null) },
-  workspaces: { categories: ['workspaces', 'archives'], minAgeMs: r => (positive(r.abandonedAfterHours) ? r.abandonedAfterHours * HOUR : null) },
-});
+export const PERIODIC_RULES = Object.freeze(['workspaces', 'caches', 'tempFiles', 'testArtifacts', 'logs', 'history']);
 const NEVER_CATEGORIES = new Set(['snapshots', 'exports', 'releases', 'running_app', 'dependencies', 'data', 'other']);
 const NEVER_ACTIONS = new Set(['delete-snapshot', 'delete-export', 'remove-release']);
+const NEVER_KINDS = new Set(['snapshot', 'export', 'release', 'pseudo']);
 
 export function enabledPeriodicRules(policy) {
   const rules = policy?.rules || {};
-  return Object.keys(PERIODIC_RULES).filter(key => rules[key]?.enabled === true);
+  return PERIODIC_RULES.filter(key => rules[key]?.enabled === true);
 }
 
 // schedulerSelection(check, policy, { now, policySelection }) → item ids.
-export function schedulerSelection(check, policy, { now, policySelection = null } = {}) {
-  const enabled = enabledPeriodicRules(policy);
-  if (!enabled.length || !Array.isArray(check?.items)) return [];
-  const ruleFor = category => enabled.find(key => PERIODIC_RULES[key].categories.includes(category));
-  let ids = check.items.filter(item => {
-    if (item.status !== 'eligible' || NEVER_CATEGORIES.has(item.category) || NEVER_ACTIONS.has(item.action) || item.kind === 'snapshot' || item.kind === 'export' || item.kind === 'release') return false;
-    const key = ruleFor(item.category);
-    if (!key) return false;
-    const minAge = PERIODIC_RULES[key].minAgeMs(policy.rules[key], item);
-    if (minAge == null) return false;
-    if (minAge === 0) return true;
-    const newest = Number(item.newestMtimeMs ?? item.identity?.mtimeMs);
-    return Number.isFinite(newest) && now - newest >= minAge;
-  }).map(item => item.id);
-  if (typeof policySelection === 'function') {
-    const theirs = new Set((policySelection(check, policy) || []).map(x => (typeof x === 'string' ? x : x?.id)).filter(Boolean));
-    ids = ids.filter(id => theirs.has(id));
-  }
-  return ids;
+export function schedulerSelection(check, policy, { now, policySelection = defaultPolicySelection } = {}) {
+  if (!enabledPeriodicRules(policy).length || !Array.isArray(check?.items)) return [];
+  const picked = new Set((policySelection(check, policy, now)?.items || []).map(x => (typeof x === 'string' ? x : x?.id)).filter(Boolean));
+  return check.items
+    .filter(item => picked.has(item.id) && item.status === 'eligible' && !NEVER_CATEGORIES.has(item.category) && !NEVER_ACTIONS.has(item.action) && !NEVER_KINDS.has(item.kind))
+    .map(item => item.id);
 }
 
 export function createRetentionScheduler({
-  listTargets, resolveTarget = null, policyFor, runCheck, policySelection = null, activityFor, requestCleanup, monitor = null,
+  listTargets, resolveTarget = null, policyFor, runCheck, policySelection = defaultPolicySelection, activityFor, requestCleanup, monitor = null,
   now = () => Date.now(), log = () => {}, env = process.env, scheduleCron = null,
 }) {
   let running = false;
   let task = null;
-  const alert = async (target, title, body) => {
-    try { await monitor?.postCleanupAlert?.({ targetKey: target.key, targetName: target.name || target.key, kind: 'cleanup', ok: false, level: 'error', origin: 'policy', title, body }); } catch { /* an alert never stops the round */ }
+  const alert = async target => {
+    try { await monitor?.postCleanupAlert?.(target.key, { ok: false, failedCount: 0 }, { name: target.name || target.key }); } catch { /* an alert never stops the round */ }
   };
 
   async function runTarget(entry) {
@@ -101,7 +79,7 @@ export function createRetentionScheduler({
         catch (e) {
           out.targets.push({ key: entry.key, error: e?.code || 'FAILED' });
           log('[app-storage-retention] round failed for a target', { target: entry.key, code: e?.code || null });
-          await alert(entry, `Automatic storage cleanup for ${entry.name || entry.key} could not run`, `The retention policy could not clean up storage this round (${e?.code || 'error'}). It tries again in six hours.`);
+          await alert(entry);
         }
       }
       return out;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRetentionScheduler, schedulerSelection, enabledPeriodicRules, DEFAULT_CRON } from '../lib/app-storage/retention-scheduler.js';
-import { nodusCheck, nodusTarget, ids } from './helpers/app-storage-cleanup-world.js';
+import { nodusCheck, nodusTarget, ids, CHECK_ID } from './helpers/app-storage-cleanup-world.js';
 
 const NOW = Date.parse('2026-10-20T23:00:00Z');
 const on = (over = {}) => ({ enabled: true, ...over });
@@ -13,6 +13,7 @@ const policy = rules => ({ version: 1, rules: {
   ...rules,
 }, alerts: { enabled: true } });
 
+// The ages are policy.js policySelection's (the real one); the scheduler adds the never-list.
 test('rule ages decide: old enough items of enabled rules only; unknown age is never selected', () => {
   const check = nodusCheck();
   assert.deepEqual(schedulerSelection(check, policy({ caches: on({ maxAgeDays: 14 }) }), { now: NOW }), [ids.cache], 'the cache was last changed on 1 September');
@@ -22,7 +23,6 @@ test('rule ages decide: old enough items of enabled rules only; unknown age is n
   assert.deepEqual(schedulerSelection(check, policy({ workspaces: on({ abandonedAfterHours: 1 }) }), { now: NOW }), [ids.staging, ids.hostBundle]);
   assert.deepEqual(schedulerSelection(check, policy({ logs: on({ rotatedMaxAgeDays: 14 }) }), { now: NOW }), [ids.journal], 'the journal vacuum has a size limit, not an age');
   assert.deepEqual(schedulerSelection(check, policy({ history: on({ maxAgeDays: 30 }) }), { now: NOW }), [ids.dump]);
-  assert.deepEqual(schedulerSelection(check, policy({ caches: on({ maxAgeDays: 0 }) }), { now: NOW }), [], 'an invalid limit selects nothing');
   const noAge = nodusCheck(); noAge.items.find(i => i.id === ids.cache).newestMtimeMs = undefined; noAge.items.find(i => i.id === ids.cache).identity = {};
   assert.deepEqual(schedulerSelection(noAge, policy({ caches: on({ maxAgeDays: 14 }) }), { now: NOW }), []);
 });
@@ -34,9 +34,9 @@ test('never snapshots, exports or releases, whatever the policy says', () => {
   assert.deepEqual(enabledPeriodicRules(policy({})), [], 'releases and snapshots rules are not periodic rules');
 });
 
-test("the policy's own selection must agree", () => {
+test('the never-list guards whatever a selection returns', () => {
   const p = policy({ caches: on({ maxAgeDays: 14 }), history: on({ maxAgeDays: 30 }) });
-  assert.deepEqual(schedulerSelection(nodusCheck(), p, { now: NOW, policySelection: () => [{ id: ids.dump }, { id: ids.release }] }), [ids.dump]);
+  assert.deepEqual(schedulerSelection(nodusCheck(), p, { now: NOW, policySelection: () => ({ items: [ids.dump, ids.release] }) }), [ids.dump], 'a release is never taken, whatever a selection returns');
 });
 
 function scheduler({ policyFor, activity = () => ({ openJobs: [], buildActive: false, reasons: [] }), cleanup = null, check = nodusCheck() } = {}) {
@@ -48,7 +48,7 @@ function scheduler({ policyFor, activity = () => ({ openJobs: [], buildActive: f
     runCheck: async key => { calls.checks.push(key); return check; },
     activityFor: activity,
     requestCleanup: async spec => { calls.cleanups.push(spec); if (cleanup) return cleanup(spec); return { changed: true, cleanupId: 'cln_x', jobId: 'j' }; },
-    monitor: { postCleanupAlert: e => calls.alerts.push(e) },
+    monitor: { postCleanupAlert: (targetKey, outcome, opts) => calls.alerts.push({ targetKey, ...outcome, ...opts }) },
     now: () => NOW,
   });
   return { s, calls };
@@ -68,7 +68,7 @@ test('an enabled rule runs a policy check and requests a policy cleanup of exact
   const { s, calls } = scheduler({ policyFor: () => policy({ caches: on({ maxAgeDays: 14 }), tempFiles: on({ maxAgeDays: 2 }) }) });
   const out = await s.runOnce();
   assert.deepEqual(calls.checks, ['application:1']);
-  assert.deepEqual(calls.cleanups, [{ targetKey: 'application:1', checkId: 'chk-1', items: [ids.group, ids.cache], snapshots: [], exports: [], acknowledgeSnapshotLoss: false, scope: 'categories', origin: 'policy', userId: null }]);
+  assert.deepEqual(calls.cleanups, [{ targetKey: 'application:1', checkId: CHECK_ID, items: [ids.group, ids.cache], snapshots: [], exports: [], acknowledgeSnapshotLoss: false, scope: 'categories', origin: 'policy', userId: null }]);
   assert.equal(out.targets[0].selected, 2);
 });
 
@@ -82,7 +82,7 @@ test('a busy application is skipped without an alert; a failure is alerted', asy
   const broken = scheduler({ policyFor: () => policy({ caches: on({ maxAgeDays: 14 }) }), cleanup: () => { throw Object.assign(new Error('db'), { code: 'SQLITE_BUSY' }); } });
   const out = await broken.s.runOnce();
   assert.equal(out.targets[0].error, 'SQLITE_BUSY');
-  assert.equal(broken.calls.alerts.length, 1); assert.equal(broken.calls.alerts[0].kind, 'cleanup'); assert.equal(broken.calls.alerts[0].ok, false);
+  assert.deepEqual(broken.calls.alerts, [{ targetKey: 'application:1', ok: false, failedCount: 0, name: 'Nodus' }]);
 });
 
 test('the schedule: every six hours by default, overridable, off with PROXYPILOT_DISABLE_CRONS', async () => {

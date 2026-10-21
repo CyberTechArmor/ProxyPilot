@@ -235,7 +235,7 @@ function fileItem(it, root, cls) {
     action: status === 'eligible' ? (cls.action || 'remove') : null,
     location: cls.location || 'guest',
     root: root?.path || null,
-    identity: { type: it.type || null, dev: it.dev ?? null, ino: it.ino ?? null, mtimeMs: it.mtimeMs ?? null, size: it.size ?? null, uid: it.uid ?? null, ...(cls.identity || {}) },
+    identity: { type: it.type || null, dev: it.dev ?? null, ino: it.ino ?? null, mtimeMs: it.mtimeMs ?? null, birthtimeMs: it.birthtimeMs ?? null, size: it.size ?? null, uid: it.uid ?? null, ...(cls.identity || {}) },
     inUse: !!it.inUse,
     dev: it.dev ?? null,
     crossesDevice: !!it.crossesDevice,

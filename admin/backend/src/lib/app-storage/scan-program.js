@@ -168,7 +168,7 @@ function readSmall(f){const s=lst(f);if(!s||!s.isFile()||s.size>MARKER_MAX)retur
 const HEX40=/^[a-f0-9]{40}$/,HEX64=/^[a-f0-9]{64}$/;
 function measure(it,r){
   const st=lst(it.path);if(!st){it.missing=true;return}
-  it.name=p.posix.basename(it.path);it.dev=st.dev;it.ino=st.ino;it.uid=st.uid;it.gid=st.gid;it.mode=st.mode&0o7777;it.nlink=st.nlink;it.size=st.size;it.mtimeMs=st.mtimeMs;it.newestMtimeMs=st.mtimeMs;
+  it.name=p.posix.basename(it.path);it.dev=st.dev;it.ino=st.ino;it.uid=st.uid;it.gid=st.gid;it.mode=st.mode&0o7777;it.nlink=st.nlink;it.size=st.size;it.mtimeMs=st.mtimeMs;it.birthtimeMs=st.birthtimeMs>0?st.birthtimeMs:null;it.newestMtimeMs=st.mtimeMs;
   it.logicalBytes=st.size;it.allocatedBytes=st.blocks*512;it.files=0;it.dirs=0;it.links=0;it.others=0;it.sharedBytes=0;it.inaccessible=0;
   const m=mountOf(it.path);if(m&&memoryFs(m.fstype))it.memoryBacked=true;
   const parent=lst(p.posix.dirname(it.path));if(parent&&parent.dev!==st.dev)it.mountPoint=true;

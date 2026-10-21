@@ -165,7 +165,8 @@ export default function RetentionPolicy({ target, client = api, checkId = null, 
         </div>
         <p className="text-xs text-muted-foreground max-w-3xl">{POLICY_TEXT.description}</p>
         <p className="text-xs text-muted-foreground" data-testid="policy-changed">
-          {data.updatedAt ? POLICY_TEXT.changed(formatAge(data.updatedAt), formatDateTime(data.updatedAt), data.updatedBy) : POLICY_TEXT.neverChanged}
+          {data.source === 'defaults-new' ? POLICY_TEXT.defaultsNewRecorded
+            : data.updatedAt ? POLICY_TEXT.changed(formatAge(data.updatedAt), formatDateTime(data.updatedAt), data.updatedBy) : POLICY_TEXT.neverChanged}
         </p>
       </div>
       {!data.checkId && (

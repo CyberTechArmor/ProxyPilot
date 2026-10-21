@@ -14,7 +14,7 @@ import {
   parseTargetKey, targetKeyOf, storageHref, headerFigures, ruleState, ruleForm, validateRuleForm, withRule,
   ruleFormChanged, alertsForm, validateAlertsForm, withAlerts, alertsFormChanged, gbToBytes, bytesToGb,
   effectFor, isCheckRunning, isCheckFinished, isCleanupFinished, NOTHING_SELECTED, ALL_ELIGIBLE_SCOPE,
-  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure, groupMemberNoun, itemHint, reclaimedParts,
+  RULE_FIELDS, ALERT_LIMITS, effectNote, cleanupEvents, reclaimedFigure, groupMemberNoun, itemHint, reclaimedParts, figureLabel,
 } from '../../../frontend/src/components/app-storage/app-storage-model.mjs';
 import { validatePolicy } from '../lib/app-storage/policy.js';
 import {
@@ -435,4 +435,51 @@ test('the measured reclaim is shown by kind: files on disk, memory, the pool wit
   assert.deepEqual(reclaimedParts({ guestBytes: -4096, memoryBytes: -1, datasetBytes: -1 }), [{ key: 'disk', bytes: 0 }, { key: 'memory', bytes: 0 }]);
   assert.deepEqual(reclaimedParts(null), []);
   assert.deepEqual(Object.keys(TEXT.reclaimedKinds), ['disk', 'memory', 'pool']);
+});
+
+test('categories keep disk and memory apart and leave host-wide shared items out (review M8, M9; WS1 §5)', () => {
+  const temp = categoryRows(check).find((r) => r.key === 'temp');
+  assert.equal(temp.allocatedBytes, 4096, 'disk: /var/tmp only');
+  assert.equal(temp.memoryBytes, 203628192, '/tmp is memory');
+  assert.equal(temp.eligibleMemoryBytes, 181420000);
+  // A check without the split (older shape) is split from its items.
+  const old = { ...check, categories: check.categories.map(({ memoryBytes, eligibleMemoryBytes, sharedHostBytes, ...c }) => (c.key === 'temp' ? { ...c, allocatedBytes: 203632288 } : c)) };
+  const oldTemp = categoryRows(old).find((r) => r.key === 'temp');
+  assert.equal(oldTemp.allocatedBytes, 4096);
+  assert.equal(oldTemp.memoryBytes, 203628192);
+  const bundle = { id: 'b'.repeat(16), category: 'archives', label: 'bundle-x', kind: 'directory', status: 'investigate', sub: 'shared', sharedHost: true, allocatedBytes: 5000, location: 'host' };
+  const withShared = { checkId: 'chk_y', items: [bundle] };
+  const arch = categoryRows(withShared).find((r) => r.key === 'archives');
+  assert.equal(arch.allocatedBytes, 0);
+  assert.equal(arch.sharedHostBytes, 5000);
+  assert.equal(canSelect(bundle), false);
+  assert.equal(TEXT.cleanableSize('2.1 GB', '181 MB'), '2.1 GB on disk and 181 MB in memory can be cleaned up');
+  assert.equal(TEXT.cleanableSize('6.4 GB'), '6.4 GB can be cleaned up');
+  assert.equal(TEXT.sharedHostShort('5 KB'), '5 KB shared by all applications, not counted here');
+});
+
+test('a pool on the host disk: figures named as the host\'s, no "not measured individually" item (review M10, 17)', () => {
+  const shared = nodusCheck(NOW, { sharedHost: true });
+  const h = headerFigures(shared);
+  assert.equal(h.sharedHost, true);
+  assert.equal(h.usedSource, 'shared-host-df');
+  const withPseudo = { ...shared, items: [...shared.items, { id: 'p'.repeat(16), category: 'other', kind: 'pseudo', status: 'investigate', label: 'Not measured individually', allocatedBytes: 1e9 }] };
+  assert.equal(categoryRows(withPseudo).flatMap((r) => r.items).some((i) => i.kind === 'pseudo'), false);
+  assert.equal(headerFigures(check).sharedHost, false);
+  assert.equal(figureLabel('incus-root-usage'), 'on disk, with snapshots');
+  assert.equal(figureLabel('container-df'), 'files inside the container');
+  assert.equal(figureLabel('shared-host-df'), "the host's shared disk, not this container's alone");
+  assert.equal(figureLabel('something-new', 'Server wording'), 'Server wording');
+  assert.equal(figureLabel(undefined), null);
+  assert.match(TEXT.sharedHostNotice, /not this container's alone/);
+});
+
+test('several snapshots (not all) free at least their figures; new-project defaults are explained (review 16, WS1 §1)', () => {
+  const three = { ...check, items: [...check.items, { ...SNAP2, id: 'c'.repeat(16), label: 'pp-third' }] };
+  const two = selectMany(three, null, [SNAP.id, SNAP2.id]);
+  const est = estimateSelection(three, two);
+  assert.equal(est.precision, 'at-least');
+  assert.ok(est.notes.some((n) => /several snapshots together/.test(n)));
+  assert.equal(estimateSelection(three, selectItem(three, null, SNAP.id)).precision, 'about', 'one snapshot is an estimate');
+  assert.equal(POLICY_TEXT.defaultsNewRecorded, 'These rules were turned on when the project was created (the documented defaults).');
 });

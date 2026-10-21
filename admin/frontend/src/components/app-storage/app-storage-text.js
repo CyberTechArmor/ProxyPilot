@@ -63,6 +63,16 @@ export const CATEGORY_DESCRIPTIONS = {
   other: 'Files no rule recognises. Look at them before deciding.',
 };
 
+// Short plain names for where each "used" figure comes from (keys are the
+// check's FIGURE_SOURCES; the server's own labels are longer sentences).
+export const FIGURE_LABELS = {
+  'container-df': 'files inside the container',
+  'shared-host-df': "the host's shared disk, not this container's alone",
+  'incus-root-usage': 'on disk, with snapshots',
+  'zfs-dataset': 'on disk, with snapshots',
+  'monitor-sample': 'on disk, with snapshots (last 15-minute reading)',
+};
+
 export const KIND_LABELS = {
   application: 'Application',
   project: 'Dev Studio project',
@@ -218,7 +228,12 @@ export const TEXT = {
   // Overview extras
   colActions: 'Actions',
   usedSize: (size) => `${size} of files in the container`,
-  cleanableSize: (size) => `${size} can be cleaned up`,
+  usedSizeShared: (size) => `${size} used on the host's shared disk`,
+  cleanableSize: (size, memory = null) => (memory ? `${size} on disk and ${memory} in memory can be cleaned up` : `${size} can be cleaned up`),
+  inMemoryShort: 'in memory',
+  sharedHostShort: (size) => `${size} shared by all applications, not counted here`,
+  usedShared: 'Used on the shared host disk',
+  sharedHostNotice: "This container's storage pool keeps its files on the host's own disk, shared with the host and other containers. Used and Available are that whole disk's figures, not this container's alone, and what this check did not measure one by one cannot be estimated.",
   forName: (name) => ` for ${name}`,
   ofName: (name) => ` of ${name}`,
   policyChip: {
@@ -262,6 +277,7 @@ export const ESTIMATE_NOTES = {
   partial: 'Some sizes are at least what is shown, because not every folder could be measured.',
   journal: 'System logs are reduced to the size limit; the space recovered is an estimate.',
   allSnapshots: 'All snapshots are selected, so the space they hold together is counted.',
+  snapshotsTogether: 'Deleting several snapshots together frees at least the space each holds on its own, often more.',
   counted: 'Files linked from several places are counted once.',
 };
 
@@ -367,6 +383,7 @@ export const POLICY_TEXT = {
   loading: 'Loading the rules…',
   changed: (age, date, who) => `Last changed ${age} (${date})${who ? ` by user #${who}` : ''}.`,
   neverChanged: 'Not changed here yet.',
+  defaultsNewRecorded: 'These rules were turned on when the project was created (the documented defaults).',
   noCheckTitle: 'No storage check has run yet',
   noCheckNudge: 'The rules below cannot show what they would remove until a check has run. Run a storage check first; you can still turn a rule on now.',
   effectNoCheck: 'No storage check yet, so what this rule would remove is not known. Run a check first to see it.',

@@ -167,6 +167,7 @@ try {
     const nodusRow = page.locator(width >= 1024 ? 'table [data-target="application:1"]' : 'main div[data-target="application:1"]');
     await nodusRow.getByText('on disk, with snapshots').waitFor();
     await nodusRow.getByText('3.6 GB of files in the container', { exact: false }).waitFor();
+    await nodusRow.getByText('2.1 GB on disk and 181 MB in memory can be cleaned up', { exact: false }).waitFor();
     if (width >= 1024) await page.getByRole('columnheader', { name: 'Disk used now' }).waitFor();
     ok(`${width}px: the overview says which "used" is which — disk with snapshots now, files in the container at the last check`);
     ok(`${width}px: overview "Request storage check" shows Checking… and polls GET /checks/:id until finished`);
@@ -194,6 +195,10 @@ try {
     for (const label of ['Abandoned browser download', 'tsx-989', 'nodus-embed-* (263 folders)']) {
       assert.equal(await page.locator(`[data-item="${byLabel(label).id}"]`).getByText('Uses memory, not disk', { exact: false }).count(), 1, `${label}: the memory note appears once`);
     }
+    const tempSection = page.locator('section[data-category="temp"]');
+    await tempSection.getByText('4.1 KB on disk', { exact: true }).waitFor();
+    await tempSection.getByText('204 MB in memory', { exact: true }).waitFor();
+    await page.locator(`[data-item="${byLabel('Abandoned browser download').id}"]`).getByText('138 MB in memory', { exact: true }).waitFor();
     for (const sec of await page.locator('section[data-category]').all()) {
       if (await sec.getByText('Some can be cleaned up', { exact: true }).count()) assert.ok(await sec.getByRole('button', { name: /Select all|Clear/ }).count(), 'a "Some can be cleaned up" category has something to select');
     }
@@ -341,6 +346,23 @@ try {
 
     assert.deepEqual(world.state.unexpected, [], 'no unexpected API calls');
     assert.deepEqual(errors, [], 'no page errors');
+    await context.close();
+  }
+
+  /* ------------------------ a pool on the host's own disk ------------------------ */
+  {
+    const world = createWorld(NOW, { sharedHost: true });
+    const { page, errors, context } = await newPage(world);
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto(`${origin}/storage/applications?target=application:1`);
+    await page.getByRole('heading', { name: 'Nodus', level: 1 }).waitFor();
+    await page.getByTestId('shared-host').getByText("Used and Available are that whole disk's figures, not this container's alone", { exact: false }).waitFor();
+    await page.getByText('Used on the shared host disk', { exact: true }).waitFor();
+    await expandAll(page);
+    assert.equal(await page.getByText('Not measured individually', { exact: false }).count(), 0, 'no "not measured individually" remainder on a shared disk');
+    for (const w of [360, 1280]) await layoutCheck(page, w, 'detail-shared-host');
+    assert.deepEqual(errors, []);
+    ok('360/1280px: on a pool that shares the host disk, the page says the figures are the host\'s and shows no "not measured individually" remainder');
     await context.close();
   }
 

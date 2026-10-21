@@ -12,10 +12,10 @@ import {
 
 export const USER = { id: 'storage-admin', username: 'admin', role: 'admin', permissions: [] };
 
-export function createWorld(now = Date.now(), { noCheck = false } = {}) {
+export function createWorld(now = Date.now(), { noCheck = false, sharedHost = false } = {}) {
   const state = {
     now,
-    latestCheck: noCheck ? null : nodusCheck(now),
+    latestCheck: noCheck ? null : nodusCheck(now, { sharedHost }),
     checkRequests: [],     // { key }
     checkPolls: new Map(), // checkId -> polls answered
     checkTargets: new Map(),

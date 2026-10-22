@@ -388,11 +388,15 @@ host integration work; a guidance version never proves those capabilities.
 `,
     },
     ...guidance.files.map(({ path, content }) => ({ path, content })),
+    ...(guidance.runtime_files || []).map(({ path, content }) => ({ path, content })),
     { path: '.mock2/standards/VERSION', content: `${guidance.version}\n` },
     { path: '.mock2/standards/PROVENANCE.json', content: JSON.stringify({
       family: guidance.family, version: guidance.version, scope: guidance.scope,
       source: 'https://git.fractionate.ai/mock2/mock2-core',
       files: guidance.files.map(({ path, source, sha256 }) => ({ path, source, sha256 })),
+      runtime_scope: guidance.runtime_scope || 'none',
+      runtime_files: (guidance.runtime_files || []).map(({ path, source, sha256 }) => ({ path, source, sha256 })),
+      git_host_operations: 'not_performed_by_seed',
       relay_runtime: 'not_installed_by_guidance_seed',
     }, null, 2) + '\n' },
   ];

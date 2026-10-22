@@ -318,3 +318,16 @@ Use actual non-demo navigation, redirected resources, live frames, cancellation,
 cleanup, restart and subsequent normal-update evidence. Follow with real model
 execution, manual authentication/action approval, files and internal destinations.
 Only then reconcile approved mockups and deploy visible UI/UX batches separately.
+
+
+## Background task: portable Git readiness adoption — 2026-10-22
+
+Public branch `codex/git-readiness-adoption-20261022` begins at main
+`869099bc9b3962b456e21849fc36ac3e3ba8a386`. It adopts canonical Mock2 1.35.0
+(release SHA-256 `7a3eea91ef84f43033386da14c7735b5fb1805ba2f624b8d4abe2991bc40fab6`)
+with 33 guidance files and six dedicated readiness files. See
+`state/change-records/2026-10-22-git-readiness-adoption.md` for scope and evidence.
+Focused seed/acquisition/framework checks: 32/32 passed; real seeded inspection
+CLI ran on a temporary local folder; diff check passed. The coordinator owns
+publication and release integration. No private Flightdeck source, shared
+self-update candidate, external provider or live deployment was changed.

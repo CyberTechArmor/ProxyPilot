@@ -268,6 +268,33 @@ test('classify: explain-only negatives — a build request that merely mentions 
   }
 });
 
+test('FD0130-1 guided explanation overrides continuation before a build receives tools', () => {
+  for (const msg of [
+    'continue, but only explain the problem',
+    'try again, just explain why',
+    'resume: please only tell me what failed',
+    'Please continue and just answer the question.',
+    'retry — but please explain only why the login fails',
+    'keep going with only explain the plan',
+    'continue, but only explain ' + 'x'.repeat(MAX_GUIDANCE_CHARS + 1),
+  ]) {
+    assert.deepEqual(classifyContinuationMessage(msg), { kind: 'explain_only', guidance: msg }, msg);
+    const decision = resolveTaskRoute({ message: msg, lane: 'build', tasks: [task({ status: 'interrupted' })], nowMs: NOW });
+    assert.equal(decision.action, 'investigate', msg);
+    assert.equal(decision.taskKey, null, msg);
+    assert.equal(decision.guidance, msg, msg);
+    assert.equal(resolveTaskRoute({ message: msg, lane: 'ask', tasks: [], nowMs: NOW }).action, 'pass', msg);
+  }
+  for (const msg of [
+    'continue, but make the email field read-only',
+    'continue, add a tooltip that says just explain',
+    'resume: add a help page that will only explain the pricing',
+  ]) {
+    assert.equal(classifyContinuationMessage(msg).kind, 'continue', msg);
+    assert.equal(resolveTaskRoute({ message: msg, lane: 'build', tasks: [task({ status: 'interrupted' })], nowMs: NOW }).action, 'resume_build', msg);
+  }
+});
+
 test('classify: continuation with guidance — separators and and/but/with; remainder kept verbatim', () => {
   const cases = [
     ['continue, but skip the e2e tests', 'but skip the e2e tests'],

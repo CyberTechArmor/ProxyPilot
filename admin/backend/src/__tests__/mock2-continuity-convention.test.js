@@ -64,8 +64,9 @@ test('AGENTS.md: the entry point, with the reading order in the right sequence',
   assert.match(agentsMd(null), /^# Project — start here\n/);
   for (const tool of ['Claude Code', 'Copilot', 'Codex']) assert.ok(md.includes(tool), `names ${tool}`);
   const order = md.slice(md.indexOf('## Reading order'), md.indexOf('## Rules'));
-  const steps = ['`CLAUDE.md`', '`state/work.md`', '`state/decisions.md`', '`state/tasks/*/task.json`',
-    '`handoff.md`', '`state/handoff.md`', '`.mock2/standards/`'];
+  const steps = ['`.mock2/capacity.md`', '`000-READ-FIRST.md`', '`state/handoff.md`', '`state/work.md`',
+    '`state/decisions.md`', '`state/rules.md`', '`state/production-checklist.md`', '`state/tasks/*/task.json`',
+    '`handoff.md`', '`CLAUDE.md`', '`.mock2/standards/`'];
   let at = -1;
   for (const s of steps) {
     const i = order.indexOf(s, at + 1);
@@ -75,6 +76,25 @@ test('AGENTS.md: the entry point, with the reading order in the right sequence',
   // Which tasks are unfinished — the four statuses, named in the reading order.
   for (const st of UNFINISHED) assert.ok(order.includes(`\`${st}\``), `names unfinished status ${st}`);
   assert.ok(md.includes('`state/tasks/README.md`'), 'points at the format');
+});
+
+test('FD0130-2 continuity supplements managed startup and separates offline context from runtime task selection', async () => {
+  const md = agentsMd({ name: 'Example' });
+  assert.match(md, /managed Mock2 startup instructions/);
+  assert.match(md, /follow it first/);
+  assert.match(md, /never replaces it/);
+  assert.match(md, /Do not overwrite a managed block/);
+  assert.match(md, /not an instruction to restart this reading order/);
+  assert.match(md, /last seven days/);
+  assert.match(md, /stopped task only when that task is the newest task overall/);
+  assert.match(md, /database selects the authorized task/);
+  assert.match(md, /Do not select or authorize a\s+build from the newest file/);
+  assert.match(md, /Continuing an investigation stays read-only/);
+  const constitution = await readFile(new URL('../mock2/framework-seed/constitution.md', import.meta.url), 'utf8');
+  const section = constitution.slice(constitution.indexOf('## 15. Task continuity'), constitution.indexOf('<!-- BEGIN PINNED MOCK2 GUIDANCE -->'));
+  assert.match(section, /managed Mock2 startup instructions first/);
+  assert.match(section, /a stopped\s+task is eligible only when newest overall/);
+  assert.doesNotMatch(section, /order: `CLAUDE.md`/);
 });
 
 test('AGENTS.md: the rules — own folder, mirror, authorizes nothing, newest instruction, verify, no secrets', () => {

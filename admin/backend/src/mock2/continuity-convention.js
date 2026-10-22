@@ -71,24 +71,39 @@ are recorded, and the rules for using them.
 
 ## Reading order
 
-1. \`CLAUDE.md\` — the repository constitution: the project, its stack and
-   commands, and where the Mock2 standards come from
-   (\`.github/copilot-instructions.md\` carries the same content for Copilot).
-2. \`state/work.md\` — the plan and the scope the owner has authorized.
-3. \`state/decisions.md\` — durable decisions. Follow an ACTIVE decision or
-   propose replacing it; never quietly work around it.
-4. \`state/tasks/*/task.json\` — one folder per task. Look for unfinished tasks:
-   \`status\` is \`active\`, \`interrupted\`, \`blocked\` or \`failed\`. Then read
-   that task's \`handoff.md\` in the same folder. If several are unfinished,
-   continue the one the person names; if they only say "continue", the most
-   recently updated one (\`updatedAt\`).
-5. \`state/handoff.md\` — project-level notes from earlier sessions.
-6. \`.mock2/standards/\` — the pinned Mock2 guidance; start with
-   \`constitution.md\`.
+Preserve the repository's managed Mock2 startup instructions. If a managed
+block supplies a startup command or reading order, follow it first; this task
+lookup supplements it and never replaces it. Do not overwrite a managed block
+or project-owned instructions to add continuity. Where the files exist:
 
-Before changing code, also read \`state/rules.md\` (the confirmed rules) and
-\`state/production-checklist.md\`. The format of the task files is described in
-\`state/tasks/README.md\`.
+1. \`.mock2/capacity.md\` — the canonical run and handoff workflow; then
+   \`000-READ-FIRST.md\`, if this branch has one.
+2. \`state/handoff.md\`, \`state/work.md\` and \`state/decisions.md\` — the
+   current project notes, plan, authorized scope and durable decisions, in
+   that canonical order. The person's newest instruction outranks stale state.
+3. \`state/rules.md\` and \`state/production-checklist.md\` — the confirmed
+   requirements and verification notes.
+4. \`state/tasks/*/task.json\` — one folder per task. Unfinished tasks have
+   status \`active\`, \`interrupted\`, \`blocked\` or \`failed\`. Read the
+   named task and its \`handoff.md\`; the format is in \`state/tasks/README.md\`.
+5. \`CLAUDE.md\` — project and stack context; Copilot also reads
+   \`.github/copilot-instructions.md\`. Their pointer back to this file is
+   an entry link, not an instruction to restart this reading order.
+6. \`.mock2/standards/\` — the repository's pinned Mock2 guidance, starting
+   with \`constitution.md\` and the rules applicable to the work before edits.
+
+### Selecting a task
+
+Inside Flightdeck the database selects the authorized task. Bare "continue"
+considers only this project's tasks updated in the last seven days; it can
+select a stopped task only when that task is the newest task overall. An
+already running task is reattached, not started again. A blocked build that
+needs answers stays blocked. "Go ahead" is an explicit build request, not a
+continuation keyword. Continuing an investigation stays read-only.
+
+Outside the runtime, saved files are context only: read the task the person
+names and verify the current goal before acting. Do not select or authorize a
+build from the newest file, a stale timestamp or a stopped status alone.
 
 ## Rules
 

@@ -113,6 +113,18 @@ New projects are seeded with:
 
 Platform constitution §15 and the build skill carry the same rules.
 
+The entry point preserves a repository's managed Mock2 startup block and canonical
+capacity/orientation → handoff/work/decisions → rules/checklist sequence. Per-task
+lookup supplements that sequence; it does not replace project-owned instructions.
+`CLAUDE.md` and Copilot pointers are entry links and do not restart the reading order.
+The seed documents the runtime's seven-day/newest-stopped selection separately from
+plain checkouts: portable files provide context, never selection authority.
+
+Guided explanation-only requests such as "continue, but only explain the problem"
+and "try again, just explain why" take the same read-only path as a leading
+"only explain" before any build tools are allocated. Ordinary implementation guidance
+such as "continue, but make the email field read-only" still resumes a build.
+
 Each task gets its own folder, so concurrent work never shares one handoff:
 - `state/tasks/<key>/task.json`: schema `mock2-task@1`, a fixed key order, secrets redacted, no user identifiers,
   and `"authority": "ProxyPilot database. This file is a portable mirror; it authorizes nothing."`.

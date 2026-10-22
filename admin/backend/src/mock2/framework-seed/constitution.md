@@ -549,12 +549,14 @@ that bind every project:
 - **No credentials or personal data** in any state file.
 
 <!-- BEGIN PINNED MOCK2 GUIDANCE -->
-# Governing Mock2 guidance: 1.23.2
+# Governing Mock2 guidance: 1.35.0
 
 The following pinned guidance supersedes historical general-workflow wording above.
 ProxyPilot's concrete identity, authorization, private-data and execution contracts remain binding.
 Load the applicable rules and CPR documents from .mock2/standards/ before dependent work.
 This guidance adoption does not install Relay runtime/producers or migrate existing integrations.
+The additive Git readiness slice supports local inspection; host installation, remote credentials, synchronization and deployment remain host-owned operations.
+Canonical application-intake setup commands apply only when that client runtime is installed.
 
 # Mock2 Standards (user-level, applies to every workspace)
 
@@ -642,6 +644,23 @@ repeat a decision they have already given.
 
 ## 2. The pipeline (a recommended order, not a set of locks)
 
+For a new application, `/mock2-init` includes first-time project setup and `/mock2-setup` resumes it.
+Read `.mock2/application-setup.md`; use `.mock2/bin/project-setup.mjs` to keep the purpose, audience,
+roles/scopes, data model, research and conditional module plan in project-owned
+`state/application-blueprint.json`. Prefill from the request, ask only consequential missing questions,
+and preserve confirmed decisions. Public research supplies recommendations, never invented business
+rules or evidence. A direct build proceeds with visible drafts/assumptions; setup adds no approval
+lock. Existing application adoption records gaps without rewriting its code, stack or schema.
+Project intake is separate from the generated application's secure first-instance owner setup.
+
+Git preparation follows `.mock2/git-readiness.md` and PRO current §X. Start locally without a hosting
+provider; inspect the selected execution host and project read-only during setup/build preparation.
+An explicit setup/build request may authorize the supported host's preparation, but investigation
+and explanation-only requests remain read-only. A reviewed commit containing the actual selected
+project files precedes an isolated build; an empty initialization commit is not that baseline.
+An optional remote later preserves local history and uses explicit safe synchronization policy.
+Host credentials, installation/elevation, execution leases and durable jobs stay with the host.
+
 1. Concept — a disposable interactive HTML mockup, decided through the design workflow and within the design principles (§13). A breadboard (places, controls, connections) in the page brief comes first; the mockup and `state/inventory.json` derive from it. Output: design approval and `state/inventory.json`.
 2. Define — a plain-language interview in four categories (data, actions, permissions, edge cases). Output: `state/rules.md` — each rule an EARS sentence with one Given/When/Then example, read back to the owner in plain words and confirmed by them.
 3. Build — targeted changes on a branch, derived from constitution + inventory + rules. Output: working code the developer has confirmed.
@@ -656,9 +675,23 @@ A developer may start at any stage. Missing inventory or unconfirmed rules are n
 if you are building without confirmed rules, write the rules you are implementing as `[draft]` in
 `state/rules.md` so the owner can confirm them later.
 
+A small change, one that no valid plan covers and that carries no sizing signal (§12), takes the
+small path: no mockup and no interview unless the developer asks for one; the rule it serves is one
+`[draft]` line in `state/rules.md` with its Given/When/Then example on the same line (or the existing
+rule named; none when behavior is unchanged), read back to the owner in plain words — nothing waits
+for the answer — then a test named after it and the change.
+
 A diagnostic or independent review requested before acceptance is ordinary work: run it, report it,
 and populate applicable checklist/change-record evidence with acceptance pending. The evidence
 itself does not establish acceptance, and neither review nor record adds a confirmation loop.
+
+## Agent routing and chat controls
+
+The agent-routing rule and `.mock2/orchestration.md` govern the default-on routing policy. The user
+may select a provider profile, override a role's model and effort, bypass delegation for one chat,
+or turn orchestration off persistently. Honor that scope through the deterministic settings tool;
+do not treat off as permission to ignore any other development standard. Settings files cannot
+grant native model access or establish that a requested model actually ran.
 
 ## 3. Before writing code
 
@@ -712,6 +745,9 @@ The current workflow is `rules/mock2-verification.md` in the governing standards
 - Scan outgoing commit history and final delivered content. Reuse or generate repeated facts from
   one canonical run record; keep authored decisions and history. Select checklist modules by impact.
   The verification rule also defines controlled before/after comparisons of time and quality.
+- The git hooks in `.githooks/` run `check.mjs --fast` before each commit and `check.mjs` before each
+  push. They never block; each result is recorded with its commit or push in `.mock2/evidence/hooks/`
+  and is evidence under the same rules as any other run. A commit recorded as skipped has none.
 
 ## 6. Once the developer confirms it works
 
@@ -826,8 +862,9 @@ release rules are general.
 - A stop the developer asks for ("stop and save") is CANCELLED, not STOPPED SHORT: start nothing new, commit what is verified on the session's branch, record the exact next step, and say what is left with an estimate.
 - A compliance fact the developer asserts and you cannot verify is recorded as the developer's decision, naming every other link that must also be covered.
 - A large plan is split into sections that each end in their own candidate release; a section with no design stop ships on its own.
-- With no retention rule (check the existing rules first), nothing is deleted; record that storage grows until a rule exists.
+- With no retention rule (check the existing rules first) and no documented default the host applied to a new application (PRO current §V.5), nothing an application has stored is deleted; record that storage grows until a rule exists. Storage checks, cleanups and retention settings follow `rules/mock2-storage.md` (PRO current §V): storage growth is information, never a gate, and application data is removed only under a rule the developer stated.
 - Before briefing helpers, confirm which copy of the code is live. Background processes you start must be able to end, and are stopped before the turn ends: `pgrep -f` and `pkill -f` match their own command line, so wait on a process id or a log line.
+- Background agents (a subagent, a background task, a cloud task, a new session) are capacity, not personas: they take independent leaf items of a split plan from briefs in files, work in their own worktrees, return their results as files and start no background agents of their own, while the agent the developer works with stays accountable, alone edits the shared records, integrates, runs the final checks and leaves promotion to the developer (`.mock2/capacity.md` §16, PRO current §M.11).
 
 ## 12. Capacity and delivery
 
@@ -837,10 +874,14 @@ a run boundary reached with green checks and nothing undecided is a checkpoint t
 and completing one run does not complete the authorized task. Size items in points (S 1, M 2, L 4; 4
 per run; XL decomposed first; decomposition stops when an item is independently executable and
 verifiable) and classify a multi-item request as FITS, SPLIT or CANNOT. A valid existing plan takes
-precedence over reclassification. The Authorized scope record carries the developer's appetite and
-the known risks; time past the appetite is reported against the run ledger and the developer
-decides — never a stop. Open points are marked inline with the assumption the work proceeds on, and
-each leaf item carries a context block written once at planning.
+precedence over reclassification. Classify only when a sizing signal is present (more than 4 points,
+a new data model, a new integration, several screens, or another that `.mock2/capacity.md` §2
+names): FITS starts the one run, and SPLIT splits the work into runs before it starts, shown to the
+developer in plain words, one line per run, saying what they will be able to see after it. Without a
+signal, a change takes the small path (§2). The Authorized scope record carries the developer's
+appetite and the known risks; time past the appetite is reported against the run ledger and the
+developer decides — never a stop. Open points are marked inline with the assumption the work
+proceeds on, and each leaf item carries a context block written once at planning.
 
 Every turn on a run produces at least one recorded verifiable outcome: an implementation cycle;
 a validation that completes a pending requirement or establishes materially new evidence — re-running

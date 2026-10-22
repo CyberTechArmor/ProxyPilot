@@ -9,10 +9,10 @@ differs from the latest published version, `upgradeFrameworkFromSeed()` publishe
 disabled or production-pinned host nothing here is read, imported, or installed
 (ADR-001). The registry is append-only and content rows are immutable (ADR-003).
 
-## Current guidance adoption (2026-10-17)
+## Current guidance adoption (2026-10-22)
 
-The embedded Mock2 source release is **1.23.2**, family `mock2-core`, scope
-`guidance`. `upstream-guidance.json` retains 30 canonical text files and their
+The embedded Mock2 source release is **1.35.0**, family `mock2-core`, scope
+`guidance`. `upstream-guidance.json` retains 33 canonical guidance files and their
 release hashes. The platform constitution includes the pinned current
 constitution after the retained platform contracts. New project seeds carry
 these documents under `.mock2/standards/` with VERSION and PROVENANCE.json.
@@ -22,9 +22,9 @@ framework version does not certify their local files or deployed application.
 Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`.
 Every required source file is checked against release.json before output.
 Source release.json SHA256 at adoption:
-`745cb748d94f4ae229b1c4731fc26f10d1e3ba28403f774399ecd6ea1512574d`
-(1.23.2, 2026-10-17; previous adoption 1.14.0 on 2026-10-03 was
-`a62c6223783eeb74ed506f5049e6e6dafcf60e1a7106dfaf3ad8c61a138aced5`).
+`7a3eea91ef84f43033386da14c7735b5fb1805ba2f624b8d4abe2991bc40fab6`
+(1.35.0, 2026-10-22; previous adoption 1.23.2 on 2026-10-17 was
+`745cb748d94f4ae229b1c4731fc26f10d1e3ba28403f774399ecd6ea1512574d`).
 
 CPR remains specification **1.1**, framework registry integers and the base-app
 scaffold are separate version families. Relay reference **1.2.1** is described
@@ -32,6 +32,29 @@ by the guidance; its runtime and ongoing producers are **not installed by this
 seed**. Integration foundations are instructions for new builds; existing
 connections and schemas are not migrated by adopting standards. Existing
 dependency release lines are preserved.
+
+## Portable Git readiness adoption (2026-10-22)
+
+The pinned canonical release additionally supplies six files: `.mock2/git-readiness.md`
+and the five-module `.mock2/bin/git-readiness*.mjs` dependency closure. The sync script
+checks every included file against the release hashes and permits only static
+relative imports within that named slice plus Node builtins. A missing module,
+changed byte, application dependency or release-path escape refuses acquisition
+before any generated seed is written.
+
+New project seeds can run `node .mock2/bin/git-readiness.mjs --inspect` locally
+without a hosting-provider account. The separate runtime provenance is
+`git-readiness-local-inspection`; the general guidance scope remains `guidance`.
+This does not run an installer, attach a provider, fetch/push a branch, replace
+project history or deploy an application. ProxyPilot's existing host/connector
+operations retain their authorization and durable-job boundaries. A canonical
+application-intake `project-setup.mjs` command applies only to clients that have
+that runtime; it is not installed by this narrow readiness adoption.
+
+Guidance bytes and readiness-tool hashes are recorded independently in seeded
+`PROVENANCE.json`. Existing projects use their explicit additive, hash-aware
+standards rollout; a framework version publication is not a claim that every
+existing checkout or running application has already adopted the tool.
 
 ## Task continuity convention (2026-10-21)
 

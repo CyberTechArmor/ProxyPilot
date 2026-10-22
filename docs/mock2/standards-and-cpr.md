@@ -1,5 +1,6 @@
-> Current adoption (2026-10-17): the framework seed now includes hash-verified
-> Mock2 **1.23.2** guidance (previously 1.14.0, 2026-10-03). See `framework-seed/README.md` and
+> Current adoption (2026-10-22): the framework seed now includes hash-verified
+> Mock2 **1.35.0** guidance and its dedicated local Git-readiness slice
+> (previous guidance adoption 1.23.2, 2026-10-17). See `framework-seed/README.md` and
 > `scripts/sync-mock2-guidance.mjs`. Framework integer, scaffold, CPR 1.1 and Relay
 > 1.2.1 are independent identities. Historical instructions below describe the
 > earlier 0.3.0 rendering. An available site release requires reviewed adoption;
@@ -60,6 +61,25 @@ system, the platform's deploy path (blue/green slots, release registry and
 no-build rollback are CPR Base Platform responsibilities — see §5).
 
 ## 3. Updating the seed when the site changes
+
+### Git readiness slice
+
+`scripts/sync-mock2-guidance.mjs` also acquires the pinned canonical Git readiness
+guide and dedicated `git-readiness*.mjs` static dependency closure. Source files
+must match release hashes and remain within the acquired release. Arbitrary
+application modules, external packages, dynamic imports and path escapes are
+refused before outputs are written. `upstream-guidance.json` keeps these files
+in `runtime_files`, with `runtime_scope: git-readiness-local-inspection`;
+`template.js` emits them and records their hashes in project provenance.
+
+This makes the read-only local CLI available in newly seeded projects. Local
+Git does not require GitHub or Gitea. A configured external connector remains a
+separate host capability: seed acquisition does not install Git, attach a
+remote, fetch/push or execute the consuming client's privileged operations.
+The canonical application-intake setup runtime is not part of this slice;
+its status command applies only when that runtime is installed by the client.
+Existing projects require their normal explicit hash-aware additive rollout;
+publishing a seed version alone does not establish local or deployed adoption.
 
 1. Read `manifest.json` on the site (version + changelog) and diff `core/` against
    the last version recorded in `framework-seed/README.md`.

@@ -278,6 +278,12 @@ export function classifyContinuationMessage(text) {
   if (m) {
     const guidance = m[2].trim();
     if (!guidance) return { kind: 'continue', guidance: '' };
+    // A newer explanation-only instruction can follow the continuation phrase.
+    // Inspect that clause before a route can resume a build with write tools.
+    // Strip only the optional conjunction and ordinary polite words; mentions
+    // inside an implementation request ("add a just explain tooltip") stay builds.
+    const directive = normalizeMessage(guidance.replace(/^(?:and|but|with)\b[\s,:;—–-]*/i, ''));
+    if (EXPLAIN_ONLY_LEADING_RE.test(directive)) return { kind: 'explain_only', guidance: original };
     if (guidance.length <= MAX_GUIDANCE_CHARS) return { kind: 'continue', guidance };
   }
   return { kind: 'other', guidance: '' };

@@ -10,8 +10,8 @@
 //   * scheduleTaskFilesSync / syncTaskFilesNow — every other transition (an
 //     ask, the boot sweep, a stop): debounced per project, and only when the
 //     project is IDLE (online, no lock holder, no live cycle, no ask running),
-//     re-checked right before committing, so this never commits under a build
-//     or a person's session. The commit is PATH-SCOPED to exactly the written
+//     fenced by a checkout operation lease across writing and committing, so
+//     this never commits under a build or a person's session. The commit is PATH-SCOPED to exactly the written
 //     paths (commitProjectPaths in routes/mcp.js) and pushed exactly as the
 //     runner's checkpoint pushes (template.buildCheckpointScript: origin
 //     HEAD:main into the bare repo).
@@ -23,8 +23,10 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { randomUUID } from 'node:crypto';
 import { conventionFilesIfAbsent, taskJsonPath, taskHandoffPath } from './continuity-convention.js';
 import { isValidTaskKey, renderTaskJson, renderTaskHandoffMd } from './task-logic.js';
+import { writeTaskRecordFile } from './task-record-write.js';
 
 // runner.APP_DIR (and commitProjectPaths' cd) — not imported, see above.
 const APP_DIR = '/srv/app';
@@ -56,7 +58,12 @@ function loadDefaultDeps() {
       import('./locks.js'), import('./cycles.js'), import('./ask.js'), import('./tasks.js'),
     ]).then(([runner, provision, projects, locks, cycles, ask, tasks]) => ({
       containerSh: runner.containerSh,
-      writeFileInContainer: runner.writeFileInContainer,
+      // Retain the dependency seam name; production NEVER uses the generic
+      // model-file writer for unattended metadata.
+      writeFileInContainer: (ct, path, content, options) => writeTaskRecordFile(runner.containerSh, ct, path, content, options),
+      acquireTaskContinuityLease: locks.acquireTaskContinuityLease,
+      settleTaskContinuityLease: locks.settleTaskContinuityLease,
+      markTaskContinuityLeaseUncertain: locks.markTaskContinuityLeaseUncertain,
       containerNameForProject: provision.containerNameForProject,
       getProject: projects.getProject,
       getLock: locks.getLock,
@@ -84,7 +91,7 @@ function resolveDeps(explicit) {
 // person's lock and a running ask all mean someone else owns the working tree.
 export function taskFilesIdleState({ project, lock, cycle, askJob } = {}) {
   if (!project || project.lifecycle !== 'active') return { idle: false, reason: 'not_active' };
-  if (lock && (lock.holder_user_id != null || lock.holder_cycle_id != null)) return { idle: false, reason: 'locked' };
+  if (lock && (lock.holder_user_id != null || lock.holder_cycle_id != null || lock.holder_operation_id != null)) return { idle: false, reason: 'locked' };
   if (cycle && LIVE_CYCLE_STATUSES.includes(cycle.status)) return { idle: false, reason: 'cycle_running' };
   if (askJob && !ASK_DONE_PHASES.includes(askJob.phase)) return { idle: false, reason: 'ask_running' };
   return { idle: true, reason: null };
@@ -140,10 +147,12 @@ export function parseMissingPaths(result, paths) {
 // The path-scoped commit (commitProjectPaths' shape): the message rides as $1
 // and the paths as "$@" — set from base64 decoded in-shell, so neither is ever
 // interpolated into the script text. Pushed like the runner's checkpoint.
-export function buildTaskFilesCommitScript(paths, message) {
+export function buildTaskFilesCommitScript(paths, message, acknowledgement = 'PP_TASK_COMMIT_DONE') {
+  if (!/^PP_TASK_COMMIT_[A-Za-z0-9_]+$/.test(acknowledgement)) throw new TypeError('Invalid commit acknowledgement');
   const args = [message, ...paths].map((s) => `"$(printf '%s' '${b64(s)}' | base64 -d)"`).join(' ');
   return [
     'set -e',
+    `trap 'rc=$?; printf \"${acknowledgement} %s\\n\" \"$rc\" >&2' EXIT`,
     `cd '${APP_DIR}'`,
     `set -- ${args}`,
     'msg="$1"; shift',
@@ -156,13 +165,15 @@ export function buildTaskFilesCommitScript(paths, message) {
   ].join('\n');
 }
 
-export function parseCommitOutput(result) {
+export function parseCommitOutput(result, acknowledgement = 'PP_TASK_COMMIT_DONE') {
   const stdout = String(result?.stdout || '');
   const sha = (stdout.trim().split('\n').pop() || '').trim();
-  const ok = result?.code === 0;
+  const settled = new RegExp(`(?:^|\\n)${acknowledgement} ${Number(result?.code)}(?:\\n|$)`).test(String(result?.stderr || ''));
+  const ok = result?.code === 0 && settled;
   const unchanged = /PP_NOCHANGE/.test(stdout);
   return {
     ok,
+    settled,
     committed: ok && !unchanged,
     unchanged,
     commit: /^[0-9a-f]{40}$/.test(sha) ? sha : null,
@@ -193,16 +204,16 @@ async function missingConventionFiles(d, containerName, project) {
     console.warn(`[mock2] task files: could not tell which convention files exist in ${containerName} — leaving them alone`);
     return [];
   }
-  return entries.filter((f) => missing.includes(f.path));
+  return entries.filter((f) => missing.includes(f.path)).map((f) => ({ ...f, createOnly: true }));
 }
 
 async function writeFiles(d, containerName, files) {
   const paths = [];
   for (const f of files) {
     if (!safeRepoPath(f.path)) return { ok: false, paths, error: `refused path ${JSON.stringify(String(f.path).slice(0, 80))}` };
-    const w = await d.writeFileInContainer(containerName, f.path, f.content);
-    if (!w?.ok) return { ok: false, paths, error: `${f.path}: ${String(w?.error || 'write failed').slice(0, 200)}` };
-    paths.push(f.path);
+    const w = await d.writeFileInContainer(containerName, f.path, f.content, { createOnly: f.createOnly === true });
+    if (!w?.ok) return { ok: false, paths, error: `${f.path}: ${String(w?.error || 'write failed').slice(0, 200)}`, ...(w?.settled === false ? { uncertain: true } : {}) };
+    if (w.written !== false) paths.push(f.path);
   }
   return { ok: true, paths, error: null };
 }
@@ -210,28 +221,42 @@ async function writeFiles(d, containerName, files) {
 // writeTaskFilesInContainer — write one task's files (+ missing convention
 // files when ensureConvention). NO commit: the caller holds the lock and its
 // checkpoint commits them. `deps` is the optional test seam.
-export async function writeTaskFilesInContainer({ containerName, task, project, ensureConvention = true, deps } = {}) {
+export async function writeTaskFilesInContainer({ containerName, task, project, cycleId, ensureConvention = true, deps } = {}) {
+  let d = null; let lease = null; let uncertain = false;
   try {
     if (!containerName) return { ok: false, paths: [], error: 'no container' };
     if (!task || !isValidTaskKey(task.key)) return { ok: false, paths: [], error: 'invalid task key' };
-    const d = await resolveDeps(deps);
+    if (!Number.isInteger(Number(cycleId)) || Number(cycleId) <= 0) return { ok: false, paths: [], error: 'cycle checkout ownership required' };
+    d = await resolveDeps(deps);
+    lease = d.acquireTaskContinuityLease(Number(task.projectId), { cycleId: Number(cycleId) });
+    if (!lease?.ok || !lease.token) return { ok: false, paths: [], error: 'cycle checkout ownership unavailable' };
     const files = taskFileEntries(task);
     if (ensureConvention && project) files.push(...await missingConventionFiles(d, containerName, project));
+    uncertain = true;
     const w = await writeFiles(d, containerName, files);
+    uncertain = w.uncertain === true;
     if (!w.ok) console.warn(`[mock2] task files: write failed for task ${task.key}: ${w.error}`);
     return w;
   } catch (e) {
     console.warn(`[mock2] task files: write error: ${errText(e)}`);
-    return { ok: false, paths: [], error: errText(e) };
+    return { ok: false, paths: [], error: errText(e), ...(uncertain ? { uncertain: true } : {}) };
+  } finally {
+    if (lease?.ok && lease.token) {
+      if (uncertain) d.markTaskContinuityLeaseUncertain(Number(task.projectId), lease.token);
+      else d.settleTaskContinuityLease(Number(task.projectId), lease.token);
+    }
   }
 }
 
 // ---- the idle sync ----
 
-function idleNow(d, pid, project) {
+function idleNow(d, pid, project, ownToken = null) {
+  const lock = d.getLock(pid);
+  const owned = ownToken && lock?.holder_operation_id === ownToken
+    && lock.holder_user_id == null && lock.holder_cycle_id == null;
   return taskFilesIdleState({
     project,
-    lock: d.getLock(pid),
+    lock: owned ? null : lock,
     cycle: d.latestCycle(pid),
     askJob: d.getAskJobStatus(pid),
   });
@@ -248,29 +273,44 @@ async function doSync(pid, depsArg) {
   const due = selectTasksToWrite(d.listTasks(pid, { limit: 50 }));
   if (!due.length) return done(true, [], 'nothing_to_write');
 
-  const containerName = project.container_name || d.containerNameForProject(pid);
-  const files = due.flatMap(taskFileEntries);
-  files.push(...await missingConventionFiles(d, containerName, project));
-  const w = await writeFiles(d, containerName, files);
-  if (!w.ok) {
-    console.warn(`[mock2] task files: project ${pid}: ${w.error}`);
-    return done(false, w.paths, 'write_failed');
+  // This reservation is a real checkout owner. Human/build/MCP/restore
+  // admission must honor it until every remote mutation has acknowledged its
+  // outcome. A timeout is NOT evidence that the remote process stopped.
+  const lease = d.acquireTaskContinuityLease(pid);
+  if (!lease?.ok || !lease.token) return done(false, [], 'locked');
+  let uncertain = false;
+  let paths = [];
+  try {
+    const admitted = idleNow(d, pid, d.getProject(pid) || project, lease.token);
+    if (!admitted.idle) return done(false, [], admitted.reason);
+    const containerName = project.container_name || d.containerNameForProject(pid);
+    const files = due.flatMap(taskFileEntries);
+    files.push(...await missingConventionFiles(d, containerName, project));
+    uncertain = true;
+    const w = await writeFiles(d, containerName, files);
+    paths = w.paths;
+    uncertain = w.uncertain === true;
+    if (!w.ok) {
+      console.warn(`[mock2] task files: project ${pid}: ${w.error}`);
+      return done(false, paths, uncertain ? 'outcome_unknown' : 'write_failed');
+    }
+    const again = idleNow(d, pid, d.getProject(pid) || project, lease.token);
+    if (!again.idle) return done(false, paths, again.reason);
+    uncertain = true;
+    const acknowledgement = `PP_TASK_COMMIT_${randomUUID().replaceAll('-', '')}`;
+    const c = parseCommitOutput(await d.containerSh(containerName, buildTaskFilesCommitScript(paths, taskFilesCommitMessage(due), acknowledgement), { timeoutMs: 60000 }), acknowledgement);
+    uncertain = !c.settled;
+    if (!c.ok) {
+      console.warn(`[mock2] task files: project ${pid}: commit failed`);
+      return done(false, paths, uncertain ? 'outcome_unknown' : 'commit_failed');
+    }
+    if (c.pushFailed) console.warn(`[mock2] task files: project ${pid}: committed but the push to the bare repo failed (the next checkpoint push carries it)`);
+    for (const t of due) d.markFilesRevision(t.id, t.revision);
+    return done(true, paths, null);
+  } finally {
+    if (uncertain) d.markTaskContinuityLeaseUncertain(pid, lease.token);
+    else d.settleTaskContinuityLease(pid, lease.token);
   }
-
-  // Re-check: a build or a person may have taken the checkout while we wrote.
-  // The files stay in the tree (that owner's own commit may carry them); the
-  // retry commits them once the project is idle again.
-  const again = idleNow(d, pid, d.getProject(pid) || project);
-  if (!again.idle) return done(false, w.paths, again.reason);
-
-  const c = parseCommitOutput(await d.containerSh(containerName, buildTaskFilesCommitScript(w.paths, taskFilesCommitMessage(due)), { timeoutMs: 60000 }));
-  if (!c.ok) {
-    console.warn(`[mock2] task files: project ${pid}: commit failed`);
-    return done(false, w.paths, 'commit_failed');
-  }
-  if (c.pushFailed) console.warn(`[mock2] task files: project ${pid}: committed but the push to the bare repo failed (the next checkpoint push carries it)`);
-  for (const t of due) d.markFilesRevision(t.id, t.revision);
-  return done(true, w.paths, null);
 }
 
 // Runs are serialised per project: a sync started while another is writing

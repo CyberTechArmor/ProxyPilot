@@ -369,6 +369,27 @@ test('beforeCheckpoint / afterCheckpoint: checks before the commit, the verified
   assert.equal(t.completedSteps.filter((s) => s.step === 'Checkpoint abcdef0 committed').length, 1, 'deduped');
 });
 
+test('FD0130 cycle mirrors await the actual write and preserve unknown-outcome evidence', async () => {
+  for (const hook of [writeTaskFilesForCycle, beforeCheckpoint]) {
+    const { d, task } = buildWorld({ status: 'running' });
+    let release;
+    const pendingWrite = new Promise(resolve => { release = resolve; });
+    let entered;
+    const writing = new Promise(resolve => { entered = resolve; });
+    d.writeTaskFilesInContainer = args => { assert.equal(args.cycleId, 88); entered(); return pendingWrite; };
+    let completed = false;
+    const pending = hook({ cycle: d.getCycle(88), project: PROJECT, containerName: 'm2-1' }, d).then(result => { completed = true; return result; });
+    await writing;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(completed, false, 'never proceeds while the mutation is still running');
+    release({ ok: false, uncertain: true, error: 'task_record_outcome_unknown' });
+    assert.equal((await pending).uncertain, true);
+    assert.match(d.getTask(task.id).uncertain[0], /no confirmed outcome/);
+  }
+  const source = readFileSync(new URL('../mock2/task-sync.js', import.meta.url), 'utf8');
+  assert.ok(!source.includes('Promise.race'), 'the continuity writer never races a mutation against a timer');
+});
+
 test('onContextHandoff: remaining / next step from the handoff, and the task waits for its continuation', async () => {
   const { d, task } = buildWorld({ status: 'running' });
   await onContextHandoff({ cycle: d.getCycle(88), handoffText: 'DONE:\n- schema\nNEXT STEPS:\n1. Add the export route\n2. Wire the button\nGOTCHAS:\n- keep the old CSV header', run: 1 }, d);
@@ -643,11 +664,19 @@ test('route: `said` (the person\'s words beside a preamble-wrapped message) is w
   assert.equal(r2.body.routed.action, 'resume_build');
 });
 
-test('route: a store failure before any action passes the message through', async () => {
-  const w = buildWorld({ status: 'interrupted' });
-  const broken = { ...w.d, listTasks: () => { throw new Error('db locked'); } };
-  assert.deepEqual(await routeChatMessage({ project: PROJECT, message: 'continue', lane: 'build', user: USER }, broken), { handled: false });
-  assert.equal(w.calls.retryCycle.length, 0);
+test('FD0130-1 recognized controls fail closed when the task store is unavailable; ordinary text stays unchanged', async () => {
+  for (const message of ['continue', 'stop', 'only explain why', 'continue, but only explain why']) {
+    const w = buildWorld({ status: 'interrupted' });
+    const broken = { ...w.d, listTasks: () => { throw new Error('untrusted db detail'); } };
+    const result = await routeChatMessage({ project: PROJECT, message, lane: 'build', user: USER }, broken);
+    assert.equal(result.handled, true, message);
+    assert.equal(result.status, 503, message);
+    assert.doesNotMatch(result.body.error, /untrusted db detail/);
+    assert.equal(w.calls.retryCycle.length + w.calls.startAsk.length, 0);
+  }
+  const w = world();
+  const broken = { ...w.d, listTasks: () => { throw new Error('should not read'); } };
+  assert.deepEqual(await routeChatMessage({ project: PROJECT, message: 'Build a read-only table', lane: 'build', user: USER }, broken), { handled: false });
 });
 
 // ---- reads + task routes ----
@@ -689,6 +718,24 @@ test('resumeTaskByKey: a build resumes through retryCycle (MOCK2_TASK_RESUME); a
   assert.equal((await resumeTaskByKey({ project: PROJECT, key: live.task.key, user: USER }, live.d)).status, 409);
   const asking = buildWorld({ status: 'awaiting_user', stage: 'define' });
   assert.equal((await resumeTaskByKey({ project: PROJECT, key: asking.task.key, user: USER }, asking.d)).status, 409);
+});
+
+test('FD0130-1 direct Resume guidance honors explain and stop before retrying an authorized build', async () => {
+  for (const message of ['only explain why it failed', 'continue, but only explain the error', 'try again, just explain why']) {
+    const w = buildWorld({ status: 'interrupted' });
+    const result = await resumeTaskByKey({ project: PROJECT, key: w.task.key, message, user: USER }, w.d);
+    assert.equal(result.status, 202, message);
+    assert.equal(result.body.routed.action, 'investigate', message);
+    assert.equal(w.calls.retryCycle.length, 0, message);
+    assert.equal(w.calls.startAsk.length, 1, message);
+    assert.equal(w.calls.startAsk[0].task, null, 'does not change the original build into an investigation');
+    assert.equal(w.calls.startAsk[0].said, message);
+    assert.equal(w.d.getTask(w.task.id).status, 'interrupted');
+  }
+  const w = buildWorld({ status: 'interrupted' });
+  const stopped = await resumeTaskByKey({ project: PROJECT, key: w.task.key, message: 'stop', user: USER }, w.d);
+  assert.equal(stopped.status, 200);assert.equal(stopped.body.routed.action, 'stop_task');
+  assert.equal(w.calls.retryCycle.length, 0);assert.equal(w.d.getTask(w.task.id).status, 'stopped');
 });
 
 test('resumeTaskByKey: an investigation continues read-only (startAsk), no echo without a message', async () => {

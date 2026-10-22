@@ -38,9 +38,27 @@ function fakeWorld({ project, lock = null, cycle = null, askJob = null, tasks = 
   const w = {
     project: project === undefined ? { id: 3, name: 'Demo', lifecycle: 'active', container_name: null } : project,
     lock, cycle, askJob, tasks, existing: new Set(existing), writes: [], scripts: [], marks: [],
-    commit: commit || { code: 0, stdout: `${SHA}\n`, stderr: '' },
+    commit: commit || { code: 0, stdout: `${SHA}\n`, stderr: 'PP_TASK_COMMIT_DONE 0\n' },
+    leases: [],
   };
   w.deps = {
+    acquireTaskContinuityLease: (_pid, { cycleId } = {}) => {
+      if (cycleId != null ? w.lock?.holder_cycle_id !== cycleId || w.lock?.holder_operation_id != null : w.lock != null) return { ok: false, reason: 'locked' };
+      const token = 'test-operation-token';
+      w.lock = { ...w.lock, holder_operation_id: token, holder_operation_state: 'active' };
+      w.leases.push('acquired');
+      return { ok: true, token };
+    },
+    settleTaskContinuityLease: (_pid, token) => {
+      w.leases.push('settled');
+      if (w.lock?.holder_operation_id !== token) return false;
+      w.lock = w.lock.holder_cycle_id != null ? { holder_cycle_id: w.lock.holder_cycle_id } : null; return true;
+    },
+    markTaskContinuityLeaseUncertain: (_pid, token) => {
+      w.leases.push('uncertain');
+      if (w.lock?.holder_operation_id !== token) return false;
+      w.lock.holder_operation_state = 'uncertain'; return true;
+    },
     containerNameForProject: (id) => `m2-${id}`,
     getProject: (id) => (w.project && Number(w.project.id) === Number(id) ? w.project : null),
     getLock: () => w.lock,
@@ -59,7 +77,8 @@ function fakeWorld({ project, lock = null, cycle = null, askJob = null, tasks = 
         const paths = [...script.matchAll(/printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d\); if/g)].map((m) => Buffer.from(m[1], 'base64').toString('utf8'));
         return { code: 0, stdout: paths.map((p, i) => `${w.existing.has(p) ? 'PP_EXISTS' : 'PP_MISSING'} ${i}`).join('\n'), stderr: '' };
       }
-      return w.commit;
+      const acknowledgement = script.match(/printf \"(PP_TASK_COMMIT_[A-Za-z0-9_]+) %s/)?.[1];
+      return { ...w.commit, stderr: w.commit.stderr.replaceAll('PP_TASK_COMMIT_DONE', acknowledgement || 'PP_TASK_COMMIT_DONE') };
     },
   };
   return w;
@@ -78,7 +97,7 @@ test.afterEach(() => _resetTaskFilesForTests());
 test('the module loads its native dependencies lazily: no static import of runner/db/locks/cycles/ask/tasks', () => {
   const src = readFileSync(new URL('../mock2/task-files.js', import.meta.url), 'utf8');
   const statics = [...src.matchAll(/^import .* from '([^']+)';$/gm)].map((m) => m[1]);
-  assert.deepEqual(statics.sort(), ['./continuity-convention.js', './task-logic.js']);
+  assert.deepEqual(statics.sort(), ['./continuity-convention.js', './task-logic.js', './task-record-write.js', 'node:crypto']);
   for (const m of ['./runner.js', './provision.js', './locks.js', './cycles.js', './ask.js', './tasks.js']) {
     assert.ok(src.includes(`import('${m}')`), m);
   }
@@ -91,6 +110,7 @@ test('taskFilesIdleState: online, no lock holder, no live cycle, no ask running'
   assert.deepEqual(taskFilesIdleState({ project: null }), { idle: false, reason: 'not_active' });
   assert.equal(taskFilesIdleState({ project, lock: { holder_user_id: 4, holder_cycle_id: null } }).reason, 'locked');
   assert.equal(taskFilesIdleState({ project, lock: { holder_user_id: null, holder_cycle_id: 9 } }).reason, 'locked');
+  assert.equal(taskFilesIdleState({ project, lock: { holder_operation_id: 'lease' } }).reason, 'locked');
   assert.equal(taskFilesIdleState({ project, lock: { holder_user_id: null, holder_cycle_id: null } }).idle, true, 'an empty lock row holds nothing');
   for (const status of ['queued', 'estimating', 'running']) {
     assert.equal(taskFilesIdleState({ project, cycle: { status } }).reason, 'cycle_running', status);
@@ -138,7 +158,7 @@ test('buildTaskFilesCommitScript: message as $1 and paths as "$@", never interpo
   const script = buildTaskFilesCommitScript(paths, message);
   for (const raw of ['rm -rf', 'whoami', '$HOME', ...paths]) assert.ok(!script.includes(raw), `${raw} is not in the script text`);
   assert.deepEqual(decodedArgs(script), [message, ...paths]);
-  assert.match(script, /^set -e\ncd '\/srv\/app'\n/);
+  assert.match(script, /^set -e\ntrap '[^\n]*PP_TASK_COMMIT_DONE[^\n]*' EXIT\ncd '\/srv\/app'\n/);
   assert.match(script, /msg="\$1"; shift\ngit add -A -- "\$@"\n/);
   assert.match(script, /git diff --cached --quiet -- "\$@"/);
   assert.match(script, /git -c user\.email=flightdeck@proxypilot -c user\.name="ProxyPilot Flightdeck" commit -q -m "\$msg" -- "\$@"/);
@@ -147,20 +167,24 @@ test('buildTaskFilesCommitScript: message as $1 and paths as "$@", never interpo
 });
 
 test('parseCommitOutput / taskFilesCommitMessage', () => {
-  assert.deepEqual(parseCommitOutput({ code: 0, stdout: `${SHA}\n`, stderr: '' }), { ok: true, committed: true, unchanged: false, commit: SHA, pushFailed: false });
-  assert.deepEqual(parseCommitOutput({ code: 0, stdout: `PP_NOCHANGE\n${SHA}`, stderr: 'PP_PUSH_FAILED' }), { ok: true, committed: false, unchanged: true, commit: SHA, pushFailed: true });
+  assert.deepEqual(parseCommitOutput({ code: 0, stdout: `${SHA}\n`, stderr: 'PP_TASK_COMMIT_DONE 0\n' }), { ok: true, settled: true, committed: true, unchanged: false, commit: SHA, pushFailed: false });
+  assert.deepEqual(parseCommitOutput({ code: 0, stdout: `PP_NOCHANGE\n${SHA}`, stderr: 'PP_PUSH_FAILED\nPP_TASK_COMMIT_DONE 0\n' }), { ok: true, settled: true, committed: false, unchanged: true, commit: SHA, pushFailed: true });
   assert.equal(parseCommitOutput({ code: 128, stdout: '', stderr: 'fatal' }).ok, false);
   assert.equal(parseCommitOutput(null).ok, false);
+  assert.equal(parseCommitOutput({ code: 0, stdout: SHA, stderr: 'PP_TASK_COMMIT_old 0\n' }, 'PP_TASK_COMMIT_current').settled, false, 'stale or unrelated completion output cannot release this operation');
+  assert.throws(() => buildTaskFilesCommitScript(['note'], 'message', 'unsafe;marker'), /acknowledgement/);
   assert.equal(taskFilesCommitMessage([task(1), task(2)]), 'flightdeck: task records (t1-goal-1, t2-goal-2)');
   assert.ok(taskFilesCommitMessage(Array.from({ length: 30 }, (_, i) => task(i + 1))).length <= 200);
 });
 
 // ---- writeTaskFilesInContainer ----
 
+function cycleDeps(w) { w.lock = { holder_cycle_id: 9 }; return w.deps; }
+
 test('writeTaskFilesInContainer: the two task files, plus only the MISSING convention files; no commit', async () => {
   const w = fakeWorld({ existing: ['AGENTS.md'] });
   const t = task(12, { key: 't12-add-invoice-export' });
-  const r = await writeTaskFilesInContainer({ containerName: 'm2-3', task: t, project: w.project, deps: w.deps });
+  const r = await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: t, project: w.project, deps: cycleDeps(w) });
   assert.deepEqual(r, { ok: true, paths: ['state/tasks/t12-add-invoice-export/task.json', 'state/tasks/t12-add-invoice-export/handoff.md', 'state/tasks/README.md'], error: null });
   assert.equal(w.writes[0].content, renderTaskJson(t));
   assert.equal(w.writes[1].content, renderTaskHandoffMd(t));
@@ -172,36 +196,42 @@ test('writeTaskFilesInContainer: the two task files, plus only the MISSING conve
 
 test('writeTaskFilesInContainer: ensureConvention false, or an uncertain existence answer, writes no convention file', async () => {
   const w = fakeWorld();
-  await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1), project: w.project, ensureConvention: false, deps: w.deps });
+  await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1), project: w.project, ensureConvention: false, deps: cycleDeps(w) });
   assert.deepEqual(w.writes.map((x) => x.path), ['state/tasks/t1-goal-1/task.json', 'state/tasks/t1-goal-1/handoff.md']);
   assert.equal(w.scripts.length, 0);
   const garbled = fakeWorld();
   garbled.deps.containerSh = async () => ({ code: 0, stdout: 'garbage', stderr: '' });
   const warn = mock.method(console, 'warn', () => {});
-  const r = await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1), project: garbled.project, deps: garbled.deps });
+  const r = await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1), project: garbled.project, deps: cycleDeps(garbled) });
   warn.mock.restore();
   assert.equal(r.ok, true);
   assert.deepEqual(garbled.writes.map((x) => x.path), ['state/tasks/t1-goal-1/task.json', 'state/tasks/t1-goal-1/handoff.md']);
   const both = fakeWorld();
-  await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1), project: both.project, deps: both.deps });
+  await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1), project: both.project, deps: cycleDeps(both) });
   assert.deepEqual(both.writes.slice(2).map((x) => [x.path, x.content]), [['AGENTS.md', agentsMd(both.project)], ['state/tasks/README.md', tasksReadmeMd()]]);
 });
 
 test('writeTaskFilesInContainer: invalid key, no container, a failed write, throwing deps → {ok:false}, never throws', async () => {
   const w = fakeWorld();
-  assert.deepEqual(await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1, { key: null }), project: w.project, deps: w.deps }), { ok: false, paths: [], error: 'invalid task key' });
-  assert.deepEqual(await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1, { key: '../../etc' }), deps: w.deps }), { ok: false, paths: [], error: 'invalid task key' });
-  assert.deepEqual(await writeTaskFilesInContainer({ containerName: '', task: task(1), deps: w.deps }), { ok: false, paths: [], error: 'no container' });
+  assert.deepEqual(await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1, { key: null }), project: w.project, deps: cycleDeps(w) }), { ok: false, paths: [], error: 'invalid task key' });
+  assert.deepEqual(await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1, { key: '../../etc' }), deps: cycleDeps(w) }), { ok: false, paths: [], error: 'invalid task key' });
+  assert.deepEqual(await writeTaskFilesInContainer({ cycleId: 9, containerName: '', task: task(1), deps: cycleDeps(w) }), { ok: false, paths: [], error: 'no container' });
   assert.equal(w.writes.length, 0);
   const warn = mock.method(console, 'warn', () => {});
   const failing = fakeWorld({ onWrite: (_w, path) => (path.endsWith('handoff.md') ? { ok: false, error: 'disk full' } : null) });
-  const r = await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1), project: failing.project, deps: failing.deps });
+  const r = await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1), project: failing.project, deps: cycleDeps(failing) });
   assert.equal(r.ok, false);
   assert.deepEqual(r.paths, ['state/tasks/t1-goal-1/task.json']);
   assert.match(r.error, /handoff\.md: disk full/);
   const throwing = fakeWorld();
   throwing.deps.writeFileInContainer = async () => { throw new Error('incus gone'); };
-  assert.deepEqual(await writeTaskFilesInContainer({ containerName: 'm2-3', task: task(1), deps: throwing.deps }), { ok: false, paths: [], error: 'incus gone' });
+  assert.deepEqual(await writeTaskFilesInContainer({ cycleId: 9, containerName: 'm2-3', task: task(1), deps: cycleDeps(throwing) }), { ok: false, paths: [], error: 'incus gone', uncertain: true });
+  assert.equal(throwing.lock.holder_cycle_id, 9, 'uncertain reservation stays attached to its genuine cycle owner');
+  assert.equal(throwing.lock.holder_operation_state, 'uncertain');
+  assert.deepEqual(throwing.leases, ['acquired', 'uncertain']);
+  assert.equal(failing.lock.holder_cycle_id, 9, 'confirmed refusal preserves the original cycle lock');
+  assert.equal(failing.lock.holder_operation_id, undefined);
+  assert.deepEqual(failing.leases, ['acquired', 'settled']);
   warn.mock.restore();
   assert.equal(warn.mock.callCount() >= 2, true, 'failures are logged');
 });
@@ -266,11 +296,11 @@ test('syncTaskFilesNow: a failed write or commit marks nothing; a failed push st
   const wf = fakeWorld({ tasks: [task(1)], onWrite: () => ({ ok: false, error: 'read-only fs' }) });
   assert.deepEqual(await syncTaskFilesNow(3, { deps: wf.deps }), { ok: false, written: [], skipped: 'write_failed' });
   assert.equal(commitScripts(wf).length, 0);
-  const wc = fakeWorld({ tasks: [task(1)], existing: ['AGENTS.md', 'state/tasks/README.md'], commit: { code: 128, stdout: '', stderr: 'fatal: not a git repository' } });
+  const wc = fakeWorld({ tasks: [task(1)], existing: ['AGENTS.md', 'state/tasks/README.md'], commit: { code: 128, stdout: '', stderr: 'fatal: not a git repository\nPP_TASK_COMMIT_DONE 128\n' } });
   const rc = await syncTaskFilesNow(3, { deps: wc.deps });
   assert.equal(rc.skipped, 'commit_failed');
   assert.deepEqual(wc.marks, []);
-  const wp = fakeWorld({ tasks: [task(1)], existing: ['AGENTS.md', 'state/tasks/README.md'], commit: { code: 0, stdout: SHA, stderr: 'PP_PUSH_FAILED' } });
+  const wp = fakeWorld({ tasks: [task(1)], existing: ['AGENTS.md', 'state/tasks/README.md'], commit: { code: 0, stdout: SHA, stderr: 'PP_PUSH_FAILED\nPP_TASK_COMMIT_DONE 0\n' } });
   assert.equal((await syncTaskFilesNow(3, { deps: wp.deps })).ok, true);
   assert.deepEqual(wp.marks, [[1, 2]]);
   warn.mock.restore();
@@ -297,6 +327,61 @@ test('syncTaskFilesNow: throwing dependencies → skipped "error", never throws;
   release();
   await Promise.all([p1, p2]);
   assert.equal(order.filter((x) => x === 'list').length, 2);
+});
+
+test('FD0130 idle lease spans remote dispatch through acknowledgement; uncertainty retains its fence', async () => {
+  const warn = mock.method(console, 'warn', () => {});
+  try {
+    for (const mode of ['ack', 'missing-ack', 'throw', 'confirmed-failure']) {
+      const w = fakeWorld({ tasks: [task(1)], existing: ['AGENTS.md', 'state/tasks/README.md'] });
+      let dispatch;
+      const dispatched = new Promise((resolve) => { dispatch = resolve; });
+      let finish;
+      const gate = new Promise((resolve) => { finish = resolve; });
+      const transport = w.deps.containerSh;
+      w.deps.containerSh = async (...args) => {
+        if (!args[1].includes('git add -A')) return transport(...args);
+        assert.equal(w.lock?.holder_operation_state, 'active');
+        dispatch(); await gate;
+        if (mode === 'throw') throw new Error('transport disconnected');
+        if (mode === 'missing-ack') return { code: 0, stdout: SHA, stderr: '' };
+        if (mode === 'confirmed-failure') return { code: 128, stdout: '', stderr: `${args[1].match(/printf \"(PP_TASK_COMMIT_[A-Za-z0-9_]+) %s/)[1]} 128\n` };
+        return transport(...args);
+      };
+      const pending = syncTaskFilesNow(3, { deps: w.deps });
+      await dispatched;
+      assert.deepEqual(w.leases, ['acquired'], 'never released while remote commit is in flight');
+      assert.equal(w.deps.acquireTaskContinuityLease(3).ok, false, 'another checkout owner cannot acquire during dispatch');
+      finish();
+      const result = await pending;
+      if (mode === 'ack' || mode === 'confirmed-failure') {
+        assert.deepEqual(w.leases, ['acquired', 'settled']); assert.equal(w.lock, null);
+      } else {
+        assert.deepEqual(w.leases, ['acquired', 'uncertain']);
+        assert.equal(w.lock.holder_operation_state, 'uncertain');
+        assert.equal(w.deps.acquireTaskContinuityLease(3).ok, false, 'unknown outcome must remain fenced');
+      }
+      assert.equal(result.ok, mode === 'ack');
+      assert.deepEqual(w.marks, mode === 'ack' ? [[1, 2]] : []);
+    }
+  } finally { warn.mock.restore(); }
+});
+
+test('FD0130 idle lease releases on a confirmed writer refusal; unknown write and thrown write retain it', async () => {
+  const warn = mock.method(console, 'warn', () => {});
+  try {
+    for (const mode of ['refused', 'unknown', 'throw']) {
+      const w = fakeWorld({ tasks: [task(1)] });
+      w.deps.writeFileInContainer = async () => {
+        assert.equal(w.lock?.holder_operation_state, 'active');
+        if (mode === 'throw') throw new Error('disconnected');
+        return { ok: false, settled: mode === 'refused', error: mode === 'refused' ? 'python3_required' : 'task_record_outcome_unknown' };
+      };
+      assert.equal((await syncTaskFilesNow(3, { deps: w.deps })).ok, false);
+      assert.deepEqual(w.leases, ['acquired', mode === 'refused' ? 'settled' : 'uncertain']);
+      assert.equal(commitScripts(w).length, 0);
+    }
+  } finally { warn.mock.restore(); }
 });
 
 // ---- debounce / backoff ----

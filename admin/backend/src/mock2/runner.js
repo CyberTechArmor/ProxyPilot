@@ -19,6 +19,7 @@
 // drives it is build_runner. Nothing here is named "agent".
 
 import { sh, b64 } from './host.js';
+import { captureCheckoutShell } from './checkout-operation.js';
 import { getMock2Db } from './db.js';
 import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
@@ -44,6 +45,7 @@ import {
   queueMayAdvancePast, touchesUserFacing, gateConfigTouchedFiles,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
+import { assertTaskMirrorSettled } from './task-record-write.js';
 import { insertChangeRecord, changeRecordMirror, lastChangeRecord } from './change-records.js';
 import { terminalRecordPlan } from './conclude-logic.js';
 import { insertMessage } from './chats.js';
@@ -638,7 +640,7 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     return { status: 'error', error: `Project must be online to run a cycle (it is "${project.lifecycle}").` };
   }
   const existingLock = getLock(projectId);
-  if (existingLock && (existingLock.holder_cycle_id != null || existingLock.holder_user_id != null)) {
+  if (existingLock && (existingLock.holder_operation_id != null || existingLock.holder_cycle_id != null || existingLock.holder_user_id != null)) {
     return { status: 'error', error: 'This project is checked out by another writer. Wait, or request a takeover.' };
   }
 
@@ -839,11 +841,14 @@ export async function startCycle({ project, instruction, initiatedBy, actingAsAd
     // Task continuity: the cycle holds the lock now, so its task's portable
     // files (state/tasks/<key>/) go into the working tree BEFORE the model's
     // first turn — written, not committed (this cycle's checkpoint commits
-    // them). Bounded and best-effort: it never fails or holds up the build.
+    // them). Confirmed refusals are best-effort; an unknown mutation blocks
+    // this checkout until its outcome has been verified.
+    let taskFilesResult = null;
     try {
       const { writeTaskFilesForCycle } = await import('./task-sync.js');
-      await writeTaskFilesForCycle({ cycle: getCycle(cycle.id) || cycle, project, containerName });
+      taskFilesResult = await writeTaskFilesForCycle({ cycle: getCycle(cycle.id) || cycle, project, containerName });
     } catch (e) { console.warn('[mock2] task files before the build skipped:', e?.message); }
+    assertTaskMirrorSettled({ result: taskFilesResult, lock: getLock(projectId) });
     if (wantsPrepass) {
       try {
         setJob(cycle.id, { phase: 'starting', message: 'Sizing the request…' });
@@ -3417,6 +3422,7 @@ async function runBrowserProbeTool({ containerName, webPort, input }) {
 // ---- tool execution against the fenced container ----
 
 async function executeTool({ call, cycle, containerName, holder, gateScripts, webPort, probeState }) {
+  assertTaskMirrorSettled({ lock: getLock(Number(cycle.project_id)) });
   switch (call.name) {
     case 'exec_in_container': {
       const r = await execInContainer(containerName, String(call.input?.command || ''));
@@ -3600,7 +3606,7 @@ function safeRel(path) {
 // Exported so the SDK runner (runner-sdk.js) syncs its local checkout in/out of the
 // fenced container through the same host round-trip — unchanged for the default path.
 export function containerSh(containerName, script, { timeoutMs = 120000 } = {}) {
-  return sh(`printf '%s' '${b64(script)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs });
+  return captureCheckoutShell(script, body => sh(`printf '%s' '${b64(body)}' | base64 -d | incus exec ${containerName} -- sh`, { timeoutMs }));
 }
 
 export async function execInContainer(containerName, command) {
@@ -3628,7 +3634,7 @@ export async function writeFileInContainer(containerName, path, content) {
   // the command string hits Linux's 128KiB argv-entry cap (spawn E2BIG)
   // once a file grows past ~96KB.
   const script = `p=$(printf '%s' '${b64(rel)}' | base64 -d); d="${APP_DIR}/$p"; mkdir -p "$(dirname "$d")"; base64 -d > "$d" && echo ok`;
-  const r = await sh(`incus exec ${containerName} -- sh -c 'eval "$(printf %s ${b64(script)} | base64 -d)"'`, { timeoutMs: 120000, input: b64(content) });
+  const r = await captureCheckoutShell(script, body => sh(`incus exec ${containerName} -- sh -c 'eval "$(printf %s ${b64(body)} | base64 -d)"'`, { timeoutMs: 120000, input: b64(content) }));
   if (r.code !== 0) return { ok: false, error: (r.stderr || 'write failed').trim().slice(-300) };
   return { ok: true };
 }
@@ -3748,6 +3754,7 @@ export function formatGateReports(reports) {
 // Exported so the SDK runner produces the SAME commit + hash-chained change record.
 export async function checkpointAndRecord({ cycle, project, containerName, holder, gateReports, gateScripts, framework, summary }) {
   const projectId = Number(project.id);
+  assertTaskMirrorSettled({ lock: getLock(projectId) });
   setJob(cycle.id, { phase: 'checkpoint', message: 'Checkpointing into the bare repo…' });
 
   // 0) Snapshot the in-container Postgres (ADR-008) into the working clone so
@@ -3761,12 +3768,14 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
 
   // 0b) Task continuity: the checks so far land on the task and its portable
   //     files are refreshed BEFORE the commit below, so this checkpoint
-  //     carries them. Bounded, best-effort.
+  //     carries them. Unknown mutation outcomes block this checkout.
   let taskSync = null;
+  let taskFilesResult = null;
   try {
     taskSync = await import('./task-sync.js');
-    await taskSync.beforeCheckpoint({ cycle, project, containerName, gateReports });
+    taskFilesResult = await taskSync.beforeCheckpoint({ cycle, project, containerName, gateReports });
   } catch (e) { console.warn('[mock2] task files before checkpoint skipped:', e?.message); }
+  assertTaskMirrorSettled({ result: taskFilesResult, lock: getLock(projectId) });
 
   // 1) Commit + push into the bare repo (over the ADR-011 mount).
   const commitScript = buildCheckpointScript({ appDir: APP_DIR, message: summary || 'checkpoint: mock2 cycle' });
@@ -3926,6 +3935,7 @@ export async function concludeCycle({
 // Exported so the SDK runner deploys through the IDENTICAL Run phase.
 export async function deployStage({ cycle, project, containerName, holder }) {
   const projectId = Number(project.id);
+  assertTaskMirrorSettled({ lock: getLock(projectId) });
   const webPort = project.web_port || 3000;
 
   const runContract = await readRunContract(containerName, APP_DIR);

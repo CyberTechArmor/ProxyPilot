@@ -2019,4 +2019,16 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // An actual third holder for automatic task-state I/O, never an invented
+    // person/cycle. No existing lock rows or task records are rewritten.
+    version: 563,
+    name: 'mock2_checkout_operation_holder',
+    up: (d) => {
+      const columns = d.prepare('PRAGMA table_info(mock2_locks)').all().map(c => c.name);
+      if (!columns.includes('holder_operation_id')) d.exec('ALTER TABLE mock2_locks ADD COLUMN holder_operation_id TEXT');
+      if (!columns.includes('holder_operation_state')) d.exec("ALTER TABLE mock2_locks ADD COLUMN holder_operation_state TEXT CHECK(holder_operation_state IN ('active','uncertain'))");
+      if (!columns.includes('holder_operation_kind')) d.exec("ALTER TABLE mock2_locks ADD COLUMN holder_operation_kind TEXT CHECK(holder_operation_kind IN ('task-continuity','mcp-write','project-write','restore'))");
+    },
+  },
 ];

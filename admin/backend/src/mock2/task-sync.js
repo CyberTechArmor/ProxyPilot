@@ -8,9 +8,9 @@
 // silent build — and the next "continue" must land on the SAME unfinished work,
 // with the build tools only when a person authorized a build, and with the list
 // of operations whose outcome nobody knows in front of the model before it acts.
-// Every hook here is best-effort: task bookkeeping can never fail, block or
-// noticeably delay a build, an ask or a cycle transition — each entry point
-// catches everything and logs `[mock2] …`.
+// Bookkeeping hooks are best-effort. Recognized user controls fail closed if
+// their task store is unavailable, and an uncertain automatic write blocks
+// checkout mutations until its outcome is verified.
 //
 // Native-free at import time ON PURPOSE (stub-first, risk R9): the DB-touching
 // modules are loaded lazily (loadDeps) and every entry point takes an optional
@@ -37,8 +37,6 @@ const nowIso = () => new Date().toISOString();
 
 // Cycle statuses during which a build segment is actually executing.
 export const LIVE_CYCLE_STATUSES = Object.freeze(['queued', 'estimating', 'running']);
-// How long an in-cycle task-file write may take before the build goes on without it.
-const IN_CYCLE_WRITE_TIMEOUT_MS = 20000;
 const GOAL_MAX = 500;
 const MAX_REMAINING = 12;
 
@@ -91,15 +89,6 @@ async function loadDeps() {
 
 function warn(what, e) {
   console.warn(`[mock2] task ${what} failed:`, e?.message || e);
-}
-
-function withTimeout(promise, ms, label) {
-  let t = null;
-  const timer = new Promise((resolve) => {
-    t = setTimeout(() => resolve({ ok: false, error: `${label} timed out after ${ms}ms` }), ms);
-    if (typeof t?.unref === 'function') t.unref();
-  });
-  return Promise.race([promise, timer]).finally(() => clearTimeout(t));
 }
 
 // ---- pure helpers (exported for the tests) ----
@@ -503,7 +492,18 @@ async function inCycleWrite({ cycle, project, containerName }, d) {
   // older project are NOT the build's work, and written here they would ride
   // its diff and change record. The idle sync after the cycle adds them in
   // their own path-scoped commit.
-  return d.writeTaskFilesInContainer({ containerName, task: fresh, project, ensureConvention: false });
+  return d.writeTaskFilesInContainer({ containerName, task: fresh, project, cycleId: Number(cycle.id), ensureConvention: false });
+}
+
+async function recordUncertainTaskWrite(cycle, result, d) {
+  if (result?.uncertain !== true) return;
+  try {
+    const task = await taskForCycle(cycle, d);
+    if (task) d.updateTask(task.id, { uncertain: dedupeList([
+      'Automatic task record write has no confirmed outcome. Verify the checkout operation before repeating or resuming.',
+      ...(Array.isArray(task.uncertain) ? task.uncertain : []),
+    ], MAX_UNCERTAIN) });
+  } catch (e) { warn('uncertain task write evidence', e); }
 }
 
 // Right after a cycle takes the lock, before the model's first turn: the
@@ -513,7 +513,8 @@ async function inCycleWrite({ cycle, project, containerName }, d) {
 export async function writeTaskFilesForCycle({ cycle, project, containerName }, deps = null) {
   try {
     const d = deps || await loadDeps();
-    const r = await withTimeout(inCycleWrite({ cycle, project, containerName }, d), IN_CYCLE_WRITE_TIMEOUT_MS, 'task file write');
+    const r = await inCycleWrite({ cycle, project, containerName }, d);
+    await recordUncertainTaskWrite(cycle, r, d);
     if (r && r.ok === false && r.error !== 'no task for this cycle') console.warn(`[mock2] task files not written for cycle ${cycle?.id}: ${r.error}`);
     return r;
   } catch (e) { warn('in-cycle file write', e); return { ok: false, error: e?.message || String(e) }; }
@@ -530,10 +531,9 @@ export async function beforeCheckpoint({ cycle, project, containerName, gateRepo
     const checks = checksFromGateReports(gateReports);
     if (checks.length) d.updateTask(task.id, { checks });
     if (!containerName) return null;
-    return await withTimeout(
-      Promise.resolve(d.writeTaskFilesInContainer({ containerName, task: d.getTask(task.id), project, ensureConvention: false })),
-      IN_CYCLE_WRITE_TIMEOUT_MS, 'task file refresh',
-    );
+    const result = await d.writeTaskFilesInContainer({ containerName, task: d.getTask(task.id), project, cycleId: Number(cycle.id), ensureConvention: false });
+    await recordUncertainTaskWrite(cycle, result, d);
+    return result;
   } catch (e) { warn('checkpoint refresh', e); return null; }
 }
 
@@ -792,6 +792,7 @@ export async function routeChatMessage({ project, message, said = null, lane, us
   let route;
   let tasks;
   let words;
+  let recognizedControl = false;
   try {
     // The person's own words: `said` when the UI sent them alongside a
     // preamble-wrapped message, else the message with any known preamble cut.
@@ -799,6 +800,7 @@ export async function routeChatMessage({ project, message, said = null, lane, us
     if (!words) return PASS;
     // Cheap first: an ordinary request never touches the task store.
     if (classifyContinuationMessage(words)?.kind === 'other') return PASS;
+    recognizedControl = true;
     d = deps || await loadDeps();
     tasks = await annotatedTasks(project.id, d, { full: true });
     route = resolveTaskRoute({ message: words, lane: lane === 'ask' ? 'ask' : 'build', tasks, nowMs: Date.now() });
@@ -806,7 +808,14 @@ export async function routeChatMessage({ project, message, said = null, lane, us
     // A screenshot cannot ride a resume (the resume turn carries text only):
     // a "try again" with images stays a new build, as before.
     if (route.action === 'resume_build' && Array.isArray(images) && images.length) return PASS;
-  } catch (e) { warn('routing', e); return PASS; }
+  } catch (e) {
+    warn('routing', e);
+    // A recognized control must never regain build tools because bookkeeping
+    // failed. Nothing has been dispatched in this admission block.
+    return recognizedControl
+      ? { handled: true, status: 503, body: { error: 'Task recovery is temporarily unavailable. No task was started; retry after it recovers.' } }
+      : PASS;
+  }
 
   const action = route.action;
   const task = route.taskKey ? tasks.find((t) => t.key === route.taskKey) || null : null;
@@ -886,6 +895,18 @@ export async function resumeTaskByKey({ project, key, message = '', user, acting
   if (!task) return { status: 404, body: { error: 'Task not found' } };
   const guidance = String(message || '').trim();
   const acting = actingAsAdmin ? 1 : 0;
+  const control = classifyContinuationMessage(guidance);
+  if (control.kind === 'stop') return stopTaskByKey({ project, key, user, ip }, d);
+  if (control.kind === 'explain_only') {
+    const question = `${guidance}\n\nExisting task context (read only): ${sanitizeTaskText(task.goal, { max: 500 })}`;
+    const r = await runInvestigation({ project, question, echo: guidance, said: guidance, user, actingAsAdmin: acting, images: [] }, d);
+    if (!r.ok) return { status: r.status || 409, body: { error: r.error } };
+    const fresh = r.taskId != null ? await annotateOne(d.getTask(r.taskId), d) : null;
+    const note = routedNote('investigate', fresh || task);
+    try { d.insertMessage({ projectId: Number(project.id), kind: 'system', body: note }); } catch (e) { warn('explanation note', e); }
+    try { d.logAudit(user?.id ?? null, 'MOCK2_TASK_EXPLAIN', 'mock2_project', Number(project.id), { task_key: task.key }, ip); } catch { /* best effort */ }
+    return { status: 202, body: { routed: { action: 'investigate', task: shape(fresh), note } } };
+  }
   let action;
   let taskId = task.id;
   let note = null;
@@ -920,6 +941,7 @@ export async function stopTaskByKey({ project, key, user, ip = null }, deps = nu
   const task = await getAnnotatedTaskByKey(project.id, key, d);
   if (!task) return { status: 404, body: { error: 'Task not found' } };
   let action;
+  if (task.intent === 'investigation' && task.live) return { status: 409, body: { error: 'This read-only answer is still being written and cannot be interrupted.' } };
   if (task.intent === 'build' && task.live) {
     action = 'stop_build';
     const r = await stopBuild({ project, task, user, ip }, d);

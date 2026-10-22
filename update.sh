@@ -14,12 +14,16 @@ LOG_FILE="/tmp/proxypilot-update.log"
 # Pre-update DB backup state (populated by backup_db, consumed by restore_db on failure)
 DB_BACKUP_FILE=""
 DB_BACKUP_SOURCE=""
+DB_SNAPSHOT_DIR=""
+DB_SNAPSHOT_ATTEMPTED=false
+DB_WRITERS_QUIESCED=false
 BACKUPS_TO_KEEP=5
 DB_MAINTENANCE_STARTED=false
 DB_WRITERS_RESTARTED=false
 REVIEW_RUNTIME_REFRESH_STARTED=false
 NATIVE_BACKEND_MODE=""
 DB_LAYOUT_NEW_PATH=""
+DB_LAYOUT_NEW_MOCK2_PATH=""
 DB_LAYOUT_ENV_BACKUP=""
 DB_LAYOUT_ENV_PATH=""
 
@@ -612,6 +616,7 @@ migrate_db_layout() {
     local legacy_db="$data_dir/proxypilot.db"
     local new_dir="$data_dir/db"
     local new_db="$new_dir/proxypilot.db"
+    local legacy_mock2="$data_dir/mock2.db" new_mock2="$new_dir/mock2.db"
     local deployed_env="$install_dir/.env"
 
     # Already migrated, nothing to do.
@@ -635,6 +640,15 @@ migrate_db_layout() {
         log "${RED}Inspect both DB files; keep the newer one; delete the other; re-run update.sh.${NC}"
         return 1
     fi
+    local target suffix
+    for target in "$new_db" "$new_mock2"; do
+        for suffix in '' -wal -shm -journal; do
+            if [ -e "${target}${suffix}" ] || [ -L "${target}${suffix}" ]; then
+                log "${RED}migrate_db_layout: existing target database or sidecar; refusing a different database generation${NC}"
+                return 1
+            fi
+        done
+    done
 
     log "${BLUE}[migrate] Separating SQLite DB from served-content directory${NC}"
     log "  Old: $legacy_db"
@@ -652,6 +666,7 @@ migrate_db_layout() {
     (umask 077; cp "$deployed_env" "$DB_LAYOUT_ENV_BACKUP") || return 1
     chmod 600 "$DB_LAYOUT_ENV_BACKUP" || return 1
     DB_LAYOUT_NEW_PATH="$new_db"
+    DB_LAYOUT_NEW_MOCK2_PATH="$new_mock2"
 
     mkdir -p "$new_dir" || { log "${RED}migrate_db_layout: mkdir $new_dir failed${NC}"; return 1; }
     chmod 0700 "$new_dir" 2>/dev/null || true
@@ -662,6 +677,15 @@ migrate_db_layout() {
     fi
     if [ -f "${legacy_db}-wal" ]; then mv "${legacy_db}-wal" "${new_db}-wal" || return 1; fi
     if [ -f "${legacy_db}-shm" ]; then mv "${legacy_db}-shm" "${new_db}-shm" || return 1; fi
+    if [ -f "${legacy_db}-journal" ]; then mv "${legacy_db}-journal" "${new_db}-journal" || return 1; fi
+    # Mock2 resolves beside core. Move its matching generation with core,
+    # preserving absence when this host has never enabled Mock2.
+    if [ -f "$legacy_mock2" ]; then
+        mv "$legacy_mock2" "$new_mock2" || return 1
+        if [ -f "${legacy_mock2}-wal" ]; then mv "${legacy_mock2}-wal" "${new_mock2}-wal" || return 1; fi
+        if [ -f "${legacy_mock2}-shm" ]; then mv "${legacy_mock2}-shm" "${new_mock2}-shm" || return 1; fi
+        if [ -f "${legacy_mock2}-journal" ]; then mv "${legacy_mock2}-journal" "${new_mock2}-journal" || return 1; fi
+    fi
 
     # Migrate any pre-update DB backups that lived alongside the legacy
     # file (e.g. "proxypilot.db.backup-*") into the new dir as well —
@@ -764,6 +788,9 @@ stop_native_backend() {
         pm2)
             # Stop through PM2 so its supervisor cannot respawn the writer.
             # A failed start may still have registered/running processes.
+            if pids="$(pm2 pid proxypilot 2>>"$LOG_FILE")" && [[ "$pids" =~ ^[0[:space:]]*$ ]]; then
+                return 0
+            fi
             if pm2 stop proxypilot >>"$LOG_FILE" 2>&1 &&
                 pids="$(pm2 pid proxypilot 2>>"$LOG_FILE")" &&
                 [[ "$pids" =~ ^[0[:space:]]*$ ]]; then
@@ -790,6 +817,7 @@ stop_native_backend() {
 }
 
 stop_update_writers() {
+    DB_WRITERS_QUIESCED=false
     stop_setup_runner || return 1
     stop_native_backend || return 1
     if [ -n "${INSTALL_DIR:-}" ] && [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
@@ -802,9 +830,35 @@ stop_update_writers() {
             return 1
         fi
     fi
+    DB_WRITERS_QUIESCED=true
+}
+
+backup_quiesced_databases() {
+    # This stage deliberately runs from the freshly re-exec'd script AFTER
+    # confirmed maintenance, even when the old updater supplied a core backup.
+    # The inherited live core copy never stands in for sibling Mock2 coverage.
+    DB_SNAPSHOT_ATTEMPTED=true
+    if [ "$DB_WRITERS_QUIESCED" != true ]; then
+        log "${RED}Database writers are not confirmed stopped; refusing paired snapshot${NC}"
+        return 1
+    fi
+    local db_path="${DB_BACKUP_SOURCE:-}" parent
+    if [ -z "$db_path" ] || [ ! -f "$db_path" ]; then
+        log "${RED}Cannot locate the existing core database for a paired snapshot${NC}"
+        return 1
+    fi
+    parent="$(dirname "$db_path")/backups"
+    DB_SNAPSHOT_DIR="$(python3 -I "$SCRIPT_DIR/scripts/update-database-snapshot.py" create --core "$db_path" --parent "$parent")" || return 1
+    [ -f "$DB_SNAPSHOT_DIR/manifest.json" ] && [ -f "$DB_SNAPSHOT_DIR/proxypilot.db" ] || return 1
+    DB_BACKUP_FILE="$DB_SNAPSHOT_DIR/proxypilot.db"
+    log "${GREEN}Quiescent core and Mock2 database snapshot: ${DB_SNAPSHOT_DIR}${NC}"
 }
 
 restore_db() {
+    if [ "$DB_SNAPSHOT_ATTEMPTED" = true ] && { [ -z "$DB_SNAPSHOT_DIR" ] || [ ! -f "$DB_SNAPSHOT_DIR/manifest.json" ] || [ ! -f "$DB_SNAPSHOT_DIR/proxypilot.db" ]; }; then
+        log "${RED}Paired snapshot failed before migration; retaining databases and leaving writers stopped${NC}"
+        return 1
+    fi
     if [ -z "$DB_BACKUP_FILE" ] || [ ! -f "$DB_BACKUP_FILE" ]; then
         log_verbose "No backup to restore"
         return 0
@@ -815,6 +869,9 @@ restore_db() {
     fi
     stop_update_writers || return 1
     log "${YELLOW}Restoring database from: ${DB_BACKUP_FILE}${NC}"
+    if [ -n "$DB_SNAPSHOT_DIR" ]; then
+        python3 -I "$SCRIPT_DIR/scripts/update-database-snapshot.py" restore --core "$DB_BACKUP_SOURCE" --snapshot "$DB_SNAPSHOT_DIR" || return 1
+    else
     # A backup without a WAL must not inherit the failed update's WAL.
     # SHM is a disposable index: SQLite rebuilds it from the matching WAL.
     rm -f "${DB_BACKUP_SOURCE}-wal" "${DB_BACKUP_SOURCE}-shm" || return 1
@@ -829,8 +886,12 @@ restore_db() {
     if [ -f "${DB_BACKUP_FILE}-wal" ]; then
         cp "${DB_BACKUP_FILE}-wal" "${DB_BACKUP_SOURCE}-wal" || return 1
     fi
+    fi
     if [ -n "${DB_LAYOUT_NEW_PATH:-}" ]; then
-        rm -f "$DB_LAYOUT_NEW_PATH" "${DB_LAYOUT_NEW_PATH}-wal" "${DB_LAYOUT_NEW_PATH}-shm" || return 1
+        rm -f "$DB_LAYOUT_NEW_PATH" "${DB_LAYOUT_NEW_PATH}-wal" "${DB_LAYOUT_NEW_PATH}-shm" "${DB_LAYOUT_NEW_PATH}-journal" || return 1
+        if [ -n "${DB_LAYOUT_NEW_MOCK2_PATH:-}" ]; then
+            rm -f "$DB_LAYOUT_NEW_MOCK2_PATH" "${DB_LAYOUT_NEW_MOCK2_PATH}-wal" "${DB_LAYOUT_NEW_MOCK2_PATH}-shm" "${DB_LAYOUT_NEW_MOCK2_PATH}-journal" || return 1
+        fi
         cp "$DB_LAYOUT_ENV_BACKUP" "$DB_LAYOUT_ENV_PATH" || return 1
     fi
     log "${YELLOW}Database restored. Operator should investigate the failure before retrying.${NC}"
@@ -2024,8 +2085,10 @@ PYEOF
         # Do not enter maintenance (including its recovery trap) when the
         # host writer cannot stop. It must stay stopped across the rebuild.
         stop_setup_runner
+        DB_SNAPSHOT_ATTEMPTED=true
         DB_MAINTENANCE_STARTED=true
         stop_update_writers
+        backup_quiesced_databases
         # Arm paired recovery before the first runtime mutation. The helper
         # independently verifies that this backend is down and work is idle.
         if [ -f "${INSTALL_DIR}/scripts/review-runtime-refresh.py" ]; then
@@ -2177,7 +2240,7 @@ PYEOF
         trap - EXIT ERR INT TERM
         if [ -n "$DB_BACKUP_FILE" ]; then
             log "Database backup retained at: $DB_BACKUP_FILE"
-            log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
+            log "Rollback requires stopped writers and the complete paired snapshot manifest; do not restore only the core file."
         fi
         exit 0
     fi
@@ -2212,6 +2275,22 @@ PYEOF
         fi
         sleep 1
     done
+
+    # Confirm the old native writer cannot respawn during the paired snapshot.
+    # PM2 is the supported supervisor; unknown remaining index.js writers are
+    # refused rather than treated as stopped merely because a port was free.
+    stop_setup_runner
+    if command -v pm2 &>/dev/null; then
+        NATIVE_BACKEND_MODE=pm2
+    fi
+    DB_SNAPSHOT_ATTEMPTED=true
+    DB_MAINTENANCE_STARTED=true
+    stop_update_writers
+    if pgrep -f "node.*index.js" >/dev/null 2>&1; then
+        log "${RED}A native backend writer remains; refusing database snapshot and restart${NC}"
+        exit 1
+    fi
+    backup_quiesced_databases
 
     # Start the backend
     log "Starting ProxyPilot backend..."
@@ -2334,5 +2413,5 @@ log ""
 log "Update log saved to: $LOG_FILE"
 if [ -n "$DB_BACKUP_FILE" ]; then
     log "Database backup retained at: $DB_BACKUP_FILE"
-    log "To roll back manually: stop ProxyPilot, then cp \"$DB_BACKUP_FILE\" \"$DB_BACKUP_SOURCE\""
+    log "Rollback requires stopped writers and the complete paired snapshot manifest; do not restore only the core file."
 fi

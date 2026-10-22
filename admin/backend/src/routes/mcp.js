@@ -24,6 +24,7 @@ import { localProofRefusal, requestOrigin } from '../lib/sso/sessions.js';
 
 import express from 'express';
 import { randomBytes } from 'node:crypto';
+import { withCheckoutOperationLease, captureCheckoutHost } from '../mock2/checkout-operation.js';
 import { appendFile, readFile, writeFile, rename, rm, mkdir, stat as fsStat, readdir, copyFile, open as fsOpen } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -93,9 +94,10 @@ import {
 import { stageZipUpload, getZipUpload, discardZipUpload } from '../lib/zip-staging.js';
 import {
   checkContainerConflicts, readContainerStartup, applyTarToContainer,
-  setupStartupScript, writeTarFromZip, runHostCapture, runInContainer, CAPTURE_CAP,
+  setupStartupScript, writeTarFromZip, runHostCapture as captureHost, runInContainer, CAPTURE_CAP,
   STARTUP_UNIT_NAME,
 } from '../lib/lxc-zip.js';
+const runHostCapture = (...args) => captureCheckoutHost(captureHost, ...args);
 import { resolveMock2Gate } from '../mock2/gating.js';
 import { findOrCreateLxcService, syncLxcServiceUpstream } from './lxc.js';
 import { regenerateDomainCaddyConfig, ensureCaddyStructure, assertRoutesShareSslStance, syncPrimaryRouteFromLegacy, caddyRenderDeps, normalizePathPrefix } from './services.js';
@@ -4560,6 +4562,26 @@ const extended = createExtendedHandlers({
 });
 export const EXTENDED_TOOL_NAMES = Object.freeze(Object.keys(extended.handlers));
 
+// Only project checkout mutators participate. Read-only MCP handlers and
+// unrelated container/platform operations retain their existing behavior.
+function checkoutMutationHandler(handler, { untrackedErrorResult = false } = {}) {
+  return async (args, auth, req) => {
+    const m = await mock2Modules();
+    const { project, error } = requireActiveProject(m, args);
+    if (error) return handler(args, auth, req); // preserve existing input/prerequisite diagnostic
+    const { acquireCheckoutOperationLease, settleCheckoutOperationLease, markCheckoutOperationLeaseUncertain } = await import('../mock2/locks.js');
+    try {
+      return await withCheckoutOperationLease({ projectId: project.id, kind: 'mcp-write',
+        acquire: acquireCheckoutOperationLease, settle: settleCheckoutOperationLease,
+        markUncertain: markCheckoutOperationLeaseUncertain, untrackedErrorResult,
+      }, () => handler(args, auth, req));
+    } catch (failure) {
+      return toolResult(failure?.code?.startsWith('CHECKOUT_OPERATION_') ? failure.message
+        : 'The project write did not complete. Inspect its checkout holder before retrying.', { isError: true });
+    }
+  };
+}
+
 const TOOL_HANDLERS = {
   ...extended.handlers,
   list_git_connectors: toolListGitConnectors,
@@ -4614,23 +4636,23 @@ const TOOL_HANDLERS = {
   cancel_queued_build: toolCancelQueuedBuild,
   list_project_files: toolListProjectFiles,
   read_project_file: toolReadProjectFile,
-  write_project_file: toolWriteProjectFile,
-  edit_project_file: toolEditProjectFile,
-  append_project_file: toolAppendProjectFile,
-  insert_project_file_at_line: toolInsertProjectFileAtLine,
+  write_project_file: checkoutMutationHandler(toolWriteProjectFile),
+  edit_project_file: checkoutMutationHandler(toolEditProjectFile),
+  append_project_file: checkoutMutationHandler(toolAppendProjectFile),
+  insert_project_file_at_line: checkoutMutationHandler(toolInsertProjectFileAtLine),
   search_project_files: toolSearchProjectFiles,
   read_project_files: toolReadProjectFiles,
   project_map: toolProjectMap,
-  apply_project_patch: toolApplyProjectPatch,
-  delete_project_file: toolDeleteProjectFile,
-  move_project_file: toolMoveProjectFile,
-  run_project_command: toolRunProjectCommand,
+  apply_project_patch: checkoutMutationHandler(toolApplyProjectPatch),
+  delete_project_file: checkoutMutationHandler(toolDeleteProjectFile),
+  move_project_file: checkoutMutationHandler(toolMoveProjectFile),
+  run_project_command: checkoutMutationHandler(toolRunProjectCommand),
   project_git_log: toolProjectGitLog,
   project_git_diff: toolProjectGitDiff,
   project_git_show: toolProjectGitShow,
   get_build_log: toolGetBuildLog,
-  append_change_record: toolAppendChangeRecord,
-  redeploy_project: toolRedeployProject,
+  append_change_record: checkoutMutationHandler(toolAppendChangeRecord),
+  redeploy_project: checkoutMutationHandler(toolRedeployProject, { untrackedErrorResult: true }),
   check_proxypilot_update: toolCheckProxypilotUpdate,
   get_proxypilot_update_status: toolGetProxypilotUpdateStatus,
   run_proxypilot_update: toolRunProxypilotUpdate,

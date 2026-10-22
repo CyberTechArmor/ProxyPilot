@@ -522,11 +522,19 @@ that bind every project:
 
 ## 15. Task continuity (starting and resuming work)
 
-- **Where task state lives.** `AGENTS.md` is the entry point and gives the reading
-  order: `CLAUDE.md` → `state/work.md` (plan and authorized scope) →
-  `state/decisions.md` → `state/tasks/<task-id>/task.json` + `handoff.md` (one
-  folder per task, schema `mock2-task@1`, documented in `state/tasks/README.md`) →
-  `state/handoff.md` → `.mock2/standards/`. Read them when starting or resuming.
+- **Where task state lives.** `AGENTS.md` is the entry point. Preserve and follow
+  the repository's managed Mock2 startup instructions first. Continuity supplements
+  that order, never replaces a managed block or project-owned text: capacity and
+  branch orientation (where present), project handoff/work/decisions, rules and
+  production checklist, then the named task's `state/tasks/<task-id>/task.json`
+  and `handoff.md` (schema `mock2-task@1`, see `state/tasks/README.md`). Read project
+  context in `CLAUDE.md` and applicable pinned `.mock2/standards/` before edits;
+  pointers back to `AGENTS.md` do not restart the reading order.
+- **Task selection is not file authorization.** Flightdeck's database resolves a
+  bare continuation only within the project and the last seven days; a stopped
+  task is eligible only when newest overall. Outside the runtime, use the task
+  the person names and verify the current goal. Never authorize work from a saved
+  file's timestamp or status alone. A running task is reattached, not duplicated.
 - **Per-task records.** Each task writes only its own folder; concurrent work never
   shares one handoff. On ProxyPilot the platform database is authoritative and
   Flightdeck rewrites the task files — do not edit them by hand.

@@ -254,8 +254,25 @@ import { publicCycleShape, INTERRUPTS, typicalDurationMs, queueMayAdvancePast, b
 import { parseRoutingJson } from './routing-logic.js';
 import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
+  acquireCheckoutOperationLease, settleCheckoutOperationLease, markCheckoutOperationLeaseUncertain,
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
+import { withCheckoutOperationLease } from './checkout-operation.js';
+const projectCheckoutOperation = (projectId, kind, action) => withCheckoutOperationLease({ projectId, kind,
+  acquire: acquireCheckoutOperationLease, settle: settleCheckoutOperationLease,
+  markUncertain: markCheckoutOperationLeaseUncertain,
+}, action);
+function checkoutRestoreRoute(handler) {
+  return async (req, res) => {
+    const pending = { statusCode: 200, body: undefined, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    try {
+      await projectCheckoutOperation(req.mock2Project.id, 'restore', () => handler(req, pending));
+      return res.status(pending.statusCode).json(pending.body ?? { error: 'The restore did not produce a response.' });
+    } catch (failure) {
+      return res.status(failure?.code?.startsWith('CHECKOUT_OPERATION_') ? 409 : 500).json({ error: failure?.code?.startsWith('CHECKOUT_OPERATION_') ? failure.message : 'The restore did not complete. Inspect its checkout holder before retrying.' });
+    }
+  };
+}
 import { listChangeRecords, lastChangeRecord, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { redoContextSection } from './contract-classifier-logic.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
@@ -4529,7 +4546,8 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const lock = getLock(project.id);
     if (!lock) return res.status(409).json({ error: 'Project is not checked out.' });
-    releaseLock(project.id);
+    const released = releaseLock(project.id);
+    if (!released.released) return res.status(409).json({ error: released.reason });
     logAudit(req.user.id, 'MOCK2_LOCK_FORCE_RELEASE', 'mock2_project', project.id,
       { released_holder_user: lock.holder_user_id ?? null, released_holder_cycle: lock.holder_cycle_id ?? null }, req.ip);
     res.json({ ok: true });
@@ -4592,7 +4610,7 @@ export function createMock2Router() {
   // restored HEAD. The default, with no restore, is the latest checkpoint
   // ("what was currently built").
   const restoreSchema = z.object({ seq: z.coerce.number().int().positive() });
-  router.post('/projects/:id/restore', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+  router.post('/projects/:id/restore', requireMock2Role('editor'), refuseIfArchived, checkoutRestoreRoute(async (req, res) => {
     const project = req.mock2Project;
     const parsed = restoreSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'seq (the checkpoint number to restore to) is required' });
@@ -4607,10 +4625,7 @@ export function createMock2Router() {
       lifecycle: project.lifecycle,
     });
     if (!check.ok) return res.status(409).json({ error: check.error });
-    const lock = getLock(project.id);
-    if (lock && (lock.holder_cycle_id != null || lock.holder_user_id != null)) {
-      return res.status(409).json({ error: 'This project is checked out by another writer. Wait, or request a takeover.' });
-    }
+    // checkoutRestoreRoute already owns the genuine exclusive operation holder.
     const framework = getCurrentFrameworkVersion();
     if (!framework) return res.status(409).json({ error: 'No framework version exists to pin the restore record to.' });
 
@@ -4655,7 +4670,7 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_PROJECT_RESTORE', 'mock2_project', project.id,
       { to_seq: seq, target_sha: record.commit_sha, restored_sha: restoredSha, db }, req.ip);
     res.json({ restored: true, to_seq: seq, record_seq: newRecord?.seq ?? null, restored_sha: restoredSha, db });
-  });
+  }));
 
   // ---- Build log (downloadable transcript — "what actually happened") ----
 
@@ -5767,10 +5782,10 @@ export function createMock2Router() {
     const containerName = project.container_name || containerNameForProject(project.id);
     let result;
     try {
-      result = await backfillManifestEntryInContainer({
+      result = await projectCheckoutOperation(project.id, 'project-write', () => backfillManifestEntryInContainer({
         containerName, entry: parsed.data.entry,
         execInContainer, readFileInContainer, writeFileInContainer,
-      });
+      }));
     } catch (err) {
       return res.status(500).json({ error: `Backfill failed: ${err?.message || 'unknown error'}` });
     }
@@ -5808,7 +5823,7 @@ export function createMock2Router() {
     const containerName = project.container_name || containerNameForProject(project.id);
     let result;
     try {
-      result = await repairManifestInContainer({ containerName, execInContainer, readFileInContainer, writeFileInContainer });
+      result = await projectCheckoutOperation(project.id, 'project-write', () => repairManifestInContainer({ containerName, execInContainer, readFileInContainer, writeFileInContainer }));
     } catch (err) {
       return res.status(500).json({ error: `Repair failed: ${err?.message || 'unknown error'}` });
     }

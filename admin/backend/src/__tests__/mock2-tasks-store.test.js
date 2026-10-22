@@ -42,10 +42,10 @@ function freshDb() {
 
 const col = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => `${c.name} ${c.type}${c.notnull ? ' NOT NULL' : ''}${c.dflt_value != null ? ` DEFAULT ${c.dflt_value}` : ''}${c.pk ? ' PK' : ''}`);
 
-test('migration 562 is the newest mock2 migration and creates mock2_tasks exactly as specified; re-running is harmless', () => {
+test('migration 562 remains registered before its checkout reservation successor and creates mock2_tasks exactly as specified; re-running is harmless', () => {
   assert.ok(m562, 'registered');
   assert.equal(m562.name, 'mock2_tasks');
-  assert.equal(MOCK2_MIGRATIONS.at(-1).version, 562);
+  assert.ok(MOCK2_MIGRATIONS.findIndex(m => m.version === 563) > MOCK2_MIGRATIONS.findIndex(m => m.version === 562), 'checkout reservation migration follows task schema');
   const versions = MOCK2_MIGRATIONS.map((m) => m.version);
   assert.equal(new Set(versions).size, versions.length, 'no duplicate version');
   const db = freshDb();

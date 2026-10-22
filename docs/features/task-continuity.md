@@ -11,7 +11,7 @@
     Mock2 convention files);
   - frontend: `components/mock2/TaskStrip.jsx`, `components/mock2/task-strip-logic.js`, and the routed-send handling
     in `BuildChat.jsx`.
-- Data: mock2.db migration 562 (`mock2_tasks`).
+- Data: mock2.db migration 562 (`mock2_tasks`); migration 563 adds genuine checkout operation reservations.
 
 Flightdeck remembers what the person asked for apart from the chat, and picks it up again after a disconnect, a
 restart or a stalled build. A **task** is one build request (`intent: build`, one per `mock2_requests` row, kept
@@ -51,6 +51,8 @@ The matching is deliberately narrow:
 - "Stop the timer from resetting" and "make the email field read-only" are ordinary build requests.
 - A "try again" with a screenshot attached starts a new build, because a resume turn cannot carry images.
 - Card resends (redo, clarifier, split, suggestions, research, escalation) are never routed.
+- The task strip's direct Resume endpoint applies the same newest explanation/stop guidance before resuming a build.
+- If recognized continuation/stop/explanation routing cannot read the task store, it returns a fixed503 and starts no task; it never falls through to build tools.
 
 A routed send answers `{ routed: { action, task, note } }`. The server echoes the person's message once and posts
 `note` (for example "Resuming build: Add invoice export") as a system message. Audit:
@@ -131,6 +133,20 @@ Each task gets its own folder, so concurrent work never shares one handoff:
 - `state/tasks/<key>/handoff.md`: a short summary for the next session.
 
 The key is `t<id>-<slug>`.
+
+Automatic record I/O uses a fixed, constrained Python3 program in the project container, not the generic model file writer.
+It refuses symlink parents/final files, nonregular or multiply linked records, foreign task identities, stale JSON revisions,
+and oversized content. Each task's directory is locked while its own regular record is atomically replaced. Missing-only
+convention creation never overwrites a path that appears concurrently. If Python3 is absent, the fixed `python3_required`
+diagnostic reports failure; nothing is installed into the user's app and no mirror success is claimed.
+
+The idle writer owns a genuine checkout operation reservation across writes and the path-scoped commit. In-cycle writes
+attach a reservation to the exact cycle owner and await the actual result; a JavaScript timer never abandons a live mutation.
+Confirmed completion/refusal settles only that reservation. A missing acknowledgement or transport failure retains an
+**uncertain** checkout reservation across cycle release and backend restart, and the owning cycle cannot continue tools,
+checkpoint or deploy over it. Its task records that the outcome must be verified before repeating. Reservations have no
+automatic expiry and an ordinary force-release cannot remove them: an operator must establish the remote outcome before
+settling the matching operation. Human/build admission, relevant MCP checkout writes and restores respect the same owner.
 
 When the files are written:
 - **During a build:** before its first turn, and again just before each checkpoint commit. They are not committed

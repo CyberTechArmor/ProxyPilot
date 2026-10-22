@@ -491,7 +491,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
     return { status: 'error', error: 'Approve the design first — Build unlocks after the Concept sign-off.' };
   }
   const existingLock = getLock(projectId);
-  if (existingLock && (existingLock.holder_cycle_id != null || existingLock.holder_user_id != null)) {
+  if (existingLock && (existingLock.holder_operation_id != null || existingLock.holder_cycle_id != null || existingLock.holder_user_id != null)) {
     return { status: 'error', error: 'This project is checked out by another writer. Wait, or request a takeover.' };
   }
   if (auditJobActive(projectId)) {

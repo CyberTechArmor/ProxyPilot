@@ -1,7 +1,7 @@
 // Mock2 checkout-lock PURE decision layer (Phase M6, ADR-004). Native-free,
 // unit-tested stub-first (risk R9). The lock guards the CONTAINER (working tree
 // + dev server + project DB), so there is exactly one lock per project, held by
-// whatever writes — a human session or a cycle. Branch-per-user is foreclosed by
+// whatever writes — a human session, cycle, or operation. Branch-per-user is foreclosed by
 // this ADR: any future multi-writer feature needs per-writer containers, not a
 // second holder on this row.
 //
@@ -20,10 +20,11 @@ export const LOCK_IDLE_MINUTES_KEY = 'lock_idle_minutes';
 export const DEFAULT_LOCK_IDLE_MINUTES = 15;
 export const LOCK_WARN_SECONDS = 120;
 
-// The holder of a lock row, or null. Exactly one of holder_user_id /
-// holder_cycle_id is set on a live lock (03-data-model.md).
+// The effective holder of a lock row, or null. An operation takes precedence
+// over its attached original cycle until its remote outcome is acknowledged.
 export function lockHolder(lockRow) {
   if (!lockRow) return null;
+  if (lockRow.holder_operation_id != null) return { type: 'operation', id: lockRow.holder_operation_id };
   if (lockRow.holder_cycle_id != null) return { type: 'cycle', id: Number(lockRow.holder_cycle_id) };
   // holder_user_id is a UUID (users.id is TEXT), so return it AS-IS — never
   // Number()-coerce it. Number(uuid) is NaN, which never equalled requester.id,
@@ -45,6 +46,7 @@ export function msSinceWrite(lockRow, nowIso) {
 // Milliseconds until this lock idle-expires (negative once past). null when the
 // lock is absent or its timestamps are unreadable.
 export function timeRemainingMs(lockRow, nowIso, idleMinutes = DEFAULT_LOCK_IDLE_MINUTES) {
+  if (lockRow?.holder_operation_id != null) return null;
   const since = msSinceWrite(lockRow, nowIso);
   if (!Number.isFinite(since)) return null;
   return Math.max(0, Number(idleMinutes)) * 60000 - since;
@@ -53,6 +55,8 @@ export function timeRemainingMs(lockRow, nowIso, idleMinutes = DEFAULT_LOCK_IDLE
 // Has the lock gone idle past its timeout? A malformed timestamp is NOT expired
 // (fail safe — never auto-release a lock we can't reason about).
 export function isLockExpired(lockRow, nowIso, idleMinutes = DEFAULT_LOCK_IDLE_MINUTES) {
+  // A remote operation can outlive its caller. Elapsed time is never evidence it stopped.
+  if (lockRow?.holder_operation_id != null) return false;
   const remaining = timeRemainingMs(lockRow, nowIso, idleMinutes);
   if (remaining == null) return false;
   return remaining <= 0;
@@ -88,6 +92,7 @@ export function resolveIdleMinutes(raw) {
 //
 // Returns { ok, reason, canTakeover, heldBy }.
 export function mayAcquire({ lockRow, requester, role, nowIso, idleMinutes = DEFAULT_LOCK_IDLE_MINUTES } = {}) {
+  if (lockRow?.holder_operation_id != null) return { ok: false, reason: checkoutOperationReason(lockRow), canTakeover: false, heldBy: { type: 'maintenance', id: null } };
   if (!requester) return { ok: false, reason: 'no requester', canTakeover: false, heldBy: null };
   // Viewers never hold the container lock (ADR-004). A cycle holder is not
   // role-gated (a cycle is authorized at start), so this only bites human holds.
@@ -119,9 +124,24 @@ export function shouldAutoRelease(lockRow, nowIso, idleMinutes = DEFAULT_LOCK_ID
 // Client-safe view of a lock for the project detail banner: holder, remaining
 // time, warn state, and whether a takeover has already been requested. holderName
 // is resolved by the caller (a username or a cycle label).
+export function checkoutOperationReason(lockRow) {
+  const label = lockRow?.holder_operation_kind === 'task-continuity' ? 'Task-state synchronization' : 'A project write';
+  return lockRow?.holder_operation_state === 'uncertain'
+    ? `${label} has an unconfirmed outcome. Inspect the project and confirm the remote operation has stopped before resolving it; no automatic takeover is allowed.`
+    : `${label} is in progress. Wait for it to finish; it cannot be force-released while the remote operation may be running.`;
+}
+
 export function publicLockShape(lockRow, { nowIso, idleMinutes = DEFAULT_LOCK_IDLE_MINUTES, holderName = null } = {}) {
   const holder = lockHolder(lockRow);
   if (!holder) return { held: false };
+  if (holder.type === 'operation') return {
+    held: true, holder_type: 'maintenance', holder_id: null, holder_name: lockRow.holder_operation_kind === 'task-continuity' ? 'Task-state synchronization' : 'Project write',
+    acquired_at: lockRow.acquired_at || null, last_write_at: lockRow.last_write_at || null,
+    remaining_ms: null, remaining_seconds: null, expired: false, warn: false,
+    takeover_requested_by: null, takeover_requested_at: null,
+    operation_state: lockRow.holder_operation_state === 'uncertain' ? 'uncertain' : 'active',
+    can_force_release: false, reason: checkoutOperationReason(lockRow),
+  };
   const remaining = timeRemainingMs(lockRow, nowIso, idleMinutes);
   return {
     held: true,

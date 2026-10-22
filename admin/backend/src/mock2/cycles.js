@@ -13,6 +13,19 @@ import { recordRoutingOutcomeForCycle } from './routing.js';
 
 const nowIso = () => new Date().toISOString();
 
+// Task continuity hook (task-sync.js): every status transition of a cycle
+// updates the task it belongs to. Dynamic import — task-sync sits above this
+// module in the import graph — and fire-and-forget: task bookkeeping must
+// never fail, block or delay a cycle transition. task-sync re-reads the row,
+// so hooks that land out of order still converge on its latest state.
+const TASK_SYNC_FIELDS = Object.freeze(['status', 'verification_state', 'deploy_status']);
+function notifyTaskSync(cycle) {
+  if (!cycle || cycle.request_id == null) return;
+  import('./task-sync.js')
+    .then((m) => m.onCycleChanged(cycle.id))
+    .catch((e) => console.warn('[mock2] task cycle hook failed:', e?.message));
+}
+
 export function getCycle(id) {
   return getMock2Db().prepare(`SELECT * FROM mock2_cycles WHERE id = ?`).get(Number(id));
 }
@@ -103,7 +116,9 @@ export function insertCycle({
     .run(Number(projectId), Number(frameworkVersionId), stage, status, instruction ?? null, initiatedBy ?? null,
       actingAsAdmin ? 1 : 0, estTokens, estCostCents, nowIso(),
       requestId == null ? null : Number(requestId), segment == null ? null : String(segment));
-  return getCycle(info.lastInsertRowid);
+  const cycle = getCycle(info.lastInsertRowid);
+  notifyTaskSync(cycle);
+  return cycle;
 }
 
 const WRITABLE = new Set([
@@ -129,7 +144,9 @@ export function updateCycle(id, patch = {}) {
   const set = cols.map((c) => `${c} = ?`).join(', ');
   const vals = cols.map((c) => patch[c]);
   getMock2Db().prepare(`UPDATE mock2_cycles SET ${set} WHERE id = ?`).run(...vals, Number(id));
-  return getCycle(id);
+  const cycle = getCycle(id);
+  if (cols.some((c) => TASK_SYNC_FIELDS.includes(c))) notifyTaskSync(cycle);
+  return cycle;
 }
 
 // Accumulate spend onto a cycle (after each model call, alongside the ledger
@@ -151,6 +168,16 @@ export function setInterrupt(id, interruptRequest) {
   return getCycle(id);
 }
 
+// THE rule for "stop this build" — the interrupt route and a task stop
+// (task-sync.js) both go through here, so the two can never drift: only a
+// RUNNING cycle takes an interrupt; the runner honours it at its next step
+// boundary. Returns { ok, cycle } or { ok: false, status, error }.
+export function requestCycleInterrupt(cycle, action) {
+  if (!cycle) return { ok: false, status: 404, error: 'Cycle not found' };
+  if (cycle.status !== 'running') return { ok: false, status: 409, error: `Cycle is "${cycle.status}", not running` };
+  return { ok: true, cycle: setInterrupt(cycle.id, action) };
+}
+
 // Mark a cycle terminal with a status + optional error, stamping finished_at.
 // Every terminal build cycle that carries a routing stamp also lands one row
 // in mock2_routing_outcomes here (migration 525) — the append-only evidence
@@ -162,5 +189,6 @@ export function finishCycle(id, { status, error = null } = {}) {
     .run(status, error, nowIso(), Number(id));
   const cycle = getCycle(id);
   try { recordRoutingOutcomeForCycle(cycle); } catch (e) { console.warn('[mock2] routing outcome write failed:', e?.message); }
+  notifyTaskSync(cycle);
   return cycle;
 }

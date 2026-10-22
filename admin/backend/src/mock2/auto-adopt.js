@@ -79,7 +79,7 @@ async function maybeAdoptProject(projectId, framework) {
   let lockHeld = false;
   try {
     const lock = getLock(project.id);
-    lockHeld = !!(lock && (lock.holder_cycle_id != null || lock.holder_user_id != null));
+    lockHeld = !!(lock && (lock.holder_operation_id != null || lock.holder_cycle_id != null || lock.holder_user_id != null));
   } catch { lockHeld = false; }
 
   const verdict = shouldAutoAdopt({

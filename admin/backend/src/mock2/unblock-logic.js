@@ -140,14 +140,20 @@ export function resolveSelectedOption(options = [], selected) {
 // operator's free-text message, the resolution option they chose, and any scoped
 // one-time authorizations granted for THIS resume. Returns '' when there's nothing to
 // add (a bare resume stays a bare resume).
-export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [], findings = [], lastCheckpoint = null } = {}) {
+// `recovery` (task continuity, task-logic.buildRecoverySection): the task's own
+// checkpoint and its VERIFY BEFORE REPEATING list. It is platform state, not
+// operator guidance — so on its own it renders WITHOUT the authoritative-
+// guidance header, and with guidance it sits right after the last checkpoint,
+// before anything the model is asked to do.
+export function buildResumeContextBlock({ message = '', selectedOption = null, authorizations = [], waivers = [], findings = [], lastCheckpoint = null, recovery = '' } = {}) {
+  const rec = String(recovery || '').trim();
   const msg = String(message || '').trim();
   const opt = selectedOption && selectedOption.label ? selectedOption : null;
   const auths = (Array.isArray(authorizations) ? authorizations : []).filter((a) => a && a.scope);
   const waived = (Array.isArray(waivers) ? waivers : []).filter(Boolean);
   const found = (Array.isArray(findings) ? findings : []).map((f) => String(f || '').trim()).filter(Boolean);
   const checkpoint = lastCheckpoint && String(lastCheckpoint.summary || '').trim() ? lastCheckpoint : null;
-  if (!msg && !opt && !auths.length && !waived.length && !found.length && !checkpoint) return '';
+  if (!msg && !opt && !auths.length && !waived.length && !found.length && !checkpoint) return rec;
 
   const lines = [
     'Operator guidance on resume (AUTHORITATIVE — a human is directing this build after it',
@@ -174,6 +180,7 @@ export function buildResumeContextBlock({ message = '', selectedOption = null, a
       lines.push('This was verified against the tree before the halt — do not re-derive what it already confirms.');
     }
   }
+  if (rec) lines.push('', rec);
   if (opt) {
     // Name the typed kind (except the neutral expand_scope) so the model knows what
     // KIND of direction this is, then the option's exact injectOnResume text if it

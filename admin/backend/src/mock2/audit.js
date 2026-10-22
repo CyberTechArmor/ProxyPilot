@@ -480,7 +480,7 @@ function detectDrift(project, framework) {
 // so they ride every segment: the audit call here, and the build's first task
 // turn (runner.js hydrates them from the request row), surviving the
 // rule-question gate and resumes.
-export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full', echoToChat = false, escalate = false, escalateModel = null, escalateEffort = null, escalateThinking = null, origin = 'operator' }) {
+export async function startBuild({ project, instruction, user, actingAsAdmin = 0, images = [], buildMode = 'full', echoToChat = false, escalate = false, escalateModel = null, escalateEffort = null, escalateThinking = null, origin = 'operator', taskGoal = null }) {
   const projectId = Number(project.id);
   const mode = normalizeBuildMode(buildMode);
 
@@ -491,7 +491,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
     return { status: 'error', error: 'Approve the design first — Build unlocks after the Concept sign-off.' };
   }
   const existingLock = getLock(projectId);
-  if (existingLock && (existingLock.holder_cycle_id != null || existingLock.holder_user_id != null)) {
+  if (existingLock && (existingLock.holder_operation_id != null || existingLock.holder_cycle_id != null || existingLock.holder_user_id != null)) {
     return { status: 'error', error: 'This project is checked out by another writer. Wait, or request a takeover.' };
   }
   if (auditJobActive(projectId)) {
@@ -557,7 +557,7 @@ export async function startBuild({ project, instruction, user, actingAsAdmin = 0
   // never changes runner behavior).
   let attachments = [];
   try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] build image save failed:', e?.message); }
-  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin, attachments, buildMode: mode });
+  const request = insertRequest({ projectId, instruction: String(instruction || '').slice(0, getChatMaxChars()), initiatedBy: user.id, actingAsAdmin, attachments, buildMode: mode, origin, taskGoal });
   // The operator's request shows in the build chat as THEIR message (the Ask
   // lane already does this). Interactive submissions only — queued/synthetic
   // builds (queue drain, per-screen builds, production check) echo elsewhere

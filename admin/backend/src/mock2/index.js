@@ -8,6 +8,10 @@
 // ./gating.js so the decision can be made without loading anything native.
 
 export { initMock2Db, getMock2Db, mock2DbPath, sweepMock2OnBoot } from './db.js';
+// Task continuity boot sweep: runs right after sweepMock2OnBoot (which fails
+// orphaned cycles with raw SQL, so no cycle hook saw it) and turns each task
+// whose work died with the process into an interrupted, resumable one.
+export { sweepTasksOnBoot } from './task-sync.js';
 export { createMock2Router } from './routes.js';
 // Quick connect (VS Code / git over smart HTTP): its own router because git
 // clients authenticate with connect tokens (HTTP Basic), not session cookies —

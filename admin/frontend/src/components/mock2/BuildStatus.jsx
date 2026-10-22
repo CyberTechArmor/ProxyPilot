@@ -24,6 +24,7 @@ import ChangeHistory from './ChangeHistory';
 import ExplainThis from './ExplainThis';
 import VerificationChecklist from './VerificationChecklist';
 import { ProjectComponentsPanel } from './ProjectTimeCard';
+import { routedNoteText, routedOf } from './task-strip-logic';
 
 const STATUS_TONE = {
   running: 'text-cyan-500', succeeded: 'text-green-500', failed: 'text-red-500',
@@ -154,7 +155,15 @@ export default function BuildStatus({
     setFullBusy(true);
     try {
       const res = await api.mock2StartCycle(projectId, body, null, 'full');
-      if (res.refused) {
+      // Task continuity: "continue" / "stop" typed here are resolved against
+      // the remembered task server-side — no full build started, so say what
+      // did happen and close the dialog like any finished send.
+      const routed = routedOf(res);
+      if (routed) {
+        toast({ title: routedNoteText(routed) });
+        setFullOpen(false);
+        setFullText('');
+      } else if (res.refused) {
         toast({ variant: 'destructive', title: 'Full build refused', description: res.reason || 'Quota exceeded.' });
       } else {
         toast({

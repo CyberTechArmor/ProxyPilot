@@ -26,6 +26,8 @@ import { ChatMessageList } from './chat-messages';
 import { useChatImages, ImageAttachmentBar } from './ImageAttachments';
 import ChangeHistory from './ChangeHistory';
 import VerificationChecklist from './VerificationChecklist';
+import TaskStrip from './TaskStrip';
+import { RESUME_GUIDANCE_MAX, routedNoteText, routedOf, routedRefreshesParent } from './task-strip-logic';
 import { toWireImages } from '@/lib/chat-images';
 import { uploadReferenceFiles } from '@/lib/reference-uploads';
 import { RECOMMENDED_ESCALATE_MODEL, modelOptionsWith } from '@/lib/model-options';
@@ -255,7 +257,14 @@ export default function BuildChat({
     prevScreenActive.current = screenActive;
   }, [screenActive, load]);
 
-  const shouldPoll = active || askActive || screenActive || openQuestionCount > 0 || projectOpenQuestions > 0;
+  // The task Flightdeck remembers right now (task continuity), from the same
+  // payload. While the server says it is live the chat keeps polling on its
+  // own, so a reload or a dropped connection reattaches to the running work
+  // and the strip leaves "Building: …" when it ends — even before the
+  // parent's cycle poll has caught up.
+  const currentTask = data?.current_task || null;
+  const taskLive = currentTask?.live === true;
+  const shouldPoll = active || askActive || screenActive || taskLive || openQuestionCount > 0 || projectOpenQuestions > 0;
   useEffect(() => {
     if (!shouldPoll) return undefined;
     const t = setInterval(load, askActive ? 900 : 2500);
@@ -405,16 +414,39 @@ export default function BuildChat({
     }
   };
 
+  // ---- task continuity: routed sends ----
+  // "continue", "try again", "stop" and "only explain" are resolved by the
+  // server against the project's remembered task BEFORE anything starts, and
+  // the send is then answered { routed: { action, task, note } } instead of
+  // its usual shape. The server has already echoed the message and posted the
+  // note, so a routed answer IS a finished send: say what happened, clear the
+  // composer the way that send would have, refresh. Every send checks this
+  // FIRST — a routed answer carries none of the proposal fields the card
+  // branches read, and must never be mistaken for "Build started".
+  const announceRouted = async (routed, { clear = true } = {}) => {
+    toast({ title: routedNoteText(routed) });
+    if (clear) { setInstruction(''); attach.clear(); }
+    if (routedRefreshesParent(routed.action) && onStarted) onStarted();
+    await load();
+  };
+  const finishIfRouted = async (res, opts) => {
+    const routed = routedOf(res);
+    if (!routed) return false;
+    await announceRouted(routed, opts);
+    return true;
+  };
+
   // buildMode: 'quick' is the default iteration path — one small scoped
   // change, minimal gates, straight to deploy; 'full' runs the audited build
   // (rule questions, whole gate battery); 'mvp' is the scaffold speed path.
-  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false, escalateModel = null, skipResearch = false, redo = false } = {}) => {
+  const startBuild = async (buildMode = 'quick', { skipSplit = false, skipSuggest = false, extras = null, textOverride = null, extraImages = null, escalate = false, escalateModel = null, skipResearch = false, redo = false, said = null } = {}) => {
     const body = (textOverride ?? instruction).trim();
     if (!body) return;
     setBusy(true);
     try {
       const images = [...toWireImages(attach.images), ...(extraImages || [])];
-      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate, escalateModel, skipResearch, redo });
+      const res = await api.mock2StartCycle(projectId, body, images, buildMode, { skipSplit, skipSuggest, extras, escalate, escalateModel, skipResearch, redo, said });
+      if (await finishIfRouted(res)) return;
       if (res.research_proposal) {
         // The pre-pass judged this request depends on external knowledge —
         // nothing has started; the card offers Research & plan first.
@@ -658,7 +690,8 @@ export default function BuildChat({
     if (!body) return;
     setBusy(true);
     try {
-      await api.mock2Ask(projectId, body, toWireImages(attach.images));
+      const res = await api.mock2Ask(projectId, body, toWireImages(attach.images));
+      if (await finishIfRouted(res)) return;
       setInstruction('');
       attach.clear();
       await load();
@@ -683,7 +716,9 @@ export default function BuildChat({
     if (!body) return;
     setBusy(true);
     try {
-      await api.mock2Ask(projectId, body, toWireImages(attach.images), { research: true });
+      const res = await api.mock2Ask(projectId, body, toWireImages(attach.images), { research: true });
+      // Routed: no research ran, so no "Research done — send the build?" card.
+      if (await finishIfRouted(res, { clear: textOverride == null })) return;
       if (textOverride == null) { setInstruction(''); attach.clear(); }
       setResearchFollowup({ instruction: body, addendum: '', ready: false });
       toast({ title: 'Research started', description: 'Pulling the current docs and reading the code — the phased plan lands in this chat.' });
@@ -708,7 +743,8 @@ export default function BuildChat({
     if (!body) return;
     setBusy(true);
     try {
-      await api.mock2Ask(projectId, `${PLAN_MODE_PREAMBLE}\n\n${body}`, toWireImages(attach.images));
+      const res = await api.mock2Ask(projectId, `${PLAN_MODE_PREAMBLE}\n\n${body}`, toWireImages(attach.images), { said: body });
+      if (await finishIfRouted(res)) return;
       setInstruction('');
       attach.clear();
       await load();
@@ -721,6 +757,7 @@ export default function BuildChat({
   // a targeted look/layout change to the current design, never a redesign.
   const startDesignUpdate = () => startBuild('quick', {
     textOverride: `${DESIGN_MODE_PREAMBLE}\n\n${instruction.trim()}`,
+    said: instruction.trim(),
     ...consumeBoost(),
   });
 
@@ -920,6 +957,74 @@ export default function BuildChat({
       toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
     } finally { setBusy(false); }
   };
+
+  // ---- task strip actions (task continuity) ----
+  // Resume goes through the TASK, not the cycle: the server adds the task's
+  // checkpoint and its verify-before-repeating list to the resume, which a
+  // plain cycle retry does not. Text in the composer rides along as guidance
+  // (and is cleared, as a send would); attachments stay — a resume carries
+  // no images.
+  const [taskBusy, setTaskBusy] = useState(null); // 'resume' | 'stop' | null
+  const resumeTask = async () => {
+    if (!currentTask?.key || taskBusy) return;
+    const guidance = instruction.trim();
+    if (guidance.length > RESUME_GUIDANCE_MAX) {
+      toast({
+        variant: 'destructive', title: 'Message too long to ride a resume',
+        description: `Shorten it to ${RESUME_GUIDANCE_MAX.toLocaleString()} characters, or send it as its own update.`,
+      });
+      return;
+    }
+    setTaskBusy('resume');
+    try {
+      const res = await api.mock2ResumeTask(projectId, currentTask.key, guidance || null);
+      if (guidance) setInstruction('');
+      await announceRouted(
+        routedOf(res) || { action: currentTask.intent === 'investigation' ? 'continue_investigation' : 'resume_build' },
+        { clear: false },
+      );
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not resume', description: err.message });
+    } finally { setTaskBusy(null); }
+  };
+  const stopTask = async () => {
+    if (!currentTask?.key || taskBusy) return;
+    setTaskBusy('stop');
+    try {
+      const res = await api.mock2StopTask(projectId, currentTask.key);
+      await announceRouted(routedOf(res) || { action: currentTask.live ? 'stop_build' : 'stop_task' }, { clear: false });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Could not stop', description: err.message });
+    } finally { setTaskBusy(null); }
+  };
+  // "Waiting on you" → bring the thing it waits on into view: the first open
+  // question card, else the newest system note (a halt explains itself there).
+  const showWaiting = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const target = el.querySelector('[data-open-question]')
+      || [...el.querySelectorAll('[data-msg-kind="system"]')].pop();
+    if (!target) return;
+    interactedRef.current = true; // the person chose where to look; don't yank them away
+    target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  };
+  // Reattach after a reload or a dropped connection: the chat payload can say
+  // a build is live before the parent's slower cycle poll knows (e.g. a resume
+  // sent from another tab or phone). Nudge the parent on each live ↔ settled
+  // transition — and on first sight of a live build it has not seen — so the
+  // activity stream and Interrupt follow without the person doing anything.
+  const taskLiveKey = currentTask ? `${currentTask.key}:${taskLive ? 1 : 0}` : '';
+  const prevTaskLiveKeyRef = useRef('');
+  useEffect(() => {
+    const prev = prevTaskLiveKeyRef.current;
+    prevTaskLiveKeyRef.current = taskLiveKey;
+    if (prev === taskLiveKey) return;
+    if (!prev && !(taskLive && currentTask?.intent === 'build' && !active)) return;
+    if (onStarted) onStarted();
+    // Only the transition matters; active/onStarted changing must not re-fire it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskLiveKey]);
+
   // The composer's two jobs are in tension on a phone: reading the conversation
   // wants every pixel, writing a change wants a real writing surface. So the box
   // GROWS with what is in it — one line at rest, up to a third of the viewport
@@ -1771,8 +1876,25 @@ export default function BuildChat({
           )}
         />
 
-
-
+        {/* The remembered task, just above the composer (only when there is
+            one): what is running or where it stopped, and Resume / Stop.
+            Compact at rest so a phone keeps its conversation lines. */}
+        {currentTask ? (
+          <TaskStrip
+            task={currentTask}
+            canAct={canEdit}
+            online={online}
+            busy={taskBusy}
+            disabled={busy}
+            guidancePending={canEdit && instruction.trim().length > 0}
+            currentAction={currentTask.intent === 'investigation'
+              ? (askActive ? askJob?.message : null)
+              : (active ? job?.message : null)}
+            onResume={resumeTask}
+            onStop={stopTask}
+            onShow={showWaiting}
+          />
+        ) : null}
 
         {canEdit ? (
           <div className="space-y-2 shrink-0">

@@ -20,6 +20,7 @@ import BuildStatus from './BuildStatus';
 import ScreenPlan from './ScreenPlan';
 import BuildChat from './BuildChat';
 import { deriveBuildTasks } from '@/lib/build-tasks';
+import { routedNoteText, routedOf } from './task-strip-logic';
 import { ensureNotifyPermission, notifyBrowser } from '@/lib/browser-notify';
 
 export default function BuildMode({
@@ -169,7 +170,11 @@ export default function BuildMode({
     setBusy(true);
     try {
       const res = await api.mock2StartCycle(projectId, text);
-      if (res.refused) toast({ variant: 'destructive', title: 'Update refused', description: res.reason || 'Quota exceeded.' });
+      // A routed answer (task continuity) started no update cycle — never
+      // report one; the server's note says what happened instead.
+      const routed = routedOf(res);
+      if (routed) toast({ title: routedNoteText(routed) });
+      else if (res.refused) toast({ variant: 'destructive', title: 'Update refused', description: res.reason || 'Quota exceeded.' });
       else toast({ title: 'Update cycle started' });
       refresh();
     } catch (err) { toast({ variant: 'destructive', title: 'Could not start update cycle', description: err.message }); }

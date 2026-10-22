@@ -636,6 +636,7 @@
       "host_command: const read = await runHostCapture(": 1,
       "host_command: const retry = await runHostCapture('incus', snapshotArgv('create', incusName, snapName, other), { timeoutMs: 120000 });": 1,
       "host_command: const routeProbe = await runHostCapture('ip', ['route', 'get', ip], { timeoutMs: 10000 }).catch(() => null);": 1,
+      "host_command: const runHostCapture = (...args) => captureCheckoutHost(captureHost, ...args);": 1,
       "host_command: const s = await runHostCapture(": 1,
       "host_command: const unitR = await runHostCapture(": 1,
       "host_command: const w = await runHostCapture(": 3,
@@ -648,6 +649,7 @@
       "host_command: out = await runHostCapture('incus', ['list', '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
       "host_command: out = await runHostCapture('incus', ['list', incusName, '--format', 'json'], { timeoutMs: 30000, maxCapture: LXC_LIST_CAPTURE_CAP });": 1,
       "host_command: runHostCapture, runInContainer, readContainerStartup, agentCall, publicBaseUrl,": 1,
+      "host_command: setupStartupScript, writeTarFromZip, runHostCapture as captureHost, runInContainer, CAPTURE_CAP,": 1,
       "host_command: setupStartupScript, writeTarFromZip, runHostCapture, runInContainer, CAPTURE_CAP,": 1,
       "host_command: snapshotCliProbe = runHostCapture('incus', ['snapshot', 'create', '--help'], { timeoutMs: 15000 })": 1,
       "host_namespace: // Every number from the HOST (nsenter-aware runner), never from inside a guest.": 1

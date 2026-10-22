@@ -13,6 +13,7 @@
 
 import { randomBytes } from 'crypto';
 import { getMock2Db } from './db.js';
+import { deleteTasksForProject } from './tasks.js';
 import { getDb } from '../db.js';
 import { mintSlugCandidate, slugifyName, isReservedSlug, isValidSlugShape } from './slug.js';
 
@@ -215,6 +216,10 @@ export function deleteProject(id) {
       db.prepare(`DELETE FROM mock2_storage_checks WHERE target_key = ? AND status <> 'running'`).run(key);
       db.prepare(`DELETE FROM mock2_storage_cleanups WHERE target_key = ? AND status IN ('succeeded', 'partial', 'failed', 'refused', 'cancelled')`).run(key);
     } catch { /* pre-migration */ }
+    // Its tasks too (task continuity) — inside this transaction, so a reused
+    // id never inherits a deleted project's unfinished work.
+    // Guarded: the table is absent until migration 562 has run.
+    try { deleteTasksForProject(id); } catch { /* pre-migration */ }
     return db.prepare(`DELETE FROM mock2_projects WHERE id = ?`).run(id).changes > 0;
   });
   return tx();

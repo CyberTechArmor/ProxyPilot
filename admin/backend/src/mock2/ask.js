@@ -82,11 +82,34 @@ function recordSpend({ projectId, connector, model, usage, step = null, userId =
   return cents;
 }
 
+// Task continuity (task-sync.js): an ask is an INVESTIGATION task — opened
+// here once the ask may run, finished with its answer excerpt or its failure.
+// Best-effort and read-only by construction: the task never changes this
+// lane's tools, and a bookkeeping failure never fails the ask.
+async function taskHook(name, args) {
+  try {
+    const m = await import('./task-sync.js');
+    return await m[name](args);
+  } catch (e) {
+    console.warn(`[mock2] ask task hook ${name} failed:`, e?.message);
+    return null;
+  }
+}
+
 // startAsk — validate, take the lock, fire the background loop. Returns
-// { status: 'started' | 'error', error }. `images` is the VALIDATED list from
+// { status: 'started' | 'error', error, taskId }. `images` is the VALIDATED list from
 // chat-image-logic.validateChatImages — a screenshot of a bug or an API doc
 // rides the question straight into the model call.
-export async function startAsk({ project, question, user, actingAsAdmin = 0, images = [], research = false }) {
+// Task routing (task-sync.routeChatMessage) passes three more:
+//   task      an unfinished investigation this ask CONTINUES (reused, not a new task)
+//   routed    the question was routed ("only explain", "continue"): it is
+//             answered by the tool loop — the design-options / polish
+//             detectors (which can queue a build) never take it
+//   echoBody  what the chat shows as the person's message — their own words,
+//             not the built continuation question ('' = no echo)
+// `said` (the route's optional field): the person's own words when the UI
+// wrapped them in a preamble (Plan) — the investigation's goal.
+export async function startAsk({ project, question, user, actingAsAdmin = 0, images = [], research = false, task = null, routed = false, echoBody = undefined, said = null }) {
   const projectId = Number(project.id);
   // Research mode (Plan's deeper register): the same lane — web search +
   // read/exec tools — under the research preamble: pull the current external
@@ -115,7 +138,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   // a screenshot-and-critique is not what someone asking for options wants.
   // A research request is explicitly a planning ask — never hijacked by the
   // design-options / polish intent detectors below.
-  const options = research ? null : detectDesignOptionsIntent(question);
+  const options = (research || routed) ? null : detectDesignOptionsIntent(question);
   if (options) {
     const { runDesignOptions } = await import('./design-options.js');
     getOrCreateChat(projectId);
@@ -138,7 +161,7 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   //
   // This is where the Polish pass BUTTON went (it was a fourth build-looking
   // action for something that is not a build).
-  const polish = research ? null : detectPolishIntent(question);
+  const polish = (research || routed) ? null : detectPolishIntent(question);
   if (polish) {
     const { runDesignReview } = await import('./design-review.js');
     getOrCreateChat(projectId);
@@ -188,24 +211,31 @@ export async function startAsk({ project, question, user, actingAsAdmin = 0, ima
   try { contextMessages = listMessages(projectId).slice(-ASK_CONTEXT_MAX_MESSAGES); } catch { contextMessages = []; }
   let attachments = [];
   try { attachments = saveChatImages(projectId, images); } catch (e) { console.warn('[mock2] ask image save failed:', e?.message); }
-  insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: q, attachments });
-  setJob(projectId, { phase: 'running', message: 'Looking into it…', startedAt: Date.now(), turns: 0 });
+  const echo = echoBody === undefined ? q : String(echoBody || '').trim();
+  if (echo) insertMessage({ projectId, authorUserId: user.id, actingAsAdmin, kind: 'user', body: echo, attachments });
+  setJob(projectId, { phase: 'running', message: 'Looking into it…', startedAt: Date.now(), turns: 0, taskId: task?.id ?? null, continued: !!task });
+  // The investigation task: the person's own question as its goal (task-sync
+  // strips a Plan/Research preamble), or the task being continued.
+  const taskRow = await taskHook('onAskStarted', { project, question, said, research, task, user });
+  const taskId = taskRow?.id ?? task?.id ?? null;
+  if (taskId != null) setJob(projectId, { taskId });
 
-  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages, user })
+  runAsk({ project, projectId, holder, ready, question: q, attachments, contextMessages, user, taskId })
     .catch((err) => {
       console.error(`[mock2] ask crashed for project ${projectId}:`, err?.message || err);
       try { insertMessage({ projectId, kind: 'system', body: `The ask failed: ${err?.message || err}` }); } catch { /* ignore */ }
       setJob(projectId, { phase: 'failed', message: `ask crashed: ${err?.message || err}`, partial: null });
+      void taskHook('onAskFinished', { taskId, outcome: 'failed', error: `The ask failed: ${err?.message || err}` });
       scheduleJobCleanup(projectId);
     })
     .finally(() => {
       try { releaseLock(projectId, holder); } catch { /* ignore */ }
     });
 
-  return { status: 'started' };
+  return { status: 'started', taskId };
 }
 
-async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [], user = null }) {
+async function runAsk({ project, projectId, holder, ready, question, attachments = [], contextMessages = [], user = null, taskId = null }) {
   const containerName = project.container_name || containerNameForProject(projectId);
 
   // The installed-components section rides along so questions about auth /
@@ -271,6 +301,7 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
     if (!res.ok) {
       insertMessage({ projectId, kind: 'system', body: `The ask could not complete: ${res.error}` });
       setJob(projectId, { phase: 'failed', message: res.error, partial: null });
+      void taskHook('onAskFinished', { taskId, outcome: 'failed', answer: partial, error: `The ask could not complete: ${res.error}` });
       return scheduleJobCleanup(projectId);
     }
     totalCents += recordSpend({ projectId, connector: ready.connector, model: res.modelUsed || ready.model, usage: res.usage, step: 'ask', userId: user?.id ?? null });
@@ -288,6 +319,9 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
     }
   }
 
+  // Ran out of steps: the investigation is unfinished (not answered), so a
+  // "continue" picks it up read-only from what the stream had found.
+  const ranOut = !finalText;
   if (!finalText) {
     finalText = 'I ran out of steps before finishing — try a narrower question, or run the task as a build.';
   }
@@ -300,6 +334,9 @@ async function runAsk({ project, projectId, holder, ready, question, attachments
   } catch { /* best effort */ }
   // partial cleared with the same poll that delivers the durable message.
   setJob(projectId, { phase: 'done', message: 'Answered.', partial: null });
+  void taskHook('onAskFinished', ranOut
+    ? { taskId, outcome: 'interrupted', answer: partial }
+    : { taskId, outcome: 'completed', answer: finalText });
   return scheduleJobCleanup(projectId);
 }
 

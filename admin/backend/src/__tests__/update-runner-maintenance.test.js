@@ -42,6 +42,8 @@ function harness(t, { runtime = false, runtimeFailure = '', writeAfterRestart = 
   const trace = [];
   let runner = null, backend = null;
   for (const p of [join(install, 'data/db'), bin, state, join(root, 'etc/systemd/system'), join(root, 'src/deploy')]) mkdirSync(p, { recursive: true });
+  mkdirSync(join(root, 'src/scripts'), { recursive: true });
+  copyFileSync(join(REPO, 'scripts/update-database-snapshot.py'), join(root, 'src/scripts/update-database-snapshot.py'));
   const originalEnv = `DATABASE_PATH=/data/${legacy ? '' : 'db/'}proxypilot.db\nJWT_SECRET=existing-jwt\nTOTP_ENCRYPTION_KEY=existing-key\nSETUP_EXECUTOR_POLICY=backend-allowed\nCUSTOM_SETTING=keep-me\n`;
   writeFileSync(env, originalEnv);
   writeFileSync(join(install, 'docker-compose.yml'), 'services: {proxypilot: {}}\n');
@@ -114,11 +116,16 @@ function harness(t, { runtime = false, runtimeFailure = '', writeAfterRestart = 
   const bridge = `request() { rm -f "$FAKE_STATE/ack"; printf '%s' "$1" > "$FAKE_STATE/request"; for i in $(seq 1 500); do if [ -f "$FAKE_STATE/ack" ]; then return "$(cat "$FAKE_STATE/ack")"; fi; /bin/sleep 0.01; done; exit 98; }\n`;
   const writeExe = (name, body) => writeFileSync(join(bin, name), '#!/bin/bash\nset -e\n' + body, { mode: 0o755 });
   if (runtime) {
+    const python = spawnSync('python3', ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+    assert.equal(python.status, 0, python.stderr);
     mkdirSync(join(install, 'scripts'), { recursive: true });
     writeFileSync(join(install, 'scripts/review-runtime-refresh.py'), '# simulated service adapter\n');
     mkdirSync(join(root, 'src/scripts'), { recursive: true });
     copyFileSync(join(install, 'scripts/review-runtime-refresh.py'), join(root, 'src/scripts/review-runtime-refresh.py'));
     writeExe('python3', `
+if [ "\${1:-}" = -I ] && [ "\${2:-}" = ${quote(join(root, 'src/scripts/update-database-snapshot.py'))} ]; then
+ exec ${quote(python.stdout.trim())} "$@"
+fi
 test "$1" = ${quote(join(install, 'scripts/review-runtime-refresh.py'))}
 echo "runtime $2 $*" >> "$FAKE_STATE/calls"
 if [ "$2" = apply ] || [ "$2" = rollback ]; then
@@ -199,7 +206,7 @@ exec /bin/${name} "$@"
 `);
   // Inject a failure after the DB moved but before its .env was rewritten.
   if (failEnvWrite) writeExe('awk', `if [[ "$*" == *DATABASE_PATH* ]]; then exit 27; fi\nexec /usr/bin/awk "$@"\n`);
-  const functions = ['log', 'log_verbose', 'backup_db', 'stop_setup_runner', 'stop_native_backend', 'stop_update_writers', 'migrate_db_layout', 'restore_db', 'on_error', 'review_runtime_refresh', 'install_setup_runner'].map(lift).join('\n')
+  const functions = ['log', 'log_verbose', 'backup_db', 'backup_quiesced_databases', 'stop_setup_runner', 'stop_native_backend', 'stop_update_writers', 'migrate_db_layout', 'restore_db', 'on_error', 'review_runtime_refresh', 'install_setup_runner'].map(lift).join('\n')
     .replaceAll('/opt/proxypilot', install)
     .replaceAll('/etc/systemd/system', join(root, 'etc/systemd/system'))
     .replaceAll('/usr/local/bin/proxypilot', join(bin, 'proxypilot'))
@@ -224,7 +231,9 @@ LOG_FILE=${quote(join(root, 'update.log'))}
 VERBOSE=false
 RED='' GREEN='' YELLOW='' BLUE='' NC=''
 DB_BACKUP_FILE='' DB_BACKUP_SOURCE='' BACKUPS_TO_KEEP=5
+DB_SNAPSHOT_DIR='' DB_SNAPSHOT_ATTEMPTED=false DB_WRITERS_QUIESCED=false
 DB_MAINTENANCE_STARTED=false DB_LAYOUT_NEW_PATH='' DB_LAYOUT_ENV_BACKUP='' DB_LAYOUT_ENV_PATH=''
+DB_LAYOUT_NEW_MOCK2_PATH=''
 NATIVE_BACKEND_MODE=''
 EXPECTED_UPDATE_SHA=${quote('a'.repeat(40))}
 REVIEW_RUNTIME_REFRESH_STARTED=false

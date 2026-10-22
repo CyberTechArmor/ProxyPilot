@@ -78,6 +78,9 @@ export function initMock2Db() {
 // here (not locks.js) to avoid a db.js ↔ locks.js import cycle.
 export function sweepMock2OnBoot(db = getMock2Db()) {
   try {
+    // The old backend may have dispatched a remote write before it stopped.
+    // Retain its genuine operation holder until the outcome is inspected.
+    try { db.prepare("UPDATE mock2_locks SET holder_operation_state='uncertain',holder_cycle_id=NULL WHERE holder_operation_id IS NOT NULL").run(); } catch { /* pre-563 schema */ }
     const r = db
       .prepare(
         `UPDATE mock2_cycles
@@ -94,7 +97,7 @@ export function sweepMock2OnBoot(db = getMock2Db()) {
     // checkpoint and the runner is gone, so the lock is stale.
     let lockRel = { changes: 0 };
     try {
-      lockRel = db.prepare(`DELETE FROM mock2_locks WHERE holder_cycle_id IS NOT NULL`).run();
+      lockRel = db.prepare(`DELETE FROM mock2_locks WHERE holder_cycle_id IS NOT NULL AND holder_operation_id IS NULL`).run();
     } catch { /* mock2_locks may not exist on a pre-M0 db; ignore */ }
     if (lockRel.changes > 0) {
       console.log(`[mock2] boot sweep released ${lockRel.changes} orphaned cycle lock(s)`);

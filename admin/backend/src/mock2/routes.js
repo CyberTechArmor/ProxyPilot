@@ -115,6 +115,8 @@ import { claudeHarnessStatus } from './harness.js';
 import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
 import { registerFlightdeckRoutes } from './flightdeck.js';
+import { registerTaskRoutes } from './task-routes.js';
+import { routeChatMessage, currentTaskForProject } from './task-sync.js';
 import {
   startProvision,
   startArchive,
@@ -246,14 +248,31 @@ import { runConsult } from './consult.js';
 import { consultAllowed } from './consult-logic.js';
 import {
   getCycle, listCyclesForProject, listRecentSucceededCyclesAllProjects, latestCycle, latestDeployCycle, setInterrupt, finishCycle, updateCycle,
-  countRunningCycles,
+  countRunningCycles, requestCycleInterrupt,
 } from './cycles.js';
 import { publicCycleShape, INTERRUPTS, typicalDurationMs, queueMayAdvancePast, buildStallVerdict } from './cycle-logic.js';
 import { parseRoutingJson } from './routing-logic.js';
 import {
   getLock, releaseLock, requestTakeover, getLockIdleMinutes,
+  acquireCheckoutOperationLease, settleCheckoutOperationLease, markCheckoutOperationLeaseUncertain,
 } from './locks.js';
 import { publicLockShape, LOCK_IDLE_MINUTES_KEY } from './lock-logic.js';
+import { withCheckoutOperationLease } from './checkout-operation.js';
+const projectCheckoutOperation = (projectId, kind, action) => withCheckoutOperationLease({ projectId, kind,
+  acquire: acquireCheckoutOperationLease, settle: settleCheckoutOperationLease,
+  markUncertain: markCheckoutOperationLeaseUncertain,
+}, action);
+function checkoutRestoreRoute(handler) {
+  return async (req, res) => {
+    const pending = { statusCode: 200, body: undefined, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    try {
+      await projectCheckoutOperation(req.mock2Project.id, 'restore', () => handler(req, pending));
+      return res.status(pending.statusCode).json(pending.body ?? { error: 'The restore did not produce a response.' });
+    } catch (failure) {
+      return res.status(failure?.code?.startsWith('CHECKOUT_OPERATION_') ? 409 : 500).json({ error: failure?.code?.startsWith('CHECKOUT_OPERATION_') ? failure.message : 'The restore did not complete. Inspect its checkout holder before retrying.' });
+    }
+  };
+}
 import { listChangeRecords, lastChangeRecord, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { redoContextSection } from './contract-classifier-logic.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
@@ -507,6 +526,11 @@ const chatImagesSchema = z.array(z.object({
 
 const cycleStartSchema = z.object({
   instruction: z.string().trim().min(1),
+  // The person's own words when the UI wrapped them in a preamble (Design
+  // mode) — task routing classifies these and the build task's goal is these;
+  // the full instruction still goes to the build unchanged. Length-checked
+  // against the chat ceiling in the handler, like the instruction.
+  said: z.string().optional(),
   images: chatImagesSchema,
   // 'full' (default) runs the audited build with the whole gate battery; 'mvp'
   // is the speed path — rule interview skipped, reduced battery, fast model.
@@ -713,6 +737,10 @@ const componentVersionSchema = z.object({
 // The ask lane's input — a question/task for the read-and-run assistant.
 const askSchema = z.object({
   question: z.string().trim().min(1).max(4000),
+  // The person's own words when the UI wrapped them in a register preamble
+  // (Plan) — task routing classifies these, and an investigation's goal is
+  // these; the full question still goes to the model unchanged.
+  said: z.string().max(4000).optional(),
   images: chatImagesSchema,
   // Research mode — Plan's deeper register: web search + doc retrieval + a
   // phased build-ready plan (ask-logic RESEARCH_MODE_PREAMBLE).
@@ -3467,8 +3495,27 @@ export function createMock2Router() {
     const maxChars = getChatMaxChars();
     const parsed = cycleStartSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: `instruction is required (1–${maxChars} chars)` });
-    if (parsed.data.instruction.length > maxChars) {
+    if (parsed.data.instruction.length > maxChars || (parsed.data.said || '').length > maxChars) {
       return res.status(400).json({ error: `instruction is too long (max ${maxChars} chars)` });
+    }
+    // TASK ROUTING first (task-sync.js), before the probe, the clarifier and
+    // the redo context: "continue" resumes the unfinished build it means (with
+    // its recovery checkpoint), "stop" stops it, "only explain" is answered in
+    // the read-only ask lane. Skipped for resends and cards — a Redo, a
+    // clarifier/split/suggestion/research answer, an escalation — which are
+    // never free-text continuations. A pass leaves today's path untouched.
+    const cardResend = !!(parsed.data.redo || parsed.data.skip_clarify || parsed.data.skip_split
+      || parsed.data.skip_suggest || parsed.data.skip_research || parsed.data.escalate
+      || (parsed.data.extras || []).length);
+    if (!cardResend) {
+      const imgCheck = validateChatImages(parsed.data.images);
+      if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
+      const routed = await routeChatMessage({
+        project, message: parsed.data.instruction, said: parsed.data.said, lane: 'build',
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        images: imgCheck.images, ip: req.ip,
+      });
+      if (routed.handled) return res.status(routed.status).json(routed.body);
     }
     // M8 (ADR-002): the Build press runs the AUDIT first. It compares the
     // approved inventory + rules.md + the pinned framework and either asks
@@ -3590,6 +3637,9 @@ export function createMock2Router() {
         images: imgCheck.images,
         buildMode: mode,
         echoToChat: true,
+        // The task's goal is what the person asked — not the redo context,
+        // additions or guesses this route appends to the instruction.
+        taskGoal: parsed.data.said || parsed.data.instruction,
         escalate: !!parsed.data.escalate,
         escalateModel: parsed.data.escalate ? (parsed.data.escalate_model || null) : null,
         escalateEffort: parsed.data.escalate ? (parsed.data.escalate_effort || null) : null,
@@ -4166,8 +4216,10 @@ export function createMock2Router() {
     if (!cycle || cycle.project_id !== req.mock2Project.id) return res.status(404).json({ error: 'Cycle not found' });
     const parsed = interruptSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: `action must be one of ${INTERRUPTS.join(', ')}` });
-    if (cycle.status !== 'running') return res.status(409).json({ error: `Cycle is "${cycle.status}", not running` });
-    setInterrupt(cycle.id, parsed.data.action);
+    // One rule for "stop this build" (cycles.requestCycleInterrupt) — a task
+    // stop from the chat or the task strip goes through the same function.
+    const stop = requestCycleInterrupt(cycle, parsed.data.action);
+    if (!stop.ok) return res.status(stop.status || 409).json({ error: stop.error });
     logAudit(req.user.id, 'MOCK2_CYCLE_INTERRUPT', 'mock2_cycle', cycle.id, { action: parsed.data.action }, req.ip);
     res.json({ cycle: publicCycleShape(getCycle(cycle.id)) });
   });
@@ -4494,7 +4546,8 @@ export function createMock2Router() {
     const project = req.mock2Project;
     const lock = getLock(project.id);
     if (!lock) return res.status(409).json({ error: 'Project is not checked out.' });
-    releaseLock(project.id);
+    const released = releaseLock(project.id);
+    if (!released.released) return res.status(409).json({ error: released.reason });
     logAudit(req.user.id, 'MOCK2_LOCK_FORCE_RELEASE', 'mock2_project', project.id,
       { released_holder_user: lock.holder_user_id ?? null, released_holder_cycle: lock.holder_cycle_id ?? null }, req.ip);
     res.json({ ok: true });
@@ -4557,7 +4610,7 @@ export function createMock2Router() {
   // restored HEAD. The default, with no restore, is the latest checkpoint
   // ("what was currently built").
   const restoreSchema = z.object({ seq: z.coerce.number().int().positive() });
-  router.post('/projects/:id/restore', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
+  router.post('/projects/:id/restore', requireMock2Role('editor'), refuseIfArchived, checkoutRestoreRoute(async (req, res) => {
     const project = req.mock2Project;
     const parsed = restoreSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'seq (the checkpoint number to restore to) is required' });
@@ -4572,10 +4625,7 @@ export function createMock2Router() {
       lifecycle: project.lifecycle,
     });
     if (!check.ok) return res.status(409).json({ error: check.error });
-    const lock = getLock(project.id);
-    if (lock && (lock.holder_cycle_id != null || lock.holder_user_id != null)) {
-      return res.status(409).json({ error: 'This project is checked out by another writer. Wait, or request a takeover.' });
-    }
+    // checkoutRestoreRoute already owns the genuine exclusive operation holder.
     const framework = getCurrentFrameworkVersion();
     if (!framework) return res.status(409).json({ error: 'No framework version exists to pin the restore record to.' });
 
@@ -4620,7 +4670,7 @@ export function createMock2Router() {
     logAudit(req.user.id, 'MOCK2_PROJECT_RESTORE', 'mock2_project', project.id,
       { to_seq: seq, target_sha: record.commit_sha, restored_sha: restoredSha, db }, req.ip);
     res.json({ restored: true, to_seq: seq, record_seq: newRecord?.seq ?? null, restored_sha: restoredSha, db });
-  });
+  }));
 
   // ---- Build log (downloadable transcript — "what actually happened") ----
 
@@ -4707,35 +4757,42 @@ export function createMock2Router() {
   // The concept-stage view: the whole chat, the live turn/approval job, the stage
   // indicator, and the mockup preview URL (any member — viewers watch, editors
   // drive). Polled while a turn is in flight.
-  router.get('/projects/:id/chat', requireMock2Role('viewer'), (req, res) => {
+  router.get('/projects/:id/chat', requireMock2Role('viewer'), async (req, res, next) => {
     const project = req.mock2Project;
-    const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
-    const ready = conceptReady();
-    const audit = auditReady();
-    // Open editor questions (the rule_question rows the chat renders as tappable
-    // choices) — the frontend shows the choice buttons only for OPEN ids (M8).
-    const openQuestions = listOpenEditorQuestions(project.id);
-    res.json({
-      messages: listMessages(project.id).map(publicChatMessageShape),
-      job: getConceptJobStatus(project.id),
-      audit_job: getAuditJobStatus(project.id),
-      ask_job: getAskJobStatus(project.id),
-      // The screen check / design options progress. On the chat payload so the
-      // chat knows to keep polling — it used to stop, and the findings only
-      // appeared when the operator refreshed the page by hand.
-      screen_job: getScreenJob(project.id),
-      stage: shaped.stage,
-      current_mockup_id: shaped.current_mockup_id,
-      preview_url: shaped.preview_url,
-      concept_ready: ready.ok,
-      concept_ready_reason: ready.ok ? null : ready.reason,
-      audit_ready: audit.ok,
-      audit_ready_reason: audit.ok ? null : audit.reason,
-      open_question_ids: openQuestions.map((q) => q.id),
-      open_editor_questions: openQuestions.length,
-      open_admin_items: shaped.open_admin_items,
-      my_role: req.mock2Access.role,
-    });
+    // The task strip above the composer (task continuity): the live task, else
+    // the newest unfinished one. Never throws (null on any failure). Awaited
+    // first, so the rest of the handler fails into Express exactly as before.
+    const currentTask = await currentTaskForProject(project.id);
+    try {
+      const shaped = shapeProject(project, { isAdmin: isReqAdmin(req) });
+      const ready = conceptReady();
+      const audit = auditReady();
+      // Open editor questions (the rule_question rows the chat renders as tappable
+      // choices) — the frontend shows the choice buttons only for OPEN ids (M8).
+      const openQuestions = listOpenEditorQuestions(project.id);
+      res.json({
+        messages: listMessages(project.id).map(publicChatMessageShape),
+        job: getConceptJobStatus(project.id),
+        audit_job: getAuditJobStatus(project.id),
+        ask_job: getAskJobStatus(project.id),
+        // The screen check / design options progress. On the chat payload so the
+        // chat knows to keep polling — it used to stop, and the findings only
+        // appeared when the operator refreshed the page by hand.
+        screen_job: getScreenJob(project.id),
+        stage: shaped.stage,
+        current_mockup_id: shaped.current_mockup_id,
+        preview_url: shaped.preview_url,
+        concept_ready: ready.ok,
+        concept_ready_reason: ready.ok ? null : ready.reason,
+        audit_ready: audit.ok,
+        audit_ready_reason: audit.ok ? null : audit.reason,
+        open_question_ids: openQuestions.map((q) => q.id),
+        open_editor_questions: openQuestions.length,
+        open_admin_items: shaped.open_admin_items,
+        my_role: req.mock2Access.role,
+        current_task: currentTask,
+      });
+    } catch (err) { next(err); }
   });
 
   // ASK lane — a question about the codebase or a bounded read-and-run task
@@ -4747,6 +4804,21 @@ export function createMock2Router() {
   router.post('/projects/:id/ask', requireMock2Role('editor'), refuseIfArchived, async (req, res) => {
     const parsed = askSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'question is required (1–4000 chars)' });
+    // TASK ROUTING first (task-sync.js): "continue" / "stop" resolve against
+    // the project's unfinished task before the model receives any tools — a
+    // build resumes with build tools only because a person authorized it as a
+    // build; an investigation continues read-only. Anything else passes
+    // through to today's ask untouched.
+    {
+      const imgCheck = validateChatImages(parsed.data.images);
+      if (!imgCheck.ok) return res.status(400).json({ error: imgCheck.error });
+      const routed = await routeChatMessage({
+        project: req.mock2Project, message: parsed.data.question, said: parsed.data.said, lane: 'ask',
+        user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
+        images: imgCheck.images, ip: req.ip,
+      });
+      if (routed.handled) return res.status(routed.status).json(routed.body);
+    }
     let result;
     try {
       const imgCheck = validateChatImages(parsed.data.images);
@@ -4756,6 +4828,7 @@ export function createMock2Router() {
         user: req.user, actingAsAdmin: req.mock2Access.actingAsAdmin ? 1 : 0,
         images: imgCheck.images,
         research: !!parsed.data.research,
+        said: parsed.data.said,
       });
     } catch (err) {
       return res.status(500).json({ error: `Could not start the ask: ${err?.message || 'unknown error'}` });
@@ -5709,10 +5782,10 @@ export function createMock2Router() {
     const containerName = project.container_name || containerNameForProject(project.id);
     let result;
     try {
-      result = await backfillManifestEntryInContainer({
+      result = await projectCheckoutOperation(project.id, 'project-write', () => backfillManifestEntryInContainer({
         containerName, entry: parsed.data.entry,
         execInContainer, readFileInContainer, writeFileInContainer,
-      });
+      }));
     } catch (err) {
       return res.status(500).json({ error: `Backfill failed: ${err?.message || 'unknown error'}` });
     }
@@ -5750,7 +5823,7 @@ export function createMock2Router() {
     const containerName = project.container_name || containerNameForProject(project.id);
     let result;
     try {
-      result = await repairManifestInContainer({ containerName, execInContainer, readFileInContainer, writeFileInContainer });
+      result = await projectCheckoutOperation(project.id, 'project-write', () => repairManifestInContainer({ containerName, execInContainer, readFileInContainer, writeFileInContainer }));
     } catch (err) {
       return res.status(500).json({ error: `Repair failed: ${err?.message || 'unknown error'}` });
     }
@@ -6021,6 +6094,10 @@ export function createMock2Router() {
   // against the project container. Same auth chain as the rest of the router;
   // each route adds requireMock2Role (viewer read / editor write).
   registerFlightdeckRoutes(router, refuseIfArchived);
+
+  // Task continuity — the project's tasks (list / one / resume / stop), the
+  // database-authoritative record behind the task strip and state/tasks/.
+  registerTaskRoutes(router, refuseIfArchived);
 
   return router;
 }

@@ -44,7 +44,10 @@
 // v10: mountFooters self-heals a page that carries no [data-legal-footer]
 // slot at all (SpliceGirls' /login — every build paid a failing
 // platform-baseline-signin-legal check and a pending-verification round).
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v10';
+// v11: GET /api/foundation/health (admin) and a "Foundation services" card in
+// the admin console, both inert (404 / hidden) in a project without the
+// application foundation (scaffold-foundation.js).
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v11';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -792,6 +795,8 @@ function platformRoutesTs() {
   return `import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { branding, legalPages, assets, auditLog } from './schema.js';
@@ -912,6 +917,31 @@ platformRoutes.get('/api/whoami', (req: Request, res: Response) => {
   // caller with no session at all.
   if (!auth || !auth.authenticated) { res.status(401).json({ code: 'UNAUTHENTICATED' }); return; }
   res.json({ kind: 'session', user: { id: auth.userId ?? null, role: auth.role }, permissions: Object.keys(DEFAULT_PERMISSIONS) });
+});
+
+// The application foundation's health — database, storage, embeddings — from
+// real probes, plus the local-embeddings warning. Administrators only. The
+// runtime lives in foundation/ at the repository root and exists only in
+// projects provisioned on the foundation stack, so it is loaded by URL when
+// asked: a project without it still compiles, and answers 404 here.
+const FOUNDATION_HEALTH_URL = new URL('../../foundation/runtime/health.mjs', import.meta.url);
+const FoundationHealthQuery = z.object({ refresh: z.enum(['0', '1']).optional() });
+type FoundationHealthModule = { healthReport: (options: { refresh?: boolean }) => Promise<unknown> };
+
+platformRoutes.get('/api/foundation/health', requireRole('admin'), async (req: Request, res: Response) => {
+  const q = FoundationHealthQuery.safeParse(req.query);
+  if (!q.success) { res.status(400).json({ code: 'INVALID_QUERY', message: 'refresh must be 0 or 1.' }); return; }
+  if (!fs.existsSync(fileURLToPath(FOUNDATION_HEALTH_URL))) {
+    res.status(404).json({ code: 'FOUNDATION_NOT_INSTALLED', message: 'This application was not provisioned on the foundation stack.' });
+    return;
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const mod = (await import(FOUNDATION_HEALTH_URL.href)) as FoundationHealthModule;
+    res.json(await mod.healthReport({ refresh: q.data.refresh === '1' }));
+  } catch (err) {
+    res.status(503).json({ code: 'FOUNDATION_HEALTH_FAILED', message: (err as Error).message });
+  }
 });
 
 /* -------------------------------- ADMIN ---------------------------------- */
@@ -2140,6 +2170,63 @@ function platformAdminJs() {
       await loadReadonly();
     } catch (e) { this.checked = !on; note('pf-ro-status', e.message, true); }
   });
+
+  // ---- foundation services (only in an app provisioned on the foundation) ----
+  // GET /api/foundation/health answers 404 in an app without it, and the card
+  // is never shown there. Statuses come from real probes; the local-embeddings
+  // warning is shown whenever the bundled model is the provider.
+  function foundationCard(d) {
+    var card = document.createElement('div');
+    card.className = 'card sect';
+    card.id = 'pf-foundation';
+    var h = document.createElement('div');
+    h.className = 'card-h';
+    var t = document.createElement('h3');
+    t.textContent = 'Foundation services';
+    h.appendChild(t);
+    var b = document.createElement('div');
+    b.className = 'card-b';
+    (d.warnings || []).forEach(function (w) {
+      var p = document.createElement('p');
+      p.className = 'note err';
+      p.textContent = w;
+      b.appendChild(p);
+    });
+    var wrap = document.createElement('div');
+    wrap.className = 'table-scroll';
+    var table = document.createElement('table');
+    table.className = 'list';
+    var body = document.createElement('tbody');
+    (d.components || []).forEach(function (c) {
+      var tr = document.createElement('tr');
+      var name = document.createElement('td');
+      name.textContent = c.component;
+      var st = document.createElement('td');
+      var badge = document.createElement('span');
+      badge.className = 'badge ' + (c.status === 'ready' ? 'b-ok' : c.status === 'off' ? 'b-neutral' : 'b-warn');
+      badge.textContent = String(c.status).replace(/_/g, ' ');
+      st.appendChild(badge);
+      var det = document.createElement('td');
+      det.className = 'small muted';
+      det.textContent = (c.detail && (c.detail.message || c.detail.provider || c.detail.target)) || '';
+      tr.appendChild(name); tr.appendChild(st); tr.appendChild(det);
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+    b.appendChild(wrap);
+    card.appendChild(h);
+    card.appendChild(b);
+    return card;
+  }
+  fetch('/api/foundation/health', { credentials: 'same-origin' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (!d) return;
+      var anchor = $('pf-save').closest('.card');
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(foundationCard(d), anchor);
+    })
+    .catch(function () {});
 
   loadBranding().catch(function (e) { note('pf-note', e.message, true); });
   loadKeys();

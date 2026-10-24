@@ -74,7 +74,7 @@ export const STACK = Object.freeze({
   }),
   embeddings: Object.freeze({
     service: 'embeddings',
-    image: 'ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0',
+    image: 'ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4',
     listen: '127.0.0.1',
     port: 8088,
     volume: 'mock2_embed_cache',

@@ -83,6 +83,8 @@ test('compose: storage and embeddings are published on 127.0.0.1 only, at the co
   assert.ok(cmd.includes('-s3') && cmd.includes('-filer'));
   assert.ok(cmd.includes('-s3.port.iceberg=0') && cmd.includes('-s3.port.lance=0'), 'extra listeners are off');
   assert.deepEqual(m.services.embeddings.command.slice(0, 2), ['--model-id', STACK.embeddings.model]);
+  assert.ok(m.services.embeddings.command.includes('--auto-truncate'), 'long inputs are truncated, not refused');
+  assert.equal(m.services.embeddings.image, 'ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d');
   assert.notDeepEqual(m.services.storage.networks, m.services.embeddings.networks, 'storage and embeddings are on separate networks');
   for (const yaml of [L.buildFoundationComposeYaml(), L.buildFoundationComposeYaml({ portable: true })]) {
     for (const line of yaml.split('\n').filter((l) => /^\s+- ".*:\d+:\d+"$/.test(l))) assert.match(line, /- "127\.0\.0\.1:/, line);

@@ -81,7 +81,7 @@ export function isFoundationProject(project) {
 export const FOUNDATION_IMAGE_DIGESTS = Object.freeze({
   postgres: 'sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11',
   storage: 'sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d',
-  embeddings: 'sha256:2f840dc5e7248abb2ba19e823bb745b81bc9edc50cfc78e6b537b42955e804c9',
+  embeddings: 'sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d',
 });
 export const FOUNDATION_IMAGES = Object.freeze({
   postgres: `${STACK.postgres.image}@${FOUNDATION_IMAGE_DIGESTS.postgres}`,
@@ -331,7 +331,9 @@ export function buildFoundationComposeModel({ portable = false, layout = DEFAULT
     [em.service]: {
       image: FOUNDATION_IMAGES.embeddings,
       restart: 'unless-stopped',
-      command: ['--model-id', em.model, '--hostname', '0.0.0.0', '--port', '80', '--json-output'],
+      // --auto-truncate: an input longer than the model's 512-token window is
+      // cut to it instead of failing the whole request (TEI answers 413 without it).
+      command: ['--model-id', em.model, '--hostname', '0.0.0.0', '--port', '80', '--auto-truncate', '--json-output'],
       environment: { HUGGINGFACE_HUB_CACHE: '/data', RAYON_NUM_THREADS: String(FOUNDATION_LIMITS.embeddings.threads) },
       ports: [`${em.listen}:${env('MOCK2_FOUNDATION_EMBEDDINGS_PORT', L.ports.embeddings)}:80`],
       volumes: [`${volumeRef('embeddings')}:/data`],

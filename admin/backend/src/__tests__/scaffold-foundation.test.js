@@ -36,6 +36,12 @@ const BACKEND = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..',
 const compose = () => buildFoundationComposeYaml({ portable: true });
 const files = () => buildFoundationFiles({ composeYaml: compose() });
 const byPath = (list) => new Map(list.map((f) => [f.path, f]));
+// The portable stack mounts its Postgres files from beside compose.yaml, so the
+// scaffold ships them under foundation/ too (foundation-stack-logic.js).
+const STACK_FILES = Object.freeze([
+  'foundation/postgres/entrypoint.sh', 'foundation/postgres/initdb/01-mock2-foundation.sql',
+  'foundation/postgres/initdb/99-mock2-seal.sh', 'foundation/postgres/pg_hba.conf', 'foundation/postgres/pg_ident.conf',
+]);
 
 // Write the generated foundation/ into a temp dir. With node_modules, link the
 // backend's (it carries pg and the AWS SDK) so the runtime can be imported.
@@ -376,7 +382,7 @@ test('the scaffold ships the foundation, runs every entry with the bootstrap fir
   assert.equal(MOCK2_SCAFFOLD_VERSION, 'mock2-ts-express-drizzle-v8');
   const out = byPath(buildScaffoldFiles({ name: 'Demo' }));
   for (const p of EXPECTED) assert.ok(out.has(p), `scaffold lacks ${p}`);
-  assert.deepEqual(scaffoldFoundationFiles().map((f) => f.path).sort(), [...EXPECTED].sort());
+  assert.deepEqual(scaffoldFoundationFiles().map((f) => f.path).sort(), [...EXPECTED, ...STACK_FILES].sort());
   const pkg = JSON.parse(out.get('package.json').content);
   assert.equal(FOUNDATION_NODE_IMPORT, '--import=./foundation/runtime/bootstrap.mjs');
   assert.equal(pkg.scripts.start, `node ${FOUNDATION_NODE_IMPORT} dist/server.js`);
@@ -433,7 +439,7 @@ test('the platform module serves the admin-only foundation health route and stay
 test('the base-app upgrade refreshes foundation/ only in projects that already have it', () => {
   const candidates = currentPlatformFiles({ name: 'Demo' });
   const foundationPaths = candidates.filter((f) => f.path.startsWith('foundation/')).map((f) => f.path).sort();
-  assert.deepEqual(foundationPaths, [...EXPECTED].sort());
+  assert.deepEqual(foundationPaths, [...EXPECTED, ...STACK_FILES].sort());
   for (const p of foundationPaths) assert.ok(isPlatformOwnedPath(p), p);
   assert.equal(isPlatformOwnedPath('foundation/../src/app.ts'), false);
   assert.equal(isPlatformOwnedPath('src/app.ts'), false);
@@ -446,6 +452,6 @@ test('the base-app upgrade refreshes foundation/ only in projects that already h
   // Marker present: EVERY foundation file is written, including ones the
   // project does not have yet (a newer foundation may add a module).
   const modern = planBaseAppUpgrade({ ...base, present: [...PLATFORM_OWNED_ALWAYS, FOUNDATION_MARKER] });
-  assert.deepEqual(modern.paths.filter((p) => p.startsWith('foundation/')).sort(), [...EXPECTED].sort());
+  assert.deepEqual(modern.paths.filter((p) => p.startsWith('foundation/')).sort(), [...EXPECTED, ...STACK_FILES].sort());
   assert.match(upgradeSummary(modern), /foundation runtime in foundation\//);
 });

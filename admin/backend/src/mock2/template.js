@@ -23,7 +23,6 @@ import { PLATFORM_VERSION_PATH, renderPlatformVersionFile } from './base-app-upg
 import { buildDesignPresetSeedFiles } from './design-presets.js';
 import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from './deploy-logic.js';
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
-import { FOUNDATION_DATABASE_URL } from './foundation-contract.js';
 import { agentsMd, workMd, projectHandoffMd, tasksReadmeMd, TASKS_DIR } from './continuity-convention.js';
 import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
 import { DATABASE_RULE } from './database-exception-logic.js';

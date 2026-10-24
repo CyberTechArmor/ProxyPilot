@@ -1,0 +1,769 @@
+--- a/core/claude/CLAUDE.md
++++ b/core/claude/CLAUDE.md
+@@ -258,13 +258,21 @@
+ handoffs, verification provenance and independent review apply to any repository in any language.
+ 
+ Technology choices live in a named profile. The **PRO application profile**
+-(`.mock2/standards/profile-cpr.md`) is the intended default for new PRO applications: TypeScript,
++(`.mock2/standards/profile-cpr.md`) is the profile of every new PRO application: TypeScript,
+ Express, Drizzle, Zod, Vitest, PostgreSQL on the server; React + TypeScript built by Vite,
+ Tailwind and shadcn/ui primitives on the client; the prescribed directory layout, the `--t-*` theme
+-tokens, and the Host SDK conventions.
++tokens, and the Host SDK conventions. Every new PRO application also starts on the **application
++foundation stack**: PostgreSQL with pgvector, S3-compatible object storage and an embedding service,
++provisioned by the host with the application, with storage and embeddings switchable per deployment
++and no switch deleting data (PRO current §W.6).
+ 
+ Every repository records its profile in `.github/copilot-instructions.md` — `cpr`, or `none` for a
+ stack the profile does not describe — together with its deliberate deviations and their reasons.
++A new application records `cpr` with the foundation stack; `none` and stack deviations describe an
++existing repository's own stack, and you never record them for a new application. SQLite or another
++database engine needs the developer's explicit request, recorded on the project by a person; nothing
++you write in the repository creates that record, and a missing database is a start-up failure, never
++a fallback.
+ Adopting Mock2 never rewrites an application's stack and never creates host-platform features
+ outside the repository's scope. Verification maps to the selected toolchain through
+ `.mock2/checks.json`.
+@@ -272,7 +280,11 @@
+ Exact new-project pins and compatibility scope live in `stack.versions.json` / `Stack-Versions.md`.
+ Existing repositories retain their recorded release lines with maintenance patches unless the
+ developer asks to upgrade/migrate. AI data/retrieval follows `AI-Data-Standards.md` when applicable;
+-model/index identity, permission filters and private object storage are host capabilities.
++model/index identity, permission filters and private object storage are host capabilities. Feature
++code reaches object storage, embeddings and vector search only through the host's adapters, never an
++S3 SDK or an embedding API of its own. Secrets are held encrypted by the host and never written to an
++env file or the repository. Readiness is reported only after a real operation, and a mock or local
++model says what it is.
+ 
+ ## 10. PRO — Production Readiness Optimization v1.1
+ 
+--- a/core/claude/rules/mock2-cpr.md
++++ b/core/claude/rules/mock2-cpr.md
+@@ -37,7 +37,7 @@
+ Identity and namespace; host-contract range; host capabilities with a reason each; permissions; feature dependencies (public, declared); migrations with the tables they own and their classification; jobs with `concurrencySafe`; outbound hosts with a reason; install/uninstall actions; portability blockers and risks.
+ 
+ ## The application declares its capabilities; flags are one of them (current §J.9–§J.10) **[cpr profile]**
+-- `app.manifest.json` at the repository root lists each Base Platform capability the application uses: its catalog name (PRO current §J.4: identity, authorization, settings, navigation shell, audit logging, health/readiness, configuration, flags), the reason, and the fake used in development and tests. The host provisions from the declaration, never from what it infers. The entry is one line in the change that first uses the capability, removed with its last use. A use with no entry, or an entry with no fake, is a checklist finding, never a stop. An existing application adds the file when it next touches a capability. Provisioning from the manifest is a host follow-up; until the host does it, the manifest is what a person provisions from.
++- `app.manifest.json` at the repository root lists each Base Platform capability the application uses: its catalog name (PRO current §J.4: identity, authorization, settings, navigation shell, audit logging, health/readiness, configuration, flags, and from 1.39.0 `database`, `object_storage`, `embeddings`, `vector_search`), the reason, and the fake used in development and tests. The host provisions from the declaration, never from what it infers; the application foundation stack is provisioned with every new application as its own deployment unit, which is not inference (PRO current §W.6). The entry is one line in the change that first uses the capability, removed with its last use. A use with no entry, or an entry with no fake, is a checklist finding, never a stop. An existing application adds the file when it next touches a capability. Provisioning from the manifest is a host follow-up; until the host does it, the manifest is what a person provisions from.
+ - Flags are optional and added only when the developer asks (an agent may propose one). Evaluation is OpenFeature-shaped: `getBooleanValue`, `getStringValue`, `getNumberValue`, each with a key, a default given at the call and a context; the default comes back when the flag is unknown, unreachable or mistyped, and evaluation never throws. Development and tests run on an in-memory fake; no SDK or provider package is required. Each flag has an owner and a removal line under Follow-ups in `state/work.md`; keys are namespaced by feature id. Commit is not release: a flag's production value is a release decision the developer makes and records.
+ 
+ ## Versioning and data (§8, §13) **[general]**
+@@ -125,13 +125,13 @@
+ - **One schema to the UI's types** (current §K.7, amended 1.23.0) **[cpr profile]**: the Drizzle schema gives the Zod schemas, which live in `contracts/` and are what the Express routes parse with and the client types its calls with (`import type`). No request or response type is hand-copied; `tsc --noEmit` over both configurations in the check command reports drift. Another existing arrangement is a recorded deviation.
+ - **Style against tokens** (A.2 `ui.theme`) **[cpr profile]**: every surface reads the host's `--t-*` palette tokens scoped by `data-theme`; a package stylesheet never names host classes; original palettes are copied, never edited to taste. Whether the prefix becomes the repository's choice is OPEN (current §K.8); a DTCG `state/design/tokens.json` emitted by `node .mock2/bin/tokens.mjs`, with the prefix as an output setting, makes either answer cheap, and until it is decided `--t-*` applies.
+ - **Live state goes through `realtime.rooms`** (A.2) **[cpr profile]**: one socket per app from the Host SDK client — join / backfill after last id / say / typing / read / ping, client ids with a unique `(room, client_id)` index so a resend never duplicates, ids ≤ 0 never matched, auth before the upgrade, a polling fallback. A package never opens its own socket server. The manifest names the gateway location it needs.
+-- **AI through `ai.capabilities`** (A.2) **[cpr profile]**: capabilities not vendors, sealed credentials, short-lived client secrets for live voice, every call metered with a scope, a mock provider that is a real provider in configuration, and no dollar amount ever produced by a model.
++- **AI through `ai.capabilities`** (A.2) **[cpr profile]**: capabilities not vendors, sealed credentials, short-lived client secrets for live voice, every call metered with a scope, a mock provider that is a real provider in configuration, and no dollar amount ever produced by a model. *Narrowed in 1.39.0:* embedding replacement and failover never cross embedding spaces, and a mock or local development-quality provider reports itself as such and is never reported as production-ready (PRO current §R, §W.6).
+ - **An out-of-band admin channel** (A.2 `admin.oob`) **[cpr profile]**: a request file read on the next controlled restart, result written beside it, reset to `none` afterwards.
+ - **Fake every external dependency** (A.3) **[general]**: the repository ships fakes for every service it talks to and its suite runs green with no egress; browser APIs the real path needs are stubbed. **Selectors (amended):** browser tests select on role and accessible name (`getByRole`, `getByLabel`) where the assertion is about user-facing behaviour and accessibility semantics, and on a stable `data-*` test id where the contract is structural, no accessible name is stable, or the element is not user-facing. Both are contracts: a material selector change is recorded and the affected tests are updated without weakening what they assert. This supersedes A.3's original "select on `data-*` attributes" wording. Real-provider verification, where authorized, is a separate recorded step on the candidate host.
+ - **Snapshot before promote; releases check themselves** (A.4) **[general]**: a guest snapshot named for the release precedes every public switch; a release carries the hashes of the files it delivers and the installer verifies them on the target before replacing anything, keeping the previous version.
+ - **Orientation and provenance** (A.5) **[general]**: `000-READ-FIRST.md` at the root is written once per branch — its absence on a branch that has not written one is normal; preserve dated rationale while maintaining one concise resolved current instruction; a rule that exists because of a defect names the release that fixed it and the test that asserts it — that set is the parity guard a rewrite must keep green.
+ - **Run capacity, delivery and handoff** (A.7, 2026-09-08) **[general]**: the authorized task is the scope the operator set — a run plan records and decomposes it, never expands it. A run is a bounded, verifiable work package rather than one response, and a run boundary reached with passing checks and nothing undecided is a checkpoint to continue through. Every turn produces a recorded verifiable outcome; discovery, diagnosis, a described edit and an unnecessary edit are not outcomes, and re-running an unchanged known failure is not progress. Every check is recorded with its command, result, the turn it ran in and the state it tested, with valid reuse labelled `reused — inputs unchanged` and invalidated or unproven evidence labelled historical, retaining original time and complete input identity. Bookkeeping is proportionate to the change. An item is verified when its acceptance behaviour is demonstrated, never because a command exited zero. A numeric target gets a budget estimate at scope time, is measured from the first working skeleton before feature and visual runs, and is reported as measured vs target with PASS or FAIL; each failure case states the rule the design keeps (current §E, amended 1.38.0). A turn returning while the authorized task is actionable is recorded as stopped short; two in a row shrink the next execution unit, never the authorized task. Full rule: `.mock2/capacity.md`.
+-- **Not adopted** (A.8): write-size-driven parts/patch machinery, position-anchored patches, standard-library-only servers, SQLite in production, hand-written websocket codecs or ciphers.
++- **Not adopted** (A.8): write-size-driven parts/patch machinery, position-anchored patches, standard-library-only servers, SQLite in production, hand-written websocket codecs or ciphers. *Narrowed in 1.39.0:* SQLite in any server role, unless the developer explicitly asked for it and a person recorded the request on the project (PRO current §W.6).
+ 
+ ## Universal integration (current §T) **[general]**
+ 
+--- a/core/claude/rules/mock2-security.md
++++ b/core/claude/rules/mock2-security.md
+@@ -23,7 +23,7 @@
+   allowlist, a static ordering clause — and never for anything derived from a request, a file, a
+   database row or an environment value. Where a sort column or direction comes from outside, map the
+   input to a fixed set of permitted values and use the mapped constant, not the input.
+-- Application secrets (database password, signing keys) come from the environment or the host's secret service, never from the repository; a `.env.example` lists every variable with a placeholder, and `.env` is git-ignored. Integration credentials an operator manages (a provider's API token or password) are entered in the admin interface and stored encrypted. They are never put in `.env`, and the developer is never asked to set them as environment variables. On the cpr profile that store is the host's credential service (PRO current §J.5).
++- Application secrets (database password, signing keys) come from the environment or the host's secret service, never from the repository; a `.env.example` lists every variable with a placeholder, and `.env` is git-ignored. Integration credentials an operator manages (a provider's API token or password) are entered in the admin interface and stored encrypted. They are never put in `.env`, and the developer is never asked to set them as environment variables. On the cpr profile that store is the host's credential service (PRO current §J.5). On the application foundation stack (PRO current §W.6) every application secret — signing keys and setup keys included — is held encrypted by the host and delivered sealed; a deployed instance reads no secret from an env file, a compose or unit file, or the repository, and its `.env.example` lists only non-secret settings and local-development placeholders.
+ - Secrets never go on a command line: not in arguments, and not in a `sudo env VAR=…` prefix, which
+   process listings and the system journal both show. Pass a secret on stdin, through an inherited
+   descriptor, or in a file only its owner can read (mode 0600).
+--- a/core/claude/rules/mock2-stack-ai.md
++++ b/core/claude/rules/mock2-stack-ai.md
+@@ -27,3 +27,10 @@
+ object/database reconciliation, measured retrieval quality/resources and a host search scale path.
+ Embedding-model sunset/failover cannot silently change an index's embedding space; migrate and
+ re-embed explicitly. Preparing standards does not install services outside the task.
++
++New PRO applications start on the application foundation stack (PRO current §W.6): PostgreSQL 18
++with pgvector, S3-compatible object storage and an embedding service, pinned in `stack.versions.json`
++and provisioned by the host with the application. Reach them only through the host's adapters. No
++SQLite or other database engine without the developer's explicit request recorded on the project by a
++person. Secrets never go in env files. A switch never deletes data, a model or dimension change
++re-embeds into a new validated index, and the local model is reported as development quality.
+--- a/core/cpr/AI-Data-Standards.md
++++ b/core/cpr/AI-Data-Standards.md
+@@ -1,10 +1,13 @@
+ # AI, retrieval and object data
+ 
+ These requirements extend the existing host AI, jobs, secrets, usage, permissions, storage and
+-realtime contracts when the corresponding capability is used. They prepare new PRO applications
+-for AI without adding unused services to an established application. Features consume host
+-capabilities; provider credentials stay sealed in host services. Keep offline fakes, scoped usage
+-metering and configurable provider/model selection already required by PRO.
++realtime contracts when the corresponding capability is used. New PRO applications start on the
++application foundation stack (PRO current §W.6): PostgreSQL with pgvector, S3-compatible object
++storage and an embedding service, provisioned by the host with the application, with storage and
++embeddings each switchable off per deployment. A standards upgrade adds no service to an
++established application. Features consume host capabilities; provider credentials stay sealed in
++host services. Keep offline fakes, scoped usage metering and configurable provider/model selection
++already required by PRO.
+ 
+ ## Embedding identity and migrations
+ 
+@@ -20,19 +23,30 @@
+ is allowed only to an independently verified identical space; otherwise queue/retry or report
+ unavailability. Do not silently query an old index using a new embedding model.
+ 
++*Amended in 1.39.0.* A provider, model or dimension change builds the new index from the stored
++content of the active one and validates it before the switch — at least the item count, the
++dimensions and a self-retrieval sample — and only a validated index becomes active. The adapter
++sends the model and the dimensions explicitly on every call and checks the length of what comes
++back; a provider default is never relied on. The foundation stack's bundled local model
++(`BAAI/bge-small-en-v1.5`, 384 dimensions) is development quality: the application's admin area and
++the host both warn to switch to OpenAI or another provider for production-quality search. An
++OpenAI configuration names its model and dimensions (for example `text-embedding-3-small`, 1536).
++
+ ## PostgreSQL and vector retrieval
+ 
+-New applications start with the selected PostgreSQL 18 maintenance release and explicit pgvector
+-pin when vector retrieval is used. pgvector is an extension, not bundled merely by choosing a
+-PostgreSQL major; PostgreSQL 16 can also run it. Provision its server binaries and enable `vector`
+-in each authorized database through the migration owner. Check actual `server_version` and
+-`pg_extension.extversion` at startup/readiness and in deployment evidence. Test generated Drizzle
+-migrations and vector operators against the real supported server/extension pair. Extension upgrade,
+-restore availability, index rebuild requirements and rollback compatibility belong in the release
+-record. A PGlite-only test cannot establish this production contract.
++New applications start with the selected PostgreSQL 18 maintenance release and the explicit pgvector
++pin from creation: the foundation stack's database is PostgreSQL with pgvector (*amended in
++1.39.0*; before 1.39.0, only when vector retrieval was used). pgvector is an extension, not bundled
++merely by choosing a PostgreSQL major; PostgreSQL 16 can also run it. Provision its server binaries
++and enable `vector` in each authorized database through the migration owner. Check actual
++`server_version` and `pg_extension.extversion` at startup/readiness and in deployment evidence. Test
++generated Drizzle migrations and vector operators against the real supported server/extension pair.
++Extension upgrade, restore availability, index rebuild requirements and rollback compatibility
++belong in the release record. A PGlite-only test cannot establish this production contract.
+ 
+ Choose exact search or HNSW using measured recall/latency and memory. Verify index dimension/type
+ limits before picking an embedding model (pgvector HNSW vector: 2,000 dimensions; halfvec: 4,000).
++Above 4,000 dimensions the index is an exact scan, and the host reports it as one.
+ Use host search APIs so storage engines can change without changing features. Combine PostgreSQL
+ full-text and vector candidates when lexical and semantic retrieval are both needed; reranking is
+ optional and evaluated. Apply tenant/document permissions in retrieval before any content enters
+@@ -49,6 +63,14 @@
+ contract and record its version/identity, limits, retention and backup policy. S3 is an API contract,
+ not a universally versioned server product.
+ 
++*Amended in 1.39.0.* Objects go through the host storage adapter only. The foundation stack's bundled
++S3-compatible store is the default; any S3-compatible provider (Cloudflare R2, AWS S3, Backblaze B2,
++MinIO and others) replaces it through the same adapter by a per-deployment setting, with no feature
++change. Turning storage off never deletes objects. A provider switch while objects exist is a
++person's choice between copying every object, verified by size and sha256 on the target before the
++new provider becomes active, and deliberately starting fresh with the old objects kept where they
++were. Objects are never stranded silently.
++
+ Use unique immutable object keys and bounded authorized uploads/downloads or short-lived signed
+ URLs. Validate type, size and content; scan/sandbox extraction through existing host jobs as needed.
+ An object write and database transaction are not atomic together: model pending/available/deleting
+@@ -62,6 +84,16 @@
+ revision. Record ingestion lag, failed jobs, token/request usage and cost, and retrieval latency,
+ quality and access-test evidence. Do not invent provider pricing or a model-generated dollar value.
+ 
++## Readiness is a real operation
++
++*Added in 1.39.0.* Database, storage and embeddings each report `ready` only after a real operation
++succeeded: the database answered a query and a vector operation; storage completed a put, get and
++delete of a probe object; the embedding provider returned one probe embedding with the configured
++dimensions. A filled-in setting or a present key is never readiness. Missing credentials are
++reported as missing, a switched-off feature as off, and the capabilities that depend on it as
++unavailable. A mock provider and the local development-quality model say what they are and are
++never reported as production-ready.
++
+ ## Scale and replacement path
+ 
+ Start with application PostgreSQL + pgvector; isolate vector work in a dedicated PostgreSQL
+--- a/core/cpr/CPR-v1.1-addendum-A.md
++++ b/core/cpr/CPR-v1.1-addendum-A.md
+@@ -13,6 +13,9 @@
+ >
+ > 1.32.1: kept as published, except that names of other products, applications, customers and people, and the file
+ > names and identifiers that pointed to them, are generalised.
++>
++> 1.39.0: A.2 (`ai.capabilities`: embedding replacement and failover, mock and local providers) and A.8 (SQLite) are
++> narrowed by PRO current §W.6 and §R; the narrowing is marked where it applies. Everything else is kept as published.
+ 
+ ## A.1 Extends §4 — Technology baseline
+ 
+@@ -70,6 +73,9 @@
+ - Capabilities, not vendors: conversation, realtime (speech-to-speech), reasoning, vision, stt, tts, image_edit,
+   image_generation, embeddings, search. An operator assigns a provider/model per capability, or leaves it on automatic
+   selection from what is configured; a sunset model is replaced automatically; a provider error fails over.
++  *Narrowed in 1.39.0:* never across embedding spaces. An embedding provider, model or dimension change is an
++  explicit re-embedding into a new index that is validated before the switch, and failover goes only to an
++  independently verified identical space (PRO current §R, §W.6; `AI-Data-Standards.md`).
+ - Credentials are sealed server-side (host `secrets.encrypt`) and never reach a client; a live-voice session is minted
+   as a short-lived client secret by the host, per actor (customer, staff, operator).
+ - Every call is metered into one usage table with capability, provider, model, units, estimated cost and a **scope**
+@@ -77,7 +83,9 @@
+   metered; calls record duration, not tokens.
+ - A **mock provider** is a first-class provider: selectable in configuration, answering per task with canned shapes
+   that include the failure cases (obstructed frame, dark frame, unpriceable item, unknown answer). It is what the test
+-  suite runs against (A.3) and what a demo runs on with no keys.
++  suite runs against (A.3) and what a demo runs on with no keys. *Narrowed in 1.39.0:* a mock provider, and a local
++  development-quality model such as the foundation stack's bundled embedding model, reports itself as such in health,
++  usage and the interface, and is never reported as production-ready (PRO current §W.6).
+ - Deterministic where money is involved: the AI never produces a dollar amount; a rules engine does, and an unpriced
+   line says a person will price it, never "$0".
+ 
+@@ -217,3 +225,7 @@
+ Recorded so the question does not come back: a 27 KB file-write limit of one host and its parts/bundle/patch machinery;
+ the position-anchored patch format; "standard library only" on the server; SQLite as the production database; a
+ hand-written websocket codec or cipher. Each was a correct answer to that host's transport and is not a standard.
++
++*Narrowed in 1.39.0:* SQLite is refused for any server role — production, staging, demo or a deployed preview — not
++only as the production database. The one exception is the developer's explicit request, recorded on the project by a
++person outside anything an agent can write (PRO current §W.6, rule 2).
+--- a/core/cpr/CPR-v1.1-current.md
++++ b/core/cpr/CPR-v1.1-current.md
+@@ -19,7 +19,14 @@
+ are never loaded as an equally authoritative current instruction. When you cite PRO in a change
+ record, cite the section and note whether this amendment applies to it.
+ 
+-Amended 2026-10-21, 1.32.0: storage, retention and cleanup from operation (§V, new): a read-only
++Amended 2026-10-24, 1.39.0: the application foundation stack (§W.6, new): every new PRO
++application is provisioned with PostgreSQL + pgvector, S3-compatible object storage and an embedding
++service as its own deployment unit, with storage and embeddings switchable per deployment and no
++switch deleting data; SQLite and other engines only on the developer's explicit request recorded by a
++person; secrets encrypted by the host, never in env files; truthful readiness. It narrows §D (a new
++application records `Profile: cpr`), §J.4 and §J.9 (catalog entries `database`, `object_storage`,
++`embeddings`, `vector_search`), §Q, §R and §W.3, and Addendum A.2 and A.8. Previous amendment
++2026-10-21, 1.32.0: storage, retention and cleanup from operation (§V, new): a read-only
+ storage check, what no cleanup removes, cleanups a person selects and approves once, retention
+ settings per application with documented defaults that the host turns on for a new application, and
+ storage alerts that never block; a release cap counts the live and the previous release and never
+@@ -128,6 +135,12 @@
+ it did not have, or creates host-platform features outside its scope. Deviations within a `cpr`
+ repository are recorded with a reason rather than corrected by rewriting working code.
+ 
++*Amended in 1.39.0.* A new application records `Profile: cpr` with the application foundation stack
++(§W.6). `Profile: none` and stack deviations describe an existing repository's own stack; an agent
++never records them for a new application. A database engine other than PostgreSQL is never a
++deviation an agent records: it needs the developer's explicit request, recorded on the project by a
++person (§W.6).
++
+ Verification maps to the repository's toolchain through `.mock2/checks.json`; nothing assumes npm.
+ 
+ ## E. Verification and evidence
+@@ -596,6 +609,11 @@
+ *Amended in 1.23.0:* `flags` is an optional entry, filled in J.10. An application declares the
+ entries it uses (J.9); a catalog entry is what a declaration names.
+ 
++*Amended in 1.39.0:* `database`, `object_storage`, `embeddings` and `vector_search` are entries,
++filled in W.6. `database` is required for every new application; the other three are conditional on
++the application using them. Their implementations are the host's adapters over the application
++foundation stack, and those adapters are the only supported way to reach it.
++
+ Variation is by configuration and supported adapters first. A host-owned fork (§K.4) records
+ divergence that has already happened; it is not the mechanism for variation and does not reduce the
+ cost of carrying it.
+@@ -677,6 +695,13 @@
+ hand. An existing application adds the file when it next touches a capability or when the developer
+ asks; adoption does not create it.
+ 
++*Amended in 1.39.0.* The catalog names also include `database`, `object_storage`, `embeddings` and
++`vector_search` (W.6). A new application's manifest lists `database` from creation; the others are
++added in the change that first uses them, like any capability. The host provisions the application
++foundation stack with every new application whatever the manifest says. That is not inference: the
++stack is the application's own deployment unit (W.6), and a declaration says which capabilities the
++application uses and which fake its tests run against, not which containers the host starts.
++
+ Mock2 text now: the file, its shape and this rule. Host follow-up: provisioning from the declaration.
+ 
+ ### J.10 Flags
+@@ -1759,6 +1784,11 @@
+ silent migration or a new release gate. A selected version is not proof of a deployed identity or
+ an application's tested integration. Validate updates as a combination at their affected contracts.
+ 
++**Amended in 1.39.0: the foundation stack's pins.** `pgvector` is required for new PRO applications,
++and the foundation stack's services (object store, embedding service, local model, Compose runtime)
++are selected systems with image pins in `stack.versions.json` (W.6). Their compatibility entry stays
++`pending-evidence` until a run of the stack is recorded; a pin is a selection, not that proof.
++
+ **Amended in 1.23.0: documentation for the pinned version.** Before relying on a library's API, an
+ agent reads the documentation for the version the lockfile pins: the documentation the package ships in
+ its installed directory when it ships any, otherwise the published documentation for that version (a
+@@ -1795,6 +1825,15 @@
+ rollback. Matching dimensions alone are insufficient. Keep source and index configuration rebuildable.
+ Preparing these contracts does not add unused services outside the authorized application task.
+ 
++*Amended in 1.39.0.* For new applications the embedding service, pgvector and object storage are
++part of the application foundation stack (W.6), so they are present from creation; that is not an
++unused service added by a task. Feature code reaches them only through the host's `embeddings`,
++`vector_search` and `object_storage` adapters, never through an S3 SDK or an embedding HTTP API of
++its own. An embedding provider, model or dimension change re-embeds into a new index, validates it
++(item count, dimensions, a self-retrieval sample) and only then switches; failover or automatic
++model replacement never crosses embedding spaces. A mock provider and the bundled local model report
++what they are and are never reported as production-ready.
++
+ ## S. Relay producers and session visibility
+ 
+ **Extends:** current §I and `Relay.md`. `Relay-Recording.md` defines the source → local outbox →
+@@ -2098,6 +2137,13 @@
+ plan until its implementation is bound and verified; declarations/fakes alone are not working jobs,
+ object storage, billing, tenant administration, external identity or retrieval infrastructure.
+ 
++*Amended in 1.39.0.* The application foundation stack (W.6) is not an external service: it is the
++application's own deployment unit, provisioned by the host with the instance. Generation still
++provisions nothing. The database of every new application is PostgreSQL with pgvector from that
++stack. Its embedding service and object storage are present from creation; their presence does not
++select a retrieval or file feature, which still needs its use case, and the rule above about AI alone
++still holds for what is built.
++
+ ### W.4 Deployed-instance setup and access
+ 
+ First-instance setup establishes the initial owner only through an authenticated or secret-protected
+@@ -2119,6 +2165,91 @@
+ workflow must have behavioral evidence before it is described as working. No new mandatory approval
+ step, infrastructure service or paid provider call is introduced by installing this guidance.
+ 
++### W.6 The application foundation stack
++
++**Added in 1.39.0. Extends J.2–J.4, J.9, §R and W.3; narrows §D and Addendum A.2 and A.8.** Every new
++PRO application is provisioned by its host with one Compose unit, the **application foundation
++stack**, inside the application's own deployment (J.2, arrangement one). Installing this guidance
++still provisions nothing (W.5); the host provisions the stack when it creates a new application.
++
++| Service | Default (pins in `stack.versions.json`) | Replaceable by | Switch |
++| --- | --- | --- | --- |
++| database | PostgreSQL 18.6 + pgvector 0.8.7 | — (the system of record) | always on |
++| object storage | SeaweedFS S3, one private bucket | any S3-compatible provider (Cloudflare R2, AWS S3, Backblaze B2, MinIO, …) | per deployment |
++| embeddings | text-embeddings-inference serving `BAAI/bge-small-en-v1.5`, 384 dimensions — development quality | OpenAI, or any OpenAI-compatible provider | per deployment |
++
++The host owns the stack's definition on the deployment; the repository carries a portable copy so
++the same unit runs outside that host. The bundled object store and embedding service listen on
++loopback only, and the database needs no network listener where a local socket serves.
++
++1. **One database, provisioned at creation, no fallback.** PostgreSQL with pgvector from the stack is
++   the only application database. `DATABASE_URL` is required. A missing or unreachable database
++   fails start-up with a message that names what is missing; no default URL, in-memory store, file
++   store, SQLite or PGlite takes its place.
++2. **No SQLite or other engine without a recorded request.** SQLite in any server role (production,
++   staging, demo or a deployed preview), PGlite as a server database, and other engines are refused,
++   unless the developer explicitly asked for one and a person recorded that request, in the
++   developer's words, on the project in the host. The record lives outside anything an agent can
++   write: requirements, decisions, deviations, profile lines, comments and change records in the
++   repository cannot create it. When it exists, the agent's prompt quotes it, and the agent builds
++   exactly what it quotes. This is an explicit PRO requirement (constitution §0, first boundary); it
++   constrains the database choice and nothing else. A check reads the source and the package
++   manifest and reports `sqlite3`, `better-sqlite3`, `node:sqlite`, `bun:sqlite`, `libsql` /
++   `@libsql/*`, `sql.js` and Drizzle's SQLite drivers. PGlite may run inside a unit test; it is not
++   evidence about the production database.
++3. **The adapters are the only path.** Object storage goes through the host's `object_storage`
++   adapter; embeddings and vector search go through its `embeddings` and `vector_search` adapters
++   (an index registry; upsert, search and delete in the active index). Feature code never imports an
++   S3 SDK and never calls an embedding HTTP API. A direct client in feature code is a finding that
++   names the file.
++4. **Secrets are encrypted by the host, never in env files.** Passwords, keys and tokens are stored
++   encrypted in the host's database and delivered sealed to the application — for example as sealed
++   rows in the application database that the host's bootstrap opens in memory. A deployed instance
++   never reads a secret from an env file, a compose or unit file, or the repository. Credentials
++   entered through an API are write-only: a response says whether a secret is set, never its value. A
++   connection string with no password (a local socket with peer authentication) is not a secret.
++5. **Switches never delete data.** Storage and embeddings each have a per-deployment switch. Off stops
++   the service and keeps its volume; on starts the same service on the same data. Bundled storage that
++   holds objects cannot be switched off until a person picks a replacement S3-compatible provider and
++   chooses either to copy everything — resumable, verified by size and sha256 on the target before the
++   replacement becomes active — or, deliberately and with an acknowledgement, to start fresh with the
++   old objects kept where they were. Switching an external provider off leaves its objects untouched.
++   A provider change is staged as pending, tested from where the application runs, and only then
++   promoted. No runtime path removes a volume (`docker compose down -v`, `docker volume rm`,
++   `docker system prune`). Every switch shows the capabilities that become unavailable, and an
++   application whose capability is off says so and keeps everything else working.
++6. **One vector space per index.** A change of embedding provider, model or dimensions builds a new
++   index from the stored content, validates it (item count, dimensions, a self-retrieval sample) and
++   only then switches; the former index is kept for rollback. Spaces are never mixed, and no
++   automatic model replacement or failover crosses spaces (narrows Addendum A.2).
++7. **Readiness is a real operation.** Each service is `ready` only after a real operation succeeded:
++   a query and a vector operation; a put, get and delete of a probe object; one probe embedding with
++   the configured dimensions. A setting or a key is never readiness; missing credentials are reported
++   as missing. A mock provider and the local model say what they are and are never reported as
++   production-ready; the application and the host show a warning to switch the local model for
++   production-quality search (narrows Addendum A.2).
++8. **Scope.** The stack's presence is not a reason to build file or retrieval features the task does
++   not ask for (W.3). A standards upgrade gives no existing application the stack; moving one onto it
++   is an explicit migration with its data plan (§N).
++
++Catalog entries (J.4). For all four, the *implementation* is the host's adapter over the foundation
++stack, with its version pinned by the consuming repository; *data and migration ownership* is the
++host's for the stack's own schema (feature switches, sealed secrets, the vector index registry) and
++the application's for its tables and object keys; *extension points* are per-deployment provider
++configuration, never a fork.
++
++| Entry | Contract | Fake | Requirement level | Consumer example | Compatibility and upgrade |
++| --- | --- | --- | --- | --- | --- |
++| `database` | A PostgreSQL connection with pgvector; start-up fails without it | None for migrations and vector operators, which run against the real server; a fake store for unit tests | Required | Drizzle over the host's connection | PostgreSQL 18 line; an extension upgrade is recorded in the release |
++| `object_storage` | Put, get, delete, list and short-lived signed URLs on a private bucket; reports off and unavailable | An in-memory object store under `tests/fakes/` | Conditional: the application stores files | `await host.storage.put(key, bytes, { contentType })` | The S3 API; the provider is recorded per deployment |
++| `embeddings` | Vectors for texts with the configured model and dimensions, never another length; reports off, missing credentials and unavailable | A deterministic fake embedder | Conditional: semantic retrieval is used | `const [vector] = await host.embeddings.embed([text])` | A model or dimension change is a re-embedding migration (rule 6) |
++| `vector_search` | Upsert, search and delete in the active index; permission filters applied before results leave; answers off when embeddings are off | An in-memory index | Conditional: semantic retrieval is used | `await host.vectors.search(text, { limit: 10, filter })` | Rebuildable from stored content; HNSW up to 2,000 dimensions (`vector`) or 4,000 (`halfvec`) |
++
++The calls in the consumer examples are illustrative; the host's SDK documents the exact names.
++
++Mock2 text now: the stack, the eight rules and the four entries. Host follow-up: provisioning the
++stack, the switches and their jobs, the sealed secret delivery and the check in rule 2.
++
+ ## X. Local-first Git readiness
+ 
+ **Added in 1.35.0. Extends W.1 and normal build preparation.** A person can start work in an ordinary
+--- a/core/cpr/Stack-Version-Table.md
++++ b/core/cpr/Stack-Version-Table.md
+@@ -9,7 +9,7 @@
+ | node | 24.21.0 | LTS | PRO baseline |
+ | npm | 12.2.0 | stable | PRO baseline |
+ | postgresql | 18.6 | stable | PRO baseline |
+-| pgvector | 0.8.7 | stable | When used |
++| pgvector | 0.8.7 | stable | PRO baseline |
+ | react | 19.3.0 | stable | PRO baseline |
+ | react-dom | 19.3.0 | stable | PRO baseline |
+ | typescript | 7.0.2 | stable | PRO baseline |
+@@ -24,8 +24,8 @@
+ | tailwindcss | 4.3.3 | stable | When used |
+ | shadcn | 4.21.1 | stable | When used |
+ | nx | 23.2.1 | stable | When used |
+-| docker-engine | 29.8.2 | stable | When used |
+-| docker-compose | 5.6.0 | stable | When used |
++| docker-engine | 29.8.2 | stable | PRO baseline |
++| docker-compose | 5.6.0 | stable | PRO baseline |
+ | nginx | 1.30.5 | stable | When used |
+ | lucide-react | 1.51.0 | stable | When used |
+ | @electric-sql/pglite | 0.5.8 | stable | When used |
+@@ -39,9 +39,14 @@
+ | pg | 8.23.1 | stable | When used |
+ | @types/pg | 8.23.1 | stable | When used |
+ | eslint | 10.13.0 | stable | When used |
++| seaweedfs | 4.48 | stable | PRO baseline |
++| text-embeddings-inference | 1.9.0 | stable | PRO baseline |
++| local-embedding-model | BAAI/bge-small-en-v1.5 | stable | PRO baseline |
++| openai-embeddings | text-embedding-3-small | stable | When used |
+ 
+ ## Compatibility evidence
+ 
+ - `cpr-2026-10-03-packages`: **verified-package-fixture**. Node runtime, React SSR/Vite, Express/Zod request validation, Drizzle SQL/vector mapping, strict TypeScript, Vitest; production DB/storage/browser remain host-specific
+ - `drizzle-zod-0.8.3-generated`: **verified-package-fixture**. drizzle-zod 0.8.3 in the contracts the generators write, with the selected packages (drizzle-orm 0.45.3, Zod 4.6.5, native TypeScript 7.0.2, Express 5.2.1, React 19.3.0, Vite 8.3.2, Vitest 5.0.3, Playwright 1.63.0) and again with drizzle-orm 0.45.4 / Zod 4.6.7 / TypeScript 5.9.3: tsc clean, the generated Vitest request tests passing on the fakes, vite build, Playwright states capture; no PostgreSQL server, migration or query, Node 22 not 24, chromium only
++- `foundation-stack-2026-10-24`: **pending-evidence**. pgvector/pgvector:0.8.7-pg18, chrislusf/seaweedfs:4.48 and text-embeddings-inference cpu-1.9.0 with BAAI/bge-small-en-v1.5 run as one Compose stack: vector operations, private object put/get/delete, storage off/on, a storage provider switch with a verified copy, an embeddings provider switch with index replacement and missing-credential reporting. Image tags checked to exist on 2026-10-24; no stack run is recorded in this release
+ - `relay-reference-1.2.1`: **retained-contract**. React 18 / Express 4 / Zod 3 reference adapter; new application major lines need a tested host adapter/port
+--- a/core/cpr/Stack-Versions.md
++++ b/core/cpr/Stack-Versions.md
+@@ -7,8 +7,8 @@
+ support status, engine/peer requirements and migration notes before changing a pin. Never resolve
+ `latest`, a floating image tag, or an old remembered default during an application build.
+ 
+-For **new PRO applications**, select `cpr-2026-10-03`: Node 24 LTS, PostgreSQL 18 and the exact
+-selected packages in the registry. The selected package combination has a reproducible compatibility
++For **new PRO applications**, select `cpr-2026-10-03`: Node 24 LTS, PostgreSQL 18 with pgvector, the
++application foundation stack's services and the exact selected packages in the registry. The selected package combination has a reproducible compatibility
+ fixture; its evidence names the actual runtime, commands and scope. Package compatibility does not
+ prove a particular application's authorization, migrations, browser behavior, object provider or
+ production performance. Validate those affected contracts during implementation. Optional tools
+@@ -25,6 +25,25 @@
+ application's own tables; validate those where the application relies on them. Keep it on a line
+ whose peer range admits the project's Drizzle and Zod versions.
+ 
++**The application foundation stack (added in Mock2 1.39.0, PRO current §W.6).** Every new PRO
++application is provisioned with one Compose unit holding its database, object storage and embedding
++service, so these are selected systems for new applications, not optional tools. `pgvector` is now
++required: the database is PostgreSQL 18.6 with pgvector 0.8.7 from the image
++`pgvector/pgvector:0.8.7-pg18`. Object storage defaults to SeaweedFS 4.48
++(`chrislusf/seaweedfs:4.48`), replaceable per deployment by any S3-compatible provider through the
++host storage adapter. Embeddings default to text-embeddings-inference 1.9.0
++(`ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0`) serving `BAAI/bge-small-en-v1.5` with 384
++dimensions; this local model is development quality and is reported as such. The production
++provider is OpenAI through the host embeddings adapter, with the model and dimensions always explicit
++(`text-embedding-3-small`, 1536), or any OpenAI-compatible provider through the same adapter.
++`docker-engine` and `docker-compose` are selected because they run the unit. A model change is a
++re-embedding into a new validated index (`AI-Data-Standards.md`), never a floating substitution.
++The image tags were checked to exist on 2026-10-24; pin each by digest for the target architecture
++at deployment. The `foundation-stack-2026-10-24` compatibility entry is `pending-evidence`: no
++run of the stack is recorded in this release, so the pins are a selection, not proof that the stack
++works on a given host. Existing applications are not given the foundation stack by an upgrade; moving
++one onto it is an explicit migration.
++
+ For **existing applications**, capture their actual stack in project-owned `state/stack.json` and
+ retain its major/minor lines. Default to maintenance patches unless the developer asks to upgrade
+ or migrate. PostgreSQL 16 → 16.15 is maintenance; 16 → 18 is a migration. Semver 5.7.3 → 5.7.4 is
+--- a/core/cpr/stack.versions.json
++++ b/core/cpr/stack.versions.json
+@@ -56,8 +56,9 @@
+       "checkedOn": "2026-10-03",
+       "channel": "stable",
+       "kind": "extension",
+-      "optional": true,
+-      "requires": "PostgreSQL 13+; extension binaries and CREATE EXTENSION vector required"
++      "optional": false,
++      "requires": "PostgreSQL 13+; extension binaries and CREATE EXTENSION vector required. Required for new PRO applications from Mock2 1.39.0: the database of the application foundation stack (PRO current §W.6).",
++      "image": "pgvector/pgvector:0.8.7-pg18"
+     },
+     "react": {
+       "selected": "19.3.0",
+@@ -180,7 +181,8 @@
+       "checkedOn": "2026-10-03",
+       "channel": "stable",
+       "kind": "service",
+-      "optional": true
++      "optional": false,
++      "requires": "Runs the application foundation stack as one Compose unit for new PRO applications (Mock2 1.39.0, PRO current §W.6)."
+     },
+     "docker-compose": {
+       "selected": "5.6.0",
+@@ -188,7 +190,8 @@
+       "checkedOn": "2026-10-03",
+       "channel": "stable",
+       "kind": "service",
+-      "optional": true
++      "optional": false,
++      "requires": "Runs the application foundation stack as one Compose unit for new PRO applications (Mock2 1.39.0, PRO current §W.6)."
+     },
+     "nginx": {
+       "selected": "1.30.5",
+@@ -296,6 +299,48 @@
+       "kind": "npm",
+       "optional": true,
+       "requires": "Node ^20.19 or ^22.13 or >=24; selected by the application foundation for shared JavaScript host/helper lint."
++    },
++    "seaweedfs": {
++      "selected": "4.48",
++      "source": "https://github.com/seaweedfs/seaweedfs/releases",
++      "checkedOn": "2026-10-24",
++      "channel": "stable",
++      "kind": "service",
++      "optional": false,
++      "image": "chrislusf/seaweedfs:4.48",
++      "requires": "Bundled S3-compatible object store of the application foundation stack. Any S3-compatible provider replaces it per deployment through the host storage adapter; the host records the provider actually used."
++    },
++    "text-embeddings-inference": {
++      "selected": "1.9.0",
++      "source": "https://github.com/huggingface/text-embeddings-inference/releases",
++      "checkedOn": "2026-10-24",
++      "channel": "stable",
++      "kind": "service",
++      "optional": false,
++      "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0",
++      "requires": "Local embedding service of the application foundation stack (CPU image). Serves the local embedding model below; switchable off per deployment."
++    },
++    "local-embedding-model": {
++      "selected": "BAAI/bge-small-en-v1.5",
++      "source": "https://huggingface.co/BAAI/bge-small-en-v1.5",
++      "checkedOn": "2026-10-24",
++      "channel": "stable",
++      "kind": "model",
++      "optional": false,
++      "dimensions": 384,
++      "metric": "cosine",
++      "requires": "Default local embedding model of the foundation stack. Development quality: the application and the host warn to switch provider for production-quality search. Record the model revision actually served."
++    },
++    "openai-embeddings": {
++      "selected": "text-embedding-3-small",
++      "source": "https://platform.openai.com/docs/guides/embeddings",
++      "checkedOn": "2026-10-24",
++      "channel": "stable",
++      "kind": "model",
++      "optional": true,
++      "dimensions": 1536,
++      "metric": "cosine",
++      "requires": "Production embedding provider through the host embeddings adapter, which sends the model and dimensions explicitly on every call. Any OpenAI-compatible provider uses the same adapter with its own explicit model and dimensions."
+     }
+   },
+   "compatibility": [
+@@ -312,6 +357,12 @@
+       "evidence": "state/compatibility/2026-10-17-drizzle-zod.json"
+     },
+     {
++      "id": "foundation-stack-2026-10-24",
++      "status": "pending-evidence",
++      "scope": "pgvector/pgvector:0.8.7-pg18, chrislusf/seaweedfs:4.48 and text-embeddings-inference cpu-1.9.0 with BAAI/bge-small-en-v1.5 run as one Compose stack: vector operations, private object put/get/delete, storage off/on, a storage provider switch with a verified copy, an embeddings provider switch with index replacement and missing-credential reporting. Image tags checked to exist on 2026-10-24; no stack run is recorded in this release",
++      "evidence": null
++    },
++    {
+       "id": "relay-reference-1.2.1",
+       "status": "retained-contract",
+       "scope": "React 18 / Express 4 / Zod 3 reference adapter; new application major lines need a tested host adapter/port",
+@@ -319,9 +370,9 @@
+     }
+   ],
+   "universalVersions": {
+-    "object-storage": "S3-compatible API; host records actual provider/version",
++    "object-storage": "S3-compatible API; host records actual provider/version; the foundation stack bundles seaweedfs by default",
+     "copied-ui": "shadcn components record source/hash, CLI version alone insufficient",
+     "OS": "host chooses supported Debian/Ubuntu or established distribution; record exact image/package identity",
+-    "AI-models": "immutable provider/model/revision and embedding/index configuration; never floating substitution"
++    "AI-models": "immutable provider/model/revision and embedding/index configuration; never floating substitution; an embedding change is a re-embedding into a new validated index"
+   }
+ }
+--- a/core/mock2/profiles/profile-cpr.md
++++ b/core/mock2/profiles/profile-cpr.md
+@@ -4,19 +4,26 @@
+ verification provenance, independent review — is general and applies to any repository in any
+ language. This file is the other half: the technology choices that make up a **PRO application**.
+ 
+-It is the intended default for new PRO applications. It is not a description of every Mock2
+-repository, and adopting Mock2 in an existing repository never rewrites that repository's stack to
+-match this profile.
++It is the profile of every new PRO application, and every new PRO application starts on the
++**application foundation stack**: PostgreSQL with pgvector, S3-compatible object storage and an
++embedding service, provisioned by the host with the application (PRO current §W.6). It is not a
++description of every Mock2 repository, and adopting Mock2 in an existing repository never rewrites
++that repository's stack to match this profile.
+ 
+ A repository records its profile in `.github/copilot-instructions.md`:
+ 
+ ```
+ Profile: cpr          # this document is in force
+-Profile: none         # the stack is the repository's own; only the general workflow applies
++Profile: none         # an existing repository's own stack; only the general workflow applies
+ Deviations:
+   - <what differs from the profile, and the one-line reason>
+ ```
+ 
++A new application records `Profile: cpr` with the foundation stack. An agent never records
++`Profile: none`, a stack deviation or a database deviation for a new application. Another database
++engine is never a deviation: it needs the developer's explicit request, recorded on the project by a
++person in the host, outside anything an agent writes (PRO current §W.6).
++
+ An existing repository being adopted records the profile it actually follows and its deliberate
+ deviations. Differences from this profile are recorded as deviations, or raised under **Deviations
+ for decision** in `state/production-checklist.md` — never corrected by rewriting working code.
+@@ -33,8 +40,9 @@
+ 
+ The instance's `/setup` establishes its initial owner through the configured private bootstrap
+ mechanism and durable completion; it is distinct from project definition and user onboarding.
+-Adoption and standards upgrades preserve the current application and its blueprint. A selected
+-external identity, object, job or retrieval capability still needs its declared host binding and
++Adoption and standards upgrades preserve the current application and its blueprint. The host
++provisions the foundation stack with a new instance; installing standards provisions nothing. A
++selected external identity, job or retrieval capability still needs its declared host binding and
+ behavioral evidence; installing standards never provisions it or silently substitutes another.
+ 
+ ## Server
+@@ -48,7 +56,10 @@
+ - Express routers under `src/routes/`, one file per resource. Handlers are thin; logic lives in `src/services/`.
+ - Zod schemas are the single source of the request and response types (`z.infer`). Wire shapes live in `contracts/`, one file per resource, derived from the Drizzle schema where a table backs them; the routes parse with them and the client imports their types (PRO current §K.7). A schema used only inside one job may stay beside it.
+ - Drizzle for database access. Schema in `src/db/schema.ts`; migrations generated, never hand-edited; no raw SQL outside `src/db/`. Parameterization is a rule you follow, not a guarantee the library provides — see the security baseline on `sql.raw()`.
+-- PostgreSQL.
++- PostgreSQL with pgvector, from the foundation stack, is the only application database. `DATABASE_URL` is required: a missing or unreachable database fails start-up with a message naming what is missing, never a fallback to a default URL, an in-memory store, a file or SQLite. SQLite and every other engine need the developer's explicit, recorded request (PRO current §W.6).
++- Object storage only through the host storage adapter: the bundled S3-compatible default, or any S3-compatible provider configured per deployment. Bytes in object storage, metadata in PostgreSQL.
++- Embeddings and vector search only through the host embeddings adapter and vector helpers. Feature code never imports an S3 SDK and never calls an embedding HTTP API directly.
++- Secrets are held encrypted by the host and delivered sealed; a deployed instance never reads a password, key or token from an env file, a compose or unit file, or the repository. Non-secret settings stay environment-driven.
+ - Errors: throw typed errors, map to HTTP status in one error middleware. Never leak stack traces or DB errors to clients.
+ - Logging: structured (JSON) via the project logger; never `console.log` in committed code.
+ - Naming: `camelCase` for values, `PascalCase` for types and schemas, `kebab-case` for files.
+@@ -69,26 +80,32 @@
+ Features consume host capabilities through the Host SDK and never recreate auth, database access,
+ jobs, secrets, configuration, realtime, theming or AI access (PRO §5–§6, Addendum A.2). AI goes
+ through the capability layer — capabilities, not vendors; sealed credentials; every call metered
+-with a scope; a mock provider selectable in configuration. A model never produces a dollar amount.
++with a scope; a mock provider selectable in configuration. A mock or local development-quality
++provider reports itself as such and is never reported as production-ready. A model never produces
++a dollar amount.
+ 
+ Every feature declares a `feature.manifest.json` with namespaced permissions, owned migrations,
+ jobs, outbound hosts and the fakes its tests ship (PRO §7, Appendix B, A.6).
+ 
+ The application declares the capabilities it uses in `app.manifest.json` at the repository root —
+ name, reason and fake for each — and the host provisions from that declaration (PRO current §J.9).
++The foundation stack is the exception that is not inferred: the host provisions it with every new
++application, and `database`, `object_storage`, `embeddings` and `vector_search` are declared like
++any other capability when the application uses them.
+ Flags, where the developer asks for them, are the optional `flags` capability: OpenFeature-shaped
+ evaluation with a default and a context, an in-memory fake under `tests/fakes/`, and an owner and a
+ removal follow-up per flag (PRO current §J.10).
+ 
+ For AI retrieval, embeddings and file/object data follow `AI-Data-Standards.md`: explicit extension
+ and index identities, authorized retrieval, source/chunk provenance, host ingestion jobs, private
+-S3-compatible objects with PostgreSQL metadata and a measured scale/replacement path. Do not add
+-unused AI services merely because the standards prepare for them.
++S3-compatible objects with PostgreSQL metadata and a measured scale/replacement path. The foundation
++stack's storage and embedding service are present from creation, each switchable off per deployment;
++their presence is not a reason to build features the task does not ask for.
+ 
+ ## Tests
+ 
+ - Vitest. Every service function has a unit test; every route has at least one request test. Test files sit beside the code as `*.test.ts`.
+-- Every external service has a fake under `tests/fakes/` and the suite runs green with no network.
++- Every external service has a fake under `tests/fakes/` and the suite runs green with no network. The foundation stack's storage and embeddings adapters have fakes too. Migrations and vector operations are tested against the real PostgreSQL + pgvector pair; a PGlite-only test does not establish them.
+ - Playwright for browser tests. Select on whatever expresses the behaviour most durably:
+   - `getByRole` and `getByLabel` where the assertion is about user-facing behaviour and
+     accessibility semantics. These are preferred for anything a person interacts with — the test
+@@ -130,6 +147,7 @@
+ src/services/    logic
+ src/db/          schema and migrations
+ contracts/       Zod wire schemas from the database schema, shared by routes and client
++foundation/      the host's foundation stack definition (compose.yaml) and adapters; host-owned
+ tests/fakes/     one fake per external service
+ web/src/<app>/   one Vite entry per surface
+ web/src/shared/  ui/, theme/, vendor/, types
+--- a/core/mock2/templates/repo/.mock2/foundation/README.md.tpl
++++ b/core/mock2/templates/repo/.mock2/foundation/README.md.tpl
+@@ -7,12 +7,16 @@
+ 
+ ## Start the foundation
+ 
+-1. Use the Node runtime selected by `.mock2/standards/stack.versions.json` and a supported PostgreSQL instance.
++1. Use the Node runtime selected by `.mock2/standards/stack.versions.json` and PostgreSQL with pgvector. On a host
++   that provisions the application foundation stack, use the database it provisioned (PRO current §W.6).
+ 2. Run `npm install` and commit the resulting lockfile after dependency checks. Dependencies have exact
+    selected versions; a generated package manifest alone does not establish installed compatibility.
+-3. Copy `.env.example` to `.env`, keep it private, and fill in the database connection and application origin.
+-   Set a randomly generated setup key with at least 32 characters in `BOOTSTRAP_TOKEN`. Supply it privately
+-   to the first owner. It is never a URL parameter, source value, or command-line argument.
++3. For a local development run, copy `.env.example` to `.env`, keep it private, and fill in the database
++   connection and application origin. Set a randomly generated setup key with at least 32 characters in
++   `BOOTSTRAP_TOKEN`. Supply it privately to the first owner. It is never a URL parameter, source value, or
++   command-line argument. A deployed instance never reads a secret from an env file: on a host that provisions
++   the application foundation stack, the setup key and every other secret are delivered sealed by the host.
++   Without `DATABASE_URL` the server refuses to start; there is no default database.
+ 4. Run `npm run db:generate`, inspect the generated initial migration, then `npm run db:migrate` against
+    the intended database. The migrator does not create the database or choose an existing production target.
+ 5. Run `npm run build`, then `npm start`. Open `/setup` and enter the setup key to create the first owner.
+@@ -49,7 +53,9 @@
+ actors/actions/record identities, not passwords, session values, or complete record contents.
+ 
+ Selected integrations, jobs, private files and semantic retrieval are requested capabilities until their
+-host adapters are bound and behavior is tested. No vector service, provider credential, outbound API call
++host adapters are bound and behavior is tested. On a host that provisions the application foundation stack,
++pgvector, object storage and an embedding service are present from creation and are reached only through the
++host's adapters, never an S3 SDK or embedding API in feature code. No provider credential, outbound API call
+ or background job is provisioned merely by choosing an addon. The manifest reports those bindings truthfully.
+ 
+ ## Validation scope
+--- a/core/mock2/templates/repo/.mock2/foundation/server.ts.tpl
++++ b/core/mock2/templates/repo/.mock2/foundation/server.ts.tpl
+@@ -7,7 +7,8 @@
+ if(url.origin!==origin)throw new Error('APP_ORIGIN must be an exact origin without a path.');
+ if(process.env.NODE_ENV==='production'&&(url.protocol!=='https:'||!secureCookies))throw new Error('Production requires HTTPS and secure cookies.');
+ if(url.protocol!=='https:'&&!['localhost','127.0.0.1','[::1]'].includes(url.hostname))throw new Error('Use HTTPS outside local development.');
+-if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL is required.');
++if(!process.env.DATABASE_URL)throw new Error('DATABASE_URL is required: PostgreSQL is the application database and there is no default.');
++if(!/^postgres(?:ql)?:\/\//.test(process.env.DATABASE_URL))throw new Error('DATABASE_URL must be a PostgreSQL URL (postgres:// or postgresql://).');
+ const store=createStore(process.env.DATABASE_URL);
+ const app=createApp({store,config,origin,secureCookies,bootstrapToken:process.env.BOOTSTRAP_TOKEN??'',webRoot:resolve('dist/web')});
+ const server=app.listen(Number(process.env.PORT??3000),process.env.HOST??'127.0.0.1',()=>process.stdout.write(JSON.stringify({level:'info',event:'server.started'})+'\n'));
+--- a/core/mock2/templates/repo/.mock2/modules.md
++++ b/core/mock2/templates/repo/.mock2/modules.md
+@@ -53,6 +53,21 @@
+ host configuration, permissions, extension points, lifecycle, source identity, examples, tests and
+ known limits. Record empty collections when a category does not apply.
+ 
++## Host adapters for data, objects and embeddings
++
++The host's adapters over the application foundation stack (PRO current §W.6) are the supported
++implementations of four host capabilities: `database` (PostgreSQL with pgvector), `object_storage`
++(any S3-compatible provider), `embeddings` and `vector_search`. A module that needs one lists it in
++`dependencies.host` and uses that adapter. A module never carries its own database driver or engine
++(SQLite included), S3 client, embedding client or vector store, and never reads a credential from an
++env file. A receiving application binds the same four capabilities to its own host; the module's
++source and transfer plan never carry their configuration or credentials.
++
++A module that imports an S3 SDK, an embedding API client or a database driver directly needs an
++adapter before it is compatible; it is not a compatible capability. A module whose descriptor omits
++a host capability its code uses has an undeclared dependency. Tool follow-up: `modules.mjs plan`
++reports both; until it does, the integration review records them.
++
+ ## Setup and adoption
+ 
+ Infer boundaries and reuse intent from requested workflows and existing answers. Ask only

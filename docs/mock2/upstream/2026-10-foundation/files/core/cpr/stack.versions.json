@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "baselineId": "cpr-2026-10-03",
+  "reviewedOn": "2026-10-03",
+  "reviewDue": "2026-11-03",
+  "reviewTriggers": [
+    "monthly",
+    "upstream security advisory",
+    "support status change"
+  ],
+  "policy": {
+    "newProjects": "selected exact versions",
+    "existingProjects": "patch-only on recorded major/minor unless explicitly asked to upgrade or migrate",
+    "postgresqlMaintenance": "same major is maintenance patch",
+    "zeroMajor": "retain 0.x minor",
+    "images": "resolve selected tag to architecture-specific digest; do not invent unknown digests"
+  },
+  "systems": {
+    "node": {
+      "selected": "24.21.0",
+      "source": "https://nodejs.org/en/about/previous-releases",
+      "checkedOn": "2026-10-03",
+      "channel": "LTS",
+      "kind": "runtime",
+      "optional": false,
+      "maintenanceLine": "24",
+      "supportedUntil": "2028-04-30"
+    },
+    "npm": {
+      "selected": "12.2.0",
+      "source": "https://registry.npmjs.org/npm/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "postgresql": {
+      "selected": "18.6",
+      "source": "https://www.postgresql.org/support/versioning/",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "service",
+      "optional": false,
+      "maintenanceLine": "18",
+      "supportedUntil": "2030-11-14",
+      "existingSupportedLines": {
+        "16": "16.15",
+        "17": "17.11",
+        "15": "15.19",
+        "14": "14.24"
+      }
+    },
+    "pgvector": {
+      "selected": "0.8.7",
+      "source": "https://github.com/pgvector/pgvector",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "extension",
+      "optional": false,
+      "requires": "PostgreSQL 13+; extension binaries and CREATE EXTENSION vector required. Required for new PRO applications from Mock2 1.39.0: the database of the application foundation stack (PRO current §W.6).",
+      "image": "pgvector/pgvector:0.8.7-pg18"
+    },
+    "react": {
+      "selected": "19.3.0",
+      "source": "https://registry.npmjs.org/react/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "react-dom": {
+      "selected": "19.3.0",
+      "source": "https://registry.npmjs.org/react-dom/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "typescript": {
+      "selected": "7.0.2",
+      "source": "https://registry.npmjs.org/typescript/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false,
+      "requires": "Native tsc; programmatic compiler API consumers need separately pinned compatible bridge"
+    },
+    "express": {
+      "selected": "5.2.1",
+      "source": "https://registry.npmjs.org/express/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "zod": {
+      "selected": "4.6.5",
+      "source": "https://registry.npmjs.org/zod/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "drizzle-orm": {
+      "selected": "0.45.3",
+      "source": "https://registry.npmjs.org/drizzle-orm/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "drizzle-kit": {
+      "selected": "0.31.11",
+      "source": "https://registry.npmjs.org/drizzle-kit/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "drizzle-zod": {
+      "selected": "0.8.3",
+      "source": "https://registry.npmjs.org/drizzle-zod/latest",
+      "checkedOn": "2026-10-17",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true,
+      "requires": "Peers drizzle-orm >=0.36.0 and zod ^3.25.0 || ^4.0.0; used when the contracts are derived from the Drizzle schema, as the generators write them"
+    },
+    "vite": {
+      "selected": "8.3.2",
+      "source": "https://registry.npmjs.org/vite/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "vitest": {
+      "selected": "5.0.3",
+      "source": "https://registry.npmjs.org/vitest/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "playwright": {
+      "selected": "1.63.0",
+      "source": "https://registry.npmjs.org/playwright/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false,
+      "requires": "Playwright-matched browser binaries; browser revision recorded in project lock/deployment"
+    },
+    "tailwindcss": {
+      "selected": "4.3.3",
+      "source": "https://registry.npmjs.org/tailwindcss/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "shadcn": {
+      "selected": "4.21.1",
+      "source": "https://registry.npmjs.org/shadcn/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "nx": {
+      "selected": "23.2.1",
+      "source": "https://registry.npmjs.org/nx/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "docker-engine": {
+      "selected": "29.8.2",
+      "source": "https://docs.docker.com/engine/release-notes/29/",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "service",
+      "optional": false,
+      "requires": "Runs the application foundation stack as one Compose unit for new PRO applications (Mock2 1.39.0, PRO current §W.6)."
+    },
+    "docker-compose": {
+      "selected": "5.6.0",
+      "source": "https://github.com/docker/compose/releases",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "service",
+      "optional": false,
+      "requires": "Runs the application foundation stack as one Compose unit for new PRO applications (Mock2 1.39.0, PRO current §W.6)."
+    },
+    "nginx": {
+      "selected": "1.30.5",
+      "source": "https://nginx.org/en/download.html",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "service",
+      "optional": true
+    },
+    "lucide-react": {
+      "selected": "1.51.0",
+      "source": "https://registry.npmjs.org/lucide-react/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "@electric-sql/pglite": {
+      "selected": "0.5.8",
+      "source": "https://registry.npmjs.org/@electric-sql/pglite/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "supertest": {
+      "selected": "7.3.1",
+      "source": "https://registry.npmjs.org/supertest/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "esbuild": {
+      "selected": "0.28.2",
+      "source": "https://registry.npmjs.org/esbuild/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true
+    },
+    "qdrant": {
+      "selected": "1.19.1",
+      "source": "https://github.com/qdrant/qdrant/releases",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "service",
+      "optional": true
+    },
+    "@types/node": {
+      "selected": "24.19.1",
+      "source": "https://registry.npmjs.org/@types/node/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "@types/express": {
+      "selected": "5.0.6",
+      "source": "https://registry.npmjs.org/@types/express/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "@types/react": {
+      "selected": "19.3.0",
+      "source": "https://registry.npmjs.org/@types/react/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "@types/react-dom": {
+      "selected": "19.3.0",
+      "source": "https://registry.npmjs.org/@types/react-dom/latest",
+      "checkedOn": "2026-10-03",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": false
+    },
+    "pg": {
+      "selected": "8.23.1",
+      "source": "https://registry.npmjs.org/pg/latest",
+      "checkedOn": "2026-10-22",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true,
+      "requires": "Selected when the application foundation uses the PostgreSQL adapter."
+    },
+    "@types/pg": {
+      "selected": "8.23.1",
+      "source": "https://registry.npmjs.org/@types/pg/latest",
+      "checkedOn": "2026-10-22",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true,
+      "requires": "Selected when the application foundation uses the PostgreSQL adapter."
+    },
+    "eslint": {
+      "selected": "10.13.0",
+      "source": "https://registry.npmjs.org/eslint/latest",
+      "checkedOn": "2026-10-22",
+      "channel": "stable",
+      "kind": "npm",
+      "optional": true,
+      "requires": "Node ^20.19 or ^22.13 or >=24; selected by the application foundation for shared JavaScript host/helper lint."
+    },
+    "seaweedfs": {
+      "selected": "4.48",
+      "source": "https://github.com/seaweedfs/seaweedfs/releases",
+      "checkedOn": "2026-10-24",
+      "channel": "stable",
+      "kind": "service",
+      "optional": false,
+      "image": "chrislusf/seaweedfs:4.48",
+      "requires": "Bundled S3-compatible object store of the application foundation stack. Any S3-compatible provider replaces it per deployment through the host storage adapter; the host records the provider actually used."
+    },
+    "text-embeddings-inference": {
+      "selected": "1.9.0",
+      "source": "https://github.com/huggingface/text-embeddings-inference/releases",
+      "checkedOn": "2026-10-24",
+      "channel": "stable",
+      "kind": "service",
+      "optional": false,
+      "image": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0",
+      "requires": "Local embedding service of the application foundation stack (CPU image). Serves the local embedding model below; switchable off per deployment."
+    },
+    "local-embedding-model": {
+      "selected": "BAAI/bge-small-en-v1.5",
+      "source": "https://huggingface.co/BAAI/bge-small-en-v1.5",
+      "checkedOn": "2026-10-24",
+      "channel": "stable",
+      "kind": "model",
+      "optional": false,
+      "dimensions": 384,
+      "metric": "cosine",
+      "requires": "Default local embedding model of the foundation stack. Development quality: the application and the host warn to switch provider for production-quality search. Record the model revision actually served."
+    },
+    "openai-embeddings": {
+      "selected": "text-embedding-3-small",
+      "source": "https://platform.openai.com/docs/guides/embeddings",
+      "checkedOn": "2026-10-24",
+      "channel": "stable",
+      "kind": "model",
+      "optional": true,
+      "dimensions": 1536,
+      "metric": "cosine",
+      "requires": "Production embedding provider through the host embeddings adapter, which sends the model and dimensions explicitly on every call. Any OpenAI-compatible provider uses the same adapter with its own explicit model and dimensions."
+    }
+  },
+  "compatibility": [
+    {
+      "id": "cpr-2026-10-03-packages",
+      "status": "verified-package-fixture",
+      "scope": "Node runtime, React SSR/Vite, Express/Zod request validation, Drizzle SQL/vector mapping, strict TypeScript, Vitest; production DB/storage/browser remain host-specific",
+      "evidence": "state/compatibility/2026-10-03-stack.json"
+    },
+    {
+      "id": "drizzle-zod-0.8.3-generated",
+      "status": "verified-package-fixture",
+      "scope": "drizzle-zod 0.8.3 in the contracts the generators write, with the selected packages (drizzle-orm 0.45.3, Zod 4.6.5, native TypeScript 7.0.2, Express 5.2.1, React 19.3.0, Vite 8.3.2, Vitest 5.0.3, Playwright 1.63.0) and again with drizzle-orm 0.45.4 / Zod 4.6.7 / TypeScript 5.9.3: tsc clean, the generated Vitest request tests passing on the fakes, vite build, Playwright states capture; no PostgreSQL server, migration or query, Node 22 not 24, chromium only",
+      "evidence": "state/compatibility/2026-10-17-drizzle-zod.json"
+    },
+    {
+      "id": "foundation-stack-2026-10-24",
+      "status": "pending-evidence",
+      "scope": "pgvector/pgvector:0.8.7-pg18, chrislusf/seaweedfs:4.48 and text-embeddings-inference cpu-1.9.0 with BAAI/bge-small-en-v1.5 run as one Compose stack: vector operations, private object put/get/delete, storage off/on, a storage provider switch with a verified copy, an embeddings provider switch with index replacement and missing-credential reporting. Image tags checked to exist on 2026-10-24; no stack run is recorded in this release",
+      "evidence": null
+    },
+    {
+      "id": "relay-reference-1.2.1",
+      "status": "retained-contract",
+      "scope": "React 18 / Express 4 / Zod 3 reference adapter; new application major lines need a tested host adapter/port",
+      "package": "core/relay/package.json"
+    }
+  ],
+  "universalVersions": {
+    "object-storage": "S3-compatible API; host records actual provider/version; the foundation stack bundles seaweedfs by default",
+    "copied-ui": "shadcn components record source/hash, CLI version alone insufficient",
+    "OS": "host chooses supported Debian/Ubuntu or established distribution; record exact image/package identity",
+    "AI-models": "immutable provider/model/revision and embedding/index configuration; never floating substitution; an embedding change is a re-embedding into a new validated index"
+  }
+}

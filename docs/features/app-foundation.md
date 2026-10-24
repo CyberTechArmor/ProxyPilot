@@ -26,25 +26,33 @@ is a bug in this document.
 
 ## Guest layout
 
-- The guest is created Docker-ready: `security.nesting=true` plus the Docker syscall
-  intercepts (`security.syscalls.intercept.mknod`, `…setxattr`), the same flags
-  `create_lxc_container`'s `docker_ready` uses.
+- The guest is created Docker-ready with the same five settings `create_lxc_container`'s
+  `docker_ready` uses: `security.nesting=true` and the syscall intercepts `mknod`,
+  `setxattr`, `bpf` and `bpf.devices`. The setup script installs Debian 13's `docker.io`,
+  `docker-compose` and `postgresql-client`. For a foundation project a failed install
+  fails provisioning; it is not best-effort.
 - `/opt/mock2-foundation/compose.yaml` (+ Postgres `pg_hba.conf` / `pg_ident.conf`)
   is **platform-owned**, generated from the deployment's state in mock2.db. The app
   repository carries a portable copy at `foundation/compose.yaml` so the same unit runs
   outside ProxyPilot; the guest never reads the repo copy.
-- All three services are always defined. Bring-up runs `up -d`, then `stop`s the ones
-  that are off. The app's runtime never calls `docker compose down -v`, and the harness
+- All three services are always defined, and images are pinned by digest under the
+  contract tags. Bring-up starts `postgres` and `storage`, plus `embeddings` only when it
+  is on and local. It then `stop`s whatever is off. Storage is always started once, so its
+  identities exist before it can be reached. A service that never started is created the
+  first time it is turned on. The app's runtime never calls `docker compose down -v`, and the harness
   refuses it, together with `docker volume rm` and `docker system prune`.
 - Postgres listens on **no TCP port**. Its socket is bind-mounted at
   `/run/mock2-foundation/postgres`; `pg_hba` allows only `local … peer` with the ident
-  map `root → app` and `root|postgres → postgres`. There is no database password to
-  store. `DATABASE_URL = postgres:///app?host=/run/mock2-foundation/postgres&user=app`
+  map `root → app` and `root → postgres`. There is no database password to store. The
+  image's first-start scripts run as the container's postgres user (uid 999) through a
+  temporary mapping that is deleted when initialization ends, so a guest account that
+  happens to have uid 999 is refused. `DATABASE_URL = postgres:///app?host=/run/mock2-foundation/postgres&user=app`
   goes in the unit as an ordinary `Environment=` line.
 - SeaweedFS S3 and the embedding server are published on `127.0.0.1` only (8333 / 8088).
   The bundled S3 has two identities: `app` (read/write/list on bucket `app`) and a
-  host-only admin identity. Anonymous requests are refused, and a health probe checks
-  this.
+  host-only admin identity, both stored in SeaweedFS's filer and set over stdin only.
+  Re-applying an identity replaces its key, and the old key stops working. Anonymous
+  requests get 403, and the app key is limited to bucket `app`.
 - `/etc/mock2-foundation/master.key` (0600 root) holds the deployment master key: 32
   random bytes, which is a key and not a password. It is the one root of trust in the
   guest, and mock2.db holds an encrypted escrow copy.
@@ -122,6 +130,18 @@ deletes data. Writes need sudo and are audited.
 | POST | `/foundation/jobs/:jobId/cancel` | |
 | GET / PUT / DELETE | `/database-exception` | the recorded explicit SQLite request (below) |
 
+- **Access:** GET needs viewer; writes need editor plus sudo and refuse archived projects.
+- **Credentials:** stored credentials are reused only for the same endpoint.
+- **Staging:** a switch stays staged until it tests successfully from inside the guest.
+  Cancelling abandons it.
+- **Refusal codes:**
+  - 409: `STORAGE_HAS_OBJECTS`, `STORAGE_OBJECTS_UNKNOWN`, `SWITCH_MODE_REQUIRED`,
+    `ACKNOWLEDGE_REQUIRED`, `MISSING_CREDENTIALS`, `PROVIDER_TEST_FAILED`,
+    `FOUNDATION_JOB_RUNNING`, `FOUNDATION_BUSY`, `FOUNDATION_UNAVAILABLE`,
+    `NOT_A_FOUNDATION_PROJECT`;
+  - 400: `INVALID_REQUEST`, `INVALID_CONFIG`;
+  - 404: `JOB_NOT_FOUND`.
+
 ## Generated app side
 
 The scaffold gains a platform-owned `foundation/` module: plain ESM with type
@@ -138,6 +158,39 @@ declarations, so the app's TypeScript and the CLI share one implementation. It p
 Feature code uses these adapters only. A direct S3 client or embedding HTTP call in
 feature code is a deviation.
 
+**Load order.** The app's `start` and `dev` scripts run
+`node --import=./foundation/runtime/bootstrap.mjs …`. An `import` line at the top of the
+entry is not enough: ESM runs sibling imports while an earlier one is still awaiting.
+
+**Missing master key.** If the key file is missing, the app still starts and the
+database works. Storage and keyed embedding providers report `MISSING_MASTER_KEY`; the
+local model needs no key.
+
+**Health route.** The admin-only `GET /api/foundation/health` returns the statuses and
+the local-model warning, and the platform admin area shows them.
+
+**Re-embed validation.** A sample of up to 50 items is checked, and at least 90% must
+come back in the new index's top 5.
+
+**Repository copy.** The repository's `foundation/compose.yaml` ships with its
+`foundation/postgres/` files, so the same unit runs outside ProxyPilot.
+
+## Dashboard
+
+Dev Studio → project → Details → Build → *Application foundation*
+(`components/mock2/ProjectFoundation.jsx`, with its rules in `foundation-panel-logic.js`).
+It shows:
+
+- health per feature;
+- Turn off, which lists what becomes unavailable and deletes nothing;
+- Switch provider: storage asks for copy or fresh plus an acknowledgement, and embeddings
+  re-embed into a new index;
+- job progress with Cancel;
+- 409 options offered as next steps;
+- the collapsed SQLite exception.
+
+Proof: `tests/foundation-panel.browser.mjs`, against a mocked API.
+
 ## No SQLite without an explicit request
 
 - PostgreSQL is the only application database.
@@ -149,6 +202,15 @@ feature code is a deviation.
 - **Exception:** the person records, on the project, that they explicitly asked for
   SQLite, with their own words (`/database-exception`, sudo, audited). The prompts then
   quote that request. Nothing the builder writes into the repository can create it.
+- **What the gate also catches:** `DATABASE_URL` literals starting `sqlite:` or `file:`,
+  and a `src/` with no `package.json`.
+- **How the host runs it:** the host sets `MOCK2_DATABASE_EXCEPTION` from mock2.db only.
+  The finish guard compares against HEAD. The command policy (`harness-safety.js`)
+  refuses installs of these packages, and anything that tears down the foundation stack
+  or deletes its volumes.
+- **Standards:** constitution §2 is the binding text for builders, and the appended pinned
+  guidance does not supersede it. The mock2-core 1.39.0 amendment is drafted in
+  `docs/mock2/upstream/2026-10-foundation/`.
 
 ## Existing projects
 

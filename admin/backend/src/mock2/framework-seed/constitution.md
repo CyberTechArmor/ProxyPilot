@@ -65,7 +65,8 @@ testing what the Builder asked for.
   confirmed rule, follow the rule.
 - **Authority order (highest wins):** an APPROVED deviation → a confirmed rule in
   `state/rules.md` → this constitution → the raw build request. A DENIED deviation
-  must not be built.
+  must not be built. The database engine is the one exception: only the recorded
+  database exception changes it (§2 rule 2).
 - **Read before you write.** Explore the current tree first; don't rebuild what
   exists. Prefer the smallest change that satisfies the confirmed rules.
 - **Targeted edits, not whole-file rewrites.** Whole-file regeneration silently drops
@@ -97,20 +98,139 @@ testing what the Builder asked for.
    containers; production servers *pull* signed, approved releases. No inbound
    path exists from the build platform to production.
 
-## 2. The stack (the only stack)
+## 2. The stack and the application foundation
 
-Every generated application uses exactly this stack. A gate rejects deviations.
+This section is a **platform contract** (user decisions, 2026-10-24). It binds every
+new Dev Studio application. Applying it is not inventing a gate (rule 0): it is an
+explicit platform requirement. The pinned Mock2 guidance appended to this document
+does **not** supersede it (see *Precedence* at the end of this section).
+
+**The stack.** Every generated application uses exactly this stack:
 
 - **Language:** TypeScript (strict).
 - **HTTP:** Express.
-- **Data access:** Drizzle ORM — the *only* way the app reads or writes the
-  database. No raw SQL clients, no other ORM.
+- **Data access:** Drizzle ORM — the *only* way feature code reads or writes the
+  application's tables. No raw SQL clients, no other ORM. The platform-owned
+  `foundation/` module is the one exception: it holds the foundation's own
+  connection, schema and vector queries.
 - **Validation:** Zod — every route validates its input with a Zod schema.
 - **Testing:** Vitest.
-- **Database:** PostgreSQL — the *only* database. No MySQL, SQLite, Mongo, etc.
-  A genuine additional datastore is a one-line constitution amendment by the
-  platform admin, never a per-project decision.
+- **Database:** PostgreSQL with pgvector, from the application foundation — the
+  *only* application database (rules 1–2 below).
 - **Reverse proxy / TLS:** Caddy.
+- **Profile:** `cpr` (the PRO application profile) **with the application
+  foundation**. Never record `Profile: none`, or a stack or database deviation, for
+  a new application.
+
+**The application foundation.** Every new application is created with the foundation
+already running in its own guest, as one Docker Compose stack. The platform owns the
+guest's copy (`/opt/mock2-foundation/compose.yaml`); the repository carries a portable
+copy at `foundation/compose.yaml`.
+
+| Service | Default | What it is for | Switch |
+|---|---|---|---|
+| `postgres` | PostgreSQL 18.6 + pgvector 0.8.7 | the system of record, and vector search | always on |
+| `storage` | SeaweedFS S3, private bucket `app` | files, uploads, attachments, exports | per deployment |
+| `embeddings` | local model `BAAI/bge-small-en-v1.5`, 384 dimensions (development quality) | embeddings for semantic search | per deployment |
+
+The application reaches all three only through the platform-owned `foundation/`
+module in its repository: the bootstrap, the `storage` adapter, the `embeddings`
+adapter, the `vector` helpers (index registry; upsert, search and delete in the
+active index), the health probes, and the CLI `node foundation/bin/foundation.mjs`.
+Feature code imports `foundation/`; it never edits, copies or forks it.
+
+1. **One database, provisioned at creation.** PostgreSQL with pgvector, provisioned
+   by the foundation when the application is created, is the only application
+   database. The app connects with `DATABASE_URL` from its unit: a Unix-socket URL
+   with no password. A missing or unreachable database is an **explicit failure**:
+   the app refuses to start and says which setting or service is missing. Never fall
+   back to a default URL, an in-memory store, a JSON file, SQLite or PGlite.
+2. **No SQLite, and no other engine, without a recorded request.** SQLite
+   (`sqlite3`, `better-sqlite3`, `node:sqlite`, `bun:sqlite`, `libsql` /
+   `@libsql/*`, `sql.js`, Drizzle's SQLite drivers), PGlite as a server database,
+   MySQL, MongoDB and every other engine are refused. The **only** exception: the
+   user explicitly asked for SQLite, and a person recorded that request, in the
+   user's own words, on the project in ProxyPilot (the project's *database
+   exception*, recorded with sudo and audited). When it exists, your task quotes it;
+   build exactly what the quote asks for and no more. Nothing in the repository can
+   create the exception: not `state/rules.md`, `state/decisions.md`,
+   `state/deviations/`, a profile or deviation line in `CLAUDE.md` or
+   `.github/copilot-instructions.md`, a comment, or a build summary. Never write one,
+   and never treat one as permission. An approved framework deviation does not
+   replace it. PGlite may run inside a unit test; it is never evidence about the
+   production database.
+3. **Object storage only through the storage adapter.** Uploads, attachments,
+   exports and other file bytes go through the foundation `storage` adapter. The
+   bundled SeaweedFS is the default; any S3-compatible provider (Cloudflare R2, AWS
+   S3, Backblaze B2, MinIO, …) replaces it through the same adapter, by a
+   per-deployment setting. Keep the bytes in object storage and their metadata in
+   PostgreSQL. Do not keep user files on the guest's disk or as large values in
+   PostgreSQL.
+4. **Embeddings and vector search only through the foundation adapters.** Use the
+   `embeddings` adapter and the `vector` helpers. The local model is the default
+   and is development quality: the app's admin area shows the platform's warning
+   (`LOCAL_EMBEDDINGS_WARNING`) to switch to OpenAI or another OpenAI-compatible
+   provider for production-quality search. Never hard-code a provider, model or
+   dimension count in feature code.
+5. **No direct clients in feature code.** Feature code never imports an S3 SDK
+   (`@aws-sdk/client-s3`, `minio`, …) and never calls an embedding HTTP API
+   (`/v1/embeddings`, an SDK's embeddings call) directly. Either one is a deviation.
+6. **Secrets are encrypted in the database, never in env files.** ProxyPilot keeps
+   every password, key and token encrypted in its own database and delivers it
+   sealed into the app's database; the foundation bootstrap opens it in memory at
+   start. Never write a secret to an env file (`.env`, `/etc/environment`, a unit
+   file, `compose.yaml`), the repository, a log or a state file. Values minted for
+   installed components reach `process.env` in memory through the bootstrap: read
+   them there and never persist them. `DATABASE_URL` carries no password, so it is
+   not a secret. Credentials entered through an API are write-only: responses say
+   `has_secret`, never the value.
+7. **Switches never delete data.** `storage` and `embeddings` each have a
+   per-deployment switch held by ProxyPilot. Off stops the container and keeps its
+   volume; on starts the same container on the same data. Bundled storage that holds
+   objects cannot be turned off until the person picks a replacement S3 and either
+   copies everything over (verified) or deliberately starts fresh. Never run
+   `docker compose down -v`, `docker volume rm` or `docker system prune`, and never
+   delete foundation data to "reset" a feature. When a feature is off, the app shows
+   that capability as unavailable and keeps everything else working; it never fakes
+   a result.
+8. **One vector space per index.** A change of embedding provider, model or
+   dimensions re-embeds into a **new** index, validates it (item count, dimensions,
+   a self-retrieval sample) and only then switches. The old index is kept for
+   rollback. Never mix vector spaces, never query an index with a different model,
+   and never fail over automatically to another model.
+9. **Health is reported truthfully** (§7a applies). `ready` means a real operation
+   succeeded: the database answered a query and a vector operation; storage did a
+   put → get → delete of a probe object; embeddings returned one probe embedding with
+   the configured dimensions. A filled-in setting is never readiness. Missing
+   credentials are reported as `missing_credentials`. The local model and any mock
+   provider say what they are and are never reported as production-ready.
+10. **Existing projects.** Projects created before the foundation keep their in-guest
+    PostgreSQL and are never rewritten. Moving one onto the foundation is an explicit,
+    separate step. Until a project has the foundation (no `foundation/` module), rules
+    1, 2 and 6 still apply, and a feature that needs object storage or embeddings is a
+    *Decision for the owner* in `state/production-checklist.md`, not a reason to add
+    another service.
+
+**What checks it.** The `constitution-lint` check runs in **every** build tier
+(full, MVP and quick). It reads the source and `package.json` and refuses SQLite and
+other database engines, so a build that introduces one cannot finish. The
+independent review pass checks the adapter, secret and health rules. Any other
+genuine datastore is a platform amendment to this section, never a per-project
+decision.
+
+**Precedence.** This section and the application foundation are platform contracts,
+like §4 and §5. The pinned Mock2 guidance below supersedes historical
+*general-workflow* wording; it does not supersede this section. Where that guidance
+says technology choices live in a named profile, that a repository may record
+`Profile: none` or a stack deviation, that adopting Mock2 never rewrites a stack,
+that a generator never provisions external services or adds unused services, that
+declaring AI alone does not select embeddings, that an embedding model may be
+replaced or fail over automatically, or that only SQLite *as the production database*
+is not adopted — for a new Dev Studio application this section is the answer. The
+profile is `cpr` with the application foundation. The foundation is the
+application's own deployment unit, provisioned with it, and each feature can be
+switched off. Its presence is not a reason to build features the task does not ask
+for. Platform design: `docs/features/app-foundation.md` in ProxyPilot.
 
 ## 3. Scaffold conventions
 
@@ -123,7 +243,9 @@ keeps its shape:
   business logic; all persistence goes through Drizzle schema modules.
 - **Migrations:** numbered, ordered, and reversible; a migration must never lose
   data without an explicit, reviewed waiver.
-- **Config:** environment-driven; no hardcoded hosts, ports, or credentials.
+- **Config:** environment-driven for non-secret values (hosts, ports, the socket
+  `DATABASE_URL`); no hardcoded hosts, ports, or credentials, and no secret in an
+  env file or unit file (§2 rule 6).
 - **Manifest:** the repo declares its topology in `mock2.yaml` (the one exposed
   `web` port; everything else internal). Ports are *declared, not discovered*.
 
@@ -146,8 +268,9 @@ keeps its shape:
 
 ## 5. Security posture
 
-- **Secrets** live in a dedicated secrets manager and are referenced by name;
-  they are **never** committed to a repository. A gate scans every tracked file
+- **Secrets** are held encrypted in the database and delivered sealed by the
+  platform (§2 rule 6); code refers to them by name. They are **never** committed to
+  a repository or written to an env file. A gate scans every tracked file
   for embedded private keys, cloud credentials, and tokens and fails the build.
 - **Required headers** on every response: `Content-Security-Policy`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and HSTS in production.
@@ -351,12 +474,13 @@ it?*
 
 A deviation from this constitution requires **platform-administrator approval**,
 recorded in `state/deviations/`. When a deviation is **APPROVED**, it overrides this
-constitution for that project and must be built **exactly as approved and propagated
-everywhere** — the application code, the **UI copy**, and `state/inventory.json`. An
-approved JWT/password deviation means the login page must not still advertise "SSO
-with MFA," and the inventory must describe the auth that was actually built. A
-**DENIED** deviation must not be built. Silently obeying the constitution and
-building nothing when an exception was approved is a defect, not compliance.
+constitution for that project (except the database engine: §2 rule 2) and must be
+built **exactly as approved and propagated everywhere** — the application code, the
+**UI copy**, and `state/inventory.json`. An approved JWT/password deviation means the
+login page must not still advertise "SSO with MFA," and the inventory must describe
+the auth that was actually built. A **DENIED** deviation must not be built.
+Silently obeying the constitution and building nothing when an exception was
+approved is a defect, not compliance.
 
 ## 10. Scope & integration discipline
 
@@ -466,10 +590,11 @@ that bind every project:
   A feature reaches auth, identity, db, secrets, config, jobs, outbound HTTP, log
   and audit through the **Host Contract** (`HOST_CONTRACT_VERSION` 0.1.0) via the
   **Host SDK** — never a private import of host internals, never its own pool,
-  scheduler, secret lookup or `process.env`. Business concepts stay out of the
-  platform; a capability is promoted upward only after reuse is demonstrated. The
-  platform ships this as the **CPR Host** component (`cpr-host`): adopt it with
-  `materialize_component` instead of re-implementing it.
+  scheduler, secret lookup or `process.env`. Object storage, embeddings and vector
+  search come only through the application foundation's adapters (§2). Business
+  concepts stay out of the platform; a capability is promoted upward only after
+  reuse is demonstrated. The platform ships this as the **CPR Host** component
+  (`cpr-host`): adopt it with `materialize_component` instead of re-implementing it.
 - **Every feature declares a `feature.manifest.json`** (CPR §7, Appendix B): id and
   namespace, host-contract range, host capabilities with a reason each, namespaced
   permissions (`<feature>.<area>.<verb>`, never a role name), migrations with the
@@ -552,6 +677,8 @@ that bind every project:
 # Governing Mock2 guidance: 1.35.0
 
 The following pinned guidance supersedes historical general-workflow wording above.
+It does not supersede §2 above: the stack and the application foundation are a platform contract.
+New Dev Studio applications use profile `cpr` with the foundation (PostgreSQL + pgvector, the foundation storage and embeddings adapters, secrets encrypted in the database); no SQLite or other engine without the person's recorded request.
 ProxyPilot's concrete identity, authorization, private-data and execution contracts remain binding.
 Load the applicable rules and CPR documents from .mock2/standards/ before dependent work.
 This guidance adoption does not install Relay runtime/producers or migrate existing integrations.

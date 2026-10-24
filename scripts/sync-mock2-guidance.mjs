@@ -84,6 +84,24 @@ export function buildPinnedGuidance(source) {
     runtime_scope: runtimeFiles.length ? 'git-readiness-local-inspection' : 'none' };
 }
 
+// The ProxyPilot-generated header above the pinned upstream text. It is not
+// part of the hashed upstream bytes; it states what the pinned guidance does and
+// does not supersede (constitution §2 is a platform contract).
+export function pinnedGuidanceHeader(version) {
+  return [
+    `# Governing Mock2 guidance: ${version}`,
+    '',
+    'The following pinned guidance supersedes historical general-workflow wording above.',
+    'It does not supersede §2 above: the stack and the application foundation are a platform contract.',
+    'New Dev Studio applications use profile `cpr` with the foundation (PostgreSQL + pgvector, the foundation storage and embeddings adapters, secrets encrypted in the database); no SQLite or other engine without the person\'s recorded request.',
+    'ProxyPilot\'s concrete identity, authorization, private-data and execution contracts remain binding.',
+    'Load the applicable rules and CPR documents from .mock2/standards/ before dependent work.',
+    'This guidance adoption does not install Relay runtime/producers or migrate existing integrations.',
+    'The additive Git readiness slice supports local inspection; host installation, remote credentials, synchronization and deployment remain host-owned operations.',
+    'Canonical application-intake setup commands apply only when that client runtime is installed.',
+  ].join('\n');
+}
+
 export function syncPinnedGuidance(source) {
   const bundle = buildPinnedGuidance(source);
   const { version, updated, files } = bundle;
@@ -93,7 +111,7 @@ export function syncPinnedGuidance(source) {
   const old = readFileSync(resolve(seed, 'constitution.md'), 'utf8');
   const original = old.includes(marker) ? old.slice(0, old.indexOf(marker)).trimEnd() : old.trimEnd();
   const current = files.find(f => f.path.endsWith('/constitution.md')).content;
-  writeFileSync(resolve(seed, 'constitution.md'), `${original}\n\n${marker}\n# Governing Mock2 guidance: ${version}\n\nThe following pinned guidance supersedes historical general-workflow wording above.\nProxyPilot's concrete identity, authorization, private-data and execution contracts remain binding.\nLoad the applicable rules and CPR documents from .mock2/standards/ before dependent work.\nThis guidance adoption does not install Relay runtime/producers or migrate existing integrations.\nThe additive Git readiness slice supports local inspection; host installation, remote credentials, synchronization and deployment remain host-owned operations.\nCanonical application-intake setup commands apply only when that client runtime is installed.\n\n${current}\n<!-- END PINNED MOCK2 GUIDANCE -->\n`);
+  writeFileSync(resolve(seed, 'constitution.md'), `${original}\n\n${marker}\n${pinnedGuidanceHeader(version)}\n\n${current}\n<!-- END PINNED MOCK2 GUIDANCE -->\n`);
   const metadataPath = resolve(seed, 'standards-version.json');
   const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
   Object.assign(metadata, { version, source_version: version, family: 'mock2-core', synced: updated, adoption_scope: 'guidance', runtime_scope:bundle.runtime_scope });

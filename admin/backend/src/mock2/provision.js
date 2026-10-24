@@ -50,6 +50,8 @@ import { parseDeclaredEgress } from './egress-logic.js';
 import { syncDeclaredEgress, probeEgressGrants } from './egress-grants.js';
 import { projectHasBeenDeployed } from './cycles.js';
 import { NEW_GUEST_IMAGE, requireNewGuestImage, parseDebian13Release } from '../lib/debian13-guest.js';
+import { isFoundationProject, foundationLaunchConfigArgs, foundationEnsureSql, clonePipeScript } from './foundation-stack-logic.js';
+import { ensureMasterKey, bringUpFoundation, foundationPresent, foundationPsql } from './foundation-stack.js';
 
 export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';
 // Every new project guest must boot Debian 13. An override is accepted only
@@ -241,10 +243,23 @@ echo "[mock2] cloned bare repo $SRC -> $DST"
   const fresh = getProject(projectId);
   if (fresh?.lifecycle !== 'active') return;
   setStatus(projectId, { phase: 'database', message: 'Copying database from the source project…' });
-  const pipe = await sh(
-    `incus exec ${sourceContainerName} -- su - postgres -c 'pg_dump --clean --if-exists app' | incus exec ${containerName} -- su - postgres -c 'psql -q -v ON_ERROR_STOP=0 app' 2>&1 | tail -n 3`,
-    { timeoutMs: 600000 },
-  );
+  // A foundation guest (either side) dumps/restores through the postgres
+  // service of its stack; native guests keep the in-guest server command.
+  const targetFoundation = isFoundationProject(fresh);
+  const sourceFoundation = await foundationPresent(sourceContainerName).catch(() => false);
+  let pipe = (sourceFoundation || targetFoundation)
+    ? await runHost('bash', ['-c', clonePipeScript({ source: sourceContainerName, target: containerName, sourceFoundation, targetFoundation })], { timeoutMs: 600000 })
+    : await sh(
+      `incus exec ${sourceContainerName} -- su - postgres -c 'pg_dump --clean --if-exists app' | incus exec ${containerName} -- su - postgres -c 'psql -q -v ON_ERROR_STOP=0 app' 2>&1 | tail -n 3`,
+      { timeoutMs: 600000 },
+    );
+  // The restore replaced the clone's platform rows (features, sealed secrets)
+  // with empty tables: re-apply the schema and re-sync the clone's OWN
+  // features and secrets before the app is restarted.
+  if (pipe.code === 0 && targetFoundation) {
+    const resync = await resyncFoundationAfterRestore(projectId, containerName);
+    if (!resync.ok) pipe = { code: 1, stdout: '', stderr: resync.error };
+  }
   if (pipe.code !== 0) {
     setStatus(projectId, { phase: 'ready', message: `Clone online, but the database copy failed: ${(pipe.stderr || pipe.stdout || '').trim().slice(-400)} — the app starts with a fresh database.` });
     try {
@@ -260,6 +275,77 @@ echo "[mock2] cloned bare repo $SRC -> $DST"
   // restored schema.
   await sh(`incus exec ${containerName} -- systemctl restart mock2-dev.service 2>/dev/null || true`).catch(() => {});
   setStatus(projectId, { phase: 'ready', message: 'Clone online — app deployed and database copied from the source project.' });
+}
+
+// ---- Application foundation (projects created with projects.foundation_version) ----
+//
+// The foundation store (foundation-store.js) owns the deployment's state in
+// mock2.db — features, the master key escrow, the S3 credentials — and the
+// sync of features + sealed secrets into the app database. This module only
+// hands its inputs to the guest stack (foundation-stack.js). Imported
+// dynamically: the store is not needed by native projects.
+async function loadFoundationStore() {
+  try {
+    const store = await import('./foundation-store.js');
+    if (typeof store.getFoundationProvisionInputs !== 'function' || typeof store.syncFoundationToApp !== 'function') {
+      return { error: 'foundation-store.js does not export getFoundationProvisionInputs / syncFoundationToApp' };
+    }
+    return { store };
+  } catch (e) {
+    return { error: `the foundation store could not be loaded (${e?.message || e})` };
+  }
+}
+
+async function syncToApp(store, projectId) {
+  try {
+    const r = await store.syncFoundationToApp(projectId);
+    if (r && r.ok === false) return { ok: false, error: r.error || r.message || 'sync refused' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+// provisionFoundation — after the setup script installed Docker, before the
+// base app deploys (its migrate step needs the database). NOT best-effort:
+// any failure is returned as an actionable message and fails provisioning.
+async function provisionFoundation(projectId, containerName) {
+  const say = (message) => setStatus(projectId, { phase: 'foundation', message });
+  say('Starting the application foundation (PostgreSQL + pgvector, storage, embeddings)…');
+  const loaded = await loadFoundationStore();
+  if (loaded.error) return { ok: false, error: `application foundation: ${loaded.error} — this backend cannot provision foundation projects` };
+  let inputs;
+  try { inputs = await loaded.store.getFoundationProvisionInputs(projectId); }
+  catch (e) { return { ok: false, error: `application foundation: reading the deployment's features and credentials from mock2.db failed: ${e?.message || e}` }; }
+  if (!inputs || !inputs.masterKey || !inputs.storageCredentials) {
+    return { ok: false, error: 'application foundation: the deployment has no master key or storage credentials in mock2.db — the foundation row was not created with the project' };
+  }
+  const key = await ensureMasterKey(containerName, inputs.masterKey);
+  if (!key.ok) return { ok: false, error: `application foundation: ${key.error}` };
+  const up = await bringUpFoundation({
+    containerName,
+    features: inputs.features,
+    masterKey: inputs.masterKey,
+    storageCredentials: inputs.storageCredentials,
+    onStep: (_name, label) => say(label),
+  });
+  if (!up.ok) {
+    const at = up.steps?.find((s) => !s.ok)?.name || 'bring-up';
+    return { ok: false, error: `application foundation failed at "${at}": ${up.error}` };
+  }
+  say('Syncing the foundation features and secrets into the app database…');
+  const sync = await syncToApp(loaded.store, projectId);
+  if (!sync.ok) return { ok: false, error: `application foundation: syncing features and secrets into the app database failed: ${sync.error}` };
+  return { ok: true, steps: up.steps };
+}
+
+async function resyncFoundationAfterRestore(projectId, containerName) {
+  const schema = await foundationPsql(containerName, foundationEnsureSql(), { database: 'postgres', timeoutMs: 120000 });
+  if (schema.code !== 0) return { ok: false, error: `re-applying the foundation schema after the copy failed: ${(schema.stderr || schema.stdout || '').trim().slice(-300)}` };
+  const loaded = await loadFoundationStore();
+  if (loaded.error) return { ok: false, error: loaded.error };
+  const sync = await syncToApp(loaded.store, projectId);
+  return sync.ok ? { ok: true } : { ok: false, error: `re-syncing the clone's foundation features and secrets failed: ${sync.error}` };
 }
 
 // Land the project in a terminal failure state. `lifecycle` is the state to
@@ -354,8 +440,14 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   await ensureHostEgress().catch((e) => console.warn('[mock2] ensureHostEgress failed:', e?.message));
 
   // ---- Launch the container, NIC pinned to the project bridge ----
+  // A foundation project's guest is created Docker-ready (nesting + the
+  // syscall intercepts of create_lxc_container's docker_ready): its
+  // application foundation runs as a Compose stack inside it. Native
+  // projects launch exactly as before.
+  const foundation = isFoundationProject(project);
+  const launchFlags = foundation ? ` ${foundationLaunchConfigArgs().join(' ')}` : '';
   setStatus(projectId, { phase: 'launch', message: `${rehydrate ? 'Rehydrating' : 'Provisioning'}: launching container…` });
-  const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName}`, { timeoutMs: 300000 });
+  const launch = await sh(`incus launch ${image} ${containerName} --network ${bridgeName}${launchFlags}`, { timeoutMs: 300000 });
   if (launch.code !== 0) return bail(`container launch failed: ${(launch.stderr || '').trim().slice(-500)}`);
   const release = await sh(`incus exec ${containerName} -- cat /etc/os-release`, { timeoutMs: 30000 }).catch((error) => ({ code: 1, stderr: error?.message }));
   if (release.code !== 0 || !parseDebian13Release(release.stdout)) {
@@ -425,15 +517,27 @@ async function bringUpFromRepo(project, { repoPath, containerName, mode = 'provi
   const setupScript = buildContainerSetupScript({
     appDir: APP_DIR,
     webPort: declaredPort,
+    ...(foundation ? { foundation: true } : {}),
   });
   const pushSetup = await sh(
     `printf '%s' '${b64(setupScript)}' | base64 -d | incus exec ${containerName} -- tee /tmp/mock2-setup.sh >/dev/null && incus exec ${containerName} -- sh /tmp/mock2-setup.sh`,
-    { timeoutMs: 420000 },
+    // Docker Engine + Compose add a few hundred MB of packages.
+    { timeoutMs: foundation ? 900000 : 420000 },
   );
   if (pushSetup.code !== 0) {
     // The dev server not starting means no live URL — treat as failure so the
     // operator sees why.
     return bail(`container setup failed: ${(pushSetup.stderr || pushSetup.stdout || '').trim().slice(-800)}`);
+  }
+
+  // ---- Application foundation (foundation projects only; not best-effort) ----
+  // Brought up here — after Docker is installed, before activation and the
+  // fence — so the image pulls and the local embedding model download use the
+  // guest's direct NAT egress, and before deployBaseApp, whose migrate step
+  // needs the database.
+  if (foundation) {
+    const f = await provisionFoundation(projectId, containerName);
+    if (!f.ok) return bail(f.error);
   }
 
   updateProject(projectId, { web_port: declaredPort, container_ip: ip });

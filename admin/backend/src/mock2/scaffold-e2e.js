@@ -36,6 +36,8 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { STACK, FOUNDATION_DATABASE_URL } from './foundation-contract.js';
+
 // The port the e2e webServer binds. Deliberately NOT the app's own port: the
 // suite must be runnable while the real app is serving (during a build, the
 // systemd unit is up), and two servers on one port is a confusing failure.
@@ -126,14 +128,19 @@ export function e2eServerMjs() {
 // Uses only the pg driver + child_process, mirroring scripts/migrate.mjs, so it
 // needs no build step of its own and can run before tsc has produced dist/.
 import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import pg from 'pg';
 
 const PORT = Number(process.env.E2E_PORT || ${E2E_PORT});
 const DB = process.env.E2E_DB_NAME || '${E2E_DB}';
-const appUrl = process.env.DATABASE_URL || 'postgres://app:app@127.0.0.1:5432/app';
+// No DATABASE_URL in the environment: a foundation guest's database is the
+// stack's Unix socket (peer authentication — the app role may CREATE DATABASE);
+// otherwise the native in-guest server.
+const appUrl = process.env.DATABASE_URL
+  || (existsSync('${STACK.postgres.socketDir}/.s.PGSQL.5432') ? '${FOUNDATION_DATABASE_URL}' : 'postgres://app:app@127.0.0.1:5432/app');
 
-// Swap the database name, keep the credentials/host — the e2e DB lives on the
-// same in-container Postgres as the app's.
+// Swap the database name, keep the credentials/host (or the socket query
+// string) — the e2e DB lives on the same Postgres as the app's.
 function withDatabase(url, name) {
   const u = new URL(url);
   u.pathname = '/' + name;

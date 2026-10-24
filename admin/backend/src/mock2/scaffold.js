@@ -40,7 +40,7 @@ import {
 import {
   buildFoundationFiles, FOUNDATION_DEPENDENCIES, FOUNDATION_NODE_IMPORT, FOUNDATION_PACKAGE_IMPORTS,
 } from './scaffold-foundation.js';
-import { buildFoundationComposeYaml } from './foundation-stack-logic.js';
+import { buildFoundationComposeYaml, buildFoundationFiles as buildFoundationStackFiles } from './foundation-stack-logic.js';
 import { FOUNDATION_DATABASE_URL, FOUNDATION_CLI } from './foundation-contract.js';
 
 // v8: the application foundation — foundation/ runtime + CLI, the bootstrap
@@ -1419,5 +1419,10 @@ export function buildScaffoldFiles(project) {
 // for the seed and for the base-app upgrade (which refreshes it only in
 // projects that already have it). PURE.
 export function scaffoldFoundationFiles() {
-  return buildFoundationFiles({ composeYaml: buildFoundationComposeYaml({ portable: true }) });
+  // compose.yaml mounts its Postgres files from beside it (./postgres/…), so
+  // the portable copy ships them too or it cannot start outside ProxyPilot.
+  const stackFiles = buildFoundationStackFiles({ portable: true })
+    .filter((f) => f.path !== 'compose.yaml')
+    .map((f) => ({ ...f, path: `foundation/${f.path}` }));
+  return [...buildFoundationFiles({ composeYaml: buildFoundationComposeYaml({ portable: true }) }), ...stackFiles];
 }

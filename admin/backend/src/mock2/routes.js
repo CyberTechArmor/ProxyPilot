@@ -118,6 +118,8 @@ import { registerFlightdeckRoutes } from './flightdeck.js';
 import { registerTaskRoutes } from './task-routes.js';
 import { registerDatabaseExceptionRoutes } from './database-exception-routes.js';
 import { getDatabaseException, setDatabaseException, clearDatabaseException } from './database-exception.js';
+import { registerFoundationRoutes } from './foundation-routes.js';
+import * as foundationService from './foundation-service.js';
 import { routeChatMessage, currentTaskForProject } from './task-sync.js';
 import {
   startProvision,
@@ -6105,6 +6107,15 @@ export function createMock2Router() {
   registerDatabaseExceptionRoutes(router, {
     requireRole: requireMock2Role, refuseIfArchived, requireSudo, audit: logAudit,
     store: { get: getDatabaseException, set: setDatabaseException, clear: clearDatabaseException },
+  });
+
+  // Application foundation — the deployment's per-feature switches (storage,
+  // embeddings), health and provider-switch jobs (docs/features/app-foundation.md).
+  // Writes need sudo and are audited; credentials are write-only.
+  registerFoundationRoutes(router, {
+    requireRole: requireMock2Role, requireSudo, refuseIfArchived,
+    audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
+    service: foundationService,
   });
 
   return router;

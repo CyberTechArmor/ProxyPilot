@@ -40,6 +40,10 @@ export { sweepFrameworkAutoAdopt } from './auto-adopt.js';
 // connection) and requeue orphaned build-queue entries — the "platform is
 // stuck with nothing to click" recovery. index.js runs it every 60s.
 export { sweepStalledBuilds } from './stall-watchdog.js';
+// Application foundation: poll the deployments' provider-switch jobs
+// (storage copies, re-embeds) and promote the ones that finished. index.js
+// runs it every 60s.
+export { sweepFoundationJobs } from './foundation-service.js';
 export { seedBuiltinComponents } from './component-seed.js';
 export { loadCustomDesignPresets } from './design-presets-store.js';
 // Project terminal authorizer (ADR-007). Registered into the core

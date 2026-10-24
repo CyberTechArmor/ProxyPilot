@@ -385,6 +385,19 @@ function envFileKeysOf(text) {
 export async function ensureComponentSecrets({ containerName, rows, rand, newlyProvisioned = false, writersStopped = false } = {}) {
   const configs = installedSecretConfigs(rows);
   if (!configs.length) return { ok: true, minted: [], deferred: [], required: [] };
+  // An application-foundation deployment keeps these keys encrypted in mock2.db
+  // (component.<KEY>) and delivers them sealed through its app database —
+  // never in /etc/environment (docs/features/app-foundation.md § "Secrets").
+  let foundationProject = null;
+  try {
+    const { getProjectByContainerName } = await import('./projects.js');
+    const p = getProjectByContainerName(containerName);
+    if (p?.foundation_version) foundationProject = p;
+  } catch { /* no registry: the environment-file path below */ }
+  if (foundationProject) {
+    const { mintFoundationComponentSecrets } = await import('./foundation-store.js');
+    return mintFoundationComponentSecrets({ project: foundationProject, configs, newlyProvisioned });
+  }
   const deferred = [];
   let eligible = configs;
   const guards = secretMintGuards(configs);
@@ -631,7 +644,9 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     if (secrets.minted.length) {
       insertMessage({
         projectId, kind: 'system', cycleId,
-        body: `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
+        body: secrets.store === 'foundation'
+          ? `Minted ${secrets.minted.length} application secret(s) (${secrets.minted.join(', ')}). They are kept encrypted by the platform and delivered sealed to the app's database; the app reads them at start.`
+          : `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
       });
     }
     const deferredNote = deferredSecretsMessage(secrets.deferred);

@@ -40,15 +40,27 @@ const pg = require('pg');
 pg.types.setTypeParser(1114, (v) => v);  // timestamp
 pg.types.setTypeParser(1184, (v) => v);  // timestamptz
 
-const DATABASE_URL = process.env.DATABASE_URL
-  || 'postgres://app:app@127.0.0.1:5432/app';
+// No default. PostgreSQL is required (constitution §2): a missing DATABASE_URL is
+// a deployment error and is reported as one. A hard-coded fallback would point
+// the app at whatever happens to listen on 127.0.0.1:5432.
+const DATABASE_URL = String(process.env.DATABASE_URL || '').trim() || null;
+
+function requireDatabaseUrl() {
+  if (DATABASE_URL) return DATABASE_URL;
+  const err = new Error(
+    'DATABASE_URL is not set. PostgreSQL is the system of record and there is no default; '
+    + 'set DATABASE_URL to the application database.',
+  );
+  err.code = 'DATABASE_URL_REQUIRED';
+  throw err;
+}
 
 let pool = null;
 
 function getPool() {
   if (pool) return pool;
   pool = new pg.Pool({
-    connectionString: DATABASE_URL,
+    connectionString: requireDatabaseUrl(),
     max: Number(process.env.PGPOOL_MAX || 10),
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS || 10000),
@@ -257,6 +269,7 @@ async function close() {
 // operator hunting through application code; the database being unreachable is
 // a deployment fact and the message should say so.
 async function assertReachable() {
+  requireDatabaseUrl();
   try {
     await query('SELECT 1');
   } catch (e) {

@@ -6,12 +6,13 @@
 // precedence intact. A future re-vendor that silently drops one of these fails
 // here instead of shipping a hole to every generated project.
 //
-// Native-free: pure file reads.
+// Native-free: file reads, plus one child-process load of the pure-JS db module.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const SEED = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mock2', 'framework-seed');
@@ -293,6 +294,31 @@ test('the base app is backed by PostgreSQL, loaded before it serves', () => {
   assert.match(store, /store\.get\(\) before store\.init\(\)/, 'get() before init() must fail loudly, not return empty');
   assert.match(server, /async function boot\(\)/);
   assert.match(server, /boot\(\)\s*\n\s*\.then\(\(\) => server\.listen/, 'listen must happen after boot resolves');
+});
+
+test('a missing DATABASE_URL is an explicit failure, never a hard-coded fallback (constitution §2)', () => {
+  const db = read('base-app/lib/db.js');
+  assert.doesNotMatch(db, /['"`]postgres(?:ql)?:\/\//, 'no hard-coded connection string');
+  assert.doesNotMatch(db, /process\.env\.DATABASE_URL\s*\|\|\s*['"`][^'"`]/, 'no fallback URL after DATABASE_URL');
+  // Run the real module with DATABASE_URL unset: loading it is fine, using it
+  // fails with a named code before any connection is attempted.
+  const env = { ...process.env };
+  delete env.DATABASE_URL;
+  delete env.TEST_DATABASE_URL;
+  const script = `
+    const db = require(${JSON.stringify(path.join(SEED, 'base-app/lib/db.js'))});
+    let pool = null;
+    try { db.getPool(); pool = 'created'; } catch (e) { pool = e.code; }
+    db.assertReachable().then(
+      () => console.log(JSON.stringify({ pool, reachable: 'connected' })),
+      (e) => console.log(JSON.stringify({ pool, reachable: e.code, message: e.message })),
+    );`;
+  const out = spawnSync(process.execPath, ['-e', script], { env, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(out.status, 0, out.stderr);
+  const result = JSON.parse(out.stdout.trim());
+  assert.equal(result.pool, 'DATABASE_URL_REQUIRED');
+  assert.equal(result.reachable, 'DATABASE_URL_REQUIRED');
+  assert.match(result.message, /DATABASE_URL is not set/);
 });
 
 test('a failed write is logged, and the suite checks the database directly', () => {

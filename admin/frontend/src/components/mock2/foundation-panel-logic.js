@@ -126,6 +126,9 @@ const first = (...vals) => vals.find((v) => v !== undefined && v !== null);
 
 export function hasSecret(featureName, feature, key) {
   const h = feature?.has_secret;
+  // The API answers one flag per feature: true when every credential that
+  // provider needs is stored.
+  if (typeof h === 'boolean') return h;
   if (!h || typeof h !== 'object') return false;
   return !!first(h[key], h[`${featureName}.${key}`]);
 }

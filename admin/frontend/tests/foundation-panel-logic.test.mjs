@@ -242,4 +242,7 @@ test('has_secret accepts both short and contract-named keys', () => {
   assert.equal(hasSecret('embeddings', { has_secret: { 'embeddings.api_key': true } }, 'api_key'), true);
   assert.equal(hasSecret('embeddings', { has_secret: { api_key: false } }, 'api_key'), false);
   assert.equal(hasSecret('embeddings', {}, 'api_key'), false);
+  // The control plane's projection (foundation-logic.js projectFeature) sends one flag.
+  assert.equal(hasSecret('storage', { has_secret: true }, 'secret_access_key'), true);
+  assert.equal(hasSecret('embeddings', { has_secret: false }, 'api_key'), false);
 });

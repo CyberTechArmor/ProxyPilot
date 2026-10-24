@@ -244,19 +244,22 @@ function explain(err: Error): Error {
   if (!err.message.startsWith(EXPLAINED)) err.message = EXPLAINED + ' (' + databaseTarget + '): ' + err.message;
   return err;
 }
-class ExplicitClient extends pg.Client {
-  override connect(): Promise<void>;
-  override connect(callback: (err: Error) => void): void;
-  override connect(callback?: (err: Error) => void): Promise<void> | void {
-    if (callback) {
-      super.connect((err) => callback(err ? explain(err) : err));
-      return;
-    }
-    return super.connect().catch((err: Error) => {
+type ConnectCallback = (err: Error | null, ...rest: unknown[]) => void;
+const baseConnect = pg.Client.prototype.connect as unknown as (this: pg.Client, callback?: ConnectCallback) => Promise<unknown> | undefined;
+class ExplicitClient extends pg.Client {}
+// Wraps connect() in both of pg's calling styles (the pool uses the callback
+// one). Installed on the prototype rather than as a TypeScript override so it
+// does not depend on which @types/pg overload set is installed.
+Object.defineProperty(ExplicitClient.prototype, 'connect', {
+  configurable: true,
+  writable: true,
+  value: function connect(this: pg.Client, callback?: ConnectCallback) {
+    if (callback) return baseConnect.call(this, (err, ...rest) => callback(err ? explain(err) : err, ...rest));
+    return (baseConnect.call(this) as Promise<unknown>).catch((err: Error) => {
       throw explain(err);
     });
-  }
-}
+  },
+});
 
 export const pool = new pg.Pool({ connectionString: config.DATABASE_URL, Client: ExplicitClient });
 // A pg Pool emits 'error' when an IDLE backend connection drops (Postgres

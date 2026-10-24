@@ -16,6 +16,7 @@ import { getMock2Db } from './db.js';
 import { deleteTasksForProject } from './tasks.js';
 import { getDb } from '../db.js';
 import { mintSlugCandidate, slugifyName, isReservedSlug, isValidSlugShape } from './slug.js';
+import { FOUNDATION_VERSION } from './foundation-contract.js';
 
 const nowIso = () => new Date().toISOString();
 
@@ -117,6 +118,13 @@ export function createProject({ name, description, parentDomainId, slug, customD
     const containerName = containerNameFor ? containerNameFor(id) : null;
     db.prepare(`UPDATE mock2_projects SET repo_path = ?, container_name = ? WHERE id = ?`)
       .run(repoPath, containerName, id);
+    // Application foundation (docs/features/app-foundation.md): a project
+    // created from nothing gets the current foundation; a clone inherits its
+    // source's (a clone of a pre-foundation project stays on the native
+    // stack). Set once, here, in the creating transaction — existing rows are
+    // never given one.
+    db.prepare(`UPDATE mock2_projects SET foundation_version = ? WHERE id = ?`)
+      .run(foundationVersionForNew(db, origin), id);
     if (slug != null && parentDomainId != null) {
       // Permanent reservation. active_until NULL: not a grace-window row, just
       // "this slug has lived" — the UNIQUE(parent_domain_id, slug) index makes
@@ -134,6 +142,15 @@ export function createProject({ name, description, parentDomainId, slug, customD
   });
   const id = tx();
   return getProject(id);
+}
+
+// The foundation version a new row starts with (see createProject).
+function foundationVersionForNew(db, origin) {
+  if (origin && typeof origin === 'object' && origin.kind === 'clone') {
+    const src = db.prepare(`SELECT foundation_version FROM mock2_projects WHERE id = ?`).get(Number(origin.sourceProjectId));
+    return src?.foundation_version || null;
+  }
+  return FOUNDATION_VERSION;
 }
 
 const WRITABLE = new Set([
@@ -215,6 +232,15 @@ export function deleteProject(id) {
       db.prepare(`DELETE FROM mock2_storage_policies WHERE target_key = ?`).run(key);
       db.prepare(`DELETE FROM mock2_storage_checks WHERE target_key = ? AND status <> 'running'`).run(key);
       db.prepare(`DELETE FROM mock2_storage_cleanups WHERE target_key = ? AND status IN ('succeeded', 'partial', 'failed', 'refused', 'cancelled')`).run(key);
+    } catch { /* pre-migration */ }
+    // Its foundation state too (switches, jobs and the encrypted secrets —
+    // the master key's escrow copy among them): a reused id must never open
+    // or inherit a deleted deployment's secrets.
+    // Guarded: the tables are absent until migration 564 has run.
+    try {
+      for (const table of ['mock2_foundation_secrets', 'mock2_foundation_features', 'mock2_foundation_jobs']) {
+        db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(id);
+      }
     } catch { /* pre-migration */ }
     // Its tasks too (task continuity) — inside this transaction, so a reused
     // id never inherits a deleted project's unfinished work.

@@ -2031,4 +2031,58 @@ export const MOCK2_MIGRATIONS = [
       if (!columns.includes('holder_operation_kind')) d.exec("ALTER TABLE mock2_locks ADD COLUMN holder_operation_kind TEXT CHECK(holder_operation_kind IN ('task-continuity','mcp-write','project-write','restore'))");
     },
   },
+  {
+    // Application foundation (docs/features/app-foundation.md): the host
+    // control plane of each deployment's stack. Per-deployment feature
+    // switches (storage, embeddings: state, provider, non-secret config and a
+    // staged `pending` switch), the deployment's secrets (each value
+    // encrypted with lib/secrets.js — never plaintext; the app receives them
+    // sealed under the deployment master key), and the provider-switch jobs
+    // (storage_migrate, reembed) mirrored from the app database. Plus
+    // mock2_projects.foundation_version: set on projects created after this
+    // revision only; existing rows stay NULL and keep their native stack. New
+    // tables and one nullable column; the DDL is written out here, never read
+    // from the store module (foundation-store.js).
+    version: 564,
+    name: 'mock2_app_foundation',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_foundation_features (
+          project_id INTEGER NOT NULL,
+          feature TEXT NOT NULL CHECK (feature IN ('storage','embeddings')),
+          state TEXT NOT NULL CHECK (state IN ('on','off')),
+          provider TEXT NOT NULL,
+          config_json TEXT NOT NULL DEFAULT '{}',
+          pending_json TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (project_id, feature)
+        );
+        CREATE TABLE IF NOT EXISTS mock2_foundation_secrets (
+          project_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          ciphertext TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          rotated_at TEXT,
+          PRIMARY KEY (project_id, name)
+        );
+        CREATE TABLE IF NOT EXISTS mock2_foundation_jobs (
+          id TEXT PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('storage_migrate','reembed')),
+          state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','cancelled')),
+          params_json TEXT NOT NULL DEFAULT '{}',
+          progress_json TEXT NOT NULL DEFAULT '{}',
+          error TEXT,
+          created_by INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_foundation_jobs_project ON mock2_foundation_jobs(project_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_mock2_foundation_jobs_active ON mock2_foundation_jobs(state) WHERE state IN ('queued','running');
+      `);
+      const cols = d.prepare('PRAGMA table_info(mock2_projects)').all().map((c) => c.name);
+      if (!cols.includes('foundation_version')) d.exec('ALTER TABLE mock2_projects ADD COLUMN foundation_version TEXT');
+    },
+  },
 ];

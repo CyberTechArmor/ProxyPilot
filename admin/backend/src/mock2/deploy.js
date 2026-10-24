@@ -118,7 +118,9 @@ export async function readDeclaredEgress(containerName, appDir = '/srv/app') {
 // `detach: true` submits and returns the job id without waiting.
 export async function deployProject(args) {
   const containerName = String(args?.containerName || '');
-  const params = await resolveDeployParams({ ...args, containerName });
+  // A deploy is the moment a foundation deployment's component secrets are
+  // minted (when absent) and delivered sealed to its app database.
+  const params = await resolveDeployParams({ ...args, containerName, deliverFoundationSecrets: true });
   const store = containerLockStore();
   const requestedBy = args?.requestedBy || null;
   const via = args?.via || 'system';
@@ -200,7 +202,16 @@ export async function drainInProcessNow(store = containerLockStore(), { max = 3 
 // `guard` and `secretConfigs` may be supplied by a SERVER caller that already
 // resolved them (provision, tests); a registry lookup fills them otherwise.
 // They are references (table and column names, key names), never values.
-export async function resolveDeployParams({ containerName, appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, runContract = null, newlyProvisioned = false, guard = null, secretConfigs = null } = {}) {
+//
+// An application-foundation deployment (project.foundation_version set) mints
+// nothing into /etc/environment: params.secrets.configs is emptied, whatever
+// else fails, and params.foundation carries the version and the component
+// secret NAMES required and delivered (docs/features/app-foundation.md §
+// "Secrets"). Its data guard is not carried either: the stored-credential
+// probe reads the key from /etc/environment, where a foundation deployment
+// never has it. deliverFoundationSecrets (the deploy) mints absent keys into
+// the encrypted store and syncs them; other callers only read names.
+export async function resolveDeployParams({ containerName, appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, runContract = null, newlyProvisioned = false, guard = null, secretConfigs = null, deliverFoundationSecrets = false } = {}) {
   const params = {
     container: String(containerName || ''), appDir: String(appDir || '/srv/app'), webPort: Number(webPort) || DEFAULT_WEB_PORT,
     environmentFile: '/etc/environment',
@@ -208,12 +219,14 @@ export async function resolveDeployParams({ containerName, appDir = '/srv/app', 
     secrets: { configs: Array.isArray(secretConfigs) ? secretConfigs.map(secretConfigRef) : [], newlyProvisioned: newlyProvisioned === true },
     guard: guard || null,
   };
+  let foundationProject = null;
   try {
     const [{ getProjectByContainerName }, { listProjectComponents }, { parseContractJson, secretDataGuards }] = await Promise.all([
       import('./projects.js'), import('./components.js'), import('./component-logic.js'),
     ]);
     const project = getProjectByContainerName(containerName);
     if (project) {
+      if (project.foundation_version) foundationProject = project;
       params.projectId = project.id;
       params.previousDeployedCommit = project.deployed_commit || null;
       if (!webPort && project.web_port) params.webPort = Number(project.web_port) || params.webPort;
@@ -224,12 +237,34 @@ export async function resolveDeployParams({ containerName, appDir = '/srv/app', 
           if (c && c.secret === true && c.generate === true) params.secrets.configs.push(secretConfigRef(c));
         }
       }
-      const guards = secretDataGuards(params.secrets.configs);
-      if (!params.guard && guards[0]?.guard) params.guard = guards[0].guard;
-      if (guards[0]?.key) params.guardKey = guards[0].key;
+      if (!foundationProject) {
+        const guards = secretDataGuards(params.secrets.configs);
+        if (!params.guard && guards[0]?.guard) params.guard = guards[0].guard;
+        if (guards[0]?.key) params.guardKey = guards[0].key;
+      }
     }
   } catch { /* no mock2 registry here: nothing to mint, nothing to guard */ }
+  if (foundationProject) {
+    const configs = params.secrets.configs;
+    params.secrets.configs = [];
+    params.guard = null;
+    delete params.guardKey;
+    params.foundation = await foundationDeployRef(foundationProject, configs, { newlyProvisioned, deliver: deliverFoundationSecrets === true });
+  }
   return params;
+}
+
+// The deploy plan's foundation reference (names only). A failure is carried as
+// `error` with every component key still required — the deploy's environment
+// check then refuses to start the app rather than start it without them.
+async function foundationDeployRef(project, configs, { newlyProvisioned, deliver }) {
+  const keys = [...new Set((configs || []).map((c) => String(c.key)))];
+  try {
+    const [{ foundationDeployParams }, { normalizeFoundationDeployRef }] = await Promise.all([import('./foundation-store.js'), import('./foundation-logic.js')]);
+    return normalizeFoundationDeployRef(await foundationDeployParams({ project, configs, newlyProvisioned, deliver }));
+  } catch (e) {
+    return { version: String(project.foundation_version), required: keys, delivered: [], error: `the foundation secret store could not be read: ${String(e?.message || e).slice(0, 200)}` };
+  }
 }
 
 function pickContract(c) {

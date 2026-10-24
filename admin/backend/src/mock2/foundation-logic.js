@@ -50,12 +50,10 @@ export const CODES = Object.freeze({
 
 // The bundled S3's `app` identity is part of the stack's configuration and
 // must stay stable while another provider is active (switching back to bundled
-// needs it). The contract has no name for it, so it is kept HOST-ONLY under
-// these names: never synced, never projected. (Contract change requested:
-// add them to SECRET_NAMES / HOST_ONLY_SECRETS.)
+// needs it). Host-only in the contract: never synced, never projected.
 export const BUNDLED_APP_IDENTITY = Object.freeze({
-  accessKeyId: 'storage.bundled_access_key_id',
-  secretAccessKey: 'storage.bundled_secret_access_key',
+  accessKeyId: SECRET_NAMES.storageBundledAccessKeyId,
+  secretAccessKey: SECRET_NAMES.storageBundledSecretAccessKey,
 });
 const RETAINED_HOST_NAMES = Object.freeze(Object.values(BUNDLED_APP_IDENTITY));
 

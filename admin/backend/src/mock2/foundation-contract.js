@@ -120,14 +120,19 @@ export const SECRET_NAMES = Object.freeze({
   masterKey: 'master_key',                                   // host
   storageAdminAccessKeyId: 'storage.admin_access_key_id',    // host (bundled admin identity)
   storageAdminSecretAccessKey: 'storage.admin_secret_access_key', // host
+  // host: the bundled S3 app identity, kept while another provider is active
+  // so switching back to bundled storage can reuse it.
+  storageBundledAccessKeyId: 'storage.bundled_access_key_id',
+  storageBundledSecretAccessKey: 'storage.bundled_secret_access_key',
   storageAccessKeyId: 'storage.access_key_id',               // app
   storageSecretAccessKey: 'storage.secret_access_key',       // app
   embeddingsApiKey: 'embeddings.api_key',                    // app
 });
 export const HOST_ONLY_SECRETS = Object.freeze([
   SECRET_NAMES.masterKey, SECRET_NAMES.storageAdminAccessKeyId, SECRET_NAMES.storageAdminSecretAccessKey,
+  SECRET_NAMES.storageBundledAccessKeyId, SECRET_NAMES.storageBundledSecretAccessKey,
 ]);
-const SECRET_NAME_RE = /^(?:master_key|storage\.(?:admin_)?(?:access_key_id|secret_access_key)|embeddings\.api_key|pending\.(?:storage\.(?:access_key_id|secret_access_key)|embeddings\.api_key)|component\.[A-Z][A-Z0-9_]{0,63})$/;
+const SECRET_NAME_RE = /^(?:master_key|storage\.(?:admin_|bundled_)?(?:access_key_id|secret_access_key)|embeddings\.api_key|pending\.(?:storage\.(?:access_key_id|secret_access_key)|embeddings\.api_key)|component\.[A-Z][A-Z0-9_]{0,63})$/;
 export function isValidSecretName(name) { return SECRET_NAME_RE.test(String(name || '')); }
 export function componentSecretName(envKey) { return `component.${envKey}`; }
 export function pendingSecretName(name) { return `pending.${name}`; }

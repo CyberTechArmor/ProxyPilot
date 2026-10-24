@@ -25,6 +25,7 @@ import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from '
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
 import { agentsMd, workMd, projectHandoffMd, tasksReadmeMd, TASKS_DIR } from './continuity-convention.js';
 import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
+import { FOUNDATION_DATABASE_URL, STACK } from './foundation-contract.js';
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
@@ -173,13 +174,23 @@ with socketserver.TCPServer(("0.0.0.0", PORT), Handler) as httpd:
 
 // The secrets MANIFEST (required keys, no values). The real .env is gitignored
 // and lives only in the container (03-data-model.md: .env values never enter
-// the repo). DATABASE_URL points at the in-container Postgres (ADR-008).
+// the repo). DATABASE_URL is the application foundation's PostgreSQL over its
+// Unix socket with peer authentication, so it holds no password at all; the
+// foundation's own credentials never appear in any env file
+// (docs/features/app-foundation.md).
 function envExample(webPort) {
   return `# Secrets manifest — required keys, NO values. Copy to .env in the
 # container and fill in. .env is gitignored and never committed (ADR-006/008).
 PORT=${webPort}
-# In-container Postgres (ADR-008) — ProxyPilot stores nothing here.
-DATABASE_URL=postgres://app:app@127.0.0.1:5432/app
+# The application database: the foundation stack's PostgreSQL over its Unix
+# socket with peer authentication. This URL holds NO password — none exists.
+# Set it only to use another database; the app never falls back on its own.
+DATABASE_URL=${FOUNDATION_DATABASE_URL}
+# Storage and embedding credentials and component keys are NOT environment
+# variables: ProxyPilot keeps them encrypted and delivers them sealed through
+# the database. They are opened with the deployment master key at
+# ${STACK.keyFile} (outside ProxyPilot, point FOUNDATION_KEY_FILE at your own).
+# FOUNDATION_KEY_FILE=${STACK.keyFile}
 `;
 }
 
@@ -436,6 +447,9 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
         `The declared topology and run contract are in \`mock2.yaml\`; the app is a ` +
         `TypeScript/Express/Drizzle scaffold under \`src/\` with migrations in \`migrations/\`. ` +
         `\`serve.py\` is the pre-build placeholder dev server (Concept stage).\n\n` +
+        `The application foundation — PostgreSQL + pgvector, object storage and embeddings — ` +
+        `is reached only through the platform-owned \`foundation/\` adapters ` +
+        `(\`import { storage, vector } from '#foundation'\`); see \`foundation/README.md\`.\n\n` +
         `Working on this repo from VS Code or another editor? Read \`WORKING-COPY.md\` — ` +
         `pushes auto-deploy, and the approved design specs live in \`state/\` ` +
         `(\`design-tokens.json\`, \`design.css\`, \`mockups/current.html\`).\n`,

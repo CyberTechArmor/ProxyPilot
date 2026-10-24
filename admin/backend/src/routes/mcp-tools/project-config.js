@@ -60,6 +60,13 @@ export function createProjectConfigHandlers(kit) {
     if (error) return { error };
     return { m, project: p, incusName: projectContainerName(m, p) };
   }
+  // A project created with the application foundation keeps its database in
+  // the guest's Compose stack (no in-guest server, no postgres OS user): its
+  // SQL tools go through the postgres service. Native projects → null.
+  async function foundationStackLogic(project) {
+    const logic = await import('../../mock2/foundation-stack-logic.js');
+    return logic.isFoundationProject(project) ? logic : null;
+  }
   const git = (incusName, argv, opts = {}) => projectSh(incusName, 'cd /srv/app || exit 97; git -c user.email=mcp@proxypilot -c user.name="ProxyPilot MCP" "$@"', argv, { timeoutMs: 120000, ...opts });
 
   /* ------------------------------ components ------------------------------ */
@@ -667,13 +674,16 @@ export function createProjectConfigHandlers(kit) {
     // A READ ONLY transaction plus a statement timeout: the keyword check above
     // is the reader's guard, the transaction is the database's.
     // The statement rides in a temp file the postgres user can read: nesting
-    // it through su's quoting would be fragile.
-    const safeScript = 'n="$1"; command -v psql >/dev/null 2>&1 || { echo NOPSQL >&2; exit 66; }; '
+    // it through su's quoting would be fragile. A foundation project's
+    // database is the postgres service of its stack: the same psql runs
+    // there, the statement on its stdin.
+    const fstack = await foundationStackLogic(p.project);
+    const safeScript = fstack ? fstack.foundationReadOnlySqlScript() : 'n="$1"; command -v psql >/dev/null 2>&1 || { echo NOPSQL >&2; exit 66; }; '
       + 'f=$(mktemp /tmp/pp-sql.XXXXXX) || exit 98; cat > "$f"; chmod 644 "$f"; '
       + 'out=$(su - postgres -c "psql -X -v ON_ERROR_STOP=1 -d app -A -F \'|\' --pset footer=off -c \'SET statement_timeout = 30000\' -c \'BEGIN READ ONLY\' -f $f -c ROLLBACK" 2>&1); ec=$?; rm -f "$f"; '
       + 'printf "%s\\n" "$out" | head -n "$((n + 8))"; exit $ec';
     const r = await projectSh(p.incusName, safeScript, [String(limit)], { input: `${sql};\n`, timeoutMs: 60000, maxCapture: 2 * 1024 * 1024 });
-    if (r.status === 66) return err('psql is not available in this project container');
+    if (r.status === 66) return err(fstack ? 'docker is not available in this project container (its foundation stack runs the database)' : 'psql is not available in this project container');
     if (r.status !== 0) return err(`Query failed: ${tail(r.stdout || r.stderr, 1200)}`);
     const lines = (r.stdout || '').split('\n').filter((l) => l !== '' && !/^(SET|BEGIN|ROLLBACK)$/.test(l));
     const header = lines.length ? lines[0].split('|') : [];
@@ -687,11 +697,12 @@ export function createProjectConfigHandlers(kit) {
     note.subject_id = p.project.id; note.project_id = p.project.id;
     const label = args.label ? String(args.label).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) : 'mcp';
     const file = `${DB_DUMPS_DIR}/app-${label}-${stamp()}.sql`;
-    const d = dry(args, { file, command: 'pg_dump --clean --if-exists app (inside the container)' }); if (d) return d;
-    const script = 'f="$1"; mkdir -p "$(dirname "$f")"; command -v pg_dump >/dev/null 2>&1 || { echo NOPG >&2; exit 66; }; '
+    const fstack = await foundationStackLogic(p.project);
+    const d = dry(args, { file, command: fstack ? 'pg_dump --clean --if-exists app (in the postgres service of the project\'s foundation stack)' : 'pg_dump --clean --if-exists app (inside the container)' }); if (d) return d;
+    const script = fstack ? fstack.foundationDumpScript() : 'f="$1"; mkdir -p "$(dirname "$f")"; command -v pg_dump >/dev/null 2>&1 || { echo NOPG >&2; exit 66; }; '
       + 'su - postgres -c "pg_dump --clean --if-exists app" > "$f.tmp" || { rm -f "$f.tmp"; exit 1; }; mv "$f.tmp" "$f"; chmod 600 "$f"; wc -c < "$f"; sha256sum "$f" | cut -d" " -f1';
     const r = await projectSh(p.incusName, script, [file], { timeoutMs: 20 * 60 * 1000 });
-    if (r.status === 66) return err('pg_dump is not available in this project container (no Postgres?)');
+    if (r.status === 66) return err(fstack ? 'docker is not available in this project container (its foundation stack runs the database)' : 'pg_dump is not available in this project container (no Postgres?)');
     if (r.status !== 0) return err(`pg_dump failed: ${tail(r.stderr)}`);
     const [bytes, sha] = (r.stdout || '').trim().split('\n');
     note.snapshot = file;
@@ -707,6 +718,12 @@ export function createProjectConfigHandlers(kit) {
     const guard = liveBuildGuard(p.m, p.project); if (guard) return err(guard);
     const file = pathUnder(DB_DUMPS_DIR, basename(String(args.file || '')));
     if (!file || !/\.sql$/.test(file)) return err(`file must be a dump name inside ${DB_DUMPS_DIR} (from dump_project_db, a deploy's pre-deploy copy, or a restore's pre-restore copy)`);
+    // The restore job (setup-engine restore-db-op) still drives the in-guest
+    // server through `su - postgres`. Refuse rather than run it against a
+    // foundation guest, where it would stop the app and then fail.
+    if (await foundationStackLogic(p.project)) {
+      return err(`restore_project_db does not support foundation projects yet: ${p.project.name}'s database runs in its foundation stack and the restore job still targets an in-guest server. Nothing was changed. The dump ${basename(file)} is a plain pg_dump --clean file; an operator can restore it inside the guest with \`docker compose -p mock2-foundation -f /opt/mock2-foundation/compose.yaml exec -T postgres psql -U postgres -d app < ${file}\` after stopping mock2-dev.service.`);
+    }
     // The plan is resolved on the server: the dump name, the environment
     // copy it forms a recovery set with (bound by the job record of THIS app
     // that took them together — a file name alone binds nothing), the prior

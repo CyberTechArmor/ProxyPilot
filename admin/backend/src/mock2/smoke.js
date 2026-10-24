@@ -42,6 +42,7 @@ import {
   firstRunProbeScript, parseFirstRun, firstRunVerdict, firstRunDetail, firstRunLogLines,
 } from './first-run-logic.js';
 import { smokeEnv } from './settings.js';
+import { STACK, FOUNDATION_DATABASE_URL } from './foundation-contract.js';
 
 // Run a script inside the container (same base64-streamed pivot as the runner).
 function containerSh(containerName, script, { timeoutMs = 60000 } = {}) {
@@ -333,6 +334,29 @@ async function driveBrowserConnector({ url, config, containerName, appDir, chang
   }
 }
 
+// smokeScratchDbScript() — the shell lines that resolve the app's DSN, derive
+// the scratch database's DSN from it ($SDSN, database $SMOKEDB), create the
+// scratch database and drop it on exit. Prints NO_DSN / NO_SCRATCH_DSN /
+// CREATE_FAIL and exits 0 when it cannot. socketDir / foundationUrl are
+// overridden only by the real-Docker foundation test.
+export function smokeScratchDbScript({ socketDir = STACK.postgres.socketDir, foundationUrl = FOUNDATION_DATABASE_URL } = {}) {
+  return `DSN="\${DATABASE_URL:-\${DB_URL:-}}"\n`
+    // A foundation guest keeps DATABASE_URL in the unit, not /etc/environment:
+    // its database is the stack's socket (peer auth; root → app, CREATEDB).
+    + `if [ -z "$DSN" ] && [ -S '${socketDir}/.s.PGSQL.5432' ]; then DSN='${foundationUrl}'; fi\n`
+    + `if [ -z "$DSN" ]; then echo "NO_DSN"; exit 0; fi\n`
+    + `SMOKEDB="smoke_mig_$$"\n`
+    // A scratch DSN: swap the database name in the app's own DSN (the query
+    // string — a foundation socket URL's host/user — is kept).
+    // (`\\$` — inside the double quotes a bare `$#` is the shell's argument
+    // count, which broke the expression and left SDSN empty.)
+    + `SDSN=$(printf '%s' "$DSN" | sed -E "s#/[^/?]+(\\?.*)?\\$#/\${SMOKEDB}\\1#")\n`
+    + `if [ -z "$SDSN" ] || [ "$SDSN" = "$DSN" ]; then echo "NO_SCRATCH_DSN"; exit 0; fi\n`
+    + `psql "$DSN" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \${SMOKEDB}" >/dev/null 2>&1 || { echo "CREATE_FAIL"; exit 0; }\n`
+    + `cleanup() { psql "$DSN" -c "DROP DATABASE IF EXISTS \${SMOKEDB} WITH (FORCE)" >/dev/null 2>&1 || psql "$DSN" -c "DROP DATABASE IF EXISTS \${SMOKEDB}" >/dev/null 2>&1; }\n`
+    + `trap cleanup EXIT\n`;
+}
+
 // ---- DB connector (migration dry-run on a SCRATCH database; started only on a hit) ----
 
 // A diff that touches migrations/ or the data layer must prove two things
@@ -354,14 +378,7 @@ async function driveDbConnector({ containerName, appDir }) {
   const bootPort = 18973; // fixed throwaway port well away from app ports
   const script = `set -a\n. /etc/environment 2>/dev/null || true\nset +a\n`
     + `cd '${appDir}' 2>/dev/null || { echo "NO_APPDIR"; exit 0; }\n`
-    + `DSN="\${DATABASE_URL:-\${DB_URL:-}}"\n`
-    + `if [ -z "$DSN" ]; then echo "NO_DSN"; exit 0; fi\n`
-    + `SMOKEDB="smoke_mig_$$"\n`
-    // A scratch DSN: swap the database name in the app's own DSN.
-    + `SDSN=$(printf '%s' "$DSN" | sed -E "s#/[^/?]+(\\?.*)?\$#/\${SMOKEDB}\\1#")\n`
-    + `psql "$DSN" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \${SMOKEDB}" >/dev/null 2>&1 || { echo "CREATE_FAIL"; exit 0; }\n`
-    + `cleanup() { psql "$DSN" -c "DROP DATABASE IF EXISTS \${SMOKEDB} WITH (FORCE)" >/dev/null 2>&1 || psql "$DSN" -c "DROP DATABASE IF EXISTS \${SMOKEDB}" >/dev/null 2>&1; }\n`
-    + `trap cleanup EXIT\n`
+    + smokeScratchDbScript()
     // (1) full migration chain against the scratch DB.
     + `if DATABASE_URL="$SDSN" DB_URL="$SDSN" timeout 180 sh -c ${shSingleQuote(String(contract.migrate))} >/tmp/smoke-mig.log 2>&1; then\n`
     + `  echo "MIGRATE:ok"\n`
@@ -379,6 +396,7 @@ async function driveDbConnector({ containerName, appDir }) {
   const r = await containerSh(containerName, script, { timeoutMs: 300000 });
   const out = (r.stdout || '').trim();
   if (/NO_DSN/.test(out)) return { ok: false, unavailable: true, detail: 'db connector: no DATABASE_URL in the container environment' };
+  if (/NO_SCRATCH_DSN/.test(out)) return { ok: false, detail: 'db connector: could not derive a scratch database URL from DATABASE_URL (expected …/<database>[?query])' };
   if (/NO_APPDIR/.test(out)) return { ok: false, detail: 'db connector: app dir missing' };
   if (/CREATE_FAIL/.test(out)) return { ok: false, detail: 'db connector: could not create the scratch database (psql/permissions)' };
   const migrated = /MIGRATE:ok/.test(out);

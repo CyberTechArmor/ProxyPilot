@@ -21,6 +21,8 @@
 // PURE (stub-first, risk R9): prompt text + JSON parsing + inventory math.
 // Terminology (risk R7): nothing here is named "agent".
 
+import { DATABASE_RULE } from './database-exception-logic.js';
+
 // ---- toggle (default on; 'off' restores the halt-first behavior) ----
 
 export const CONTRACT_CLASSIFIER_FLAG = 'MOCK2_CONTRACT_CLASSIFIER';
@@ -196,7 +198,12 @@ Write, as tight numbered markdown (no code, no preamble):
    (role enums, shared modules, tests that assert cross-file equality).
 4. What must NOT change.
 5. The tests/gates this change must satisfy, incl. ui-checks for touched
-   screens.`;
+   screens.
+
+${DATABASE_RULE} A plan never adds another database engine and never plans
+around an unreachable PostgreSQL. Only a recorded request the platform quotes
+below the build request ("The user explicitly asked for SQLite: …") changes
+that.`;
 
 export function buildPlanTask({ instruction = '', inventoryJson = '', requirementsDoc = '' } = {}) {
   return [

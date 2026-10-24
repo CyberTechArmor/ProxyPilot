@@ -25,6 +25,7 @@ import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from '
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
 import { agentsMd, workMd, projectHandoffMd, tasksReadmeMd, TASKS_DIR } from './continuity-convention.js';
 import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
+import { DATABASE_RULE } from './database-exception-logic.js';
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
@@ -282,8 +283,11 @@ existing apps preserve working integrations unless modernization is requested.
 - Compliance mode: standard | hipaa
 
 ## Stack
-- TypeScript, Express, Drizzle, Zod, Vitest, PostgreSQL (Mock2 default)
-- Deviations from the default, with reason: <none>
+- TypeScript, Express, Drizzle, Zod, Vitest, PostgreSQL with pgvector (the application foundation)
+- ${DATABASE_RULE}
+- Only the person's own request, recorded on the project in Dev Studio, allows SQLite. A stack
+  deviation is approved by the platform administrator and recorded in \`state/deviations/\`
+  (constitution §9) — never decided in this file or by a build.
 
 ## Commands
 - Install: \`npm install\` · Dev: \`npm run dev\` · Migrate: \`npm run migrate\`
@@ -312,6 +316,13 @@ Same content as \`CLAUDE.md\` at the repo root; keep the two in sync. This repos
 follows the Mock2 standards installed at user level (https://mock2.fractionate.ai)
 and CPR v1.1. Nothing here blocks building or testing; production decisions live in
 \`state/production-checklist.md\`.
+
+Profile: cpr
+Deviations:
+  - none (a deviation is approved by the platform administrator in \`state/deviations/\`)
+
+${DATABASE_RULE} Only the person's own request, recorded on the project in Dev Studio,
+allows SQLite.
 
 Starting or resuming work? Read \`AGENTS.md\` first — the reading order, and where
 unfinished tasks are recorded (\`state/tasks/\`).

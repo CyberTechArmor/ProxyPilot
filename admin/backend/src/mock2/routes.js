@@ -116,6 +116,8 @@ import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
 import { registerFlightdeckRoutes } from './flightdeck.js';
 import { registerTaskRoutes } from './task-routes.js';
+import { registerDatabaseExceptionRoutes } from './database-exception-routes.js';
+import { getDatabaseException, setDatabaseException, clearDatabaseException } from './database-exception.js';
 import { routeChatMessage, currentTaskForProject } from './task-sync.js';
 import {
   startProvision,
@@ -6098,6 +6100,12 @@ export function createMock2Router() {
   // Task continuity — the project's tasks (list / one / resume / stop), the
   // database-authoritative record behind the task strip and state/tasks/.
   registerTaskRoutes(router, refuseIfArchived);
+
+  // App foundation — the person's recorded request for SQLite (sudo, audited).
+  registerDatabaseExceptionRoutes(router, {
+    requireRole: requireMock2Role, refuseIfArchived, requireSudo, audit: logAudit,
+    store: { get: getDatabaseException, set: setDatabaseException, clear: clearDatabaseException },
+  });
 
   return router;
 }

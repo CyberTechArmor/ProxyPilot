@@ -22,6 +22,8 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { foundationCommandPolicy } from './harness-safety.js';
+
 // Paths the SDK runner must never edit (secrets, governed content, hash-chained
 // history, CI). file_path from the SDK is usually absolute (cwd-joined), so the
 // `(^|/)` anchors match a segment anywhere in the path. mock2.yaml is deliberately
@@ -100,6 +102,13 @@ export function makePreToolUseGuard(ctx) {
         if (BLOCKED_BASH_PATTERNS.some((re) => re.test(cmd))) {
           ctx.logEvent('guardrail', { role: 'system', content: `blocked Bash: ${cmd.slice(0, 200)}`, meta: { event: 'guardrail.blocked', tool, command: cmd, reason: 'destructive_command', ts: ctx.now() } });
           return denyDecision(input, `Refused: \`${cmd}\` matches a blocked destructive pattern.`);
+        }
+        // The application foundation's policy, shared by every lane
+        // (harness-safety.js): refused database installs, foundation teardown.
+        const fp = foundationCommandPolicy(cmd, { databaseException: ctx.databaseException || null });
+        if (!fp.ok) {
+          ctx.logEvent('guardrail', { role: 'system', content: `blocked Bash: ${cmd.slice(0, 200)}`, meta: { event: 'guardrail.blocked', tool, command: cmd, reason: 'foundation_policy', ts: ctx.now() } });
+          return denyDecision(input, `Refused: ${fp.reason}`);
         }
       }
     } catch { /* fail open — never wedge the cycle on a guard bug */ }

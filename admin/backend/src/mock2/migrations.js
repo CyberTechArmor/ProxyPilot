@@ -2031,4 +2031,28 @@ export const MOCK2_MIGRATIONS = [
       if (!columns.includes('holder_operation_kind')) d.exec("ALTER TABLE mock2_locks ADD COLUMN holder_operation_kind TEXT CHECK(holder_operation_kind IN ('task-continuity','mcp-write','project-write','restore'))");
     },
   },
+  // 564 is reserved for the application foundation's deployment state (a
+  // sibling change); the runner keys on version, not position, so 565 may land
+  // first.
+  {
+    // App foundation — "no SQLite without an explicit request". One row per
+    // project: the person's own words asking for SQLite, recorded through the
+    // sudo + audited route only (database-exception-routes.js). The host reads
+    // it to relax the PostgreSQL-only rule for the SQLite family; nothing in a
+    // repository can create it. New table only; a project delete removes its
+    // row (ids can be reused).
+    version: 565,
+    name: 'mock2_database_exceptions',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_database_exceptions (
+          project_id INTEGER PRIMARY KEY,
+          engine TEXT NOT NULL CHECK (engine IN ('sqlite')),
+          request_text TEXT NOT NULL CHECK (length(request_text) BETWEEN 10 AND 2000),
+          recorded_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];

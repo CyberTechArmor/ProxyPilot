@@ -55,6 +55,8 @@ import { formatBriefForTask } from './prepass-logic.js';
 import { closeRequest } from './requests.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
+import { getDatabaseException, readIntroducedDatabaseEngines } from './database-exception.js';
+import { databaseEngineRejectionMessage } from './finish-guard-logic.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
 import { insertMessage } from './chats.js';
 import {
@@ -218,9 +220,12 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     } catch (err) { console.warn('[mock2] installed components load failed:', err?.message); }
     const installedKeys = new Set(installedComponents.map((c) => c.key));
     const adoptableCatalog = componentCatalog.filter((c) => !installedKeys.has(c.key));
+    // The recorded SQLite request (mock2.db only) — quoted in the governance
+    // file, honoured by the Bash guard and the finish-time engine check.
+    const databaseException = getDatabaseException(projectId);
     const claudeMd = buildRunnerClaudeMd({
       constitution: framework.constitution_md, skills, appDir: checkoutDir, webPort: project.web_port || 3000,
-      components: adoptableCatalog, installedComponents,
+      components: adoptableCatalog, installedComponents, databaseException,
     });
     await mkdir(join(checkoutDir, '.claude'), { recursive: true });
     await writeFile(join(checkoutDir, '.claude', 'CLAUDE.md'), claudeMd, 'utf8');
@@ -250,7 +255,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     // the records land in our transcript, not a file that would be synced back.
     const hookCtx = {
       cycleId: cycle.id, projectId, actorUserId: cycle.initiated_by ?? null,
-      repoRoot: checkoutDir, logEvent, now: () => new Date().toISOString(),
+      repoRoot: checkoutDir, logEvent, now: () => new Date().toISOString(), databaseException,
     };
     const hookOptions = buildHookOptions(hookCtx);
 
@@ -436,6 +441,16 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
           const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
           changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
         } catch { changedThisCycle = []; }
+        // No SQLite without an explicit request — the same host-side check as
+        // the hand-rolled finish (finish-guard-logic.js): not green, keep going.
+        const engineHits = changedThisCycle.length
+          ? await readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId })
+          : [];
+        if (engineHits.length) {
+          pendingFeedback = databaseEngineRejectionMessage(engineHits);
+          logEvent('note', { role: 'system', content: `Refused database engine in the diff — continuing: ${pendingFeedback.slice(0, 300)}`, meta: { round } });
+          continue;
+        }
         let accText = null;
         try { accText = await readFile(join(checkoutDir, ACCEPTANCE_PATH), 'utf8'); } catch { accText = null; }
         const accParsed = accText != null ? parseAcceptance(accText) : { ok: false, error: 'state/acceptance.json not found' };

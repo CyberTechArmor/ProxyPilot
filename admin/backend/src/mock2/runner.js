@@ -88,7 +88,9 @@ import {
 } from './runner-logic.js';
 import { harnessForProject } from './harness.js';
 import { applyEdits } from './apply-edit-logic.js';
-import { commandAllowed, redactSecrets } from './harness-safety.js';
+import { commandAllowed, foundationCommandPolicy, redactSecrets } from './harness-safety.js';
+import { getDatabaseException, readIntroducedDatabaseEngines } from './database-exception.js';
+import { gateExceptionValue, databaseRuleLine } from './database-exception-logic.js';
 import { formatReadRange, formatSearchResults } from './harness-copilot.js';
 import { callStepTurn, stepSystemPrompt } from './harness-steps.js';
 import {
@@ -147,7 +149,7 @@ import {
   malformedFinishInput, malformedRejectionMessage, receivedParamsEcho, FINISH_FILE_PATH, parseFinishFile,
   initFinishGuard, recordFinishRejection, escalatedRetryDiagnostic, budgetNote,
   budgetExhaustedSummary, harnessFaultHaltAccepted,
-  unverifiableClaims, sensitiveAssumedEntries,
+  unverifiableClaims, sensitiveAssumedEntries, databaseEngineRejectionMessage,
 } from './finish-guard-logic.js';
 import { recordFeature, takeFeatureLedger } from './feature-activation.js';
 // (models.js constants are no longer used directly here — the phase map and
@@ -1387,7 +1389,7 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
             const planRes = await callStepTurn('build-plan', {
               connector: planConn.connector, apiKey: planConn.apiKey, model: pm.plan.model,
               system: stepSystemPrompt('build-plan', BUILD_PLAN_SYSTEM_PROMPT, {}), tools: [],
-              transcript: [{ role: 'user', text: buildPlanTask({ instruction: cycle.instruction, inventoryJson: invJson, requirementsDoc: reqDoc }) }],
+              transcript: [{ role: 'user', text: `${buildPlanTask({ instruction: cycle.instruction, inventoryJson: invJson, requirementsDoc: reqDoc })}\n\n${databaseRuleLine(getDatabaseException(projectId))}` }],
               timeoutMs: 300000, effort: 'high',
             });
             if (planRes.ok) {
@@ -1458,6 +1460,9 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
     components: componentCatalog.filter((c) => !installedKeys.has(c.key)),
     installedComponents,
     buildMode: cycleMode,
+    // The database line in the mode header: the rule, or the user's recorded
+    // SQLite request quoted (mock2.db only — never a repo file).
+    databaseException: getDatabaseException(projectId),
   }), { CONSTITUTION: framework.constitution_md, APP_DIR, WEB_PORT: project.web_port || 3000 });
   // WHICH ENGINE IS BUILDING — stamped on every run. Operator request: build 47
   // ran on the copilot harness (the install default) and nothing in its log
@@ -2231,6 +2236,22 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
       const changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
       const codeChanged = codeChangedFiles(changedThisCycle);
+      // NO SQLITE WITHOUT AN EXPLICIT REQUEST (app foundation): a diff that
+      // adds a refused database engine cannot report done. Judged on the host
+      // from the changed files, so editing the gate copy in the container
+      // does not get past it; a recorded SQLite request (mock2.db) allows the
+      // SQLite family only. Shares the finish budget like every validator.
+      if (changedThisCycle.length) {
+        const engineHits = await readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId });
+        if (engineHits.length) {
+          const r = await rejectFinishOrConclude({
+            validator: 'database-engine', termId, termName, decision, gateReports: lastGateReports,
+            message: databaseEngineRejectionMessage(engineHits),
+          });
+          if (r === 'concluded') return scheduleJobCleanup(cycle.id);
+          continue;
+        }
+      }
       // MACHINE acceptance (cycle-94 lesson — Goodhart guard). Gates green is a
       // PROXY; finish is only accepted when the acceptance spec exists and, for
       // a bug-fix task, red→green was demonstrated INSIDE this cycle — UNLESS
@@ -3425,6 +3446,10 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts, we
   assertTaskMirrorSettled({ lock: getLock(Number(cycle.project_id)) });
   switch (call.name) {
     case 'exec_in_container': {
+      // The foundation policy binds every lane (harness-safety.js): no refused
+      // database package installs, nothing that takes the foundation down.
+      const fp = foundationCommandPolicy(String(call.input?.command || ''), { databaseException: getDatabaseException(cycle.project_id) });
+      if (!fp.ok) return { content: `DENIED: ${fp.reason}` };
       const r = await execInContainer(containerName, String(call.input?.command || ''));
       touchLock(cycle.project_id, holder);
       return { content: `exit ${r.code}\n${r.stdout || ''}${r.stderr ? `\n[stderr]\n${r.stderr}` : ''}` };
@@ -3458,7 +3483,7 @@ async function executeTool({ call, cycle, containerName, holder, gateScripts, we
     }
     case 'run_terminal': {
       const command = String(call.input?.command || '');
-      const policy = commandAllowed(command);
+      const policy = commandAllowed(command, { databaseException: getDatabaseException(cycle.project_id) });
       if (!policy.ok) return { content: `DENIED: ${policy.reason}` };
       const r = await execInContainer(containerName, command);
       touchLock(cycle.project_id, holder);
@@ -3721,12 +3746,21 @@ export async function copyGatesIntoContainer(containerName, gateScripts) {
 // Exported so the SDK runner runs the IDENTICAL pinned battery (same invocation).
 export async function runGateBattery(cycleId, containerName, gateScripts) {
   const reports = gateScripts.map((g) => ({ name: g.name, status: 'pending', started_at: null, report: null }));
+  // App foundation: the gate learns a recorded SQLite request ONLY from here —
+  // read from mock2.db and assigned on every gate's own command line (empty
+  // when none), so nothing in the repository or the guest's environment can
+  // set it. The battery's profile rides along (constitution-lint keeps its
+  // debt-prone sub-checks blocking in the full build only).
+  let dbException = '';
+  try { dbException = gateExceptionValue(getDatabaseException(getCycle(cycleId)?.project_id)); } catch { dbException = ''; }
   for (let i = 0; i < gateScripts.length; i++) {
     reports[i].status = 'running';
     reports[i].started_at = nowIso();
     updateCycle(cycleId, { current_gate: gateScripts[i].name, gates_json: JSON.stringify(reports) });
     const f = gateFilename(gateScripts[i], i);
-    const script = `cd '${APP_DIR}' 2>/dev/null || cd /\nsh '${GATES_DIR}/${f}' 2>&1\necho "__MOCK2_GATE_EXIT__:$?"`;
+    const profile = /^(quick|mvp|full)$/.test(String(gateScripts[i].profile || '')) ? gateScripts[i].profile : '';
+    const env = `MOCK2_DATABASE_EXCEPTION='${dbException === 'sqlite' ? 'sqlite' : ''}' MOCK2_GATE_PROFILE='${profile}'`;
+    const script = `cd '${APP_DIR}' 2>/dev/null || cd /\n${env} sh '${GATES_DIR}/${f}' 2>&1\necho "__MOCK2_GATE_EXIT__:$?"`;
     const r = await containerSh(containerName, script, { timeoutMs: 300000 });
     const out = r.stdout || '';
     const m = out.match(/__MOCK2_GATE_EXIT__:(\d+)\s*$/);

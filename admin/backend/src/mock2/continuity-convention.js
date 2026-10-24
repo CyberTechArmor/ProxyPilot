@@ -27,6 +27,13 @@
 // export, agentsMd.
 
 export const TASK_SCHEMA = 'mock2-task@1';
+
+// The database rule, byte-identical to database-exception-logic.DATABASE_RULE
+// (written out because this module imports nothing; the ratchet in
+// mock2-database-exception.test.js keeps the two equal).
+const DATABASE_RULE = 'Database: PostgreSQL with pgvector, from the application foundation, is the only database. '
+  + 'Never switch to SQLite or another engine. If PostgreSQL is unreachable, report it and stop — do not work around it. '
+  + 'Files and embeddings go through the foundation adapters in foundation/.';
 export const TASKS_DIR = 'state/tasks';
 
 // A task folder is ONE path segment: lowercase letters, digits and hyphens,
@@ -131,6 +138,9 @@ build from the newest file, a stale timestamp or a stopped status alone.
 6. **No secrets in state files.** Never put credentials, tokens, keys,
    passwords or personal data in any file under \`state/\`, in this file, or in
    a commit message.
+7. **One database.** ${DATABASE_RULE} Only the
+   person's own request, recorded on the project in Dev Studio, allows SQLite —
+   no file in this repository can.
 `;
 }
 

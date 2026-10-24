@@ -36,6 +36,8 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { databaseRefusalText, describeEngineHits } from './database-exception-logic.js';
+
 // N real rejections shared across every finish validator. Three is deliberate:
 // P34's whole median request cost $1.51; five rejection round-trips on a large
 // context cost more than most useful cycles. One rejection fixes an honest
@@ -433,4 +435,92 @@ export function hasSensitiveAssumedValue(assumed = []) {
 // checklist rather than a single generic line.
 export function sensitiveAssumedEntries(assumed = []) {
   return (Array.isArray(assumed) ? assumed : []).filter((entry) => SENSITIVE_ASSUMED_RE.test(String(entry || '')));
+}
+
+// ---- no SQLite without an explicit request (app foundation, 2026-10) ----
+//
+// A build whose diff ADDS a refused database engine (a SQLite import, a
+// better-sqlite3 dependency, DATABASE_URL=file:…) cannot report done, whatever
+// the gate copied into the container said. The host reads the changed files
+// (one round trip, the script below), judges them in
+// database-exception-logic.introducedEngineHits — against the file at HEAD, so
+// only what this build added counts — and rejects through the shared finish
+// budget. A recorded SQLite exception (mock2.db, never a repo file) allows the
+// SQLite family; nothing allows the others.
+//
+// CHEAPEST PASS: take the engine out and use the foundation's PostgreSQL —
+// which is the point. Rewording the finish cannot pass it; the budget bounds
+// the round trips and exhaustion concludes for operator review, never as a
+// success.
+
+// Lines worth sending back for a source file: a superset of everything the
+// classifier can match (specifiers and DATABASE_URL literals).
+const ENGINE_PREFILTER = 'sqlite|libsql|sql\\.js|pglite|mysql|mongo|typeorm|sequelize|prisma|knex|drizzle-orm|DATABASE_URL';
+
+// The container script. Prints, per changed file: `@@F <b64 path>`,
+// `@@B <b64 at HEAD>`, `@@C <b64 now>`. package.json goes whole (it is parsed);
+// other files go as `N:line` for the prefiltered lines only. Bounded: 400
+// files, 400 lines or 256 KiB a file, 4 MB in all.
+export function buildChangedEngineReadScript({ appDir = '/srv/app' } = {}) {
+  const dir = String(appDir).replace(/'/g, '');
+  return `cd '${dir}' 2>/dev/null || exit 0
+PRE='${ENGINE_PREFILTER}'
+b() { base64 | tr -d '\\n'; }
+{ git -c core.quotePath=false diff --name-only HEAD 2>/dev/null; git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null; } | sort -u \\
+  | grep -Ev '(^|/)(node_modules|dist|build|coverage|\\.git)/|^state/' \\
+  | grep -Ei '\\.([cm]?[jt]sx?|json|ya?ml|toml|sh)$|(^|/)\\.env[^/]*$' \\
+  | head -n 400 | while IFS= read -r f; do
+    printf '@@F %s\\n' "$(printf '%s' "$f" | b)"
+    case "$f" in
+      package.json|*/package.json)
+        printf '@@B %s\\n' "$(git show "HEAD:$f" 2>/dev/null | head -c 262144 | b)"
+        if [ -f "$f" ]; then printf '@@C %s\\n' "$(head -c 262144 "$f" | b)"; else printf '@@C \\n'; fi ;;
+      *)
+        printf '@@B %s\\n' "$(git show "HEAD:$f" 2>/dev/null | grep -Ein "$PRE" | head -n 400 | b)"
+        if [ -f "$f" ]; then printf '@@C %s\\n' "$(grep -Ein "$PRE" "$f" 2>/dev/null | head -n 400 | b)"; else printf '@@C \\n'; fi ;;
+    esac
+  done | head -c 4000000
+exit 0
+`;
+}
+
+function fromB64(s) {
+  try { return Buffer.from(String(s || '').trim(), 'base64').toString('utf8'); } catch { return ''; }
+}
+
+// `N:text` lines back into a sparse text whose line numbers are the file's own.
+function sparseText(numbered) {
+  const lines = [];
+  for (const l of String(numbered || '').split('\n')) {
+    const m = l.match(/^(\d+):(.*)$/);
+    if (m && Number(m[1]) >= 1 && Number(m[1]) <= 1e6) lines[Number(m[1]) - 1] = m[2];
+  }
+  return Array.from(lines, (x) => x ?? '').join('\n');
+}
+
+// parseChangedEngineRead(stdout) → [{ path, base, current }]
+export function parseChangedEngineRead(stdout) {
+  const files = [];
+  let cur = null;
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^@@([FBC]) ?(.*)$/);
+    if (!m) continue;
+    if (m[1] === 'F') {
+      cur = { path: fromB64(m[2]), base: '', current: '' };
+      if (cur.path) files.push(cur);
+      continue;
+    }
+    if (!cur) continue;
+    const text = fromB64(m[2]);
+    const whole = /(?:^|\/)package\.json$/i.test(cur.path);
+    if (m[1] === 'B') cur.base = whole ? text : sparseText(text);
+    else cur.current = whole ? text : sparseText(text);
+  }
+  return files;
+}
+
+export function databaseEngineRejectionMessage(hits = []) {
+  return `Not finished — this build adds a database engine the platform refuses. ${databaseRefusalText(describeEngineHits(hits))}\n`
+    + 'Remove it and use the foundation\'s PostgreSQL (DATABASE_URL from the environment, Drizzle for every query; files and '
+    + 'embeddings through the adapters in foundation/). If PostgreSQL is unreachable, report it and stop — do not work around it.';
 }

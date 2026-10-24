@@ -6,6 +6,35 @@ scope. Anyone picking up a future session should treat this file
 as a punch list, not a roadmap — items here are meant to be
 addressed individually, not bundled.
 
+## Application foundation (2026-10): follow-ups
+
+From the foundation build (docs/features/app-foundation.md).
+
+- **Existing projects have no adoption path yet.** Projects created before the
+  foundation keep their native in-guest Postgres. Moving one onto the stack
+  (data move, pgvector, storage, secrets out of `/etc/environment`) is a
+  separate, explicit step that is not built.
+- **Apps that already drifted to SQLite now fail quick and MVP builds**
+  (constitution-lint runs in every tier). The person either records the
+  explicit request (Foundation → Database exception) or the app is migrated.
+- **Not proven in the sandbox:** Docker inside a nested Incus guest, the
+  Debian 13 `docker.io` / `docker-compose` / `postgresql-client` install (the
+  failure path is proven), and the local embedding model (the TEI image and
+  model downloads are blocked there; an OpenAI-compatible fake stood in).
+  The first real foundation project on a host is the proof.
+- **Cloning** copies the database (vectors included) but not stored objects.
+- **The command policy** (harness-safety.js) covers run_terminal,
+  exec_in_container and the SDK lane, but not MCP `run_project_command` or
+  the ask lane.
+- **constitution-lint's ESLint step never runs**: `ls .eslintrc* eslint.config.*`
+  fails unless both config kinds exist. Left as is; fixing it changes full builds.
+- **Upstream (mock2-core) follow-ups** after the 1.39.0 amendment:
+  `base-app.mjs` still writes `BOOTSTRAP_TOKEN=` into `.env.example`;
+  `modules.mjs` does not report direct S3 / embedding clients; an
+  `@aws-sdk/client-s3` pin belongs in `stack.versions.json`.
+- **Flaky:** `migration-service.test.js` "create: validates…" failed once
+  under full-suite load and passed on every rerun.
+
 ## OpenBao dashboard operator actions still dial the public hostname
 
 Found while fixing the Infisical bootstrap 403 (2026-09-23). Adapter

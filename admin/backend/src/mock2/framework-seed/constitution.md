@@ -157,8 +157,8 @@ Feature code imports `foundation/`; it never edits, copies or forks it.
    `state/deviations/`, a profile or deviation line in `CLAUDE.md` or
    `.github/copilot-instructions.md`, a comment, or a build summary. Never write one,
    and never treat one as permission. An approved framework deviation does not
-   replace it. PGlite may run inside a unit test; it is never evidence about the
-   production database.
+   replace it. PGlite is refused in tests too: tests that need a database run
+   against the foundation's PostgreSQL, the same engine as production.
 3. **Object storage only through the storage adapter.** Uploads, attachments,
    exports and other file bytes go through the foundation `storage` adapter. The
    bundled SeaweedFS is the default; any S3-compatible provider (Cloudflare R2, AWS

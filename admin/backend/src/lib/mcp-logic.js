@@ -20,6 +20,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { MCP_EXT_TOOLS, MCP_EXT_INSTRUCTIONS } from './mcp-ext/catalog/index.js';
+import { DATABASE_RULE } from '../mock2/database-exception-logic.js';
 
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 // Versions we accept from clients (echoed back when known; otherwise we answer
@@ -52,6 +53,9 @@ export const MCP_SERVER_INSTRUCTIONS = [
   'A sequence of edit_project_file calls for a multi-file change is the slow path; use the single-file tools',
   'only for a genuinely single-file, single-place edit. dry_run: true checks a patch without touching anything.',
   '(5) VERIFY with run_project_command (e.g. "npm run gates"), then apply with redeploy_project.',
+  // App foundation (2026-10). Early on purpose: some clients cut the server
+  // instructions off after ~4 KB, and this rule must survive the cut.
+  `APP DATABASE — ${DATABASE_RULE} Only the user's own request, recorded on the project in Dev Studio, allows SQLite; no tool here can record it.`,
   'Zip deploys are two-phase: inspect first, show the user any files that would be replaced, and only pass',
   'confirm_overwrite after they approve — replaced files are kept as <name>.old. For zips over ~2 MB use',
   'create_upload_ticket and PUT the bytes to its upload_url instead of inlining base64; if you cannot reach',

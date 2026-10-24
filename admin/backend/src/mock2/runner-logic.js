@@ -17,6 +17,7 @@ import { buildComponentCatalogSection, buildInstalledComponentsSection } from '.
 import { normalizeHarness } from './project-logic.js';
 import { MODEL_PRIMARY } from './models.js';
 import { PROBE_TARGETS } from './probe-logic.js';
+import { databaseRuleLine } from './database-exception-logic.js';
 
 // The runner's tool set, as provider-neutral JSON-Schema tool definitions.
 // model-client.js maps these onto each provider's tool-calling shape (Anthropic
@@ -950,7 +951,7 @@ export const OBSERVATION_SECTION = `# Observe before you theorise
 // fresh from a pinned version, never travels through chat, cannot be talked out
 // of). constitution is the pinned constitution_md; skills the parsed skill list;
 // task the canned instruction; appDir/webPort orient the model in the container.
-export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [], buildMode = 'full', harness = 'proxypilot' } = {}) {
+export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [], buildMode = 'full', harness = 'proxypilot', databaseException = null } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
@@ -964,9 +965,10 @@ export function buildRunnerSystemPrompt({ constitution = '', skills = [], appDir
   const modeHeader = mode === 'mvp' ? `THIS CYCLE IS AN MVP BUILD: deliver a WORKING, testable end-to-end version of
 the approved design, fast.
 - You have NO run_gates tool this cycle, but a REDUCED battery does run once at
-  finish — the "does it look and act right" gates: typecheck, design-adherence,
-  platform-intact, signin-reachable, mobile-overflow, no-dead-controls,
-  no-native-dialogs, e2e. Fix what they report.
+  finish — the "does it look and act right" gates: typecheck, constitution-lint
+  (the database check), design-adherence, platform-intact, signin-reachable,
+  mobile-overflow, no-dead-controls, no-native-dialogs, e2e. Fix what they
+  report.
 - Do NOT write state/acceptance.json, per-rule test suites, or the rule
   interview — skipping them is sanctioned here and only here, and a later FULL
   build adds them. state/ui-checks.json is OPTIONAL in this lane: the
@@ -990,7 +992,8 @@ in minutes. Think "editor session", not "project build".
   improvement, and never modify the UI to satisfy what you guess a checker
   matches on. If the instruction conflicts with a gate or the approved design,
   satisfy the instruction and state the conflict in your finish summary.
-- There is NO gate battery and NO run_gates tool this cycle, and you must NOT
+- There is NO run_gates tool this cycle; a small battery (typecheck and
+  constitution-lint, the database check) runs once at finish. You must NOT
   write state/acceptance.json, ui-checks, per-rule tests, or new test suites —
   verify the change yourself (keep it type-clean); ProxyPilot's deploy (tsc
   build + health check on the live URL) is the verification backstop. Quick
@@ -1070,6 +1073,8 @@ is honestly done. You never approve your own work and you never release to
 production — a human reviewer gates production.
 
 ${modeHeader}
+
+${databaseRuleLine(databaseException)}
 
 You are working inside a sealed, network-fenced container. The project's working
 tree at ${appDir} is a TypeScript / Express / Drizzle / Zod application (the
@@ -1783,7 +1788,7 @@ export function sdkQueryOptions({ cwd, model, maxTurns, env, resumeSessionId = n
 // system-prompt version. `task` is passed to the SDK as the prompt, so it is NOT
 // duplicated here; the administrator-decisions block (when present) rides on the
 // task like it does today.
-export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [] } = {}) {
+export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '/srv/app', webPort = 3000, components = [], installedComponents = [], databaseException = null } = {}) {
   const skillLines = skills.length
     ? skills.map((s) => `- ${s.name}${s.description ? `: ${s.description}` : ''}`).join('\n')
     : '- (no skills configured in this framework version)';
@@ -1792,6 +1797,8 @@ export function buildRunnerClaudeMd({ constitution = '', skills = [], appDir = '
 You are the Mock2 build runner. You make one small, targeted change to this project's
 code, verify it against a fixed gate battery, and stop. You never approve your own
 work and you never release to production — a human reviewer gates production.
+
+${databaseRuleLine(databaseException)}
 
 The project working tree here is a TypeScript / Express / Drizzle / Zod application
 (the standard scaffold): the app lives under \`src/\` (\`src/server.ts\` binds the

@@ -220,6 +220,9 @@ export function deleteProject(id) {
     // id never inherits a deleted project's unfinished work.
     // Guarded: the table is absent until migration 562 has run.
     try { deleteTasksForProject(id); } catch { /* pre-migration */ }
+    // And its recorded SQLite request: a reused id must never inherit one.
+    // Guarded: the table is absent until migration 565 has run.
+    try { db.prepare(`DELETE FROM mock2_database_exceptions WHERE project_id = ?`).run(id); } catch { /* pre-migration */ }
     return db.prepare(`DELETE FROM mock2_projects WHERE id = ?`).run(id).changes > 0;
   });
   return tx();

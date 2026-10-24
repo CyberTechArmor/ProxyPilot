@@ -265,7 +265,13 @@ export function gateProfileForMode(mode) {
 // Gates that are cheap and universally safe enough for the quick lane. Matched
 // by name because gates_json is operator-authored and mostly untagged; a gate
 // naming itself "typecheck" is a typecheck wherever it came from.
-const QUICK_TIER_NAME_RE = /^(tsc|typecheck|type-check|types|lint|compile)$/i;
+// constitution-lint is here ON PURPOSE (app foundation, 2026-10): it carries
+// the "PostgreSQL is the only database" check, and quick and MVP builds were
+// exactly where apps drifted to SQLite while it ran in full builds only. The
+// seed declares `"tier": "quick"`; the name keeps it in every tier for a
+// framework version that lost the field. Its non-database sub-checks report
+// as advisory below full (MOCK2_GATE_PROFILE, see gatesForProfile).
+const QUICK_TIER_NAME_RE = /^(tsc|typecheck|type-check|types|lint|compile|constitution-lint)$/i;
 // The MVP tier is "look and act right": rendering, interaction, structure.
 const MVP_TIER_NAME_RE = /(^|-)(ui|ui-checks?|ui-interaction|smoke|render|responsive|mobile|a11y|accessibility|build)($|-)/i;
 
@@ -307,13 +313,16 @@ export function gateIsAdvisoryIn(name, profile) {
 }
 
 // gatesForProfile — the operator gates that belong in a profile, ordered.
+// Each carries the profile it was selected for: runGateBattery passes it to
+// the script as MOCK2_GATE_PROFILE, so a gate that runs in every tier can keep
+// its debt-prone sub-checks blocking in the full build only.
 export function gatesForProfile(gates = [], profile = 'full') {
   const rank = tierRank(profile);
   return (Array.isArray(gates) ? gates : [])
     .filter((g) => tierRank(gateTier(g)) <= rank)
     .map((g) => (gateIsAdvisoryIn(g?.name, profile)
-      ? { ...g, script: asAdvisory(g.script, g.name), advisory: true }
-      : g));
+      ? { ...g, script: asAdvisory(g.script, g.name), advisory: true, profile }
+      : { ...g, profile }));
 }
 
 // withBaselineGates — append the backend-owned baseline gates for this profile.

@@ -328,7 +328,10 @@ function configMjs() {
 // Where the database is, the deployment master key, and the feature switches
 // and sealed secrets ProxyPilot writes into the app database
 // (mock2_foundation.features / .secrets). Loaded once at boot (bootstrap.mjs),
-// reloaded whenever the host sends NOTIFY on the foundation channel.
+// reloaded whenever the host sends NOTIFY on the foundation channel (payload:
+// the generation number it keeps in mock2_foundation.meta 'generation').
+// features.<f>.pending is a staged switch, { provider, config, mode?, test? };
+// its credentials are the pending.* secrets.
 //
 // Environment (all optional):
 //   DATABASE_URL            the database; default FOUNDATION_DATABASE_URL (the
@@ -535,6 +538,9 @@ async function readState(db) {
     const s = await db.query('SELECT name, sealed, generation FROM mock2_foundation.secrets ORDER BY name');
     rows = s.rows;
     for (const r of rows) generation = Math.max(generation, Number(r.generation) || 0);
+    // The host's own counter (the number it sends with NOTIFY) wins when present.
+    const m = await db.query("SELECT value FROM mock2_foundation.meta WHERE key = 'generation'");
+    if (m.rows[0] && Number.isFinite(Number(m.rows[0].value))) generation = Number(m.rows[0].value);
   } catch (err) {
     // 42P01 undefined_table, 3F000 invalid_schema_name: this database was not
     // provisioned with the foundation schema (an e2e scratch database, or an
@@ -2269,19 +2275,25 @@ function jobsMjs() {
 // time, which the job notices within a fraction of a second. Every job is
 // resumable: running it again skips work that is already verified.
 //
-//   storage_migrate  params { mode: 'copy' }: copy every object from the
-//                    ACTIVE storage to the PENDING one. Each object is
+//   storage_migrate  params { from, to, verify: ['size','sha256'] }: copy
+//                    every object from the ACTIVE storage (features.storage
+//                    + its secrets) to the PENDING one (features.storage
+//                    .pending + the pending.* secrets). from/to are the
+//                    host's record of what it planned; the job refuses to run
+//                    when they disagree with the app database. Each object is
 //                    streamed (sha256 computed on the way), uploaded, checked
 //                    by size (HEAD) and re-read from the target to compare the
 //                    sha256. One storage_migration_items row per key. The job
 //                    succeeds only when EVERY object is verified.
-//   reembed          params { target_index_id }: the host inserted a
-//                    vector_indexes row in state 'building' with the PENDING
-//                    provider/model/dimensions. Build its table from the
-//                    active index's stored content with the pending provider,
-//                    validate (item count, dimensions, self-retrieval sample)
-//                    and mark it 'ready' (or 'failed' with the reason). The
-//                    active index is only ever read.
+//   reembed          params { from, to, source_index, target_index }: the
+//                    host inserted the target vector_indexes row (state
+//                    'building', the PENDING provider/model/dimensions). Build
+//                    its table from the active index's stored content with the
+//                    pending provider, validate (item count, dimensions,
+//                    self-retrieval sample) and end with the target 'ready'
+//                    (validation json) or 'failed' (the reason). The host
+//                    promotes only from 'ready'; this job never changes the
+//                    active index or the features.
 import crypto from 'node:crypto';
 import { Transform } from 'node:stream';
 import { ensureFoundation, getPool } from './config.mjs';
@@ -2594,12 +2606,38 @@ function sameLocation(a, b) {
   return a.endpoint === b.endpoint && a.bucket === b.bucket && a.prefix === b.prefix && a.region === b.region;
 }
 
+// The fields of a planned location (params.from / params.to) that disagree
+// with the storage the app database holds now. Absent fields are not compared.
+function locationMismatches(planned, st) {
+  if (planned === undefined || planned === null) return [];
+  if (typeof planned !== 'object') return ['not an object'];
+  const actual = { provider: st.provider, endpoint: st.endpoint, bucket: st.bucket, region: st.region, prefix: st.prefix };
+  const norm = (k, v) => {
+    const t = v === undefined || v === null ? '' : String(v);
+    return k === 'endpoint' ? t.replace(/\/+$/, '') : t;
+  };
+  const out = [];
+  for (const k of ['provider', 'endpoint', 'bucket', 'region', 'prefix']) {
+    if (planned[k] === undefined || planned[k] === null) continue;
+    if (norm(k, planned[k]) !== norm(k, actual[k])) out.push(k + ' ' + JSON.stringify(planned[k]) + ' vs ' + JSON.stringify(actual[k]));
+  }
+  return out;
+}
+
 async function runStorageMigrate(ctx) {
-  const mode = ctx.params.mode || 'copy';
-  if (mode !== 'copy') throw new FoundationError('JOB_PARAMS_INVALID', 'storage_migrate only copies (params.mode "copy"); starting fresh needs no job.');
-  const concurrency = clampInt(ctx.params.concurrency, 1, 16, 4);
+  const params = ctx.params;
+  if (params.mode !== undefined && params.mode !== 'copy') throw new FoundationError('JOB_PARAMS_INVALID', 'storage_migrate only copies; starting fresh needs no job.');
+  if (params.verify !== undefined && (!Array.isArray(params.verify) || params.verify.some((v) => v !== 'size' && v !== 'sha256'))) {
+    throw new FoundationError('JOB_PARAMS_INVALID', 'params.verify may name only "size" and "sha256" (both are always checked).');
+  }
+  const concurrency = clampInt(params.concurrency, 1, 16, 4);
   const source = await openStorage();
   const target = await openStorage({ pending: true });
+  const disagree = locationMismatches(params.from, source).map((m) => 'from ' + m)
+    .concat(locationMismatches(params.to, target).map((m) => 'to ' + m));
+  if (disagree.length) {
+    throw new FoundationError('JOB_PARAMS_MISMATCH', 'The job was planned for other storage than the app database now holds (' + disagree.join('; ') + '); nothing was copied.');
+  }
   if (sameLocation(source, target)) throw new FoundationError('JOB_PARAMS_INVALID', 'The pending storage is the same bucket and prefix as the active one.');
   Object.assign(ctx.stats, { copied: 0, skipped_verified: 0, failed: 0, vanished: 0 });
   ctx.progress.phase = 'listing';
@@ -2734,15 +2772,51 @@ async function validateIndex(ctx, args) {
   };
 }
 
+// Mark the target failed (with the reason) if it is still building. Not for an
+// interruption: that build resumes on the next run.
+async function failTarget(pool, targetId, err) {
+  const validation = {
+    passed: false,
+    code: err && err.code ? err.code : (err instanceof JobCancelled ? 'CANCELLED' : 'JOB_FAILED'),
+    reasons: [err && err.message ? err.message : String(err)],
+    failed_at: new Date().toISOString(),
+  };
+  await pool.query("UPDATE mock2_foundation.vector_indexes SET state = 'failed', validation = $2::jsonb WHERE id = $1 AND state = 'building'", [targetId, JSON.stringify(validation)]).catch(() => {});
+}
+
+function indexMismatches(planned, row) {
+  if (planned === undefined || planned === null) return [];
+  if (typeof planned !== 'object') return ['not an object'];
+  const actual = row ? { provider: row.provider, model: row.model, dimensions: Number(row.dimensions), metric: row.metric, index: row.id } : {};
+  const out = [];
+  for (const k of ['provider', 'model', 'dimensions', 'metric', 'index']) {
+    if (planned[k] === undefined || planned[k] === null) continue;
+    if (String(planned[k]) !== String(actual[k] === undefined ? '' : actual[k])) out.push(k + ' ' + JSON.stringify(planned[k]) + ' vs ' + JSON.stringify(actual[k] === undefined ? null : actual[k]));
+  }
+  return out;
+}
+
 async function runReembed(ctx) {
-  const targetId = String(ctx.params.target_index_id || '');
-  try { vectorTableName(targetId); } catch (err) { throw new FoundationError('JOB_PARAMS_INVALID', 'params.target_index_id is not a valid vector index id.'); }
+  const p = ctx.params;
+  const targetId = String(p.target_index || p.target_index_id || '');
+  try { vectorTableName(targetId); } catch (err) { throw new FoundationError('JOB_PARAMS_INVALID', 'params.target_index is not a valid vector index id.'); }
   const pool = ctx.pool;
   const t = await pool.query('SELECT * FROM mock2_foundation.vector_indexes WHERE id = $1', [targetId]);
   const target = t.rows[0];
   if (!target) throw new FoundationError('JOB_PARAMS_INVALID', 'There is no vector index ' + targetId + ' to build.');
   if (target.state === 'ready') return { ok: true };
   if (target.state !== 'building') throw new FoundationError('JOB_PARAMS_INVALID', 'Vector index ' + targetId + ' is ' + target.state + ', not building.');
+  try {
+    return await buildIndex(ctx, target, targetId);
+  } catch (err) {
+    if (!(err instanceof JobInterrupted)) await failTarget(pool, targetId, err);
+    throw err;
+  }
+}
+
+async function buildIndex(ctx, target, targetId) {
+  const p = ctx.params;
+  const pool = ctx.pool;
   if (target.table_name !== vectorTableName(targetId)) throw new FoundationError('JOB_PARAMS_INVALID', 'Vector index ' + targetId + ' names table ' + target.table_name + ', expected ' + vectorTableName(targetId) + '.');
   const emb = await openEmbeddings({ pending: true });
   if (emb.provider !== target.provider || emb.model !== target.model || emb.dimensions !== Number(target.dimensions)) {
@@ -2751,6 +2825,15 @@ async function runReembed(ctx) {
   }
   const active = await getActiveIndex(pool);
   if (active && active.id === targetId) throw new FoundationError('JOB_PARAMS_INVALID', 'The target index is the active index.');
+  // The host's plan must still describe this database: the index it read from
+  // and the one it asked for.
+  const sourceIndex = p.source_index === undefined ? undefined : p.source_index;
+  const disagree = indexMismatches(p.to, target).map((m) => 'to ' + m)
+    .concat(active ? indexMismatches(p.from, active).map((m) => 'from ' + m) : [])
+    .concat(sourceIndex !== undefined && String(sourceIndex || '') !== String(active ? active.id : '') ? ['source_index ' + JSON.stringify(sourceIndex) + ' vs ' + JSON.stringify(active ? active.id : null)] : []);
+  if (disagree.length) {
+    throw new FoundationError('JOB_PARAMS_MISMATCH', 'The job was planned for other indexes than the app database now holds (' + disagree.join('; ') + ').');
+  }
   const plan = vectorColumnPlan(Number(target.dimensions));
   const { table: dst } = await ensureIndexTable({ id: targetId, dimensions: Number(target.dimensions), metric: target.metric }, pool);
   const src = active ? qualifiedTable(active.id) : null;
@@ -2776,11 +2859,20 @@ async function runReembed(ctx) {
   }
   ctx.progress.phase = 'validating';
   await ctx.checkpoint();
+  await ctx.flush(true); // a cancel that arrived meanwhile stops us before validating
   const validation = await validateIndex(ctx, { src, dst, target, emb, sourceIndexId: active ? active.id : null });
-  await pool.query(
-    "UPDATE mock2_foundation.vector_indexes SET state = $2, item_count = $3, validation = $4::jsonb WHERE id = $1 AND state = 'building'",
-    [targetId, validation.passed ? 'ready' : 'failed', validation.item_count_target, JSON.stringify(validation)],
+  // 'ready' is what the host promotes from, so it is written only if the job
+  // is not cancelled at that very moment (one statement, no race).
+  const done = await pool.query(
+    "UPDATE mock2_foundation.vector_indexes SET state = $2, item_count = $3, validation = $4::jsonb WHERE id = $1 AND state = 'building' "
+    + "AND NOT EXISTS (SELECT 1 FROM mock2_foundation.jobs WHERE id = $5 AND state = 'cancelled') RETURNING id",
+    [targetId, validation.passed ? 'ready' : 'failed', validation.item_count_target, JSON.stringify(validation), ctx.id],
   );
+  if (!done.rowCount) {
+    const j = await pool.query('SELECT state FROM mock2_foundation.jobs WHERE id = $1', [ctx.id]);
+    if (j.rows[0] && j.rows[0].state === 'cancelled') throw new JobCancelled();
+    throw new FoundationError('TARGET_CHANGED', 'Vector index ' + targetId + ' stopped being "building" while it was built; its result was not recorded.');
+  }
   ctx.progress.phase = 'done';
   ctx.progress.validation = { passed: validation.passed, reasons: validation.reasons };
   if (!validation.passed) return { ok: false, code: 'VALIDATION_FAILED', error: 'The new index failed validation: ' + validation.reasons.join('; ') + '.' };

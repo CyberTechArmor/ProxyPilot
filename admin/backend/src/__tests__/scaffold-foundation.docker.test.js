@@ -161,9 +161,19 @@ async function superClient(db = 'app') {
   return c;
 }
 
+// The host keeps its counter in mock2_foundation.meta 'generation' (a jsonb
+// number) and NOTIFYs that number as text.
 let generation = 1;
-async function setFeature(feature, { state = 'on', provider, config, pending = null }) {
+async function bump() {
   generation += 1;
+  await W.su.query(
+    "INSERT INTO mock2_foundation.meta (key, value, updated_at) VALUES ('generation', to_jsonb($1::bigint), now()) "
+    + 'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()',
+    [generation],
+  );
+}
+async function setFeature(feature, { state = 'on', provider, config, pending = null }) {
+  await bump();
   await W.su.query(
     'INSERT INTO mock2_foundation.features (feature, state, provider, config, pending, generation, updated_at) '
     + 'VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, now()) ON CONFLICT (feature) DO UPDATE SET state = EXCLUDED.state, '
@@ -172,7 +182,7 @@ async function setFeature(feature, { state = 'on', provider, config, pending = n
   );
 }
 async function setSecret(name, value) {
-  generation += 1;
+  await bump();
   await W.su.query(
     'INSERT INTO mock2_foundation.secrets (name, sealed, generation, updated_at) VALUES ($1, $2, $3, now()) '
     + 'ON CONFLICT (name) DO UPDATE SET sealed = EXCLUDED.sealed, generation = EXCLUDED.generation, updated_at = now()',
@@ -475,6 +485,7 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     await notify();
     await until(() => cfg.getFoundation() && cfg.getFoundation().generation > before && cfg.getFoundation().features.embeddings.config.batch_size === 16, { timeout: 10000, every: 50, what: 'the reload' });
     assert.equal(process.env.TEST_COMPONENT_SECRET, rotated, 'a rotated component secret replaces the old one in memory');
+    assert.equal(cfg.getFoundation().generation, generation, "the generation is the host's meta number");
     await cfg.closeFoundation();
     await cfg.loadFoundation();
   });
@@ -549,12 +560,15 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     const total = objects.size;
 
     const pendingTo = async (prefix) => {
-      await setFeature('storage', { provider: 'bundled', config: bundledConfig(), pending: { provider: 'external', config: externalConfig(prefix) } });
+      await setFeature('storage', { provider: 'bundled', config: bundledConfig(), pending: { provider: 'external', config: externalConfig(prefix), mode: 'copy', test: { at: new Date().toISOString() } } });
       await setSecret('pending.storage.access_key_id', W.appB.accessKeyId);
       await setSecret('pending.storage.secret_access_key', W.appB.secretAccessKey);
       await W.rt.config.reloadFoundation();
     };
-    const job = async (id, params) => {
+    // What the host writes: from/to as planned, verify, plus our concurrency.
+    const where = (provider, c) => ({ provider, endpoint: c.endpoint, bucket: c.bucket, region: c.region, prefix: c.prefix });
+    const job = async (id, prefix, extra = {}) => {
+      const params = { from: where('bundled', bundledConfig()), to: where('external', externalConfig(prefix)), verify: ['size', 'sha256'], ...extra };
       await W.su.query("INSERT INTO mock2_foundation.jobs (id, kind, state, params) VALUES ($1, 'storage_migrate', 'queued', $2::jsonb)", [id, JSON.stringify(params)]);
     };
     const verified = async (id) => Number((await W.su.query("SELECT count(*) AS n FROM mock2_foundation.storage_migration_items WHERE job_id = $1 AND state = 'verified'", [id])).rows[0].n);
@@ -570,7 +584,7 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     assert.equal(t.json.detail.pending, true);
 
     // 1. Interrupted in-process after 8 verified objects, then resumed.
-    await job('mig-1', { mode: 'copy', concurrency: 2 });
+    await job('mig-1', 'tenant1/', { concurrency: 2 });
     const ac = new AbortController();
     await assert.rejects(
       runJob('mig-1', { signal: ac.signal, onProgress: (_p, s) => { if (s.copied >= 8) ac.abort(new Error('test interruption')); } }),
@@ -603,7 +617,7 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     // 2. The CLI is SIGKILLed mid-copy (a crash): the row stays 'running', and
     //    the next run resumes from the verified objects.
     await pendingTo('tenant2/');
-    await job('mig-2', { mode: 'copy', concurrency: 1 });
+    await job('mig-2', 'tenant2/', { concurrency: 1 });
     const child = spawn(process.execPath, [contract.FOUNDATION_CLI, 'job-run', 'mig-2', '--json'], { cwd: W.app, env: { ...process.env, ...W.cliEnv }, stdio: 'ignore' });
     const exited = new Promise((resolve) => child.on('exit', resolve));
     const atKill = await until(async () => { const n = await verified('mig-2'); return n >= 2 ? n : 0; }, { timeout: 60000, every: 10, what: 'two verified objects' });
@@ -627,7 +641,7 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
 
     // 3. Cancelled by the host mid-run.
     await pendingTo('tenant3/');
-    await job('mig-3', { mode: 'copy', concurrency: 1 });
+    await job('mig-3', 'tenant3/', { concurrency: 1 });
     let cancelled = false;
     const c = await runJob('mig-3', {
       onProgress: (_p, s) => {
@@ -643,11 +657,15 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     assert.ok(row.finished_at);
     assert.ok(await verified('mig-3') < total);
 
-    // 4. Only "copy" is a job.
-    await job('mig-4', { mode: 'fresh' });
+    // 4. A plan that no longer matches the app database is refused: nothing copied.
+    await job('mig-4', 'tenant9/');
     const f = await runJob('mig-4');
     assert.equal(f.job.state, 'failed');
-    assert.equal(f.error.code, 'JOB_PARAMS_INVALID');
+    assert.equal(f.error.code, 'JOB_PARAMS_MISMATCH');
+    assert.match(f.error.message, /to prefix "tenant9\/" vs "tenant3\/"/);
+    assert.equal(Number((await W.su.query("SELECT count(*) AS n FROM mock2_foundation.storage_migration_items WHERE job_id = 'mig-4'")).rows[0].n), 0);
+    await job('mig-5', 'tenant3/', { verify: ['md5'] });
+    assert.equal((await runJob('mig-5')).error.code, 'JOB_PARAMS_INVALID');
 
     for (const k of objects.keys()) await storage.delete(k);
     await W.su.query("DELETE FROM mock2_foundation.secrets WHERE name LIKE 'pending.%'");
@@ -681,8 +699,16 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
         [id, OPENAI_MODEL, dims, contract.vectorTableName(id)],
       );
     };
-    const reembedJob = async (id, target, extra = {}) => {
-      await W.su.query("INSERT INTO mock2_foundation.jobs (id, kind, state, params) VALUES ($1, 'reembed', 'queued', $2::jsonb)", [id, JSON.stringify({ target_index_id: target, ...extra })]);
+    // What the host writes: from/to as planned, source_index, target_index.
+    const reembedJob = async (id, target, { dims = 1536, source = active.id, ...extra } = {}) => {
+      const params = {
+        from: { provider: 'local', model: LOCAL_MODEL, dimensions: 384, metric: 'cosine', index: active.id },
+        to: { provider: 'openai', model: OPENAI_MODEL, dimensions: dims, metric: 'cosine', index: target },
+        source_index: source,
+        target_index: target,
+        ...extra,
+      };
+      await W.su.query("INSERT INTO mock2_foundation.jobs (id, kind, state, params) VALUES ($1, 'reembed', 'queued', $2::jsonb)", [id, JSON.stringify(params)]);
     };
     await pendingTo(openaiEmbeddings(1536));
     const probe = await cli(['embeddings-test', '--pending', '--json'], W.cliEnv);
@@ -725,13 +751,42 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     assert.ok(resumed.stats.already_present >= 8);
     assert.equal(resumed.stats.already_present + resumed.stats.embedded, before.length + 1);
 
-    // A target that does not match the pending provider is refused.
+    // A target that does not match the pending provider is refused, and the
+    // target ends 'failed' (the host promotes only from 'ready').
+    const targetState = async (id) => (await W.su.query('SELECT state, validation FROM mock2_foundation.vector_indexes WHERE id = $1', [id])).rows[0];
     await building('ix_wrong_768', 768);
-    await reembedJob('re-3', 'ix_wrong_768');
+    await reembedJob('re-3', 'ix_wrong_768', { dims: 768 });
     const bad = await runJob('re-3');
     assert.equal(bad.job.state, 'failed');
     assert.equal(bad.error.code, 'PENDING_MISMATCH');
-    assert.equal((await W.su.query("SELECT state FROM mock2_foundation.vector_indexes WHERE id = 'ix_wrong_768'")).rows[0].state, 'building');
+    let ts = await targetState('ix_wrong_768');
+    assert.equal(ts.state, 'failed');
+    assert.equal(ts.validation.code, 'PENDING_MISMATCH');
+
+    // A plan whose source index is not the active one is refused.
+    await building('ix_stale', 1536);
+    await reembedJob('re-4', 'ix_stale', { source: 'ix_someother' });
+    const stale = await runJob('re-4');
+    assert.equal(stale.error.code, 'JOB_PARAMS_MISMATCH');
+    assert.match(stale.error.message, /source_index "ix_someother"/);
+    assert.equal((await targetState('ix_stale')).state, 'failed');
+
+    // Cancelled by the host mid-build: the job stops and the target is failed.
+    await building('ix_cancel', 1536);
+    await reembedJob('re-5', 'ix_cancel', { batch_size: 4 });
+    let cancelSent = false;
+    const cancelled = await runJob('re-5', {
+      onProgress: (_p, st) => {
+        if (!cancelSent && st.embedded >= 4) {
+          cancelSent = true;
+          W.su.query("UPDATE mock2_foundation.jobs SET state = 'cancelled' WHERE id = 're-5'").catch(() => {});
+        }
+      },
+    });
+    assert.equal(cancelled.cancelled, true);
+    ts = await targetState('ix_cancel');
+    assert.equal(ts.state, 'failed');
+    assert.equal(ts.validation.code, 'CANCELLED');
 
     // A provider that answers in other dimensions than configured is refused.
     await pendingTo(openaiEmbeddings(1024));
@@ -741,7 +796,7 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
 
     // The host promotes the validated index (what ProxyPilot does).
     await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'retired', retired_at = now() WHERE id = $1", [active.id]);
-    await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'retired' WHERE id IN ('ix_openai_b', 'ix_wrong_768')");
+    await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'retired' WHERE id = 'ix_openai_b'");
     await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'active', activated_at = now() WHERE id = 'ix_openai_1536'");
     await setFeature('embeddings', { provider: 'openai', config: openaiEmbeddings(1536) });
     await setSecret('embeddings.api_key', OPENAI_KEY);

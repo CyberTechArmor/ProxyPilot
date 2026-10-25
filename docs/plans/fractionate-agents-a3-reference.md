@@ -238,7 +238,29 @@ python3 a3-worker-operator.py human <run> <attempt> <fence>   # then ssh -L 1809
 python3 a3-probe-worker.py --only <case> ...   # rerun specific cases
 python3 a3-probe-worker.py --human-session     # launch one attempt for a real person on the human page
 python3 a3-install-supervisor.py reinstall     # after a reviewed fix is staged
+python3 a3-install-fence.py reattest           # fence fingerprint after an nft/kernel output change
 ```
+
+**Fence fingerprint after a host upgrade (2026-10-25).** The fence journal
+records a fingerprint of `nft --json list table bridge pp_a3_proof`. A kernel or
+nftables upgrade can print the same rules differently. When that happens, the
+supervisor reports `BOUNDARY_UNVERIFIED: A3 table is missing, changed, or
+incomplete` and stops accepting launches, and Update's runtime refresh refuses
+on `nft_sha256`.
+
+`a3-install-fence.py reattest` re-records the fingerprint only when all of
+these hold:
+
+- the journal is `installed`;
+- the rules file and unit are the recorded reviewed bytes, and the rules file
+  is this installer's own rendering;
+- the live table equals the rules file loaded alone into a scratch network
+  namespace (`unshare --net`).
+
+Any rule difference refuses, and the command applies nothing to the host
+ruleset. The journal keeps the previous and new fingerprints under
+`reattested`. Afterwards the selected browser runtime package must re-measure
+its identity through the dashboard's browser runtime install before Update.
 
 Local checks (repository root):
 

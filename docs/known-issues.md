@@ -23,6 +23,15 @@ From the foundation build (docs/features/app-foundation.md).
   model downloads are blocked there; an OpenAI-compatible fake stood in).
   The first real foundation project on a host is the proof.
 - **Cloning** copies the database (vectors included) but not stored objects.
+- **Need a decision:**
+  - The post-deploy stored-credential check is skipped on foundation deploys
+    (the keys live in mock2.db, not `/etc/environment`); it needs a host-side
+    probe.
+  - The app's read-only SQL role cannot connect on the foundation (no TCP,
+    peer only); it needs a socket-side proxy or a TCP listener restricted to
+    that role.
+- **A checkpoint restored from before a re-embed** can bring back an index
+  that does not match the current embeddings provider.
 - **The command policy** (harness-safety.js) covers run_terminal,
   exec_in_container and the SDK lane, but not MCP `run_project_command` or
   the ask lane.

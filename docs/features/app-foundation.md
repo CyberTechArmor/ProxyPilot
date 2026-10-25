@@ -89,7 +89,11 @@ tested from inside the guest, and only then promoted.
   pick an external S3 and choose either:
   - `mode: copy` — a resumable `storage_migrate` job copies every object, verifies size
     and sha256 on the target, and only then promotes the external provider and stops the
-    bundled container; or
+    bundled container. After each copy pass it lists the source again, until a listing
+    finds nothing new (at most 5 passes; otherwise `SOURCE_STILL_CHANGING`). The host
+    polls the job every 3 s and promotes as soon as it succeeds. Objects written between
+    the last listing and the app's reload are not copied; they stay in the preserved
+    bundled volume. Or
   - `mode: fresh` — with `acknowledge: true`, the external provider is promoted
     immediately. The existing objects stay in the preserved bundled volume, and turning
     bundled back on brings them back.
@@ -122,7 +126,7 @@ deletes data. Writes need sudo and are audited.
 
 | Method | Path | Body / result |
 |---|---|---|
-| GET | `/foundation` | `{ foundation_version, database, storage, embeddings, jobs, warnings }`. Each feature carries `{ state, provider, config, pending, health, has_secret, dependents }`. |
+| GET | `/foundation` | `{ foundation_version, database, storage, embeddings, jobs, warnings }`. Each feature carries `{ state, provider, config, pending, health, has_secret, dependents }`. Storage adds `object_count` / `object_count_checked_at` (bundled only: the last count the host took, never a listing per request); embeddings adds `index { id, state, provider, model, dimensions, item_count }`. |
 | POST | `/foundation/storage` | `{ action: 'on'\|'off'\|'switch', provider?, config?, credentials?, mode?: 'copy'\|'fresh', acknowledge? }` → `{ ok, job? }`, or 409 `{ code, message, options }` |
 | POST | `/foundation/embeddings` | `{ action: 'on'\|'off'\|'switch', provider?, config?: { model, dimensions, base_url? }, credentials? }` → `{ ok, job? }` |
 | POST | `/foundation/health` | runs the real probes now → the GET shape |
@@ -141,6 +145,10 @@ deletes data. Writes need sudo and are audited.
     `NOT_A_FOUNDATION_PROJECT`;
   - 400: `INVALID_REQUEST`, `INVALID_CONFIG`;
   - 404: `JOB_NOT_FOUND`.
+- **Refusal extras:** `FOUNDATION_JOB_RUNNING` carries `job_id`; `STORAGE_HAS_OBJECTS`
+  carries `object_count`.
+- **Promotion:** runs under the same per-deployment lock as a cancel. A cancel during a
+  promotion is refused busy, and a cancelled job is never promoted.
 
 ## Generated app side
 
@@ -203,7 +211,9 @@ Proof: `tests/foundation-panel.browser.mjs`, against a mocked API.
   SQLite, with their own words (`/database-exception`, sudo, audited). The prompts then
   quote that request. Nothing the builder writes into the repository can create it.
 - **What the gate also catches:** `DATABASE_URL` literals starting `sqlite:` or `file:`,
-  and a `src/` with no `package.json`.
+  and a `src/` with no `package.json`. In foundation apps it also refuses (rule 5)
+  source outside `foundation/` that imports an S3 SDK or `minio`, or that calls an
+  embeddings API directly.
 - **How the host runs it:** the host sets `MOCK2_DATABASE_EXCEPTION` from mock2.db only.
   The finish guard compares against HEAD. The command policy (`harness-safety.js`)
   refuses installs of these packages, and anything that tears down the foundation stack
@@ -217,6 +227,11 @@ Proof: `tests/foundation-panel.browser.mjs`, against a mocked API.
 This applies to projects created after the revision (`projects.foundation_version` is
 set). Existing projects keep their native in-guest Postgres and are never rewritten.
 Their adoption path is an explicit, separate step (see Known gaps).
+
+On foundation projects, `restore_project_db`, snapshot restores and the deploy's
+pre-migration dump all go through the stack. After a restore, the platform-held rows
+are re-synced from mock2.db. Build checkpoint snapshots leave out the platform tables
+of `mock2_foundation`.
 
 ## Verification
 
@@ -235,4 +250,10 @@ Their adoption path is an explicit, separate step (see Known gaps).
 
 - Adoption for existing projects.
 - Cloning a project copies its database (vectors included) but not its stored objects.
+- On foundation deploys, the stored-credential check after the deploy is skipped,
+  because the keys live in mock2.db. It needs a host-side probe.
+- The generated app's read-only SQL role (Admin → Integration) cannot connect: the
+  foundation Postgres has no TCP listener and allows peer authentication only.
+- Restoring a checkpoint taken before a re-embed can bring back an index that does not
+  match the current embeddings provider.
 - The local embedding model is proven only where its image and model can be fetched.

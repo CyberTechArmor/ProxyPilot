@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import secrets
+import shlex
 import socket
 import tempfile
 import threading
@@ -106,6 +107,7 @@ SERVICE_FORMAT = """format filter {
         delete login
     }
 }"""
+KNOWN_MANAGED_SERVICE_DOMAIN = 'ramm.fractionate.ai'
 LIMIT = 8 * 1024 * 1024
 COMMAND_TIMEOUT = 20
 STAGE = "startup"
@@ -117,6 +119,84 @@ def stage(name):
 
 
 
+
+
+def transform_managed_service(text, domain):
+    """Replace only the canonical terminal logger of one known managed site."""
+    require(domain == KNOWN_MANAGED_SERVICE_DOMAIN and valid_domain(domain))
+    require('\r' not in text)
+    require(text.count('# ProxyPilot Managed Configuration') == 1)
+    require(text.count('# Domain: ') == 1)
+    header = (r'\A(?:# proxypilot: healthpath=[^\r\n]+\n)?'
+              r'# ProxyPilot Managed Configuration\n# Domain: ' + re.escape(domain) +
+              r'\n# Services: [^\r\n]+\n'
+              r'# Generated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\n\n'
+              r'(?:http://)?' + re.escape(domain) + r' \{\n')
+    require(re.match(header, text))
+    start = '    log {\n        output file /var/log/caddy/' + domain + '.log\n'
+    end = '    }\n}\n'
+    old = start + '        format json\n' + end
+    new = start + '\n'.join('        ' + line for line in SERVICE_FORMAT.splitlines()) + '\n' + end
+    require(text.endswith(old) or text.endswith(new))
+    logger = old if text.endswith(old) else new
+    prefix = text[:-len(logger)]
+    # Caddy braces in placeholders/quoted strings are not block delimiters.
+    lexer = shlex.shlex(text, posix=False)
+    lexer.whitespace_split = True
+    lexer.commenters = '#'
+    lexer.quotes = '"`'
+    tokens = list(lexer)
+    require(tokens[:2] in ([domain, '{'], ['http://' + domain, '{']))
+    require(tokens.count('log') == 1)
+    require(not any(token in ('debug', 'log_credentials', 'import', 'invoke') or
+                    token.startswith('log_') for token in tokens))
+    depth = 0
+    sites = 0
+    for token in tokens:
+        if token == '{':
+            sites += depth == 0
+            depth += 1
+        elif token == '}':
+            depth -= 1
+            require(depth >= 0)
+    require(depth == 0 and sites == 1)
+    # The route prefix may contain no hidden format or logger directives.
+    require(not re.search(r'^\s*(?:format|log|log_[A-Za-z_]+|debug|import|invoke)\b', prefix, re.M))
+    return prefix + new
+
+
+def prepare_configuration(root):
+    """Preflight every owned file before any write; leave other sites untouched."""
+    require(not root.is_symlink() and root.is_dir())
+    sites_dir = root / 'sites'
+    require(not sites_dir.is_symlink() and sites_dir.is_dir())
+    global_path = root / 'Caddyfile'
+    require(not global_path.is_symlink() and global_path.is_file())
+    dashboards = []
+    for path in sites_dir.iterdir():
+        if path.is_symlink() or not path.is_file():
+            continue
+        if b'# ProxyPilot Admin Dashboard' in path.read_bytes():
+            dashboards.append(path)
+    require(len(dashboards) == 1)
+    paths = [global_path, dashboards[0]]
+    require(all(not path.is_symlink() and path.is_file() for path in paths))
+    originals = [path.read_bytes().decode('utf-8') for path in paths]
+    changed = [transform(originals[0], True), transform(originals[1])]
+    domain = KNOWN_MANAGED_SERVICE_DOMAIN
+    target = sites_dir / domain
+    service = {'domain': domain, 'present': False, 'change': 'absent', 'active_verified': False}
+    # A dangling symlink also fails; never treat it as an absent optional site.
+    require(not target.is_symlink())
+    if target.exists():
+        require(target.is_file() and target not in paths)
+        original = target.read_bytes().decode('utf-8')
+        replacement = transform_managed_service(original, domain)
+        paths.append(target)
+        originals.append(original)
+        changed.append(replacement)
+        service.update(present=True, change='already_safe' if replacement == original else 'transformed')
+    return paths, originals, changed, service
 
 def query_encoder():
     return {'filter': 'query', 'actions': [
@@ -397,8 +477,10 @@ def verify_fixture():
             upstream.server_close()
 
 
-def verify(config_path, no_reload=False):
+def verify(config_path, no_reload=False, managed_service=None):
     stage("fixture")
+    service = dict(managed_service or {'domain': KNOWN_MANAGED_SERVICE_DOMAIN,
+                   'present': False, 'change': 'absent', 'active_verified': False})
     encoder, fixture = verify_fixture()
     stage("disk_configuration")
     disk = adapt(config_path)
@@ -407,7 +489,7 @@ def verify(config_path, no_reload=False):
     receipt = {'type': 'proxypilot.caddy-log-verification', 'version': 1,
                'caddy_version': version,
                'caddy_version_sha256': version_digest,
-               'disk_config_sha256': canonical_hash(disk), **proof, **fixture}
+               'disk_config_sha256': canonical_hash(disk), 'managed_service': service, **proof, **fixture}
     if no_reload:
         receipt.update(active_global_verified=False, result='pending_reload')
     else:
@@ -417,6 +499,10 @@ def verify(config_path, no_reload=False):
         require(default_encoder(disk) == default_encoder(active))
         require(disk['logging']['logs']['default'].get('level', 'INFO') ==
                 active['logging']['logs']['default'].get('level', 'INFO'))
+        if service['present']:
+            stage('active_managed_service')
+            service['logger_names'] = prove_domain(active, service['domain'])
+            service['active_verified'] = True
         receipt.update(active_global_verified=True, active_config_sha256=canonical_hash(active),
                        default_logger_matches_disk=True, result='verified')
     return receipt
@@ -557,30 +643,22 @@ def main():
     PROBE_VERSION = safe_version()[0]
     stage('identify_configuration')
     root = pathlib.Path('/etc/caddy')
-    sites = [p for p in (root / 'sites').iterdir() if p.is_file() and not p.is_symlink()
-             and '# ProxyPilot Admin Dashboard' in p.read_text()]
-    if len(sites) != 1:
-        raise ValueError('Expected one installer-owned dashboard site; review locally')
-    paths = [root / 'Caddyfile', sites[0]]
-    if any(p.is_symlink() for p in paths):
-        raise ValueError('Refusing symlink Caddy configuration')
-    originals = [p.read_text() for p in paths]
+    paths, originals, changed, service = prepare_configuration(root)
     stage('transform_configuration')
-    changed = [transform(originals[0], True), transform(originals[1])]
     no_reload = '--no-reload' in sys.argv
     reloaded = False
     try:
         if changed != originals:
             for p, data in zip(paths, changed):
-                p.write_text(data)
+                p.write_bytes(data.encode('utf-8'))
             for command in (['adapt'] if no_reload else ['validate', 'reload']):
                 reloaded = reloaded or command == 'reload'
                 run_caddy(command, '--config', str(paths[0]))
-        receipt = verify(paths[0], no_reload)
+        receipt = verify(paths[0], no_reload, managed_service=service)
         print(json.dumps(receipt, sort_keys=True, separators=(',', ':')), flush=True)
     except BaseException:
         for p, data in zip(paths, originals):
-            p.write_text(data)
+            p.write_bytes(data.encode('utf-8'))
         # Restore the live config too if this invocation already reloaded it.
         # Failure is propagated; the caller must never continue this update.
         if reloaded:

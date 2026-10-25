@@ -47,6 +47,130 @@ class V3Migration(unittest.TestCase):
         self.assertNotIn('wrap filter', patched)
         self.assertEqual(logs.transform(patched, True), patched)
 
+class ManagedRetrofit(unittest.TestCase):
+    domain = logs.KNOWN_MANAGED_SERVICE_DOMAIN
+
+    def site(self):
+        return ('# proxypilot: healthpath=/health\n# ProxyPilot Managed Configuration\n'
+                '# Domain: ' + self.domain + '\n# Services: / (container_service)\n'
+                '# Generated: 2026-10-25T12:34:56.789Z\n\n' + self.domain + ' {\n'
+                '    handle {\n        reverse_proxy 127.0.0.1:8123\n    }\n'
+                '    header Test "brace { value }"\n\n'
+                '    log {\n        output file /var/log/caddy/' + self.domain + '.log\n'
+                '        format json\n    }\n}\n')
+
+    def setup_root(self, directory, target=True):
+        root = pathlib.Path(directory)
+        (root / 'sites').mkdir()
+        (root / 'Caddyfile').write_text('{\n email admin@example.test\n}\n')
+        (root / 'sites' / 'dashboard').write_text('# ProxyPilot Admin Dashboard\nadmin.example.test {\n log {\n }\n}\n')
+        if target:
+            (root / 'sites' / self.domain).write_text(self.site())
+        return root
+
+    def test_migration_preserves_route_prefix_and_is_idempotent(self):
+        before = self.site()
+        after = logs.transform_managed_service(before, self.domain)
+        self.assertEqual(before.split('    log {')[0], after.split('    log {')[0])
+        self.assertIn('reverse_proxy 127.0.0.1:8123', after)
+        self.assertIn('request>headers>Referer query', after)
+        self.assertEqual(logs.transform_managed_service(after, self.domain), after)
+
+    def test_custom_ambiguous_mismatched_or_altered_site_refused(self):
+        good = self.site()
+        variants = [
+            good.replace('format json', 'format console'),
+            good.replace('format json', 'format json\n        level DEBUG'),
+            good.replace('# Domain: ' + self.domain, '# Domain: other.example.test'),
+            good.replace(self.domain + ' {', 'other.example.test {'),
+            good.replace('    handle {', '    log {\n    }\n    handle {'),
+            good.replace('    handle {', '    import custom\n    handle {'),
+            good.replace('# ProxyPilot Managed Configuration', '# Custom Configuration'),
+            good.replace('    handle {', '}\nother.example.test {\n    handle {'),
+            good + '# extra suffix\n', good.replace('\n', '\r\n'),
+        ]
+        for text in variants:
+            with self.subTest(text=text[:80]), self.assertRaises(ValueError):
+                logs.transform_managed_service(text, self.domain)
+        with self.assertRaises(ValueError): logs.transform_managed_service(good, 'other.example.test')
+
+    def test_prepare_absent_is_explicit_and_present_joins_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.setup_root(directory, target=False)
+            paths, originals, changed, service = logs.prepare_configuration(root)
+            self.assertEqual(len(paths), 2)
+            self.assertEqual(service, {'domain': self.domain, 'present': False, 'change': 'absent', 'active_verified': False})
+            (root / 'sites' / self.domain).write_text(self.site())
+            paths, originals, changed, service = logs.prepare_configuration(root)
+            self.assertEqual(len(paths), 3)
+            self.assertEqual(service['change'], 'transformed')
+            self.assertEqual(originals[-1], self.site())
+            paths[-1].write_text(changed[-1])
+            self.assertEqual(logs.prepare_configuration(root)[3]['change'], 'already_safe')
+
+    def test_known_target_and_dashboard_symlinks_or_nonregular_refused(self):
+        for kind in ['target_symlink', 'target_directory', 'dashboard_symlink', 'root_file_symlink']:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = self.setup_root(directory)
+                target = root / 'sites' / self.domain
+                if kind.startswith('target'):
+                    target.unlink()
+                    if kind == 'target_symlink': target.symlink_to(root / 'missing')
+                    else: target.mkdir()
+                elif kind == 'dashboard_symlink':
+                    dashboard = root / 'sites' / 'dashboard'
+                    other = root / 'dashboard-real'
+                    dashboard.rename(other)
+                    dashboard.symlink_to(other)
+                else:
+                    global_file = root / 'Caddyfile'
+                    other = root / 'global-real'
+                    global_file.rename(other)
+                    global_file.symlink_to(other)
+                with self.assertRaises(ValueError): logs.prepare_configuration(root)
+
+    def test_failed_postreload_proof_rolls_back_all_three_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.setup_root(directory)
+            paths = [root / 'Caddyfile', root / 'sites' / 'dashboard', root / 'sites' / self.domain]
+            originals = [path.read_bytes() for path in paths]
+            with mock.patch.object(logs.pathlib, 'Path', return_value=root), \
+                 mock.patch.object(logs, 'safe_version', return_value=('v2.11.4', 'hash')), \
+                 mock.patch.object(logs, 'verify', side_effect=ValueError('proof failed')) as verify, \
+                 mock.patch.object(logs, 'run_caddy') as run, \
+                 mock.patch.object(logs.sys, 'argv', ['script']):
+                with self.assertRaises(ValueError): logs.main()
+            self.assertEqual([path.read_bytes() for path in paths], originals)
+            self.assertEqual([call.args[0] for call in run.call_args_list], ['validate', 'reload', 'reload'])
+            self.assertTrue(verify.call_args.kwargs['managed_service']['present'])
+
+    def test_present_service_proof_is_required_in_same_active_snapshot(self):
+        config = {'logging': {'logs': {'default': {'encoder': logs.GLOBAL_ENCODER}}}}
+        state = {'domain': self.domain, 'present': True, 'change': 'transformed', 'active_verified': False}
+        with mock.patch.object(logs, 'verify_fixture', return_value=(logs.GLOBAL_ENCODER, {})), \
+             mock.patch.object(logs, 'adapt', return_value=config), \
+             mock.patch.object(logs, 'active_config', return_value=config), \
+             mock.patch.object(logs, 'safe_version', return_value=('v2.11.4', 'hash')):
+            with self.assertRaises(ValueError): logs.verify('/unused', managed_service=state)
+            with mock.patch.object(logs, 'prove_domain', return_value=['log0']) as prove:
+                receipt = logs.verify('/unused', managed_service=state)
+                self.assertTrue(receipt['managed_service']['active_verified'])
+                prove.assert_called_once_with(config, self.domain)
+            with mock.patch.object(logs, 'prove_domain') as prove:
+                receipt = logs.verify('/unused', no_reload=True, managed_service=state)
+                self.assertFalse(receipt['managed_service']['active_verified'])
+                self.assertEqual(receipt['result'], 'pending_reload')
+                prove.assert_not_called()
+
+    @unittest.skipUnless(shutil.which('caddy'), 'Caddy required for managed-file adaptation')
+    def test_migrated_service_adapts_to_exact_service_encoder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'Caddyfile'
+            path.write_text(logs.transform_managed_service(self.site(), self.domain))
+            config = logs.adapt(path)
+            encoders = [log.get('encoder') for log in config.get('logging', {}).get('logs', {}).values()]
+            self.assertIn(logs.SERVICE_ENCODER, encoders)
+
 class Verification(unittest.TestCase):
     def setUp(self):
         self.encoder = {'format': 'filter', 'wrap': {'format': 'filter', 'wrap': {'format': 'json'},

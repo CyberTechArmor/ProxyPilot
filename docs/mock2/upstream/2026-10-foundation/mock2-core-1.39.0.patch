@@ -319,7 +319,7 @@
  ### W.4 Deployed-instance setup and access
  
  First-instance setup establishes the initial owner only through an authenticated or secret-protected
-@@ -2119,6 +2165,91 @@
+@@ -2119,6 +2165,108 @@
  workflow must have behavioral evidence before it is described as working. No new mandatory approval
  step, infrastructure service or paid provider call is introduced by installing this guidance.
  
@@ -338,7 +338,12 @@
 +
 +The host owns the stack's definition on the deployment; the repository carries a portable copy so
 +the same unit runs outside that host. The bundled object store and embedding service listen on
-+loopback only, and the database needs no network listener where a local socket serves.
++loopback only. The application and the database superuser reach the database over a local socket
++with peer authentication and no password. The database is published on loopback for one fixed role
++only, the application's read-only reporting role: `SELECT` on curated views and nothing else,
++authenticated with SCRAM by a password the application's administrator issues and rotates and that
++is shown once. Every other role, the application's own and the superuser included, is refused over
++the network.
 +
 +1. **One database, provisioned at creation, no fallback.** PostgreSQL with pgvector from the stack is
 +   the only application database. `DATABASE_URL` is required. A missing or unreachable database
@@ -386,9 +391,21 @@
 +   as missing. A mock provider and the local model say what they are and are never reported as
 +   production-ready; the application and the host show a warning to switch the local model for
 +   production-quality search (narrows Addendum A.2).
-+8. **Scope.** The stack's presence is not a reason to build file or retrieval features the task does
-+   not ask for (W.3). A standards upgrade gives no existing application the stack; moving one onto it
-+   is an explicit migration with its data plan (§N).
++8. **Scope, and moving an existing application.** The stack's presence is not a reason to build file
++   or retrieval features the task does not ask for (W.3). A standards upgrade gives no existing
++   application the stack; moving one onto it is an explicit migration with its data plan (§N), which
++   guarantees:
++   - a person confirms a plan that lists its blockers first; an application whose data access is
++     SQLite or another engine cannot be moved until that access is PostgreSQL;
++   - a restorable snapshot of the deployment is taken before anything changes;
++   - the application is stopped for the move, and the plan states the downtime;
++   - the database is dumped, restored into the stack and verified table by table before anything
++     continues;
++   - secrets leave env files for the host's encrypted store (rule 4);
++   - the host-owned foundation module is installed, then the application is deployed and
++     health-checked (rule 7);
++   - on a failure, or when a person asks, the deployment is rolled back to the snapshot;
++   - the move deletes nothing: the old database stays until a person removes it.
 +
 +Catalog entries (J.4). For all four, the *implementation* is the host's adapter over the foundation
 +stack, with its version pinned by the consuming repository; *data and migration ownership* is the
@@ -461,7 +478,7 @@
  fixture; its evidence names the actual runtime, commands and scope. Package compatibility does not
  prove a particular application's authorization, migrations, browser behavior, object provider or
  production performance. Validate those affected contracts during implementation. Optional tools
-@@ -25,6 +25,25 @@
+@@ -25,6 +25,26 @@
  application's own tables; validate those where the application relies on them. Keep it on a line
  whose peer range admits the project's Drizzle and Zod versions.
  
@@ -482,7 +499,8 @@
 +at deployment. The `foundation-stack-2026-10-24` compatibility entry is `pending-evidence`: no
 +run of the stack is recorded in this release, so the pins are a selection, not proof that the stack
 +works on a given host. Existing applications are not given the foundation stack by an upgrade; moving
-+one onto it is an explicit migration.
++one onto it is an explicit migration that a person confirms, that starts from a restorable snapshot
++and rolls back to it on failure or on request, and that deletes nothing (PRO current §W.6 rule 8).
 +
  For **existing applications**, capture their actual stack in project-owned `state/stack.json` and
  retain its major/minor lines. Default to maintenance patches unless the developer asks to upgrade

@@ -206,7 +206,16 @@ Feature code imports `foundation/`; it never edits, copies or forks it.
    provider say what they are and are never reported as production-ready.
 10. **Existing projects.** Projects created before the foundation keep their in-guest
     PostgreSQL and are never rewritten. Moving one onto the foundation is an explicit,
-    separate step. Until a project has the foundation (no `foundation/` module), rules
+    separate step a person takes in the dashboard (Dev Studio → project → Details →
+    Build → *Application foundation* → *Move onto the application foundation*). The
+    person confirms a plan that lists blockers first (an app on SQLite or another engine
+    cannot move until its data access is PostgreSQL); the move then takes a restorable
+    snapshot before anything changes, stops the app for the stated downtime, dumps the
+    database, restores it into the stack and verifies it table by table before
+    continuing, moves secrets from env files into ProxyPilot's encrypted store, installs
+    `foundation/`, deploys and health-checks the app, rolls back to the snapshot on
+    failure or on request, and deletes nothing (the old database stays until a person
+    removes it). Until a project has the foundation (no `foundation/` module), rules
     1, 2 and 6 still apply, and a feature that needs object storage or embeddings is a
     *Decision for the owner* in `state/production-checklist.md`, not a reason to add
     another service.

@@ -36,6 +36,9 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { createHash } from 'node:crypto';
+import { databaseRefusalText, describeEngineHits } from './database-exception-logic.js';
+
 // N real rejections shared across every finish validator. Three is deliberate:
 // P34's whole median request cost $1.51; five rejection round-trips on a large
 // context cost more than most useful cycles. One rejection fixes an honest
@@ -433,4 +436,266 @@ export function hasSensitiveAssumedValue(assumed = []) {
 // checklist rather than a single generic line.
 export function sensitiveAssumedEntries(assumed = []) {
   return (Array.isArray(assumed) ? assumed : []).filter((entry) => SENSITIVE_ASSUMED_RE.test(String(entry || '')));
+}
+
+// ---- no SQLite without an explicit request (app foundation, 2026-10) ----
+//
+// A build whose diff ADDS a refused database engine (a SQLite import, a
+// better-sqlite3 dependency, DATABASE_URL=file:…) cannot report done, whatever
+// the gate copied into the container said. The host reads the changed files
+// (one round trip, the script below), judges them in
+// database-exception-logic.introducedEngineHits — against the file at the
+// commit the cycle started from (HEAD when unknown), so only what this build
+// added counts, committed mid-cycle or not — and rejects through the shared
+// finish budget. A recorded SQLite exception (mock2.db, never a repo file)
+// allows the SQLite family; nothing allows the others. This is also what holds
+// an app from before the foundation to the rule: its gate only REPORTS the
+// engines it already had.
+//
+// CHEAPEST PASS: take the engine out and use the foundation's PostgreSQL —
+// which is the point. Rewording the finish cannot pass it; the budget bounds
+// the round trips and exhaustion concludes for operator review, never as a
+// success.
+
+// Lines worth sending back for a source file: a superset of everything the
+// classifier can match (specifiers and DATABASE_URL literals).
+const ENGINE_PREFILTER = 'sqlite|libsql|sql\\.js|pglite|mysql|mongo|typeorm|sequelize|prisma|knex|drizzle-orm|DATABASE_URL';
+
+// The commit a cycle started from. The finish guards compare the tree against
+// it rather than against HEAD, so a commit the build makes mid-cycle does not
+// hide what it changed. Anything but a full object name falls back to HEAD.
+export function cycleBaseRef(base) {
+  const s = String(base || '').trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(s) ? s : 'HEAD';
+}
+
+// `git rev-parse -q --verify HEAD` output → the commit, or null.
+export function parseCycleBase(stdout) {
+  const s = String(stdout || '').trim().split('\n').pop().trim().toLowerCase();
+  return /^[0-9a-f]{40}$/.test(s) ? s : null;
+}
+
+export const CYCLE_BASE_READ_COMMAND = 'git rev-parse -q --verify HEAD 2>/dev/null';
+
+// The shell lines that set $BASE to the cycle's base commit, or HEAD when that
+// commit is not in the checkout.
+function baseRefLines(base) {
+  return `BASE='${cycleBaseRef(base)}'
+git rev-parse -q --verify "$BASE^{commit}" >/dev/null 2>&1 || BASE=HEAD`;
+}
+
+// The container script. Prints, per changed file: `@@F <b64 path>`,
+// `@@B <b64 at the base>`, `@@C <b64 now>`. package.json goes whole (it is
+// parsed); other files go as `N:line` for the prefiltered lines only. Bounded:
+// 400 files, 400 lines or 256 KiB a file, 4 MB in all. `base` is the commit
+// the cycle started from (cycleBaseRef; HEAD when unknown).
+export function buildChangedEngineReadScript({ appDir = '/srv/app', base = null } = {}) {
+  const dir = String(appDir).replace(/'/g, '');
+  return `cd '${dir}' 2>/dev/null || exit 0
+PRE='${ENGINE_PREFILTER}'
+${baseRefLines(base)}
+b() { base64 | tr -d '\\n'; }
+{ git -c core.quotePath=false diff --name-only "$BASE" 2>/dev/null; git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null; } | sort -u \\
+  | grep -Ev '(^|/)(node_modules|dist|build|coverage|\\.git)/|^state/' \\
+  | grep -Ei '\\.([cm]?[jt]sx?|json|ya?ml|toml|sh)$|(^|/)\\.env[^/]*$' \\
+  | head -n 400 | while IFS= read -r f; do
+    printf '@@F %s\\n' "$(printf '%s' "$f" | b)"
+    case "$f" in
+      package.json|*/package.json)
+        printf '@@B %s\\n' "$(git show "$BASE:$f" 2>/dev/null | head -c 262144 | b)"
+        if [ -f "$f" ]; then printf '@@C %s\\n' "$(head -c 262144 "$f" | b)"; else printf '@@C \\n'; fi ;;
+      *)
+        printf '@@B %s\\n' "$(git show "$BASE:$f" 2>/dev/null | grep -Ein "$PRE" | head -n 400 | b)"
+        if [ -f "$f" ]; then printf '@@C %s\\n' "$(grep -Ein "$PRE" "$f" 2>/dev/null | head -n 400 | b)"; else printf '@@C \\n'; fi ;;
+    esac
+  done | head -c 4000000
+exit 0
+`;
+}
+
+function fromB64(s) {
+  try { return Buffer.from(String(s || '').trim(), 'base64').toString('utf8'); } catch { return ''; }
+}
+
+// `N:text` lines back into a sparse text whose line numbers are the file's own.
+function sparseText(numbered) {
+  const lines = [];
+  for (const l of String(numbered || '').split('\n')) {
+    const m = l.match(/^(\d+):(.*)$/);
+    if (m && Number(m[1]) >= 1 && Number(m[1]) <= 1e6) lines[Number(m[1]) - 1] = m[2];
+  }
+  return Array.from(lines, (x) => x ?? '').join('\n');
+}
+
+// parseChangedEngineRead(stdout) → [{ path, base, current }]
+export function parseChangedEngineRead(stdout) {
+  const files = [];
+  let cur = null;
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^@@([FBC]) ?(.*)$/);
+    if (!m) continue;
+    if (m[1] === 'F') {
+      cur = { path: fromB64(m[2]), base: '', current: '' };
+      if (cur.path) files.push(cur);
+      continue;
+    }
+    if (!cur) continue;
+    const text = fromB64(m[2]);
+    const whole = /(?:^|\/)package\.json$/i.test(cur.path);
+    if (m[1] === 'B') cur.base = whole ? text : sparseText(text);
+    else cur.current = whole ? text : sparseText(text);
+  }
+  return files;
+}
+
+export function databaseEngineRejectionMessage(hits = []) {
+  return `Not finished — this build adds a database engine the platform refuses. ${databaseRefusalText(describeEngineHits(hits))}\n`
+    + 'Remove it and use the foundation\'s PostgreSQL (DATABASE_URL from the environment, Drizzle for every query; files and '
+    + 'embeddings through the adapters in foundation/). If PostgreSQL is unreachable, report it and stop — do not work around it.';
+}
+
+// ---- foundation/ is platform-owned (app foundation, 2026-10) ----
+//
+// In a project on the foundation (projects.foundation_version set), foundation/
+// is the platform's: the base-app upgrade rewrites it as a group, and the host
+// trusts the health and job state its CLI reports. Constitution §2: feature
+// code imports foundation/ and never edits, copies or forks it. So a build
+// whose diff — against the commit the cycle started from, untracked files
+// included — adds, modifies or deletes anything under foundation/ cannot
+// report done. Judged on the host, like the database check. The platform also
+// puts those files back (runner.restoreFoundationEdits) — at the refusal, so
+// the build continues from the platform's foundation/, and before every
+// checkpoint commit, so a halt, a pause or a concluded finish budget cannot
+// carry the change into the history a resumed segment starts from.
+//
+// THE ONE EXEMPTION is the platform's own base-app upgrade
+// (base-app-upgrade.js). It commits as `ProxyPilot <platform@proxypilot>`
+// ("base app: platform module …") before a build starts (the manual route
+// refuses while one runs), so its change is normally not in a build's diff at
+// all. When it is — an upgrade whose commit did not land — it is recognised by
+// CONTENT, not by an author or message a build could write too: a file whose
+// bytes are exactly what the platform generates today (scaffoldFoundationFiles)
+// is the upgrade's. The upgrade never deletes, so a deletion is never exempt.
+//
+// CHEAPEST PASS: leave foundation/ the way the platform put it — which is the
+// point.
+
+export const FOUNDATION_OWNED_DIR = 'foundation/';
+
+export function isFoundationOwnedChange(path) {
+  const p = String(path || '');
+  return p.startsWith(FOUNDATION_OWNED_DIR) && !p.split('/').includes('..');
+}
+
+// The container script. Prints one `@@ <status> <sha256|-> <b64 path>` line per
+// path under foundation/ that differs from the base (git diff --name-status,
+// no rename pairing) or is untracked (status A). Bounded to 400 paths.
+export function buildFoundationChangeReadScript({ appDir = '/srv/app', base = null } = {}) {
+  const dir = String(appDir).replace(/'/g, '');
+  return `cd '${dir}' 2>/dev/null || exit 0
+${baseRefLines(base)}
+TAB=$(printf '\\t')
+{ git -c core.quotePath=false diff --name-status --no-renames "$BASE" -- foundation 2>/dev/null
+  git -c core.quotePath=false ls-files --others --exclude-standard -- foundation 2>/dev/null | while IFS= read -r u; do printf 'A\\t%s\\n' "$u"; done
+} | head -n 400 | while IFS="$TAB" read -r st f; do
+    [ -n "$f" ] || continue
+    h=-
+    if [ -f "$f" ] && [ ! -L "$f" ]; then h=$(sha256sum < "$f" 2>/dev/null | cut -d' ' -f1); [ -n "$h" ] || h=-; fi
+    printf '@@ %s %s %s\\n' "$st" "$h" "$(printf '%s' "$f" | base64 | tr -d '\\n')"
+  done
+exit 0
+`;
+}
+
+// parseFoundationChangeRead(stdout) → [{ path, status: 'A'|'M'|'D'|…, sha256: string|null }]
+export function parseFoundationChangeRead(stdout) {
+  const out = [];
+  for (const line of String(stdout || '').split('\n')) {
+    const m = line.match(/^@@ ([A-Z])[0-9]* (-|[0-9a-f]{64}) (\S+)\s*$/);
+    if (!m) continue;
+    const path = fromB64(m[3]);
+    if (!path) continue;
+    out.push({ path, status: m[1], sha256: m[2] === '-' ? null : m[2] });
+  }
+  return out;
+}
+
+// platformFoundationHashes([{ path, content }]) → Map(path → sha256 hex) of the
+// bytes the platform generates for foundation/ today.
+export function platformFoundationHashes(files = []) {
+  const map = new Map();
+  for (const f of Array.isArray(files) ? files : []) {
+    if (!f || !isFoundationOwnedChange(f.path) || typeof f.content !== 'string') continue;
+    map.set(f.path, createHash('sha256').update(f.content, 'utf8').digest('hex'));
+  }
+  return map;
+}
+
+// foundationEditRefusals({ changes, platformHashes }) → [{ path, change }]
+// change: 'added' | 'modified' | 'deleted'. A file that now holds exactly the
+// platform's own bytes is the base-app upgrade's, and is not refused.
+export function foundationEditRefusals({ changes = [], platformHashes = new Map() } = {}) {
+  const hashes = platformHashes instanceof Map ? platformHashes : new Map(Object.entries(platformHashes || {}));
+  const out = [];
+  const seen = new Set();
+  for (const c of Array.isArray(changes) ? changes : []) {
+    if (!c || !isFoundationOwnedChange(c.path) || seen.has(c.path)) continue;
+    seen.add(c.path);
+    const change = c.status === 'A' ? 'added' : c.status === 'D' ? 'deleted' : 'modified';
+    if (change !== 'deleted' && c.sha256 && hashes.get(c.path) === c.sha256) continue;
+    out.push({ path: c.path, change });
+  }
+  return out;
+}
+
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+// The container script that puts foundation/ back as it was at the base: a
+// modified or deleted file is checked out from the base, an added one is
+// removed. Only the refused paths (foundationEditRefusals), nothing else
+// (runner.restoreFoundationEdits).
+export function buildFoundationRestoreScript({ appDir = '/srv/app', base = null, refusals = [] } = {}) {
+  const dir = String(appDir).replace(/'/g, '');
+  const lines = [];
+  for (const r of Array.isArray(refusals) ? refusals : []) {
+    if (!r || !isFoundationOwnedChange(r.path)) continue;
+    const p = shQuote(r.path);
+    lines.push(r.change === 'added'
+      ? `rm -f -- ${p} || printf 'not removed: %s\\n' ${p}`
+      : `git checkout "$BASE" -- ${p} 2>/dev/null || printf 'not restored: %s\\n' ${p}`);
+  }
+  return `cd '${dir}' 2>/dev/null || exit 0
+${baseRefLines(base)}
+${lines.join('\n')}
+exit 0
+`;
+}
+
+function listChanges(list, max = 12) {
+  return list.slice(0, max).map((r) => `${r.path} (${r.change})`).join('; ')
+    + (list.length > max ? `; … ${list.length - max} more` : '');
+}
+
+// The rejection. `restored` is what the platform already put back
+// (runner.restoreFoundationEdits); `remaining` is what it could not, with the
+// commands that do it.
+export function foundationEditRejectionMessage({ restored = [], remaining = [] } = {}, { base = null } = {}) {
+  const done = Array.isArray(restored) ? restored : [];
+  const left = Array.isArray(remaining) ? remaining : [];
+  const restore = left.filter((r) => r.change !== 'added').slice(0, 40).map((r) => shQuote(r.path));
+  const remove = left.filter((r) => r.change === 'added').slice(0, 40).map((r) => shQuote(r.path));
+  const steps = [
+    restore.length ? `git checkout ${cycleBaseRef(base)} -- ${restore.join(' ')}` : '',
+    remove.length ? `rm -f -- ${remove.join(' ')}` : '',
+  ].filter(Boolean).join(' && ');
+  return 'Not finished — this build changed foundation/, which is platform-owned (constitution §2): the platform\'s '
+    + 'base-app upgrade rewrites it, and the host trusts the health and job state it reports.\n'
+    + (done.length ? `The platform put these back as they were when this cycle started: ${listChanges(done)}.\n` : '')
+    + (left.length ? `Still changed — put them back yourself: ${listChanges(left)}${steps ? ` (${steps})` : ''}.\n` : '')
+    + 'Feature code uses the adapters — import { storage, embeddings, vector } from \'#foundation\' (foundation/README.md) — '
+    + 'and never edits, copies or forks foundation/. Redo the work that needed the change through the adapters; if the '
+    + 'foundation itself has to change, ask the platform to change it: say what and why in your finish summary (or halt), '
+    + 'and leave foundation/ untouched.';
 }

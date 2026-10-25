@@ -270,7 +270,8 @@ test('the seeded package.json start script matches the manifest run contract', (
   const contract = parseRunContract(files.find((f) => f.path === 'mock2.yaml').content);
   // start: "npm run start" → package.json has a "start" script node runs.
   assert.equal(contract.start, 'npm run start');
-  assert.equal(pkg.scripts.start, 'node dist/server.js');
+  // The foundation bootstrap loads before the entry (scaffold-foundation.js).
+  assert.equal(pkg.scripts.start, 'node --import=./foundation/runtime/bootstrap.mjs dist/server.js');
   assert.equal(pkg.scripts.build, 'tsc -p tsconfig.json');
   assert.equal(pkg.scripts.migrate, 'node scripts/migrate.mjs');
   // Constitution stack (framework-seed/constitution.md §2): Drizzle + pg + Zod.

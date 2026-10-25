@@ -40,7 +40,8 @@ import { mergeEnvFile } from '../lib/mcp-ext/logic.js';
 import { b64 } from './host.js';
 import { backfillManifestEntryInContainer } from './integration-enforcement.js';
 import { componentWiresBootstrap, planAuthWiring, AUTH_WIRING_TARGETS } from './scaffold-auth.js';
-import { SCAFFOLD_DEPENDENCIES } from './scaffold.js';
+import { scaffoldRepairDependencies } from './scaffold.js';
+import { FOUNDATION_CLI } from './foundation-contract.js';
 import { buildCheckpointScript } from './template.js';
 import { insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { getCurrentFrameworkVersion } from './framework.js';
@@ -385,6 +386,19 @@ function envFileKeysOf(text) {
 export async function ensureComponentSecrets({ containerName, rows, rand, newlyProvisioned = false, writersStopped = false } = {}) {
   const configs = installedSecretConfigs(rows);
   if (!configs.length) return { ok: true, minted: [], deferred: [], required: [] };
+  // An application-foundation deployment keeps these keys encrypted in mock2.db
+  // (component.<KEY>) and delivers them sealed through its app database —
+  // never in /etc/environment (docs/features/app-foundation.md § "Secrets").
+  let foundationProject = null;
+  try {
+    const { getProjectByContainerName } = await import('./projects.js');
+    const p = getProjectByContainerName(containerName);
+    if (p?.foundation_version) foundationProject = p;
+  } catch { /* no registry: the environment-file path below */ }
+  if (foundationProject) {
+    const { mintFoundationComponentSecrets } = await import('./foundation-store.js');
+    return mintFoundationComponentSecrets({ project: foundationProject, configs, newlyProvisioned });
+  }
   const deferred = [];
   let eligible = configs;
   const guards = secretMintGuards(configs);
@@ -461,14 +475,17 @@ export function deferredSecretsMessage(deferred = []) {
 // double base-app deploy) could rewrite package.json/package-lock.json and drop
 // entries the scaffold was born with (e.g. @types/pg) — after which `npm ci`
 // exits 0 against the consistent-but-wrong lockfile and the deploy fails at
-// tsc. Add-only merge: never overrides a version the project declares.
+// tsc. Add-only merge: never overrides a version the project declares. A
+// project that carries the foundation runtime (FOUNDATION_CLI) also gets its
+// S3 SDKs back; no other project ever receives them.
 export async function ensureScaffoldDeps({ containerName }) {
   const cur = await readFileInContainer(containerName, 'package.json');
   if (!cur.ok) return { ok: false, added: [], error: 'package.json unreadable' };
   let pkg;
   try { pkg = JSON.parse(cur.content); } catch { return { ok: false, added: [], error: 'package.json unparseable' }; }
+  const foundation = (await execInContainer(containerName, `test -f '${FOUNDATION_CLI}'`).catch(() => ({ code: 1 })))?.code === 0;
   const added = [];
-  for (const [section, wanted] of Object.entries(SCAFFOLD_DEPENDENCIES)) {
+  for (const [section, wanted] of Object.entries(scaffoldRepairDependencies({ foundation }))) {
     const target = pkg[section] && typeof pkg[section] === 'object' ? pkg[section] : (pkg[section] = {});
     for (const [name, version] of Object.entries(wanted)) {
       if (!target[name]) { target[name] = version; added.push(name); }
@@ -631,7 +648,9 @@ export async function preinstallComponents({ project, initiatedBy = null, acting
     if (secrets.minted.length) {
       insertMessage({
         projectId, kind: 'system', cycleId,
-        body: `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
+        body: secrets.store === 'foundation'
+          ? `Minted ${secrets.minted.length} application secret(s) (${secrets.minted.join(', ')}). They are kept encrypted by the platform and delivered sealed to the app's database; the app reads them at start.`
+          : `Minted ${secrets.minted.length} application secret(s) into the container environment (${secrets.minted.join(', ')}). Values stay in the container; the app reads them at start.`,
       });
     }
     const deferredNote = deferredSecretsMessage(secrets.deferred);

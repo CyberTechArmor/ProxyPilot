@@ -6,6 +6,12 @@
 > earlier 0.3.0 rendering. An available site release requires reviewed adoption;
 > updating unchanged ProxyPilot code cannot install it. Guidance adoption alone
 > does not install Relay runtime/producers or migrate existing integrations.
+>
+> 2026-10-24: constitution §2 is now **"The stack and the application foundation"**,
+> a platform contract that the pinned guidance does not supersede (§7 below). The
+> matching upstream amendment was **published as mock2-core 1.39.0** on 2026-10-25
+> (commit `8e2eaf7`, from `docs/mock2/upstream/2026-10-foundation/`), and the seed now
+> pins 1.39.0.
 
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 
@@ -180,3 +186,60 @@ Recorded per CPR §20 in `CPR-IMPLEMENTATION-FINDINGS.md`:
   the sources instead.
 - Boundary/manifest analysis (declared vs actual dependencies, §10.1) is not a
   gate in the battery.
+
+## 7. The application foundation and constitution §2 (2026-10-24)
+
+The user decided on 2026-10-24 that every new application gets the application
+foundation (`docs/features/app-foundation.md`): PostgreSQL + pgvector, SeaweedFS S3
+(replaceable by any S3-compatible provider) and a local embedding model, as one
+Compose stack in its guest; per-deployment switches that never delete data; secrets
+encrypted in the database, never in env files; and no SQLite unless the user
+explicitly asked and a person recorded it on the project.
+
+**What ProxyPilot changed (its own text).**
+
+- `framework-seed/constitution.md` §2 is rewritten as binding rules: the stack, the
+  foundation's three services, one database with no fallback, the recorded SQLite
+  exception that nothing in the repository can create, the storage and embeddings
+  adapters as the only path, encrypted secrets, switches that never delete data, one
+  vector space per index, truthful health, and existing projects left alone. §3
+  (config), §5 (secrets) and §13 (host capabilities) now agree with it.
+- **Precedence lives in two places.** §2 ends with a *Precedence* paragraph that names
+  each upstream sentence it overrides for new Dev Studio applications (profiles,
+  `Profile: none`, "adoption never rewrites a stack", "never provisions external
+  services", "AI alone does not select", automatic embedding failover, "SQLite as the
+  production database"). The generated header above the pinned block says the same in
+  one line. That header comes from `pinnedGuidanceHeader()` in
+  `scripts/sync-mock2-guidance.mjs`, so a re-sync keeps it; the pinned upstream bytes
+  and their hashes are unchanged.
+- The build skill's stack sentence (`skills.json`), the seed README (base-app is a
+  reference implementation, not installed) and `base-app/lib/db.js` (no hard-coded
+  `DATABASE_URL`; it fails with `DATABASE_URL_REQUIRED`) follow.
+- `standards-version.json` names upstream 1.39.0. Its `local_amendments` entry
+  records this amendment as `published-adopted` (2026-10-25, commit `8e2eaf7`). The
+  self-update check reads only the fields it knows, so the dashboard's Update block
+  and `check_proxypilot_update` are unaffected.
+
+**How §2 reaches a project and the model.**
+
+1. A changed seed publishes a new framework version on the next boot
+   (`upgradeFrameworkFromSeed`). New projects pin it; existing projects adopt it through
+   the drift → update path (automatically when `framework_auto_adopt` is on).
+2. Each build cycle pins a framework version, and the runner puts its whole
+   `constitution_md` into the system prompt under *Organizational constitution (pinned
+   — this is binding, not advisory)* (`buildRunnerSystemPrompt` in `runner-logic.js`,
+   called from `runner.js` and `runner-sdk.js`). That covers every build mode (full,
+   MVP, quick) and both harnesses (the copilot harness reuses the same builder). An
+   operator prompt override still receives it through `{{CONSTITUTION}}`. The audit
+   prompt (`audit.js`) injects it the same way.
+3. The repository's `.mock2/standards/constitution.md` is the upstream text only,
+   byte-identical to the pin, so it does **not** contain §2. The repository's own
+   `CLAUDE.md` comes from `template.js`. Over MCP nothing is injected (§5 above), so an
+   MCP client sees the foundation rules only if the project tree states them.
+
+**Upstream.** `docs/mock2/upstream/2026-10-foundation/` holds the mock2-core 1.39.0
+amendment that closes the same gaps upstream: one patch for 14 files, full copies of
+the five most changed, base and result hashes, the changelog entry and the order to
+apply. It was checked against hash-verified 1.38.0 bytes; nothing was published. When
+it is published and adopted with the sync script, §2 and the header line stay as they
+are, and the `local_amendments` entry moves to adopted.

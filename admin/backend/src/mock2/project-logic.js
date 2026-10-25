@@ -293,6 +293,10 @@ export function publicProjectShape(project, extra = {}) {
     // this the UI has no signal — the banner invited a press mid-deploy and the
     // user got a bare 409). Derived from the in-process guard, never stored.
     base_app_deploying: !!extra.baseAppDeploying,
+    // The application foundation this deployment runs on (migration 564;
+    // docs/features/app-foundation.md). null = a pre-foundation project on
+    // its native stack — the dashboard shows the foundation panel only when set.
+    foundation_version: project.foundation_version || null,
     current_mockup_id: project.current_mockup_id || null,
     // Served by the dashboard itself (reads the mockup HTML out of the
     // container) so the design review never depends on the project app being

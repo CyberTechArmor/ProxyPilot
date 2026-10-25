@@ -11,6 +11,8 @@
 // Terminology (risk R7): the AI build component is the runner; nothing here is
 // named "agent".
 
+import { FOUNDATION_DATABASE_URL } from './foundation-contract.js';
+
 // The default run contract the scaffold declares in mock2.yaml. `install` is
 // `npm ci || npm install` because the seed ships no lockfile (npm ci needs one),
 // so the first install falls through to `npm install`; later cycles with a
@@ -90,16 +92,48 @@ export function execStartForServePy(appDir = '/srv/app') {
 // vitest) and break every build.
 export const DEPLOY_NODE_ENV = 'production';
 
-// buildDevServiceUnit({ appDir, webPort, execStart }) → the mock2-dev.service
-// systemd unit text. The ONLY thing that varies between the pre-build placeholder
-// (serve.py) and a deployed app is ExecStart, so both go through here — the
-// deploy step rewrites the unit by calling this with the app's start command.
-// WantedBy=multi-user.target means a container restart (idle-stop/wake) brings
-// whatever was last written back up automatically.
-export function buildDevServiceUnit({ appDir = '/srv/app', webPort = 3000, execStart } = {}) {
+// buildDevServiceUnit({ appDir, webPort, execStart, environment, foundation })
+// → the mock2-dev.service systemd unit text. The ONLY thing that varies between
+// the pre-build placeholder (serve.py) and a deployed app is ExecStart, so both
+// go through here — the deploy step rewrites the unit by calling this with the
+// app's start command. WantedBy=multi-user.target means a container restart
+// (idle-stop/wake) brings whatever was last written back up automatically.
+//
+// environment: extra NON-secret `Environment=K=V` lines (a secret never goes in
+// a unit). A value that would break the unit or change its meaning — a line
+// break, a quote, a backslash, whitespace (systemd splits on it), a `%`
+// specifier, a control character — is refused, as is a key the unit already
+// sets. foundation: the application-foundation deployment
+// (docs/features/app-foundation.md): the app starts after Docker (its database
+// is the Compose stack's Postgres) and DATABASE_URL is the stack's socket URL.
+// With neither, the text is byte-for-byte what it always was.
+export const UNIT_RESERVED_ENV_KEYS = Object.freeze(['PORT', 'NODE_ENV', 'NODE_OPTIONS']);
+const UNIT_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// eslint-disable-next-line no-control-regex
+const UNIT_ENV_VALUE_BAD = /[\s\x22\x27\\%\x00-\x1f\x7f]/;
+const unitEnvError = (message) => Object.assign(new Error(message), { code: 'INVALID_UNIT_ENVIRONMENT' });
+export function unitEnvironmentLines(environment = {}, { foundation = false } = {}) {
+  const env = { ...(foundation ? { DATABASE_URL: FOUNDATION_DATABASE_URL } : {}) };
+  for (const [k, v] of Object.entries(environment || {})) {
+    if (!UNIT_ENV_KEY_RE.test(k)) throw unitEnvError(`unit environment key ${JSON.stringify(k)} is not a variable name`);
+    if (UNIT_RESERVED_ENV_KEYS.includes(k)) throw unitEnvError(`${k} is set by the unit itself`);
+    const value = String(v ?? '');
+    if (UNIT_ENV_VALUE_BAD.test(value)) throw unitEnvError(`the value of ${k} contains a character that would break the unit (whitespace, a quote, a backslash, % or a control character)`);
+    if (foundation && k === 'DATABASE_URL' && value !== FOUNDATION_DATABASE_URL) throw unitEnvError("a foundation deployment's DATABASE_URL is the stack's socket URL");
+    env[k] = value;
+  }
+  return Object.entries(env).map(([k, v]) => `Environment=${k}=${v}`);
+}
+
+export function buildDevServiceUnit({ appDir = '/srv/app', webPort = 3000, execStart, environment = {}, foundation = false } = {}) {
+  const extra = unitEnvironmentLines(environment, { foundation });
+  const after = foundation ? 'After=network.target docker.service\nWants=docker.service' : 'After=network.target';
+  const extraBlock = extra.length
+    ? `# Non-secret application settings${foundation ? " (DATABASE_URL is the foundation stack's socket: no password exists)" : ''}.\n${extra.join('\n')}\n`
+    : '';
   return `[Unit]
 Description=Mock2 project dev server
-After=network.target
+${after}
 
 [Service]
 Type=simple
@@ -116,7 +150,7 @@ Environment=NODE_ENV=${DEPLOY_NODE_ENV}
 # fail the deploy health check. This makes the app resilient without touching its
 # code (applies to any Node ExecStart; ignored by non-Node ExecStart like serve.py).
 Environment=NODE_OPTIONS=--unhandled-rejections=warn
-# Inherit any operator-set container env. The leading '-' makes it optional.
+${extraBlock}# Inherit any operator-set container env. The leading '-' makes it optional.
 EnvironmentFile=-/etc/environment
 ExecStart=${execStart}
 Restart=on-failure
@@ -141,14 +175,21 @@ export function parseEnvironmentFile(text = '') {
   return out;
 }
 
-// validateDeployEnvironment({ unitText, environmentText, requiredKeys }) →
-// { ok, mode } or { ok: false, error }. The deploy's fail-closed check, run
-// after the unit is built and BEFORE it is written: the unit must set
-// NODE_ENV=production, /etc/environment must not override it (systemd's
-// EnvironmentFile= wins over Environment=, so an operator-set
+// validateDeployEnvironment({ unitText, environmentText, requiredKeys,
+// foundation, storeKeys }) → { ok, mode } or { ok: false, error }. The deploy's
+// fail-closed check, run after the unit is built and BEFORE it is written: the
+// unit must set NODE_ENV=production, /etc/environment must not override it
+// (systemd's EnvironmentFile= wins over Environment=, so an operator-set
 // NODE_ENV=development there would silently switch the dev-default secrets
 // back on), and every secret the installed components own must be present.
-export function validateDeployEnvironment({ unitText = '', environmentText = '', requiredKeys = [] } = {}) {
+//
+// A foundation deployment keeps those secrets in the platform's encrypted
+// store and delivers them sealed through the app database (the app's
+// foundation bootstrap exposes them as process.env in memory), so for it a
+// required key counts as present only when it is in `storeKeys` (held AND
+// delivered); /etc/environment must neither carry it (decision 3: never in an
+// env file) nor override the unit's DATABASE_URL.
+export function validateDeployEnvironment({ unitText = '', environmentText = '', requiredKeys = [], foundation = false, storeKeys = null } = {}) {
   if (!new RegExp(`^Environment=NODE_ENV=${DEPLOY_NODE_ENV}$`, 'm').test(String(unitText || ''))) {
     return { ok: false, error: `the service unit does not set NODE_ENV=${DEPLOY_NODE_ENV}` };
   }
@@ -158,6 +199,24 @@ export function validateDeployEnvironment({ unitText = '', environmentText = '',
       ok: false,
       error: `/etc/environment sets NODE_ENV=${env.get('NODE_ENV') || '(empty)'}, which would override the unit's ${DEPLOY_NODE_ENV} mode (systemd EnvironmentFile wins) — remove that line or set it to ${DEPLOY_NODE_ENV}`,
     };
+  }
+  if (foundation) {
+    if (!String(unitText || '').split('\n').includes(`Environment=DATABASE_URL=${FOUNDATION_DATABASE_URL}`)) {
+      return { ok: false, error: "the service unit of a foundation deployment does not set DATABASE_URL to the foundation stack's socket URL" };
+    }
+    if (env.has('DATABASE_URL') && env.get('DATABASE_URL') !== FOUNDATION_DATABASE_URL) {
+      return { ok: false, error: "/etc/environment sets DATABASE_URL, which would override the foundation stack's socket URL in the unit (systemd EnvironmentFile wins) — remove that line" };
+    }
+    const inFile = (requiredKeys || []).filter((k) => env.has(k));
+    if (inFile.length) {
+      return { ok: false, error: `/etc/environment carries ${inFile.join(', ')}; on a foundation deployment application secrets live only in the platform's encrypted store — remove the line(s) so there is one value` };
+    }
+    const held = new Set(storeKeys || []);
+    const missing = (requiredKeys || []).filter((k) => !held.has(k));
+    if (missing.length) {
+      return { ok: false, error: `required application secret(s) not delivered to the foundation database: ${missing.join(', ')} — the platform keeps them encrypted and syncs them sealed into the app database; check the foundation stack is running (Foundation → Health), then redeploy` };
+    }
+    return { ok: true, mode: DEPLOY_NODE_ENV };
   }
   const missing = (requiredKeys || []).filter((k) => !env.has(k) || env.get(k) === '');
   if (missing.length) {

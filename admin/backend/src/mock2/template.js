@@ -25,6 +25,8 @@ import { DEFAULT_RUN_CONTRACT, buildDevServiceUnit, execStartForServePy } from '
 import { nodeRuntimeInstallScript } from './node-runtime-logic.js';
 import { agentsMd, workMd, projectHandoffMd, tasksReadmeMd, TASKS_DIR } from './continuity-convention.js';
 import guidance from './framework-seed/upstream-guidance.json' with { type: 'json' };
+import { DATABASE_RULE } from './database-exception-logic.js';
+import { FOUNDATION_DATABASE_URL, STACK } from './foundation-contract.js';
 
 // Bumped when the seed content changes so a rehydrate/diff (M3) can tell which
 // template a project was born from. m7-concept-1: the dev server also serves the
@@ -45,15 +47,27 @@ export const DEFAULT_WEB_PORT = 3000;
 // block DECLARES how the app installs/migrates/builds/starts — the deploy step
 // obeys it verbatim and NEVER sniffs the tree for a start command (declared, not
 // discovered, exactly like ports).
-export function defaultManifest({ webPort = DEFAULT_WEB_PORT } = {}) {
+// foundation (the default — every new project is seeded on the application
+// foundation): the database has no port at all. PostgreSQL runs in the guest's
+// foundation stack and listens on its Unix socket only, so the manifest says
+// so instead of declaring an internal 5432 that nothing listens on. Nothing
+// reads ports other than \`web\` (parseManifestWebPort); the line is for the
+// person and the builder reading the file.
+export function defaultManifest({ webPort = DEFAULT_WEB_PORT, foundation = true } = {}) {
+  const database = foundation
+    ? `# The database has no port: PostgreSQL + pgvector run in this guest's
+# application foundation stack and listen on the Unix socket in
+# ${STACK.postgres.socketDir} only (DATABASE_URL=${FOUNDATION_DATABASE_URL}).
+`
+    : `  postgres: 5432   # internal — Postgres runs inside this container (ADR-008)
+`;
   return `# mock2.yaml — project topology manifest + run contract (ADR-005).
 # Ports are DECLARED here, never discovered. ProxyPilot registers exactly one
 # HTTPS route, to \`web\`; everything else stays internal to the project bridge.
 version: 1
 ports:
   web: ${webPort}        # exposed — the one HTTPS route ProxyPilot publishes
-  postgres: 5432   # internal — Postgres runs inside this container (ADR-008)
-# How the app runs. The deploy step runs these verbatim (declared, not sniffed).
+${database}# How the app runs. The deploy step runs these verbatim (declared, not sniffed).
 run:
   runtime: ${DEFAULT_RUN_CONTRACT.runtime}
   install: ${DEFAULT_RUN_CONTRACT.install}
@@ -173,13 +187,23 @@ with socketserver.TCPServer(("0.0.0.0", PORT), Handler) as httpd:
 
 // The secrets MANIFEST (required keys, no values). The real .env is gitignored
 // and lives only in the container (03-data-model.md: .env values never enter
-// the repo). DATABASE_URL points at the in-container Postgres (ADR-008).
+// the repo). DATABASE_URL is the application foundation's PostgreSQL over its
+// Unix socket with peer authentication, so it holds no password at all; the
+// foundation's own credentials never appear in any env file
+// (docs/features/app-foundation.md).
 function envExample(webPort) {
   return `# Secrets manifest — required keys, NO values. Copy to .env in the
 # container and fill in. .env is gitignored and never committed (ADR-006/008).
 PORT=${webPort}
-# In-container Postgres (ADR-008) — ProxyPilot stores nothing here.
-DATABASE_URL=postgres://app:app@127.0.0.1:5432/app
+# The application database: the foundation stack's PostgreSQL over its Unix
+# socket with peer authentication. This URL holds NO password — none exists.
+# Set it only to use another database; the app never falls back on its own.
+DATABASE_URL=${FOUNDATION_DATABASE_URL}
+# Storage and embedding credentials and component keys are NOT environment
+# variables: ProxyPilot keeps them encrypted and delivers them sealed through
+# the database. They are opened with the deployment master key at
+# ${STACK.keyFile} (outside ProxyPilot, point FOUNDATION_KEY_FILE at your own).
+# FOUNDATION_KEY_FILE=${STACK.keyFile}
 `;
 }
 
@@ -282,8 +306,11 @@ existing apps preserve working integrations unless modernization is requested.
 - Compliance mode: standard | hipaa
 
 ## Stack
-- TypeScript, Express, Drizzle, Zod, Vitest, PostgreSQL (Mock2 default)
-- Deviations from the default, with reason: <none>
+- TypeScript, Express, Drizzle, Zod, Vitest, PostgreSQL with pgvector (the application foundation)
+- ${DATABASE_RULE}
+- Only the person's own request, recorded on the project in Dev Studio, allows SQLite. A stack
+  deviation is approved by the platform administrator and recorded in \`state/deviations/\`
+  (constitution §9) — never decided in this file or by a build.
 
 ## Commands
 - Install: \`npm install\` · Dev: \`npm run dev\` · Migrate: \`npm run migrate\`
@@ -312,6 +339,13 @@ Same content as \`CLAUDE.md\` at the repo root; keep the two in sync. This repos
 follows the Mock2 standards installed at user level (https://mock2.fractionate.ai)
 and CPR v1.1. Nothing here blocks building or testing; production decisions live in
 \`state/production-checklist.md\`.
+
+Profile: cpr
+Deviations:
+  - none (a deviation is approved by the platform administrator in \`state/deviations/\`)
+
+${DATABASE_RULE} Only the person's own request, recorded on the project in Dev Studio,
+allows SQLite.
 
 Starting or resuming work? Read \`AGENTS.md\` first — the reading order, and where
 unfinished tasks are recorded (\`state/tasks/\`).
@@ -436,6 +470,9 @@ export function buildSeedFiles(project, { webPort = DEFAULT_WEB_PORT } = {}) {
         `The declared topology and run contract are in \`mock2.yaml\`; the app is a ` +
         `TypeScript/Express/Drizzle scaffold under \`src/\` with migrations in \`migrations/\`. ` +
         `\`serve.py\` is the pre-build placeholder dev server (Concept stage).\n\n` +
+        `The application foundation — PostgreSQL + pgvector, object storage and embeddings — ` +
+        `is reached only through the platform-owned \`foundation/\` adapters ` +
+        `(\`import { storage, vector } from '#foundation'\`); see \`foundation/README.md\`.\n\n` +
         `Working on this repo from VS Code or another editor? Read \`WORKING-COPY.md\` — ` +
         `pushes auto-deploy, and the approved design specs live in \`state/\` ` +
         `(\`design-tokens.json\`, \`design.css\`, \`mockups/current.html\`).\n`,
@@ -536,6 +573,71 @@ echo "[mock2] checkpoint pushed to bare repo"
 `;
 }
 
+// ---- buildContainerSetupScript's database segments ----
+// Native projects (ADR-008): the in-guest PostgreSQL server, best-effort.
+const NATIVE_POSTGRES_INSTALL = 'apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres install skipped/failed (non-fatal in M2)"';
+const NATIVE_POSTGRES_BOOTSTRAP = `# Bring the in-container Postgres up if it installed (ADR-008). Non-fatal.
+if command -v pg_ctlcluster >/dev/null 2>&1; then
+  (service postgresql start || pg_ctlcluster "$(ls /etc/postgresql 2>/dev/null | head -n1)" main start || true) 2>/dev/null || true
+fi
+
+# Provision the in-container app role + database (ADR-008) so the app's declared
+# DATABASE_URL (postgres://app:app@127.0.0.1:5432/app in .env.example, and the
+# migrate script's default) authenticates. Idempotent + best-effort: the
+# placeholder dev server does not need it, but the DEPLOYED app (its migrate step)
+# does. Runs locally against the just-started cluster — no egress needed.
+if command -v psql >/dev/null 2>&1; then
+  su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_roles WHERE rolname='app'\\" | grep -q 1 || psql -c \\"CREATE ROLE app LOGIN PASSWORD 'app'\\"" 2>/dev/null || echo "[mock2] app role create skipped/failed (non-fatal)"
+  su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_database WHERE datname='app'\\" | grep -q 1 || psql -c \\"CREATE DATABASE app OWNER app\\"" 2>/dev/null || echo "[mock2] app database create skipped/failed (non-fatal)"
+fi`;
+// Foundation projects: Docker Engine + Compose v2 + the psql client from the
+// Debian 13 archive (docker.io, docker-compose — the Go Compose v2 in trixie —
+// and postgresql-client). Required: each failure exits with its own code and
+// a message that names the cause, and provisioning fails on it. The stack
+// itself (and the app role/database) is brought up afterwards by
+// foundation-stack.js — never by this script.
+const FOUNDATION_SETUP_INSTALL = `# Application foundation: Docker Engine + Compose v2 + the psql client (Debian 13
+# packages). NOT best-effort — the app's database runs in the Compose stack.
+if ! apt-get install -y --no-install-recommends docker.io docker-compose postgresql-client; then
+  echo "[mock2] FOUNDATION SETUP FAILED: apt-get could not install docker.io, docker-compose and postgresql-client from the Debian 13 archive. Check the guest's egress to its package mirror (the apt-get update output above) and retry provisioning." >&2
+  exit 41
+fi
+# Debian ships Compose v2 as the docker-compose binary; make sure the docker CLI
+# finds it as its compose plugin too.
+if ! docker compose version >/dev/null 2>&1; then
+  for c in /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose; do
+    if [ -x "$c" ] && "$c" version 2>/dev/null | grep -qE 'version v?2\\.'; then
+      mkdir -p /usr/local/lib/docker/cli-plugins && ln -sf "$c" /usr/local/lib/docker/cli-plugins/docker-compose && break
+    fi
+  done
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "[mock2] FOUNDATION SETUP FAILED: 'docker compose' (Compose v2) is not available after installing docker-compose — 'docker-compose version' says: $(docker-compose version 2>&1 | head -n1)" >&2
+  exit 42
+fi
+systemctl enable --now docker.service >/dev/null 2>&1 || true
+if ! docker info >/dev/null 2>&1; then
+  echo "[mock2] FOUNDATION SETUP FAILED: the Docker daemon did not start in this guest. A foundation guest must be Docker-ready (security.nesting=true + the mknod/setxattr syscall intercepts); check 'incus config show' for the guest and 'journalctl -u docker' inside it. docker info said: $(docker info 2>&1 | tail -n 3 | tr '\\n' ' ')" >&2
+  exit 43
+fi
+echo "[mock2] foundation runtime ready: $(docker --version), compose $(docker compose version --short 2>/dev/null)"`;
+// The same install, alone, for an EXISTING guest that is adopted onto the
+// foundation (foundation-adopt-service.js): the package index first, then the
+// foundation branch above, byte for byte — nothing else of the setup script.
+export function foundationRuntimeInstallScript() {
+  return `#!/bin/sh
+set -e
+export DEBIAN_FRONTEND=noninteractive
+mkdir -p /etc/apt/apt.conf.d
+printf 'Acquire::ForceIPv4 "true";\\n' > /etc/apt/apt.conf.d/00mock2-ipv4
+apt-get update -y || true
+${FOUNDATION_SETUP_INSTALL}
+`;
+}
+const FOUNDATION_SETUP_BOOTSTRAP = `# The app's PostgreSQL (with pgvector), storage and embeddings run in the
+# guest's foundation stack (/opt/mock2-foundation), brought up by the platform
+# right after this script. No database server is installed in the guest.`;
+
 // buildContainerSetupScript(opts) → a bash script run once inside the container
 // after the working clone lands. Installs the runtime + Postgres (ADR-008,
 // best-effort — a failure to install Postgres does not fail provisioning of the
@@ -547,12 +649,23 @@ echo "[mock2] checkpoint pushed to bare repo"
 // The container reaches the internet via the bridge's Incus NAT — no egress proxy
 // env is written (squid was removed). The nftables fence still logs every new
 // outbound connection and blocks lateral movement to private ranges.
-export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT } = {}) {
+//
+// foundation: true (projects created with the application foundation) swaps
+// the in-guest PostgreSQL server for Docker Engine + Compose v2 + the psql
+// client — the database runs in the guest's foundation stack — and those
+// installs are NOT best-effort: a failure exits non-zero with the reason, so
+// provisioning fails visibly. Without it the script is byte-for-byte the native one.
+export function buildContainerSetupScript({ appDir = '/srv/app', webPort = DEFAULT_WEB_PORT, foundation = false } = {}) {
   // The pre-build placeholder unit (serve.py). Same builder the deploy step uses
   // to rewrite ExecStart to the real app, so the two units differ ONLY in ExecStart.
+  // A foundation unit also carries DATABASE_URL (the socket URL — no secret in
+  // it) and orders itself after docker.service.
   const devServiceUnit = buildDevServiceUnit({
     appDir, webPort, execStart: execStartForServePy(appDir),
+    ...(foundation ? { environment: { DATABASE_URL: FOUNDATION_DATABASE_URL }, foundation: true } : {}),
   }).trimEnd();
+  const databaseInstall = foundation ? FOUNDATION_SETUP_INSTALL : NATIVE_POSTGRES_INSTALL;
+  const databaseBootstrap = foundation ? FOUNDATION_SETUP_BOOTSTRAP : NATIVE_POSTGRES_BOOTSTRAP;
   return `#!/bin/sh
 set -e
 APP_DIR="${appDir}"
@@ -584,7 +697,7 @@ apt-get install -y --no-install-recommends git curl nano sudo ca-certificates ||
 # port — the EADDRINUSE loop that was undebuggable until a /proc fallback
 # existed. Best-effort like the rest of the toolbox.
 apt-get install -y --no-install-recommends iproute2 psmisc lsof || echo "[mock2] port-tools install skipped/failed (non-fatal; /proc fallback applies)"
-apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres install skipped/failed (non-fatal in M2)"
+${databaseInstall}
 # Node.js + npm for the runtime scaffold (R8). Installed at BOOTSTRAP so the Node
 # RUNTIME is present before first use. The npm PACKAGES the app needs (npm
 # install) are fetched at DEPLOY over the bridge's NAT egress to
@@ -600,20 +713,7 @@ apt-get install -y --no-install-recommends postgresql || echo "[mock2] postgres 
 # never drift (node-runtime-logic.js).
 ${nodeRuntimeInstallScript()}
 
-# Bring the in-container Postgres up if it installed (ADR-008). Non-fatal.
-if command -v pg_ctlcluster >/dev/null 2>&1; then
-  (service postgresql start || pg_ctlcluster "$(ls /etc/postgresql 2>/dev/null | head -n1)" main start || true) 2>/dev/null || true
-fi
-
-# Provision the in-container app role + database (ADR-008) so the app's declared
-# DATABASE_URL (postgres://app:app@127.0.0.1:5432/app in .env.example, and the
-# migrate script's default) authenticates. Idempotent + best-effort: the
-# placeholder dev server does not need it, but the DEPLOYED app (its migrate step)
-# does. Runs locally against the just-started cluster — no egress needed.
-if command -v psql >/dev/null 2>&1; then
-  su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_roles WHERE rolname='app'\\" | grep -q 1 || psql -c \\"CREATE ROLE app LOGIN PASSWORD 'app'\\"" 2>/dev/null || echo "[mock2] app role create skipped/failed (non-fatal)"
-  su - postgres -c "psql -tAc \\"SELECT 1 FROM pg_database WHERE datname='app'\\" | grep -q 1 || psql -c \\"CREATE DATABASE app OWNER app\\"" 2>/dev/null || echo "[mock2] app database create skipped/failed (non-fatal)"
-fi
+${databaseBootstrap}
 
 # No egress proxy: the bridge NATs straight out (Incus ipv4.nat). Once the fence
 # is applied (provision.js, right after this script) egress is still NAT'd — the

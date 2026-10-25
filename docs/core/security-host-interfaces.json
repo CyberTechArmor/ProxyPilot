@@ -248,7 +248,7 @@
       "host_files: export const RESET_EXPORTS_DIR = '/var/lib/proxypilot/mcp-exports';": 1
     },
     "admin/backend/src/lib/setup-engine/guest-probes.js": {
-      "host_files: export function protectedCopiesScript(jobId, { appDir = '/srv/app', unitPath = '/etc/systemd/system/mock2-dev.service', environmentFile = '/etc/environment', dumpsDir = DB_DUMPS_DIR, withDatabase = true } = {}) {": 1
+      "host_files: export function protectedCopiesScript(jobId, { appDir = '/srv/app', unitPath = '/etc/systemd/system/mock2-dev.service', environmentFile = '/etc/environment', dumpsDir = DB_DUMPS_DIR, withDatabase = true, foundation = false } = {}) {": 1
     },
     "admin/backend/src/lib/setup-engine/infisical-logic.js": {
       "host_files: export const INFISICAL_ROOT = '/var/lib/proxypilot/infisical';": 1
@@ -375,6 +375,19 @@
       "host_files: // /var/lib/proxypilot/firewall.json and we never touch it). Reconciled at boot.": 1,
       "host_files: export const MOCK2_DATA_DIR = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';": 1,
       "host_namespace: // functions shell to the host through the shared nsenter-aware runner": 1
+    },
+    "admin/backend/src/mock2/foundation-adopt-service.js": {
+      "host_files: const dataDir = process.env.MOCK2_DATA_DIR || '/var/lib/proxypilot/mock2';": 1,
+      "host_namespace: // incus exec through mock2/host.js runHost \u2014 nsenter-aware, R3); tests replace": 1
+    },
+    "admin/backend/src/mock2/foundation-stack.js": {
+      "host_command: const r = await guestExec(containerName, ['test', '-f', currentLayout().composeFile], { timeoutMs: 30000 });": 1,
+      "host_command: guestExec = typeof fn === 'function' ? fn : incusGuestExec;": 1,
+      "host_command: let guestExec = incusGuestExec;": 1,
+      "host_command: return guestExec(containerName, ['sh', '-c', script, 'sh', ...args], opts);": 1,
+      "host_command: return guestExec(containerName, [...composeArgv(currentLayout()), ...args], { input, timeoutMs });": 1,
+      "host_command: return guestExec(containerName, argv, { input: String(sql ?? ''), timeoutMs });": 1,
+      "host_namespace: // `incus exec <guest> -- \u2026` through mock2/host.js runHost (R3: nsenter when": 1
     },
     "admin/backend/src/mock2/host.js": {
       "host_command: // Every Mock2 host mutation pivots through lib/host-exec.js spawnHost (risk R3:": 1,

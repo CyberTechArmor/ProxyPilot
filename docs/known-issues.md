@@ -6,6 +6,51 @@ scope. Anyone picking up a future session should treat this file
 as a punch list, not a roadmap — items here are meant to be
 addressed individually, not bundled.
 
+## Application foundation (2026-10): follow-ups
+
+From the foundation build (docs/features/app-foundation.md).
+
+- **Moving an existing project** (Foundation → Move onto the application
+  foundation) is proven against a scripted guest and a real-Docker harness
+  only. Real Incus snapshot restore, the guest restart with the Docker-ready
+  settings, Debian 13's Docker install and a real deploy are proven by the
+  first move on a host. A snapshot-retention rule could prune its rollback
+  snapshot (`SNAPSHOT_MISSING`). Removing the old database afterwards is not
+  built yet.
+- **Apps that already drifted to SQLite** (created before the foundation) get
+  an advisory on quick and MVP builds, and the full build refuses what it
+  refused before. A build that adds an engine is refused in every tier. Such an app
+  cannot be moved onto the foundation until its data access is PostgreSQL
+  (the move's plan blocks it).
+- **Not proven in the sandbox:** Docker inside a nested Incus guest, the
+  Debian 13 `docker.io` / `docker-compose` / `postgresql-client` install (the
+  failure path is proven), and the local embedding model (the TEI image and
+  model downloads are blocked there; an OpenAI-compatible fake stood in).
+  The first real foundation project on a host is the proof.
+- **Cloning** copies the database (vectors included) but not stored objects.
+- **Need a decision:**
+  - The post-deploy stored-credential check is skipped on foundation deploys
+    (the keys live in mock2.db, not `/etc/environment`); it needs a host-side
+    probe.
+- **A checkpoint restored from before a re-embed** can bring back an index
+  that does not match the current embeddings provider.
+- **The foundation Postgres sits on its own Compose bridge** (so the
+  read-only reporting role can be published on 127.0.0.1:5432), which gives
+  the container outbound network access; only a superuser could use it.
+  Docker cannot publish a port from an `internal` network, so closing it
+  needs a guest-side egress rule for that bridge.
+- **The command policy** (harness-safety.js) covers run_terminal,
+  exec_in_container and the SDK lane, but not MCP `run_project_command` or
+  the ask lane.
+- **constitution-lint's ESLint step never runs**: `ls .eslintrc* eslint.config.*`
+  fails unless both config kinds exist. Left as is; fixing it changes full builds.
+- **Upstream (mock2-core) follow-ups** after the 1.39.0 amendment:
+  `base-app.mjs` still writes `BOOTSTRAP_TOKEN=` into `.env.example`;
+  `modules.mjs` does not report direct S3 / embedding clients; an
+  `@aws-sdk/client-s3` pin belongs in `stack.versions.json`.
+- **Flaky:** `migration-service.test.js` "create: validates…" failed once
+  under full-suite load and passed on every rerun.
+
 ## OpenBao dashboard operator actions still dial the public hostname
 
 Found while fixing the Infisical bootstrap 403 (2026-09-23). Adapter

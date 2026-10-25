@@ -32,8 +32,21 @@ import { pushServiceWorkerJs, pwaInstallJs as pushInstallJs } from './scaffold-p
 import {
   playwrightConfigTs, e2eServerMjs, platformSpecTs, E2E_SCRIPTS, E2E_DEV_DEPENDENCIES,
 } from './scaffold-e2e.js';
+// The application foundation (docs/features/app-foundation.md): the app-side
+// runtime lives in foundation/ and every entry runs with its bootstrap loaded
+// first (FOUNDATION_NODE_IMPORT). The portable stack copy is rendered by
+// foundation-stack-logic.js and handed in, so scaffold-foundation.js never
+// decides what the stack looks like.
+import {
+  buildFoundationFiles, FOUNDATION_DEPENDENCIES, FOUNDATION_NODE_IMPORT, FOUNDATION_PACKAGE_IMPORTS,
+} from './scaffold-foundation.js';
+import { buildFoundationComposeYaml, buildFoundationFiles as buildFoundationStackFiles } from './foundation-stack-logic.js';
+import { FOUNDATION_DATABASE_URL, FOUNDATION_CLI } from './foundation-contract.js';
 
-export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v7';
+// v8: the application foundation — foundation/ runtime + CLI, the bootstrap
+// on every entry, the AWS SDK dependencies, and DATABASE_URL defaulting to the
+// foundation's socket (no password) instead of a password-in-URL TCP default.
+export const MOCK2_SCAFFOLD_VERSION = 'mock2-ts-express-drizzle-v8';
 
 // The canonical dependency set every scaffolded app is born with. Exported so
 // the repair pass (component-install ensureScaffoldDeps) can restore entries a
@@ -60,6 +73,15 @@ export const SCAFFOLD_DEPENDENCIES = {
     '@types/pg': '^8.11.6',
   },
 };
+
+// The repair set for one project: SCAFFOLD_DEPENDENCIES, plus the foundation's
+// own SDKs (FOUNDATION_DEPENDENCIES) only in a project that carries the
+// foundation runtime (FOUNDATION_CLI present) — a project from before the
+// foundation never gets them.
+export function scaffoldRepairDependencies({ foundation = false } = {}) {
+  if (!foundation) return SCAFFOLD_DEPENDENCIES;
+  return { ...SCAFFOLD_DEPENDENCIES, dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies, ...FOUNDATION_DEPENDENCIES } };
+}
 
 // The Mock2 standards' verification scripts (mock2-core v0.2.0, "Mock2 production
 // checklist" rule): `npm run check` runs every check and REPORTS — the `;`
@@ -88,15 +110,24 @@ function packageJson(project) {
       private: true,
       type: 'module',
       scripts: {
-        dev: 'tsx watch src/server.ts',
+        // The foundation bootstrap is loaded BEFORE the entry with --import:
+        // ESM would evaluate the entry's other imports while an import line's
+        // top-level await is still pending (scaffold-foundation.js header).
+        dev: `tsx watch ${FOUNDATION_NODE_IMPORT} src/server.ts`,
         build: 'tsc -p tsconfig.json',
-        start: 'node dist/server.js',
+        start: `node ${FOUNDATION_NODE_IMPORT} dist/server.js`,
         migrate: 'node scripts/migrate.mjs',
+        foundation: `node ${FOUNDATION_CLI}`,
         test: 'vitest run',
         ...CHECK_SCRIPTS,
         ...E2E_SCRIPTS,
       },
-      dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies },
+      // Feature code imports the adapters as '#foundation' from any depth.
+      imports: { ...FOUNDATION_PACKAGE_IMPORTS },
+      // Foundation deps are added here, not to SCAFFOLD_DEPENDENCIES: that is
+      // the repair set restored into EVERY project, including the ones that
+      // predate the foundation and never get it.
+      dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies, ...FOUNDATION_DEPENDENCIES },
       devDependencies: { ...SCAFFOLD_DEPENDENCIES.devDependencies },
     },
     null,
@@ -150,14 +181,18 @@ export default defineConfig({
 
 // src/config.ts — environment-driven config (constitution §3: no hardcoded
 // hosts/ports/credentials). PORT is the manifest's declared web port; the
-// deploy unit passes it via Environment=PORT.
+// deploy unit passes it via Environment=PORT. DATABASE_URL defaults to the
+// foundation stack's socket: peer authentication, so the URL holds no password.
 function configTs() {
   return `import { z } from 'zod';
 
 // Config is environment-driven and validated once at boot (constitution §3).
+// DATABASE_URL defaults to the foundation's PostgreSQL over its Unix socket with
+// peer authentication — there is no database password. An explicit DATABASE_URL
+// always wins; nothing ever falls back to another database.
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
-  DATABASE_URL: z.string().default('postgres://app:app@127.0.0.1:5432/app'),
+  DATABASE_URL: z.string().default('${FOUNDATION_DATABASE_URL}'),
   NODE_ENV: z.string().default('development'),
 });
 
@@ -183,7 +218,8 @@ export const healthChecks = pgTable('health_checks', {
 
 // src/db/index.ts — the single Drizzle client over a pg pool. All persistence
 // goes through this (constitution §2). The pool is lazy (no connection until a
-// query runs), so importing this in a test does not open a socket.
+// query runs), so importing this in a test does not open a socket. A failed
+// connection names the database it tried (socket or host — never a password).
 function dbIndexTs() {
   return `import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
@@ -194,7 +230,47 @@ import * as schema from './schema.js';
 // queryable through the same Drizzle client as the app's own tables.
 import * as platformSchema from '../platform/schema.js';
 
-export const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
+// Where the database is — socket or host, database, user — never a password.
+export function describeDatabaseUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const host = u.searchParams.get('host') || decodeURIComponent(u.hostname);
+    const db = decodeURIComponent(u.pathname.replace(/^\\/+/, '')) || '(default database)';
+    const user = u.searchParams.get('user') || decodeURIComponent(u.username) || '(default user)';
+    const where = host.startsWith('/') ? 'socket ' + host : (host || 'localhost') + ':' + (u.port || '5432');
+    return where + ', database ' + db + ', user ' + user;
+  } catch {
+    return 'an unparseable DATABASE_URL';
+  }
+}
+export const databaseTarget = describeDatabaseUrl(config.DATABASE_URL);
+
+// Every connection error names the database it tried, so a wrong or
+// unreachable DATABASE_URL never reads as a bare ECONNREFUSED / ENOENT.
+// There is no fallback database.
+const EXPLAINED = 'Cannot connect to the application database';
+function explain(err: Error): Error {
+  if (!err.message.startsWith(EXPLAINED)) err.message = EXPLAINED + ' (' + databaseTarget + '): ' + err.message;
+  return err;
+}
+type ConnectCallback = (err: Error | null, ...rest: unknown[]) => void;
+const baseConnect = pg.Client.prototype.connect as unknown as (this: pg.Client, callback?: ConnectCallback) => Promise<unknown> | undefined;
+class ExplicitClient extends pg.Client {}
+// Wraps connect() in both of pg's calling styles (the pool uses the callback
+// one). Installed on the prototype rather than as a TypeScript override so it
+// does not depend on which @types/pg overload set is installed.
+Object.defineProperty(ExplicitClient.prototype, 'connect', {
+  configurable: true,
+  writable: true,
+  value: function connect(this: pg.Client, callback?: ConnectCallback) {
+    if (callback) return baseConnect.call(this, (err, ...rest) => callback(err ? explain(err) : err, ...rest));
+    return (baseConnect.call(this) as Promise<unknown>).catch((err: Error) => {
+      throw explain(err);
+    });
+  },
+});
+
+export const pool = new pg.Pool({ connectionString: config.DATABASE_URL, Client: ExplicitClient });
 // A pg Pool emits 'error' when an IDLE backend connection drops (Postgres
 // restart, network blip). With no listener Node treats it as an unhandled
 // 'error' event and crashes the process — so a transient DB blip would take the
@@ -431,22 +507,32 @@ CREATE TABLE IF NOT EXISTS health_checks (
 // scripts/migrate.mjs — a tiny, dependency-light migration runner: applies every
 // migrations/*.sql in filename order that has not run yet, tracked in a
 // _migrations table. Uses only `pg` (already a dependency), so `npm run migrate`
-// works right after install without drizzle-kit. Idempotent.
+// works right after install without drizzle-kit. Idempotent. It connects the
+// way the app does (the foundation's connectWithRetry): DATABASE_URL, default
+// the foundation socket, a short retry, then an error naming what it tried.
 function migrateMjs() {
   return `#!/usr/bin/env node
 // Applies migrations/*.sql in filename order against DATABASE_URL, tracking
 // applied files in a _migrations table. Idempotent; uses only the pg driver.
+// DATABASE_URL defaults to the foundation's PostgreSQL socket (peer auth, no
+// password); a connection that cannot be made fails with the target named and
+// nothing applied — it never falls back to another database.
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import pg from 'pg';
+import { connectWithRetry, databaseUrl, retryWindowMs } from '../foundation/runtime/config.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const dir = path.join(root, 'migrations');
-const url = process.env.DATABASE_URL || 'postgres://app:app@127.0.0.1:5432/app';
 
-const client = new pg.Client({ connectionString: url });
-await client.connect();
+let client;
+try {
+  client = await connectWithRetry({ url: databaseUrl(), retryMs: retryWindowMs(30000) });
+} catch (err) {
+  console.error('migrate: ' + err.message);
+  console.error('migrate: nothing was applied.');
+  process.exit(1);
+}
 await client.query(
   'CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())',
 );
@@ -1332,5 +1418,20 @@ export function buildScaffoldFiles(project) {
     // The platform module — identity, legal pages, assets, machine API and
     // read-only SQL. Part of the base app every project is provisioned with.
     ...buildPlatformFiles(project),
+    // The application foundation — storage, embeddings, vectors, health, jobs
+    // and the CLI over the guest's foundation stack (platform-owned).
+    ...scaffoldFoundationFiles(),
   ];
+}
+
+// scaffoldFoundationFiles — the foundation/ tree with the portable stack copy,
+// for the seed and for the base-app upgrade (which refreshes it only in
+// projects that already have it). PURE.
+export function scaffoldFoundationFiles() {
+  // compose.yaml mounts its Postgres files from beside it (./postgres/…), so
+  // the portable copy ships them too or it cannot start outside ProxyPilot.
+  const stackFiles = buildFoundationStackFiles({ portable: true })
+    .filter((f) => f.path !== 'compose.yaml')
+    .map((f) => ({ ...f, path: `foundation/${f.path}` }));
+  return [...buildFoundationFiles({ composeYaml: buildFoundationComposeYaml({ portable: true }) }), ...stackFiles];
 }

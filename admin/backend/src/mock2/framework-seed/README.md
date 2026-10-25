@@ -9,9 +9,9 @@ differs from the latest published version, `upgradeFrameworkFromSeed()` publishe
 disabled or production-pinned host nothing here is read, imported, or installed
 (ADR-001). The registry is append-only and content rows are immutable (ADR-003).
 
-## Current guidance adoption (2026-10-22)
+## Current guidance adoption (2026-10-25)
 
-The embedded Mock2 source release is **1.35.0**, family `mock2-core`, scope
+The embedded Mock2 source release is **1.39.0**, family `mock2-core`, scope
 `guidance`. `upstream-guidance.json` retains 33 canonical guidance files and their
 release hashes. The platform constitution includes the pinned current
 constitution after the retained platform contracts. New project seeds carry
@@ -22,9 +22,10 @@ framework version does not certify their local files or deployed application.
 Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`.
 Every required source file is checked against release.json before output.
 Source release.json SHA256 at adoption:
-`7a3eea91ef84f43033386da14c7735b5fb1805ba2f624b8d4abe2991bc40fab6`
-(1.35.0, 2026-10-22; previous adoption 1.23.2 on 2026-10-17 was
-`745cb748d94f4ae229b1c4731fc26f10d1e3ba28403f774399ecd6ea1512574d`).
+`78872e8a1cef39b8c9c67fc2b440eab9d84a9bcabe507c2635746b203cad96e8`
+(1.39.0, 2026-10-25, published from ProxyPilot's foundation amendment; previous
+adoption 1.35.0 on 2026-10-22 was
+`7a3eea91ef84f43033386da14c7735b5fb1805ba2f624b8d4abe2991bc40fab6`).
 
 CPR remains specification **1.1**, framework registry integers and the base-app
 scaffold are separate version families. Relay reference **1.2.1** is described
@@ -32,6 +33,42 @@ by the guidance; its runtime and ongoing producers are **not installed by this
 seed**. Integration foundations are instructions for new builds; existing
 connections and schemas are not migrated by adopting standards. Existing
 dependency release lines are preserved.
+
+## Stack and application foundation (2026-10-24)
+
+Constitution §2 is now **"The stack and the application foundation"**, a platform
+contract written from the user's decisions of 2026-10-24
+(`docs/features/app-foundation.md`). It says, in binding rules:
+
+- PostgreSQL + pgvector from the foundation is the only application database,
+  provisioned when the application is created; a missing or unreachable database is
+  an explicit failure, never a fallback.
+- SQLite and other engines are refused unless the user explicitly asked for one and a
+  person recorded that request on the project (the builder cannot create the record;
+  the prompts quote it).
+- Object storage only through the foundation `storage` adapter (bundled SeaweedFS by
+  default, any S3-compatible provider); embeddings and vector search only through the
+  foundation adapters (local model by default, with a production-quality warning;
+  OpenAI or an OpenAI-compatible provider). Feature code never uses an S3 SDK or an
+  embedding HTTP API directly.
+- Secrets are encrypted in the database, never in env files or the repository.
+  Per-deployment switches never delete data. An embedding model or dimension change
+  re-embeds into a new validated index. Health is reported truthfully.
+
+**Precedence.** The pinned upstream guidance below the marker supersedes historical
+general-workflow wording only. §2 says that it does not supersede §2, and the
+generated header line says the same thing. The header comes from
+`pinnedGuidanceHeader()` in `scripts/sync-mock2-guidance.mjs`, so a later re-sync
+keeps it. The pinned upstream bytes and hashes are unchanged.
+
+The build skill's stack sentence (`skills.json`) carries the same rules in short.
+`base-app/lib/db.js` no longer falls back to a hard-coded `DATABASE_URL`; it fails
+with `DATABASE_URL_REQUIRED`. The upstream text that closes the same gaps in
+mock2-core was published as **1.39.0** on 2026-10-25 from
+`docs/mock2/upstream/2026-10-foundation/` (mock2-core commit `8e2eaf7`), and this seed
+now pins 1.39.0. `standards-version.json`'s `local_amendments` entry records the
+amendment as published and adopted; §2 stays a ProxyPilot platform contract above
+the pinned text.
 
 ## Portable Git readiness adoption (2026-10-22)
 
@@ -97,7 +134,7 @@ table above).
 
 | File | Field | State |
 |---|---|---|
-| `constitution.md` | `constitution_md` | **v2** — rule 0, the stages, CPR §13, change records + production checklist §14, on top of the hardened v1 sections (§4 identity, §5 gated shells, §7 end-to-end done, §7a no silent simulation, §9 deviations, §11–12 acceptance) |
+| `constitution.md` | `constitution_md` | **v2** — rule 0, the stages, CPR §13, change records + production checklist §14, on top of the hardened v1 sections (§4 identity, §5 gated shells, §7 end-to-end done, §7a no silent simulation, §9 deviations, §11–12 acceptance); §2 the stack and the application foundation (2026-10-24, a platform contract the pinned guidance does not supersede) |
 | `skills.json` | `skills_json` | the four stage skills (concept, define, build, review) as prompt templates — v0.2.0 posture: `[draft]` rules, checks between changes, reviewer never blocks, phase-routing@1 contract kept |
 | `gates.json` | `gates_json` | the deterministic check battery (typecheck, constitution-lint, rule-coverage, security-scan, test, ui-interaction, acceptance, component-reuse). The platform still calls them "gates" in report rows; read as production-checklist items. `security-scan`: committed secret = hard stop, dependency audit = recorded WARNING |
 | `design-system.md` | `design_system_md` | **locked** — the design system Stage-1 mockups must obey (unchanged) |
@@ -116,12 +153,12 @@ scaffold is checked for real. `skipped` is reported as such — never as `passed
 
 ## Base application template + default design brief
 
-- `base-app/` — **ProxyPilot's standard base application** (the "Upload Doc"
-  portal: auth + LDAP + RBAC + lifecycle + SSE + JSON store, near-zero
-  dependencies). A generated project starts from this tree so the plumbing costs
-  nothing per project. Its own docs are `base-app/RUNBOOK.md`; read the
-  **Required configuration** table there before deploying (`APP_BASE_URL` is
-  mandatory in production).
+- `base-app/` — a **reference implementation** (the "Upload Doc" portal: auth +
+  LDAP + RBAC + lifecycle + SSE, PostgreSQL through `lib/db.js`, near-zero
+  dependencies, plain CommonJS). It is **not installed** into projects: see *The
+  other "base app"* below. Its own docs are `base-app/RUNBOOK.md`; read the
+  **Required configuration** table there before running it (`DATABASE_URL` is
+  always required; `APP_BASE_URL` is mandatory in production).
 - `design-brief.md` — the **default** design reference, with
   `design-brief-appendix.md` as its detailed component inventory. Default, never
   forced: any design direction a project supplies wins entirely and the brief
@@ -137,12 +174,19 @@ Every project starts as a **TypeScript / Express / Drizzle / PostgreSQL** app �
 `mock2/scaffold.js` — with these wired in automatically before the AI ever
 builds anything:
 
-1. **The auth component** (`proxypilot-auth.component.json`): local + LDAPS
+1. **The application foundation** (projects created after the 2026-10 revision;
+   `docs/features/app-foundation.md`): one Docker Compose stack in the guest with
+   PostgreSQL 18.6 + pgvector 0.8.7, SeaweedFS S3 and a local embedding model, and
+   the platform-owned `foundation/` module the app uses to reach them. Storage and
+   embeddings can each be turned off per deployment; nothing is deleted. Secrets
+   are encrypted in the database, never in env files. Constitution §2 is the
+   binding text.
+2. **The auth component** (`proxypilot-auth.component.json`): local + LDAPS
    sign-in, JWT access tokens with rotating refresh, DB-driven RBAC with
    per-role permission overrides, and the first-administrator bootstrap.
-2. **The platform module** (`mock2/scaffold-platform.js`): theme, mobile
+3. **The platform module** (`mock2/scaffold-platform.js`): theme, mobile
    styles, editable Privacy/Terms pages, branding, API keys, read-only SQL.
-3. **The Mock2 standards' repo files** (`mock2/template.js` →
+4. **The Mock2 standards' repo files** (`mock2/template.js` →
    `mock2StandardsSeedFiles`): `CLAUDE.md` / `.github/copilot-instructions.md`
    (the per-repo constitution pointing at the standards site), `state/rules.md`
    with status tags, `state/production-checklist.md`, `state/decisions.md` (the
@@ -150,7 +194,7 @@ builds anything:
    the task-continuity files `AGENTS.md`, `state/work.md`, `state/handoff.md`,
    `state/tasks/README.md`; and `npm run check` + `check:*` scripts in
    `package.json`.
-4. **The CPR Host component** is in the library (not pre-installed): a build
+5. **The CPR Host component** is in the library (not pre-installed): a build
    adopts it with `materialize_component` when the first feature needs the host
    seam.
 

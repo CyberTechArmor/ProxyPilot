@@ -59,6 +59,7 @@ import { PreviewPanel, PreviewPlaceholder } from '@/components/mock2/ProjectPrev
 import { ProjectTimeCard, FrameworkDecisionsLog, EgressGrantsCard, ProjectComponentsCard } from '@/components/mock2/ProjectTimeCard';
 import ProjectApiKeys from '@/components/mock2/ProjectApiKeys';
 import ProjectAppAccess from '@/components/mock2/ProjectAppAccess';
+import ProjectFoundation from '@/components/mock2/ProjectFoundation';
 import ProjectDesignElements from '@/components/mock2/ProjectDesignElements';
 import ProjectRules from '@/components/mock2/ProjectRules';
 import ProjectSetup from '@/components/mock2/ProjectSetup';
@@ -956,6 +957,10 @@ export default function ProjectDetail() {
 
       {/* The app's own accounts (first admin, screen accounts, demo content). */}
       <ProjectAppAccess projectId={id} canEdit={canEdit && !isArchived} />
+
+      {/* The application foundation — database, file storage and search
+          embeddings, each with its health and per-deployment switch. */}
+      <ProjectFoundation projectId={id} project={project} canEdit={canEdit && !isArchived} />
 
       {/* New elements — what the builds designed that the approved mockup does
           not have. Promotion is the only way the design vocabulary grows past

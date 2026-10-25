@@ -116,6 +116,12 @@ import { deployProjectStatus } from './deploy-logic.js';
 import { requireMock2Role } from './authz.js';
 import { registerFlightdeckRoutes } from './flightdeck.js';
 import { registerTaskRoutes } from './task-routes.js';
+import { registerDatabaseExceptionRoutes } from './database-exception-routes.js';
+import { getDatabaseException, setDatabaseException, clearDatabaseException } from './database-exception.js';
+import { registerFoundationRoutes } from './foundation-routes.js';
+import * as foundationService from './foundation-service.js';
+import { registerFoundationAdoptRoutes } from './foundation-adopt-routes.js';
+import * as foundationAdoptService from './foundation-adopt-service.js';
 import { routeChatMessage, currentTaskForProject } from './task-sync.js';
 import {
   startProvision,
@@ -276,6 +282,7 @@ function checkoutRestoreRoute(handler) {
 import { listChangeRecords, lastChangeRecord, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { redoContextSection } from './contract-classifier-logic.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
+import { isFoundationProject } from './foundation-stack-logic.js';
 import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity, lastCycleEventAt } from './cycle-events.js';
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
@@ -2030,6 +2037,26 @@ export function createMock2Router() {
     if (project.lifecycle === 'provisioning') return res.status(409).json({ error: 'Cannot archive a project while it is still provisioning' });
     if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
       return res.status(409).json({ error: `Cannot archive a project in state "${project.lifecycle}"` });
+    }
+    // An unfinished foundation adoption (running, rolling back or failed)
+    // keeps its rollback point in the guest: archiving would delete it.
+    const adoptionRefused = foundationAdoptService.archiveAdoptionRefusal(project.id);
+    if (adoptionRefused) {
+      logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE_REFUSED', 'mock2_project', project.id, { name: project.name, code: adoptionRefused.code }, req.ip);
+      return res.status(409).json({ error: adoptionRefused.message, code: adoptionRefused.code, message: adoptionRefused.message, options: adoptionRefused.options || [] });
+    }
+    // Archive destroys the guest, and a foundation project's bundled storage
+    // objects live only in it (no checkpoint): refused while it holds any or
+    // cannot be counted (foundation-service.js archiveRefusal). Pre-foundation
+    // projects are unchanged.
+    if (project.foundation_version) {
+      const refused = await foundationService.archiveRefusal(project.id)
+        .catch((e) => ({ code: 'STORAGE_OBJECTS_UNKNOWN', message: `The bundled storage could not be checked for objects, so the project is not archived: ${String(e?.message || e).slice(0, 200)}`, options: [] }));
+      if (refused) {
+        const count = Number.isInteger(refused.object_count) ? { object_count: refused.object_count } : {};
+        logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE_REFUSED', 'mock2_project', project.id, { name: project.name, code: refused.code, ...count }, req.ip);
+        return res.status(409).json({ error: refused.message, code: refused.code, message: refused.message, options: refused.options || [], ...count });
+      }
     }
     logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE', 'mock2_project', project.id,
       { name: project.name, slug: project.slug, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
@@ -4631,6 +4658,7 @@ export function createMock2Router() {
 
     const containerName = containerNameForProject(project);
     const script = buildRestoreScript({
+      foundation: isFoundationProject(project),
       commitSha: record.commit_sha,
       message: `mock2: restore to checkpoint #${seq} (${String(record.commit_sha).slice(0, 8)})`,
     });
@@ -6098,6 +6126,30 @@ export function createMock2Router() {
   // Task continuity — the project's tasks (list / one / resume / stop), the
   // database-authoritative record behind the task strip and state/tasks/.
   registerTaskRoutes(router, refuseIfArchived);
+
+  // App foundation — the person's recorded request for SQLite (sudo, audited).
+  registerDatabaseExceptionRoutes(router, {
+    requireRole: requireMock2Role, refuseIfArchived, requireSudo, audit: logAudit,
+    store: { get: getDatabaseException, set: setDatabaseException, clear: clearDatabaseException },
+  });
+
+  // Application foundation — the deployment's per-feature switches (storage,
+  // embeddings), health and provider-switch jobs (docs/features/app-foundation.md).
+  // Writes need sudo and are audited; credentials are write-only.
+  registerFoundationRoutes(router, {
+    requireRole: requireMock2Role, requireSudo, refuseIfArchived,
+    audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
+    service: foundationService,
+  });
+
+  // Application foundation ADOPTION — an existing (pre-foundation) project
+  // moves onto the foundation: plan (read-only), confirm (sudo, audited),
+  // resume, rollback (docs/features/app-foundation.md § Existing projects).
+  registerFoundationAdoptRoutes(router, {
+    requireRole: requireMock2Role, requireSudo, refuseIfArchived,
+    audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
+    service: foundationAdoptService,
+  });
 
   return router;
 }

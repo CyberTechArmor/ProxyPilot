@@ -39,11 +39,16 @@ test('normalizeBuildMode: mvp/quick in any casing, everything else full', () => 
 // running none, meant the whole default path out of design approval — an MVP
 // build then quick updates — shipped an app without a single gate executing.
 // quick now runs only what costs seconds and cannot be pre-existing debt.
+// CHANGED DELIBERATELY AGAIN (app foundation, 2026-10): constitution-lint
+// carries "PostgreSQL is the only database", and quick/MVP builds were where
+// apps drifted to SQLite while it ran in full builds only. It takes seconds;
+// its debt-prone sub-checks (eslint, role literals) report as advisory below
+// full via MOCK2_GATE_PROFILE.
 test('quick mode: runs the cheap gates only — never the slow or debt-prone ones', () => {
   const gates = ['typecheck', 'constitution-lint', 'security-scan', 'test', 'component-reuse', 'rule-coverage', 'ui-interaction', 'acceptance']
     .map((name, i) => ({ name, script: '#', order: i }));
   const names = filterGatesForBuildMode(gates, 'quick').map((g) => g.name);
-  assert.deepEqual(names, ['typecheck'], 'typecheck is seconds; everything else waits for mvp/full');
+  assert.deepEqual(names, ['typecheck', 'constitution-lint'], 'typecheck and the database check are seconds; everything else waits for mvp/full');
   for (const slow of ['security-scan', 'rule-coverage', 'acceptance', 'test']) {
     assert.ok(!names.includes(slow), `${slow} must not block a one-line edit`);
   }

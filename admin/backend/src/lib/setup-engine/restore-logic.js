@@ -23,6 +23,7 @@
 // accepts a partial restore by name, and then says what was not restored.
 
 import { classifyRows } from '../../mock2/auth-data-logic.js';
+import { foundationPgExecPrefix } from '../../mock2/foundation-stack-logic.js';
 
 export const DB_DUMPS_DIR = '/var/backups/proxypilot-db';
 export const DUMP_NAME_RE = /^app-[A-Za-z0-9._-]{1,80}\.sql$/;
@@ -148,6 +149,13 @@ export function compatibilityVerdict({ guard, rows, key, legacy = [] }) {
 const absRe = /^\/[A-Za-z0-9._\/-]+$/;
 function checkPaths(...paths) { for (const p of paths) if (p != null && !absRe.test(String(p))) throw new Error('paths must be absolute'); }
 
+// The superuser client on a foundation guest (no in-guest server, no
+// postgres OS user): it runs inside the stack's postgres service
+// (foundationPgExecPrefix), so it matches the server's major version, and a
+// file reaches it on stdin. Native guests keep `su - postgres`.
+const foundationPsql = () => `${foundationPgExecPrefix()} psql -U postgres`;
+const foundationPgDump = () => `${foundationPgExecPrefix()} pg_dump -U postgres`;
+
 // The key line of an environment file, by name, without echoing the file.
 const keyOf = (file, key) => `sed -n 's/^\\(export \\)\\{0,1\\}${key}=//p' '${file}' 2>/dev/null | head -1 | sed "s/^[\\"']//; s/[\\"']\\$//"`;
 
@@ -155,7 +163,7 @@ const keyOf = (file, key) => `sed -n 's/^\\(export \\)\\{0,1\\}${key}=//p' '${fi
 // anything, in one read-only pass. Prints marker lines only; the two KEY
 // lines carry the base64 of a key value and are consumed in memory by the
 // operation, never recorded.
-export function inspectScript({ dumpsDir = DB_DUMPS_DIR, dumpName, envCopyPath = null, environmentFile = '/etc/environment', guard = null, guardKey = null, unit = 'mock2-dev.service' }) {
+export function inspectScript({ dumpsDir = DB_DUMPS_DIR, dumpName, envCopyPath = null, environmentFile = '/etc/environment', guard = null, guardKey = null, unit = 'mock2-dev.service', foundation = false }) {
   if (!DUMP_NAME_RE.test(String(dumpName || ''))) throw new Error('dumpName must be a dump name');
   checkPaths(dumpsDir, envCopyPath, environmentFile);
   if (guard && (!IDENT_RE.test(guard.table) || !IDENT_RE.test(guard.schema || 'public') || !IDENT_RE.test(guard.secret_column) || !IDENT_RE.test(guard.nonce_column))) throw new Error('guard identifiers must be plain identifiers');
@@ -165,7 +173,9 @@ export function inspectScript({ dumpsDir = DB_DUMPS_DIR, dumpName, envCopyPath =
   const lines = [
     `F='${F}'`,
     `if [ -f "$F" ]; then echo "DUMP:$(wc -c < "$F" | tr -d ' '):$(sha256sum "$F" | cut -d' ' -f1)"; echo "HEAD:$(head -c 600 "$F" | base64 | tr -d '\\n')"; else echo "DUMP:none"; fi`,
-    `if command -v psql >/dev/null 2>&1; then v=$(su - postgres -c "psql -X -tAc 'show server_version'" 2>/dev/null | head -1); echo "SERVER:${'${v:-unknown}'}"; else echo "SERVER:nopsql"; fi`,
+    foundation
+      ? `if command -v docker >/dev/null 2>&1; then v=$(${foundationPsql()} -X -tAc 'show server_version' 2>/dev/null | head -1); echo "SERVER:${'${v:-unknown}'}"; else echo "SERVER:nopsql"; fi`
+      : `if command -v psql >/dev/null 2>&1; then v=$(su - postgres -c "psql -X -tAc 'show server_version'" 2>/dev/null | head -1); echo "SERVER:${'${v:-unknown}'}"; else echo "SERVER:nopsql"; fi`,
     `echo "UNIT_ACTIVE:$(systemctl is-active '${unit}' 2>/dev/null || echo unknown)"`,
   ];
   if (guard) {
@@ -205,13 +215,13 @@ export function parseInspect(stdout) {
 // temp name and only becomes the artifact when pg_dump exited 0, the file
 // is non-empty and carries the header: an interrupted or failed capture
 // leaves nothing under the artifact's name and is reported as none.
-export function protectScript(jobId, { dumpsDir = DB_DUMPS_DIR, environmentFile = '/etc/environment' } = {}) {
+export function protectScript(jobId, { dumpsDir = DB_DUMPS_DIR, environmentFile = '/etc/environment', foundation = false } = {}) {
   const id = String(jobId || '');
   if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
   checkPaths(dumpsDir, environmentFile);
   return [
     `D='${dumpsDir}'; mkdir -p "$D" 2>/dev/null; f="$D/app-pre-restore-${id}.sql"`,
-    `if ! command -v pg_dump >/dev/null 2>&1; then echo "PRE_DUMP:none:no pg_dump"; elif su - postgres -c "pg_dump --clean --if-exists app" > "$f.tmp" 2>/dev/null && [ -s "$f.tmp" ] && head -c 64 "$f.tmp" | grep -q 'PostgreSQL database dump'; then mv -f "$f.tmp" "$f" && chmod 600 "$f" && echo "PRE_DUMP:$f:$(wc -c < "$f" | tr -d ' '):$(sha256sum "$f" | cut -d' ' -f1)"; else rm -f "$f.tmp"; echo "PRE_DUMP:none:pg_dump failed or wrote no dump"; fi`,
+    `if ! ${foundation ? 'command -v docker' : 'command -v pg_dump'} >/dev/null 2>&1; then echo "PRE_DUMP:none:${foundation ? 'no docker for the foundation stack' : 'no pg_dump'}"; elif ${foundation ? `${foundationPgDump()} --clean --if-exists app` : 'su - postgres -c "pg_dump --clean --if-exists app"'} > "$f.tmp" 2>/dev/null && [ -s "$f.tmp" ] && head -c 64 "$f.tmp" | grep -q 'PostgreSQL database dump'; then mv -f "$f.tmp" "$f" && chmod 600 "$f" && echo "PRE_DUMP:$f:$(wc -c < "$f" | tr -d ' '):$(sha256sum "$f" | cut -d' ' -f1)"; else rm -f "$f.tmp"; echo "PRE_DUMP:none:pg_dump failed or wrote no dump"; fi`,
     `umask 077; if [ -f '${environmentFile}' ]; then cp -p '${environmentFile}' '${environmentFile}.pre-restore-${id}' && chmod 600 '${environmentFile}.pre-restore-${id}' && echo "PRE_ENV:${environmentFile}.pre-restore-${id}"; else echo "PRE_ENV:none:no environment file"; fi`,
     '',
   ].join('\n');
@@ -247,13 +257,15 @@ export function artifactMatches(stdout, { path, sha256, bytes = null }) {
 // restoreScript(dumpName) — the psql restore. ON_ERROR_STOP=0 as before:
 // a --clean dump drops and recreates every object it carries; errors are
 // counted and the first twenty reported (statement text, never row data).
-export function restoreScript({ dumpsDir = DB_DUMPS_DIR, dumpName }) {
+export function restoreScript({ dumpsDir = DB_DUMPS_DIR, dumpName, foundation = false }) {
   if (!DUMP_NAME_RE.test(String(dumpName || ''))) throw new Error('dumpName must be a dump name');
   checkPaths(dumpsDir);
   return [
     `F='${dumpsDir}/${dumpName}'; T=/tmp/pp-restore.sql`,
     `cp "$F" "$T" && chmod 644 "$T" || { echo "RESTORE_RC:98"; echo "ERRORS:0"; exit 0; }`,
-    `out=$(su - postgres -c "psql -X -v ON_ERROR_STOP=0 -q -d app -f $T" 2>&1); rc=$?; rm -f "$T"`,
+    foundation
+      ? `out=$(${foundationPsql()} -X -v ON_ERROR_STOP=0 -q -d app < "$T" 2>&1); rc=$?; rm -f "$T"`
+      : `out=$(su - postgres -c "psql -X -v ON_ERROR_STOP=0 -q -d app -f $T" 2>&1); rc=$?; rm -f "$T"`,
     `echo "RESTORE_RC:$rc"`,
     `n=$(printf '%s\\n' "$out" | grep -c -E '^(psql:.*ERROR|ERROR)'); echo "ERRORS:$n"`,
     `printf '%s\\n' "$out" | grep -E '^(psql:.*ERROR|ERROR)' | head -n 20 | cut -c1-200 | sed 's/^/ERR:/'`,

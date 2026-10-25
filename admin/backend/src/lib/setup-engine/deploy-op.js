@@ -64,6 +64,8 @@ import {
   containedScript, reapStaleWritersScript, parseStaleWriters, protectedCopiesScript, parseProtectedCopies, classifyMigrateScript, CONTAINMENT_RUN_DIR, CONTAINMENT_UNAVAILABLE_RC, parseContainment,
 } from './guest-probes.js';
 import { sanitizeReason } from './logic.js';
+import { normalizeFoundationDeployRef } from '../../mock2/foundation-logic.js';
+import { FOUNDATION_DATABASE_URL } from '../../mock2/foundation-contract.js';
 
 export const DEPLOY_MARKER = 'mock2_deploy_marker';
 export const UNIT_NAME = 'mock2-dev.service';
@@ -130,6 +132,10 @@ export function resolveDeployPlan(params = {}) {
     reapOrphans: params.reapOrphans !== false,
     runDir: String(params.runDir || CONTAINMENT_RUN_DIR),
     previousDeployedCommit: params.previousDeployedCommit || null,
+    // An application-foundation deployment: secret NAMES required/delivered
+    // (the values live in the platform's encrypted store, delivered sealed to
+    // the app database), never a value. null for every other project.
+    foundation: normalizeFoundationDeployRef(params.foundation),
   };
 }
 
@@ -165,7 +171,10 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
     if (c && !containment) { containment = c; job.event?.('containment', `scripts run under ${c.kind}${c.ref ? ` (${c.ref})` : ''}`, { kind: c.kind }); }
     return r;
   };
-  const runInApp = (command, timeoutMs) => guest('run', `: ${DEPLOY_MARKER}\nset -a\n. ${environmentFile} 2>/dev/null || true\nset +a\ncd '${appDir}' || exit 97\n${command}\n`, timeoutMs);
+  // A foundation deployment's install/migrate/build see the same DATABASE_URL
+  // its unit sets (the stack's socket; no secret in it).
+  const foundationEnv = p.foundation ? `export DATABASE_URL='${FOUNDATION_DATABASE_URL}'\n` : '';
+  const runInApp = (command, timeoutMs) => guest('run', `: ${DEPLOY_MARKER}\nset -a\n. ${environmentFile} 2>/dev/null || true\nset +a\n${foundationEnv}cd '${appDir}' || exit 97\n${command}\n`, timeoutMs);
   const report = (key, label) => { try { job.onStep?.(key, label || deployStepLabel(key)); } catch { /* */ } };
   const mark = (phase, data, message) => { try { job.checkpoint(phase, data, message); } catch { /* never fails the deploy */ } };
 
@@ -249,7 +258,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   //      runner's retry class. Recorded on the checkpoint; nothing here
   //      changes the app.
   report('start');
-  const copies = parseProtectedCopies((await guest('protect', protectedCopiesScript(jobId, { appDir, environmentFile, unitPath: UNIT_PATH, withDatabase: !!migrateStep }), 10 * 60 * 1000)).stdout);
+  const copies = parseProtectedCopies((await guest('protect', protectedCopiesScript(jobId, { appDir, environmentFile, unitPath: UNIT_PATH, withDatabase: !!migrateStep, foundation: !!p.foundation }), 10 * 60 * 1000)).stdout);
   recovery.protected = { dbDump: copies.dbDump, dbDumpNote: copies.dbDumpNote, unitCopy: copies.unitCopy, envCopy: copies.envCopy, sourceCommit: copies.commit, takenBefore: 'stop, migrate, mint, unit' };
   recovery.migration = migrateStep ? classifyMigrateScript((await guest('migrate_class', `grep -o '"migrate"[[:space:]]*:[[:space:]]*"[^"]*"' '${appDir}/package.json' 2>/dev/null | head -1 | sed 's/^/MIGRATE_SCRIPT:/'; [ -d '${appDir}/migrations' ] && echo MIGRATIONS_DIR:yes || echo MIGRATIONS_DIR:no`, 15_000)).stdout, migrateStep.command) : { command: null, retry: 'none', note: 'no migration command' };
   if (migrateStep && !copies.dbDump) job.event?.('warning', `no protected database copy before the migration (${copies.dbDumpNote || 'unknown'}); the migration runner's own ledger (${recovery.migration.ledger || 'none'}) is the only way back`, { dbDumpNote: copies.dbDumpNote });
@@ -313,9 +322,12 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
 
   // 2) The unit.
   const execStart = execStartForStartCommand(contract.start, { appDir });
-  const unit = buildDevServiceUnit({ appDir, webPort, execStart });
+  const unit = buildDevServiceUnit({ appDir, webPort, execStart, foundation: !!p.foundation });
   const envRead = await guest('env', `cat ${environmentFile} 2>/dev/null || true`, 15_000);
-  const mode = validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
+  if (p.foundation?.error) job.event?.('warning', `foundation secrets: ${p.foundation.error}`, {});
+  const mode = p.foundation
+    ? validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: p.foundation.required, foundation: true, storeKeys: p.foundation.delivered })
+    : validateDeployEnvironment({ unitText: unit, environmentText: envRead.stdout || '', requiredKeys: requiredSecretKeys });
   if (!mode.ok) {
     const back = await restartUnit();
     return { ok: false, step: 'start', error: deployFailureMessage('start', `${mode.error}. ${back}`), restartAttempted: true, recovery };

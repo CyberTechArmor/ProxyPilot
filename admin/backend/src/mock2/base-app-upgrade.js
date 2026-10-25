@@ -11,14 +11,14 @@
 
 import { sh, b64 } from './host.js';
 import { buildPlatformFiles, buildPlatformRoutes, PLATFORM_MODULE_VERSION, PLATFORM_CSS } from './scaffold-platform.js';
-import { MOCK2_SCAFFOLD_VERSION, baseCss, scaffoldPwaFiles } from './scaffold.js';
+import { MOCK2_SCAFFOLD_VERSION, baseCss, scaffoldPwaFiles, scaffoldFoundationFiles } from './scaffold.js';
 import { playwrightConfigTs, e2eServerMjs, platformSpecTs, E2E_SCRIPTS, E2E_DEV_DEPENDENCIES } from './scaffold-e2e.js';
 import { insertMessage } from './chats.js';
 import { getProject } from './projects.js';
 import {
   PLATFORM_VERSION_PATH, renderPlatformVersionFile, parsePlatformVersionFile,
   planBaseAppUpgrade, upgradeSummary, PLATFORM_OWNED_ALWAYS, PLATFORM_OWNED_IF_PRESENT,
-  mergeE2ePackageJson,
+  mergeE2ePackageJson, FOUNDATION_MARKER,
 } from './base-app-upgrade-logic.js';
 
 const APP_DIR = '/srv/app';
@@ -70,6 +70,9 @@ export function currentPlatformFiles(project = null) {
     { path: 'playwright.config.ts', content: playwrightConfigTs() },
     { path: 'scripts/e2e-server.mjs', content: e2eServerMjs() },
     { path: 'e2e/platform.spec.ts', content: platformSpecTs() },
+    // The foundation runtime. planBaseAppUpgrade writes these ONLY in a
+    // project that already has the foundation (FOUNDATION_MARKER present).
+    ...scaffoldFoundationFiles(),
   ];
 }
 
@@ -81,7 +84,7 @@ async function readContainerFile(containerName, relPath) {
 // Which platform-owned paths this project actually has — decides whether the
 // auth-dependent routes.ts is in scope.
 async function presentPlatformPaths(containerName) {
-  const all = [...PLATFORM_OWNED_ALWAYS, ...PLATFORM_OWNED_IF_PRESENT];
+  const all = [...PLATFORM_OWNED_ALWAYS, ...PLATFORM_OWNED_IF_PRESENT, FOUNDATION_MARKER];
   const script = all.map((p) => `[ -f '${APP_DIR}/${p}' ] && echo '${p}'`).join('\n');
   const r = await containerSh(containerName, `${script}\nexit 0`);
   return (r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);

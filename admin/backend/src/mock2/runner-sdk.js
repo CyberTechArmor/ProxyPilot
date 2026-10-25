@@ -55,12 +55,15 @@ import { formatBriefForTask } from './prepass-logic.js';
 import { closeRequest } from './requests.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
 import { buildHookOptions } from './runner-sdk-hooks.js';
+import { getDatabaseException, readIntroducedDatabaseEngines } from './database-exception.js';
+import { databaseEngineRejectionMessage, foundationEditRejectionMessage } from './finish-guard-logic.js';
+import { isFoundationProject } from './foundation-stack-logic.js';
 import { smokeAfterDeploy, smokeFailSummary, changedFilesForCommit } from './smoke.js';
 import { insertMessage } from './chats.js';
 import {
   APP_DIR, setJob, scheduleJobCleanup, copyGatesIntoContainer, runGateBattery,
   checkpointAndRecord, concludeCycle, deployStage, formatGateReports, containerSh, haltCycle,
-  execInContainer, readFileInContainer,
+  execInContainer, readFileInContainer, readCycleBase, restoreFoundationEdits,
 } from './runner.js';
 import {
   evaluateIntegrationTruthfulness, readSourceSnapshot, haltReasonForDecision, blockingSummary,
@@ -157,6 +160,10 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
   updateCycle(cycle.id, { status: 'running', started_at: nowIso(), gates_json: JSON.stringify(initialGateReports(gateScripts)) });
   setJob(cycle.id, { phase: 'running', message: 'SDK runner starting (Claude Agent SDK)…' });
   logEvent('task', { role: 'user', content: cycle.instruction || '', meta: { model, framework_version: framework.version, runner: 'sdk', harness: 'claude', key_source: auth.source } });
+  // The tree this cycle starts from — the finish guards' base, as in the
+  // hand-rolled runner (readCycleBase).
+  const cycleBase = await readCycleBase(containerName, cycle.id);
+  const onFoundation = isFoundationProject(project);
 
   let checkoutDir = null;
   const runStartMs = Date.now();
@@ -218,9 +225,12 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     } catch (err) { console.warn('[mock2] installed components load failed:', err?.message); }
     const installedKeys = new Set(installedComponents.map((c) => c.key));
     const adoptableCatalog = componentCatalog.filter((c) => !installedKeys.has(c.key));
+    // The recorded SQLite request (mock2.db only) — quoted in the governance
+    // file, honoured by the Bash guard and the finish-time engine check.
+    const databaseException = getDatabaseException(projectId);
     const claudeMd = buildRunnerClaudeMd({
       constitution: framework.constitution_md, skills, appDir: checkoutDir, webPort: project.web_port || 3000,
-      components: adoptableCatalog, installedComponents,
+      components: adoptableCatalog, installedComponents, databaseException,
     });
     await mkdir(join(checkoutDir, '.claude'), { recursive: true });
     await writeFile(join(checkoutDir, '.claude', 'CLAUDE.md'), claudeMd, 'utf8');
@@ -250,7 +260,7 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
     // the records land in our transcript, not a file that would be synced back.
     const hookCtx = {
       cycleId: cycle.id, projectId, actorUserId: cycle.initiated_by ?? null,
-      repoRoot: checkoutDir, logEvent, now: () => new Date().toISOString(),
+      repoRoot: checkoutDir, logEvent, now: () => new Date().toISOString(), databaseException,
     };
     const hookOptions = buildHookOptions(hookCtx);
 
@@ -436,6 +446,29 @@ export async function runCycleSdk({ cycle, project, containerName, framework, ga
           const wt = await execInContainer(containerName, `{ git diff --name-only HEAD; git ls-files --others --exclude-standard; } 2>/dev/null | sort -u | grep -v '^state/changes/'`);
           changedThisCycle = (wt.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
         } catch { changedThisCycle = []; }
+        // No SQLite without an explicit request — the same host-side check as
+        // the hand-rolled finish (finish-guard-logic.js), against the commit
+        // the cycle started from: not green, keep going.
+        const engineHits = await readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId, base: cycleBase });
+        if (engineHits.length) {
+          pendingFeedback = databaseEngineRejectionMessage(engineHits);
+          logEvent('note', { role: 'system', content: `Refused database engine in the diff — continuing: ${pendingFeedback.slice(0, 300)}`, meta: { round } });
+          continue;
+        }
+        // foundation/ is platform-owned — the same check as the hand-rolled
+        // finish (restoreFoundationEdits): put back in the container, then in
+        // this local checkout (it has no git, and the next push would carry
+        // the change in again); not green, keep going.
+        if (onFoundation) {
+          const foundationEdits = await restoreFoundationEdits({ containerName, base: cycleBase });
+          if (foundationEdits.restored.length || foundationEdits.remaining.length) {
+            const synced = await pullSubtree(containerName, checkoutDir, 'foundation');
+            if (!synced.ok) console.warn(`[mock2] SDK foundation/ resync failed for cycle ${cycle.id}: ${synced.error}`);
+            pendingFeedback = foundationEditRejectionMessage(foundationEdits, { base: cycleBase });
+            logEvent('note', { role: 'system', content: `Refused change to platform-owned foundation/ — continuing: ${pendingFeedback.slice(0, 300)}`, meta: { round, foundation_restored: foundationEdits.restored, foundation_not_restored: foundationEdits.remaining } });
+            continue;
+          }
+        }
         let accText = null;
         try { accText = await readFile(join(checkoutDir, ACCEPTANCE_PATH), 'utf8'); } catch { accText = null; }
         const accParsed = accText != null ? parseAcceptance(accText) : { ok: false, error: 'state/acceptance.json not found' };
@@ -726,6 +759,32 @@ async function pullWorkingTree(containerName, checkoutDir) {
   if (!b64) return { ok: true }; // empty tree — nothing to extract
   const tarPath = join(checkoutDir, '.mock2-pull.tar');
   try {
+    await writeFile(tarPath, Buffer.from(b64, 'base64'));
+    await execFileP('tar', ['-xf', tarPath, '-C', checkoutDir]);
+    await rm(tarPath, { force: true });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+// pullSubtree — replace ONE top-level directory of the local checkout with the
+// container's copy (the foundation/ resync after the platform put it back).
+// The local directory is removed first, so a file the container no longer has
+// does not survive locally and get pushed back in.
+async function pullSubtree(containerName, checkoutDir, dirName) {
+  const name = String(dirName || '');
+  if (!/^[A-Za-z0-9._-]+$/.test(name) || name === '.' || name === '..') return { ok: false, error: 'bad directory name' };
+  const script = `cd '${APP_DIR}' 2>/dev/null || exit 3\n`
+    + `[ -d './${name}' ] || exit 0\n`
+    + `tar -cf - ${TAR_EXCLUDES.join(' ')} './${name}' 2>/dev/null | base64 | tr -d '\\n'\n`;
+  const r = await containerSh(containerName, script, { timeoutMs: 180000 });
+  if (r.code !== 0) return { ok: false, error: (r.stderr || 'tar/export failed').trim().slice(-300) };
+  try {
+    await rm(join(checkoutDir, name), { recursive: true, force: true });
+    const b64 = (r.stdout || '').trim();
+    if (!b64) return { ok: true };
+    const tarPath = join(checkoutDir, '.mock2-pull.tar');
     await writeFile(tarPath, Buffer.from(b64, 'base64'));
     await execFileP('tar', ['-xf', tarPath, '-C', checkoutDir]);
     await rm(tarPath, { force: true });

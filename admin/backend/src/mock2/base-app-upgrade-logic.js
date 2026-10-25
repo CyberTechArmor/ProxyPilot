@@ -83,6 +83,21 @@ export const PLATFORM_OWNED_IF_PRESENT = Object.freeze([
   'src/platform/routes.ts',
 ]);
 
+// The application foundation's runtime (scaffold-foundation.js) is
+// platform-owned as a GROUP: everything under foundation/. A project has it
+// only when it was provisioned on the foundation stack, and its CLI is the
+// marker. A project WITH the marker gets every file of the group refreshed (a
+// later foundation version may add a runtime file the others import, so
+// "replace only what is present" would break it); a project WITHOUT the
+// marker gets none of them, ever — projects created before the foundation keep
+// their native Postgres and are never rewritten (docs/features/app-foundation.md).
+export const FOUNDATION_OWNED_PREFIX = 'foundation/';
+export const FOUNDATION_MARKER = 'foundation/bin/foundation.mjs';
+
+export function isFoundationOwnedPath(p) {
+  return typeof p === 'string' && p.startsWith(FOUNDATION_OWNED_PREFIX) && !p.includes('..');
+}
+
 // mergeE2ePackageJson — the ONE application-owned file the upgrade may touch,
 // and only additively.
 //
@@ -120,7 +135,7 @@ export function mergeE2ePackageJson(source, { scripts = {}, devDependencies = {}
 }
 
 export function isPlatformOwnedPath(p) {
-  return PLATFORM_OWNED_ALWAYS.includes(p) || PLATFORM_OWNED_IF_PRESENT.includes(p);
+  return PLATFORM_OWNED_ALWAYS.includes(p) || PLATFORM_OWNED_IF_PRESENT.includes(p) || isFoundationOwnedPath(p);
 }
 
 // planBaseAppUpgrade — decide whether an upgrade is needed and which of the
@@ -139,9 +154,11 @@ export function planBaseAppUpgrade({
   present = [],
 } = {}) {
   const have = new Set(present || []);
+  const hasFoundation = have.has(FOUNDATION_MARKER);
   const files = (candidates || []).filter((f) => {
     if (PLATFORM_OWNED_ALWAYS.includes(f.path)) return true;
     if (PLATFORM_OWNED_IF_PRESENT.includes(f.path)) return have.has(f.path);
+    if (isFoundationOwnedPath(f.path)) return hasFoundation;
     return false; // never write anything outside the owned list
   });
 
@@ -176,6 +193,7 @@ export function upgradeSummary(plan) {
   return `${lead} — ${n} platform file${n === 1 ? '' : 's'} rewritten `
     + `(${plan.paths.slice(0, 4).join(', ')}${n > 4 ? `, +${n - 4} more` : ''}). `
     + 'No application code was touched: the upgrade only rewrites platform-owned paths '
-    + '(theme, branding, legal pages, assets, API keys, read-only SQL and the shared shell stylesheet). '
+    + '(theme, branding, legal pages, assets, API keys, read-only SQL and the shared shell stylesheet'
+    + `${plan.paths.some(isFoundationOwnedPath) ? ', and the foundation runtime in foundation/' : ''}). `
     + 'Run a build to redeploy.';
 }

@@ -1892,6 +1892,18 @@ export const api = {
     request(`/mock2/projects/${id}/database-exception`, { method: 'PUT', body: JSON.stringify(body) }),
   mock2ClearDatabaseException: (id) =>
     request(`/mock2/projects/${id}/database-exception`, { method: 'DELETE' }),
+  // Moving a pre-foundation project onto the foundation: plan (editor) → confirm
+  // with the plan_token (editor + sudo; 409 PLAN_STALE → plan again) → progress
+  // (viewer) → resume / roll back (editor + sudo).
+  mock2FoundationAdoption: (id) => request(`/mock2/projects/${id}/foundation/adopt`, { cache: 'no-store' }),
+  mock2PlanFoundationAdoption: (id) =>
+    request(`/mock2/projects/${id}/foundation/adopt/plan`, { method: 'POST', body: JSON.stringify({}) }),
+  mock2StartFoundationAdoption: (id, body) =>
+    request(`/mock2/projects/${id}/foundation/adopt`, { method: 'POST', body: JSON.stringify(body) }),
+  mock2ResumeFoundationAdoption: (id) =>
+    request(`/mock2/projects/${id}/foundation/adopt/resume`, { method: 'POST', body: JSON.stringify({}) }),
+  mock2RollbackFoundationAdoption: (id) =>
+    request(`/mock2/projects/${id}/foundation/adopt/rollback`, { method: 'POST', body: JSON.stringify({}) }),
   // ---- Project asset library (Flightdeck → Assets) ----
   // Images and content blocks the operator collects for a project. The build
   // harness receives these as reference context on every cycle.

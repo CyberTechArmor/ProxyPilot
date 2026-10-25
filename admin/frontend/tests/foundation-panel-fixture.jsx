@@ -4,6 +4,7 @@
 // the real SudoProvider and Toaster. The API is stubbed by the test.
 //   ?viewer=1          a project viewer (no write controls)
 //   ?project=legacy    the project row says foundation_version: null
+//   ?open=adopt-plan   open the move dialog and run its check (see the end)
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import ProjectFoundation from '../src/components/mock2/ProjectFoundation';
@@ -32,3 +33,15 @@ createRoot(document.getElementById('root')).render(
     </SudoProvider>
   </ThemeProvider>,
 );
+
+// ?open=adopt-plan: open "Move onto the application foundation" and run its
+// check, for tests/foundation-panel-lighthouse.mjs (Lighthouse cannot click).
+if (params.get('open') === 'adopt-plan') {
+  const press = (selector, text) => new Promise((resolve) => {
+    const t = setInterval(() => {
+      const el = [...document.querySelectorAll(selector)].find((b) => !text || b.textContent.trim() === text);
+      if (el) { clearInterval(t); el.click(); resolve(); }
+    }, 50);
+  });
+  press('[data-foundation-adopt-start]').then(() => press('[data-foundation-dialog="adopt"] button', 'Check this project'));
+}

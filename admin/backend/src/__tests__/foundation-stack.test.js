@@ -397,7 +397,11 @@ test('bringUpFoundation: every failure is reported at its step with an actionabl
 });
 
 test('foundationCompose refuses volume deletion before running anything; status and switches', async (t) => {
-  const g = fakeGuest({ ' ps --all --format json': { code: 0, stdout: '{"Service":"postgres","State":"running","Health":"healthy"}\n', stderr: '' } });
+  let storageUp = false;
+  const g = fakeGuest({
+    ' up -d --no-deps storage': () => { storageUp = true; return { code: 0, stdout: '', stderr: '' }; },
+    ' ps --all --format json': () => ({ code: 0, stdout: `{"Service":"postgres","State":"running","Health":"healthy"}\n${storageUp ? '{"Service":"storage","State":"running","Health":"healthy"}\n' : ''}`, stderr: '' }),
+  });
   S._setFoundationGuestExecForTests(g.exec);
   t.after(() => S._setFoundationGuestExecForTests());
   const r = await S.foundationCompose('m2-7', ['down', '-v']);
@@ -407,7 +411,8 @@ test('foundationCompose refuses volume deletion before running anything; status 
   assert.deepEqual(st.map((s) => s.state), ['running', 'absent', 'absent']);
   assert.equal((await S.setFoundationService('m2-7', 'postgres', 'stop')).ok, false);
   assert.equal((await S.setFoundationService('m2-7', 'storage', 'start')).ok, true);
-  assert.deepEqual(g.calls.at(-1).argv.slice(-4), ['up', '-d', '--no-deps', 'storage']);
+  assert.deepEqual(g.calls.at(-2).argv.slice(-4), ['up', '-d', '--no-deps', 'storage']);
+  assert.deepEqual(g.calls.at(-1).argv.slice(-4), ['ps', '--all', '--format', 'json'], 'start waits for the healthcheck');
   assert.equal((await S.setFoundationService('m2-7', 'nope', 'start')).ok, false);
   await S.foundationPsql('m2-7', 'SELECT 1;');
   assert.deepEqual(g.calls.at(-1).argv.slice(6), ['exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'app', '-v', 'ON_ERROR_STOP=1', '-X', '-q', '-t', '-A']);
@@ -420,6 +425,36 @@ test('foundationCompose refuses volume deletion before running anything; status 
   assert.deepEqual(g.calls.at(-1).argv.slice(-3), ['/srv/app', 'health', '--json']);
   assert.equal((await S.foundationCli('m2-7', ['bogus'])).code, null);
   assert.equal(await S.bundledStorageObjectCount('m2-7', { accessKeyId: 'x', secretAccessKey: 'y' }), null);
+});
+
+test('setFoundationService start returns only once the service is healthy; one that never is fails with its logs', async (t) => {
+  t.after(() => S._setFoundationGuestExecForTests());
+  // `up -d` returns while SeaweedFS is still starting; the switch's pending
+  // test right after it got ECONNRESET (found by foundation-e2e.docker.test.js).
+  let polls = 0;
+  const starting = fakeGuest({
+    ' ps --all --format json': () => {
+      polls += 1;
+      return { code: 0, stdout: JSON.stringify({ Service: 'storage', State: 'running', Health: polls < 3 ? 'starting' : 'healthy' }), stderr: '' };
+    },
+  });
+  S._setFoundationGuestExecForTests(starting.exec);
+  const ok = await S.setFoundationService('m2-7', 'storage', 'start', { intervalMs: 1 });
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(polls, 3, 'it polled until healthy');
+  const broken = fakeGuest({
+    ' ps --all --format json': { code: 0, stdout: JSON.stringify({ Service: 'storage', State: 'running', Health: 'unhealthy' }), stderr: '' },
+    ' logs ': { code: 0, stdout: 'weed: listen tcp 0.0.0.0:8333: bind: address already in use', stderr: '' },
+  });
+  S._setFoundationGuestExecForTests(broken.exec);
+  const bad = await S.setFoundationService('m2-7', 'storage', 'start', { intervalMs: 1, failFastMs: 5, healthTimeoutMs: 2000 });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /storage was started but did not become healthy.*address already in use/);
+  // stop does not wait.
+  const stopCalls = fakeGuest();
+  S._setFoundationGuestExecForTests(stopCalls.exec);
+  assert.equal((await S.setFoundationService('m2-7', 'storage', 'stop')).ok, true);
+  assert.deepEqual(stopCalls.calls.map((c) => c.argv.slice(-2)), [['stop', 'storage']]);
 });
 
 // ------------------------------------------------------------------- wiring

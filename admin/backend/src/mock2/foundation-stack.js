@@ -151,17 +151,31 @@ async function waitHealthy(containerName, services, { timeoutMs, intervalMs = 20
   }
 }
 
-// setFoundationService(containerName, service, 'start'|'stop') → { ok, error }
+// setFoundationService(containerName, service, 'start'|'stop', { healthTimeoutMs, intervalMs, failFastMs })
+// → { ok, error }
 // start = `up -d <service>` (creates the container the first time, same
-// volume every time); stop = `stop <service>` (the volume stays). Postgres is
-// the system of record and is never stopped here.
-export async function setFoundationService(containerName, service, action) {
+// volume every time) and then waits until it is HEALTHY: `up -d` returns once
+// the container runs, not once it serves, and every caller tests the provider
+// right after (a switch's pending test, a health probe). stop = `stop
+// <service>` (the volume stays). Postgres is the system of record and is never
+// stopped here.
+export async function setFoundationService(containerName, service, action, { healthTimeoutMs = null, intervalMs = 2000, failFastMs = 90000 } = {}) {
   if (!FOUNDATION_SERVICES.includes(service)) return { ok: false, error: `unknown foundation service: ${service}` };
   if (action !== 'start' && action !== 'stop') return { ok: false, error: `action must be start or stop, not ${action}` };
   if (action === 'stop' && service === STACK.postgres.service) return { ok: false, error: 'postgres is always on; it is never stopped through a feature switch' };
   const args = action === 'start' ? ['up', '-d', '--no-deps', service] : ['stop', service];
   const r = await foundationCompose(containerName, args, { timeoutMs: action === 'start' ? 15 * 60 * 1000 : 120000 });
   if (r.code !== 0) return { ok: false, error: `docker compose ${args.join(' ')} failed: ${tailOf(r, 400)}` };
+  if (action === 'start') {
+    // The same bounds as bring-up's healthy step (the embedding server may
+    // still download its model on a first start).
+    const timeoutMs = healthTimeoutMs ?? (service === STACK.embeddings.service ? 20 * 60 * 1000 : 4 * 60 * 1000);
+    const healthy = await waitHealthy(containerName, [service], { timeoutMs, intervalMs, failFastMs });
+    if (!healthy.ok) {
+      const logs = await composeLogs(containerName, service);
+      return { ok: false, error: `${service} was started but did not become healthy. Last log lines: ${logs || '(none)'}` };
+    }
+  }
   return { ok: true, error: null };
 }
 

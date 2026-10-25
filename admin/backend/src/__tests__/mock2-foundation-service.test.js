@@ -273,6 +273,50 @@ test('embeddings: with an active index a provider change re-embeds into a NEW in
   assert.deepEqual(calls.services.at(-1), ['embeddings', 'stop'], 'the local model is no longer used');
 });
 
+test('embeddings: an active index that does not match the provider (a full clone, an old restore) is warned and repaired by switching to the current provider', async () => {
+  const { guest } = setup();
+  // The feature row says OpenAI (with its key); the database brought a local index.
+  const r = routes();
+  const toOpenai = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai', credentials: { api_key: API_KEY } } });
+  assert.equal(toOpenai.body.promoted, true);
+  guest.activeIndex = { id: 'ix_local0001', provider: 'local', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, metric: 'cosine', item_count: 12 };
+  guest.indexes.ix_local0001 = { ...guest.activeIndex, state: 'active' };
+  service.resetFoundationServiceCaches();
+  const view = (await r.call('get', '/projects/:id/foundation')).body;
+  const w = view.warnings.find((x) => x.code === 'INDEX_PROVIDER_MISMATCH');
+  assert.ok(w, 'GET warns');
+  assert.deepEqual(w.options[0].provider, 'openai');
+  // The next step: "switch to the current provider" re-embeds into a NEW index (the stored key is reused).
+  const repair = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai' } });
+  assert.equal(repair.status, 202, JSON.stringify(repair.body));
+  assert.equal(repair.body.job.kind, 'reembed');
+  assert.deepEqual(repair.body.job.from, { provider: 'local', model: 'BAAI/bge-small-en-v1.5', dimensions: 384 });
+  assert.deepEqual(repair.body.job.to, { provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 });
+  assert.equal(store.readSecret(1, 'pending.embeddings.api_key'), API_KEY, 'reuse_active');
+  const target = repair.body.job.target_index;
+  guest.jobs[repair.body.job.id].state = 'succeeded';
+  Object.assign(guest.indexes[target], { state: 'ready', item_count: 12 });
+  assert.equal((await service.getJob(1, repair.body.job.id)).state, 'succeeded');
+  assert.equal(guest.activeIndex.id, target);
+  assert.equal(guest.indexes.ix_local0001.state, 'retired');
+  service.resetFoundationServiceCaches();
+  assert.equal((await r.call('get', '/projects/:id/foundation')).body.warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false);
+  for (const resp of r.responses) noPlanted(resp);
+});
+
+test('embeddings: switching the provider to the space the active index is already in promotes at once (nothing to rebuild)', async () => {
+  const { guest } = setup();
+  // The feature row is local; a restored dump brought an OpenAI index.
+  guest.activeIndex = { id: 'ix_openai001', provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536, metric: 'cosine', item_count: 3 };
+  guest.indexes.ix_openai001 = { ...guest.activeIndex, state: 'active' };
+  const r = routes();
+  const res = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai', credentials: { api_key: API_KEY } } });
+  assert.equal(res.status, 200);
+  assert.deepEqual([res.body.promoted, res.body.reembedded], [true, false]);
+  assert.equal(store.readFeatureRows(1).embeddings.provider, 'openai');
+  assert.equal(guest.activeIndex.id, 'ix_openai001', 'the matching index stays active');
+});
+
 test('a promotion the app database refuses leaves mock2.db exactly as it was (the job keeps promoting)', async () => {
   const { guest } = setup({ objects: 1 });
   const r = routes();

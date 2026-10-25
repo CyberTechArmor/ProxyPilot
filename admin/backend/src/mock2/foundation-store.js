@@ -32,7 +32,7 @@ import {
 import {
   BUNDLED_APP_IDENTITY, isStorableSecretName, appSecretNames, featureRowsFrom, buildSyncSql, parseGeneration,
   buildGuardProbeSql, buildGuardRowsSql, parseJsonRows, planFoundationComponentMint, redactSecrets, parseJsonObject,
-  isValidJobId, cloneInheritedSecretNames,
+  isValidJobId, cloneInheritedSecretNames, cloneEmbeddingsFeature,
 } from './foundation-logic.js';
 import { listProjectComponents } from './components.js';
 import { parseContractJson } from './component-logic.js';
@@ -200,7 +200,14 @@ export function getFoundationProvisionInputs(projectId) {
       if (!hasSecret(pid, SECRET_NAMES.storageSecretAccessKey)) writeSecret(pid, SECRET_NAMES.storageSecretAccessKey, readSecret(pid, BUNDLED_APP_IDENTITY.secretAccessKey));
     }
     const origin = first ? cloneOriginOf(db, pid) : null;
-    if (origin) inheritComponentSecrets(db, pid, origin);
+    if (origin) {
+      inheritComponentSecrets(db, pid, origin);
+      // A full clone's vector indexes are its source's: start on the source's
+      // embedding provider (non-secret config only) so they match.
+      const sourceEmbeddings = readFeatureRows(Number(origin.sourceProjectId)).embeddings;
+      const embeddings = sourceEmbeddings.stored ? cloneEmbeddingsFeature({ origin, sourceRow: sourceEmbeddings }) : null;
+      if (embeddings) writeFeature(pid, 'embeddings', embeddings);
+    }
   });
   tx();
   const rows = readFeatureRows(pid);

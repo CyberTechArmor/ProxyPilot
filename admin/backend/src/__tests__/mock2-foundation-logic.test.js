@@ -179,6 +179,39 @@ test('embeddings: OpenAI with no key is MISSING_CREDENTIALS; a new key alone (sa
   assert.equal(shorter.plan.credentials, 'reuse_active', 'same provider at the same address reuses the stored key');
 });
 
+test('embeddings: an active index in another space than the provider is repaired by a switch to the current provider (re-embed, not a no-op)', () => {
+  const openaiCfg = validateEmbeddingsConfig('openai', {}).config;
+  const openai = { state: 'on', provider: 'openai', config: openaiCfg, pending: null, secretNames: new Set([SECRET_NAMES.embeddingsApiKey]), activeJob: null };
+  const localIndex = { id: 'ix_local0001', provider: 'local', model: STACK.embeddings.model, dimensions: 384, metric: 'cosine' };
+  const repair = planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: localIndex } });
+  assert.equal(repair.plan.op, 'switch');
+  assert.equal(repair.plan.after, 'reembed');
+  assert.equal(repair.plan.credentials, 'reuse_active');
+  const matching = { id: 'ix_openai001', provider: 'openai', model: openaiCfg.model, dimensions: openaiCfg.dimensions, metric: 'cosine' };
+  assert.equal(planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: matching } }).plan.op, 'noop');
+  assert.equal(planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: false } }).plan.op, 'noop', 'no index: nothing to repair');
+  assert.equal(planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: null } }).plan.op, 'noop', 'unknown: the feature row decides');
+  // A clone without the key: the repair asks for it.
+  assert.equal(planEmbeddingsAction({ current: { ...openai, secretNames: new Set() }, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: localIndex } }).code, CODES.MISSING_CREDENTIALS);
+});
+
+test('GET: an active index that does not match the embeddings provider is warned INDEX_PROVIDER_MISMATCH with the repair as next step', () => {
+  const openaiCfg = validateEmbeddingsConfig('openai', {}).config;
+  const rows = featureRowsFrom([{ feature: 'embeddings', state: 'on', provider: 'openai', config_json: JSON.stringify(openaiCfg), pending_json: null, updated_at: '2026-10-24T10:00:00Z' }]);
+  const activeIndex = { type: 'index', id: 'ix_local0001', provider: 'local', model: STACK.embeddings.model, dimensions: 384, metric: 'cosine', item_count: 12 };
+  const p = projectFoundation({ project: PROJECT, rows, secretNames: [], activeIndex });
+  const w = p.warnings.find((x) => x.code === 'INDEX_PROVIDER_MISMATCH');
+  assert.ok(w, 'warned');
+  assert.match(w.message, /ix_local0001/);
+  assert.match(w.message, /switch embeddings to openai/);
+  assert.deepEqual(w.options, [{ action: 'switch', provider: 'openai', config: openaiCfg, field: 'credentials' }], 'the next step, and the key it needs');
+  const keyed = projectFoundation({ project: PROJECT, rows, secretNames: [SECRET_NAMES.embeddingsApiKey], activeIndex });
+  assert.deepEqual(keyed.warnings.find((x) => x.code === 'INDEX_PROVIDER_MISMATCH').options, [{ action: 'switch', provider: 'openai', config: openaiCfg }]);
+  const matching = projectFoundation({ project: PROJECT, rows, secretNames: [], activeIndex: { ...activeIndex, provider: 'openai', model: openaiCfg.model, dimensions: 1536 } });
+  assert.equal(matching.warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false);
+  assert.equal(projectFoundation({ project: PROJECT, rows, secretNames: [] }).warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false, 'no index, no warning');
+});
+
 test('embeddings: OpenAI-compatible needs base_url, model and dimensions; its key is optional and never reused at a new address', () => {
   assert.equal(validateEmbeddingsConfig('openai_compatible', { model: 'm', dimensions: 768 }).status, 400);
   assert.equal(validateEmbeddingsConfig('openai_compatible', { base_url: 'http://10.0.0.5:8080/v1', dimensions: 768 }).status, 400);

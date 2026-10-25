@@ -375,7 +375,28 @@ export function needsReembed(active, pending) {
     || Number(a.config?.dimensions) !== Number(p.config?.dimensions) || (a.config?.metric || 'cosine') !== (p.config?.metric || 'cosine');
 }
 
-export function planEmbeddingsAction({ current, request }) {
+// The vector space an index row was built in, in the feature-row shape
+// needsReembed compares.
+export function indexSpace(index) {
+  return { provider: index?.provider, config: { model: index?.model, dimensions: index?.dimensions, metric: index?.metric || 'cosine' } };
+}
+
+// indexProviderMismatch(index, row) — the active index was built with another
+// provider, model or dimensions than the embeddings feature row: the app's
+// vector calls answer INDEX_PROVIDER_MISMATCH (the same three fields the app
+// runtime compares). A full clone or a restored dump/snapshot taken before a
+// re-embed can bring such an index back.
+export function indexProviderMismatch(index, row) {
+  if (!plain(index) || !plain(row)) return false;
+  return index.provider !== row.provider || index.model !== row.config?.model || Number(index.dimensions) !== Number(row.config?.dimensions);
+}
+
+// facts.activeIndex: the app database's active index row (null/undefined when
+// unknown, false when there is none). An active index built in another space
+// than the requested one needs a re-embed even when the feature row already
+// names the requested provider — "switch to the current provider" is how an
+// index that does not match it is repaired.
+export function planEmbeddingsAction({ current, request, facts = {} }) {
   const action = request?.action;
   if (!['on', 'off', 'switch'].includes(action)) return refusal(CODES.INVALID_REQUEST, "action must be 'on', 'off' or 'switch'", [], 400);
   if (current?.activeJob) return jobRunning(current);
@@ -397,7 +418,8 @@ export function planEmbeddingsAction({ current, request }) {
   if (!creds.ok) return creds;
   const config = v.config;
   const pending = { provider, config };
-  const reembed = needsReembed({ provider: current.provider, config: current.config }, pending);
+  const staleIndex = plain(facts.activeIndex) && needsReembed(indexSpace(facts.activeIndex), pending);
+  const reembed = staleIndex || needsReembed({ provider: current.provider, config: current.config }, pending);
   const supplied = Object.keys(creds.values).length > 0;
   if (!reembed && !supplied && current.config?.base_url === config.base_url) {
     return { ok: true, plan: { op: 'noop', reason: 'embeddings already use this provider, model and dimensions' } };
@@ -652,6 +674,17 @@ export function projectFoundation({ project, rows, secretNames = [], jobs = [], 
       try { if (vectorColumnPlan(r.dimensions).ann === 'none') warnings.push({ code: 'EXACT_SCAN_ONLY', message: `${r.dimensions} dimensions is above pgvector's index limit: search is an exact scan.` }); } catch { /* invalid stays invalid */ }
     }
   }
+  if (embeddings.index && indexProviderMismatch(embeddings.index, rows.embeddings)) {
+    const ix = embeddings.index;
+    const row = rows.embeddings;
+    const needsKey = credentialsRequired('embeddings', row.provider) && !hasCredentials('embeddings', row.provider, names);
+    warnings.push({
+      code: 'INDEX_PROVIDER_MISMATCH',
+      message: `The active vector index (${ix.id}) was built with ${ix.provider} ${ix.model} (${ix.dimensions} dimensions), but embeddings use ${row.provider} ${row.config?.model} (${row.config?.dimensions} dimensions), so vector search and writes fail until the index is rebuilt. `
+        + `Next step: switch embeddings to ${row.provider} with the same model and dimensions — that re-embeds the stored content into a new index${needsKey ? ' (give its API key with the switch)' : ''}.`,
+      options: [{ action: 'switch', provider: row.provider, config: pickConfig('embeddings', row.config), ...(needsKey ? { field: 'credentials' } : {}) }],
+    });
+  }
   if (rows.storage.state === 'on' && rows.storage.provider === 'external' && /^http:/.test(rows.storage.config?.endpoint || '')) {
     warnings.push({ code: 'PLAINTEXT_STORAGE_ENDPOINT', message: 'The external S3 endpoint uses http: requests and credentials signatures travel unencrypted.' });
   }
@@ -894,6 +927,20 @@ export function cloneInheritedSecretNames({ origin, sourceNames = [], sourceConf
     .filter((c) => c && c.secret === true && c.generate === true && guardsStoredData(c))
     .map((c) => componentSecretName(String(c.key || ''))));
   return [...new Set(sourceNames)].filter((n) => guarded.has(n) && isValidSecretName(n)).sort();
+}
+
+// cloneEmbeddingsFeature({ origin, sourceRow }) → the embeddings feature row a
+// FULL clone starts with, or null (the defaults). Its database brings the
+// source's vector indexes, so it starts on the source's embedding provider —
+// the NON-SECRET part only (state, provider, model, dimensions, metric,
+// base_url): never the key, so a provider that needs one reports
+// missing_credentials until the person gives the clone its own. Storage is
+// never copied: the clone keeps its own bundled default.
+export function cloneEmbeddingsFeature({ origin, sourceRow } = {}) {
+  if (origin?.kind !== 'clone' || origin.mode !== 'full' || !plain(sourceRow) || !['on', 'off'].includes(sourceRow.state)) return null;
+  const v = validateEmbeddingsConfig(sourceRow.provider, sourceRow.config || {});
+  if (!v.ok) return null;
+  return { state: sourceRow.state, provider: sourceRow.provider, config: v.config, pending: null };
 }
 
 export function planFoundationComponentMint({ configs = [], heldNames = [], newlyProvisioned = false, probes = {} } = {}) {

@@ -27,7 +27,7 @@ import {
   CODES, BUNDLED_APP_IDENTITY, refusal, planStorageAction, planEmbeddingsAction, serviceStillUsed, interpretCliTest,
   parseHealthOutput, projectFoundation, projectJob, credentialSecretNames, parseJsonObject, parseJsonRows, newJobId, newIndexId,
   buildJobInsertSql, buildJobPollSql, buildActiveIndexSql, buildOverviewReadSql, buildCancelJobSql, promoteIndexStatements,
-  SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId,
+  SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId, needsReembed, indexSpace,
 } from './foundation-logic.js';
 import { SECRET_NAMES } from './foundation-contract.js';
 
@@ -540,18 +540,15 @@ async function performSwitch(project, feature, plan, { userId }) {
       params: { from: { provider: activeRow.provider, ...pickSide(activeRow.config) }, to: { provider: plan.pending.provider, ...pickSide(plan.pending.config) }, verify: ['size', 'sha256'] },
     }, { userId });
   }
-  // reembed: when the app has no active index there is nothing to rebuild —
-  // promote at once; otherwise build and validate a new index first.
-  let active;
-  try {
-    const r = await store.appPsql(project.container_name, buildActiveIndexSql(), { timeoutMs: 20_000 });
-    active = Number(r?.code) === 0 && parseMarker(r.stdout, SQL_MARKERS.ok).length ? (parseJsonRows(r.stdout)[0] || false) : null;
-  } catch { active = null; }
+  // reembed: when the app has no active index, or its active index is already
+  // in the new vector space, there is nothing to rebuild — promote at once;
+  // otherwise build and validate a new index first.
+  const active = await readActiveIndex(project);
   if (active == null) {
     await stopUnused();
     return refusal(CODES.FOUNDATION_UNAVAILABLE, 'The app database did not say whether an index exists; nothing was switched.', [{ action: 'switch' }]);
   }
-  if (active === false) {
+  if (active === false || !needsReembed(indexSpace(active), plan.pending)) {
     const p = await promote(project, feature);
     if (!p.ok) return refusal(CODES.FOUNDATION_UNAVAILABLE, `The switch tested fine but could not be applied: ${p.error}`, [{ action: 'switch' }]);
     return { ok: true, promoted: true, reembedded: false, ...(plan.warnings?.length ? { warnings: plan.warnings } : {}) };
@@ -567,6 +564,15 @@ async function performSwitch(project, feature, plan, { userId }) {
     },
     index: { id: target, provider: plan.pending.provider, model: cfg.model, dimensions: cfg.dimensions, metric: cfg.metric },
   }, { userId });
+}
+
+// The app database's active vector index row, false when there is none, null
+// when the database did not answer.
+async function readActiveIndex(project) {
+  try {
+    const r = await store.appPsql(project.container_name, buildActiveIndexSql(), { timeoutMs: 20_000 });
+    return Number(r?.code) === 0 && parseMarker(r.stdout, SQL_MARKERS.ok).length ? (parseJsonRows(r.stdout)[0] || false) : null;
+  } catch { return null; }
 }
 
 function pickSide(config = {}) {
@@ -585,7 +591,12 @@ export async function featureAction(projectId, feature, request, { userId = null
     if (feature === 'storage' && current.provider === 'bundled' && !current.activeJob && (request?.action === 'off' || request?.action === 'switch')) {
       facts = { bundledObjectCount: await bundledObjectCount(project) };
     }
-    const decision = feature === 'storage' ? planStorageAction({ current, request, facts }) : planEmbeddingsAction({ current, request });
+    // An active index that does not match the requested space is rebuilt even
+    // when the feature row already names it (the repair of a mismatched index).
+    if (feature === 'embeddings' && !current.activeJob && request?.action === 'switch') {
+      facts = { activeIndex: await readActiveIndex(project) };
+    }
+    const decision = feature === 'storage' ? planStorageAction({ current, request, facts }) : planEmbeddingsAction({ current, request, facts });
     if (!decision.ok) return decision;
     const plan = decision.plan;
     if (plan.op === 'noop') return { ok: true, noop: true, reason: plan.reason };

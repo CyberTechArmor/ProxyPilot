@@ -241,6 +241,29 @@ test('clones: a FULL clone takes only the data-guarding component keys; a fresh 
   assert.equal(store.readSecret(source.id, 'component.AUTH_JWT_SECRET'), srcJwt, 'the source is untouched');
 });
 
+test('clones: a FULL clone starts on its source\'s embedding provider (non-secret config, never the key); storage stays its own bundled default', async () => {
+  const db = freshMock2Db();
+  scriptedStack();
+  const { projectFoundation } = await import('../mock2/foundation-logic.js');
+  const source = projects.createProject({ name: 'Source', createdBy: 1 });
+  store.getFoundationProvisionInputs(source.id);
+  const openaiCfg = { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-large', dimensions: 1024, metric: 'cosine' };
+  store.writeFeature(source.id, 'embeddings', { state: 'on', provider: 'openai', config: openaiCfg, pending: null });
+  store.writeSecret(source.id, SECRET_NAMES.embeddingsApiKey, 'sk-source-key-0123456789');
+  store.writeFeature(source.id, 'storage', { state: 'on', provider: 'external', config: { endpoint: 'https://acct.r2.cloudflarestorage.com', region: 'auto', bucket: 'source-files', prefix: '', force_path_style: true }, pending: null });
+  const full = projects.createProject({ name: 'Full', createdBy: 1, origin: { kind: 'clone', sourceProjectId: source.id, mode: 'full' } });
+  const fresh = projects.createProject({ name: 'Fresh', createdBy: 1, origin: { kind: 'clone', sourceProjectId: source.id, mode: 'fresh' } });
+  const fullInputs = store.getFoundationProvisionInputs(full.id);
+  const freshInputs = store.getFoundationProvisionInputs(fresh.id);
+  assert.deepEqual(fullInputs.features.embeddings, { state: 'on', provider: 'openai', config: openaiCfg }, 'the full clone\'s indexes match');
+  assert.deepEqual(fullInputs.features.storage, defaultFeatures().storage, 'never the source\'s bucket');
+  assert.deepEqual(freshInputs.features, defaultFeatures(), 'a fresh clone starts on the defaults');
+  assert.equal(store.hasSecret(full.id, SECRET_NAMES.embeddingsApiKey), false, 'the key is never copied');
+  const view = projectFoundation({ project: store.getFoundationProject(full.id), rows: store.readFeatureRows(full.id), secretNames: store.listSecretNames(full.id) });
+  assert.equal(view.embeddings.health.status, 'missing_credentials');
+  assert.equal(store.readFeatureRows(source.id).embeddings.provider, 'openai', 'the source is untouched');
+});
+
 test('the project JSON the dashboard receives carries foundation_version', async () => {
   const { publicProjectShape } = await import('../mock2/project-logic.js');
   assert.equal(publicProjectShape({ id: 1, name: 'x', lifecycle: 'active', foundation_version: FOUNDATION_VERSION }).foundation_version, FOUNDATION_VERSION);

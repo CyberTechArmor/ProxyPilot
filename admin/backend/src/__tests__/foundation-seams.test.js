@@ -307,6 +307,9 @@ test('restore_project_db: the restore job drives the stack\'s postgres service; 
   const ops = await src('mock2/ops.js');
   assert.match(ops, /\.\.\.\(foundation \? \{ foundation: true \} : \{\}\)/);
   assert.match(ops, /\.\.\.\(foundation \? \{ database: 'foundation_stack' \} : \{\}\)/, 'the confirmation digest covers it');
+  const tool = await src('routes/mcp-tools/project-config.js');
+  assert.match(tool, /resolveRestoreDbPlan\(store\.getDb\(\), \{[^}]*foundation: !!fstack \}\)/, 'the previewed and confirmed plan is the one that runs');
+  assert.doesNotMatch(tool, /restore_project_db does not support foundation projects/);
   // A database or snapshot restore brings back the platform-held rows of its
   // own time; both re-sync them from mock2.db afterwards.
   assert.match(ops, /out\.foundationSync = await resyncFoundation\(refs\.projectId\);\n  \}\n  return out;/);

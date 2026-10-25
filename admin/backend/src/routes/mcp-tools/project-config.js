@@ -728,7 +728,7 @@ export function createProjectConfigHandlers(kit) {
     // attempt a retry reuses. The confirmation token is bound to its digest.
     const store = containerLockStore();
     if (!store) return err('the setup engine store is not configured; the restore cannot be recorded, so it is not run');
-    const resolved = resolveRestoreDbPlan(store.getDb(), { containerName: p.incusName, file: basename(file), environmentCopy: args.environment_copy || null, retryOf: args.retry_of || null });
+    const resolved = resolveRestoreDbPlan(store.getDb(), { containerName: p.incusName, file: basename(file), environmentCopy: args.environment_copy || null, retryOf: args.retry_of || null, foundation: !!fstack });
     if (!resolved.ok) return err(resolved.error);
     const st = await projectSh(p.incusName, 'test -f "$1" && wc -c < "$1"', [file], { timeoutMs: 15000 });
     if (st.status !== 0) return err(`No such dump in the container: ${file}`);

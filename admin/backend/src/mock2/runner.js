@@ -43,7 +43,7 @@ import {
   interruptDecision, estimateCycleTokens, shouldStopForBudget, retriesExhausted, MAX_CYCLE_RETRIES,
   noopStartRefusal,
   normalizeBuildMode, isFastBuildMode, BUILD_MODE_FULL, BUILD_MODE_MVP, BUILD_MODE_QUICK,
-  queueMayAdvancePast, touchesUserFacing, gateConfigTouchedFiles,
+  queueMayAdvancePast, touchesUserFacing, gateConfigTouchedFiles, gateRunEnv,
 } from './cycle-logic.js';
 import { getLock, acquireLock, releaseLock, touchLock } from './locks.js';
 import { assertTaskMirrorSettled } from './task-record-write.js';
@@ -131,7 +131,7 @@ import { getIntegrationGateMode, getLaneTuning, routingEnv } from './settings.js
 import { capabilityCheckStatus } from './verification-logic.js';
 // B.3: the in-fence contract-fixture server module a project must provide so the
 // honest path (real transport verified against a local TLS socket) is walkable.
-import { CONTRACT_FIXTURE_PATH_RE } from './scaffold.js';
+import { CONTRACT_FIXTURE_PATH_RE, scaffoldFoundationFiles } from './scaffold.js';
 import { scanProjectForLegacyStubs, blockingLegacyFindings } from './migration-scan.js';
 import { touchedSubsystems as touchedSubsystemsOf } from './stub-logic.js';
 import { notifyCycleComplete } from '../lib/notification-dispatch.js';
@@ -151,6 +151,8 @@ import {
   initFinishGuard, recordFinishRejection, escalatedRetryDiagnostic, budgetNote,
   budgetExhaustedSummary, harnessFaultHaltAccepted,
   unverifiableClaims, sensitiveAssumedEntries, databaseEngineRejectionMessage,
+  CYCLE_BASE_READ_COMMAND, parseCycleBase, buildFoundationChangeReadScript, parseFoundationChangeRead,
+  platformFoundationHashes, foundationEditRefusals, foundationEditRejectionMessage, buildFoundationRestoreScript,
 } from './finish-guard-logic.js';
 import { recordFeature, takeFeatureLedger } from './feature-activation.js';
 // (models.js constants are no longer used directly here — the phase map and
@@ -196,8 +198,11 @@ export function setJob(cycleId, patch) {
   const cur = activeCycles.get(Number(cycleId)) || {};
   activeCycles.set(Number(cycleId), { ...cur, ...patch, updatedAt: Date.now() });
 }
+// The commit each running cycle started from (readCycleBase), for the finish
+// guards and the checkpoint's foundation/ restore. Dropped with the job.
+const cycleBases = new Map();
 export function scheduleJobCleanup(cycleId) {
-  setTimeout(() => activeCycles.delete(Number(cycleId)), 120000);
+  setTimeout(() => { activeCycles.delete(Number(cycleId)); cycleBases.delete(Number(cycleId)); }, 120000);
   // THE CLOSE-HOOK RE-DRAIN (P48): build-queue.js always said "the close hook
   // re-drains" and nothing ever did — the drains lived only at enqueue points
   // and the after-build review, so a queued build could sit "Up next" forever
@@ -1216,6 +1221,9 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
   }
   updateCycle(cycle.id, { status: 'running', started_at: nowIso(), gates_json: JSON.stringify(initialGateReports(gateScripts)) });
   setJob(cycle.id, { phase: 'running', message: 'Runner working…' });
+  // The tree this cycle starts from — the finish guards' base (readCycleBase).
+  const cycleBase = await readCycleBase(containerName, cycle.id);
+  const onFoundation = isFoundationProject(project);
 
   // Migration scan (first cycle under the integration-truthfulness harness).
   // Idempotent; records non-blocking suspected-legacy-stub / analysis-incomplete
@@ -2242,12 +2250,32 @@ export async function runCycle({ cycle, project, containerName, framework, gateS
       // from the changed files, so editing the gate copy in the container
       // does not get past it; a recorded SQLite request (mock2.db) allows the
       // SQLite family only. Shares the finish budget like every validator.
-      if (changedThisCycle.length) {
-        const engineHits = await readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId });
+      // Judged against the commit the cycle started from, so a mid-cycle
+      // commit does not hide an engine — in every project, an app from
+      // before the foundation included (its gate reports the old ones only).
+      {
+        const engineHits = await readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId, base: cycleBase });
         if (engineHits.length) {
           const r = await rejectFinishOrConclude({
             validator: 'database-engine', termId, termName, decision, gateReports: lastGateReports,
             message: databaseEngineRejectionMessage(engineHits),
+          });
+          if (r === 'concluded') return scheduleJobCleanup(cycle.id);
+          continue;
+        }
+      }
+      // foundation/ IS PLATFORM-OWNED (constitution §2): in a project on the
+      // foundation, a diff that adds, modifies or deletes anything under it
+      // cannot report done — the base-app upgrade rewrites it and the host
+      // trusts the health and job state it reports. The platform puts the
+      // files back first, so the build continues from its foundation/; the
+      // upgrade's own bytes are exempt (finish-guard-logic.js).
+      if (onFoundation) {
+        const foundationEdits = await restoreFoundationEdits({ containerName, base: cycleBase });
+        if (foundationEdits.restored.length || foundationEdits.remaining.length) {
+          const r = await rejectFinishOrConclude({
+            validator: 'foundation-owned', termId, termName, decision, gateReports: lastGateReports,
+            message: foundationEditRejectionMessage(foundationEdits, { base: cycleBase }),
           });
           if (r === 'concluded') return scheduleJobCleanup(cycle.id);
           continue;
@@ -3641,6 +3669,57 @@ export async function execInContainer(containerName, command) {
   return { code: r.code, stdout: (r.stdout || '').slice(0, MAX_TOOL_RESULT_CHARS), stderr: (r.stderr || '').slice(0, 20000) };
 }
 
+// The commit a cycle started from. The finish guards (database engines,
+// foundation/) diff against it, so a commit the build makes mid-cycle does not
+// hide what it changed. null — the guards then use HEAD — when unreadable.
+// Remembered per cycle for checkpointAndRecord. Exported for the SDK runner.
+export async function readCycleBase(containerName, cycleId = null) {
+  let base = null;
+  try { base = parseCycleBase((await execInContainer(containerName, CYCLE_BASE_READ_COMMAND)).stdout); } catch { base = null; }
+  if (cycleId != null && base) cycleBases.set(Number(cycleId), base);
+  return base;
+}
+
+// foundation/ is platform-owned (constitution §2; finish-guard-logic.js): the
+// paths under it this cycle added, modified or deleted, less any file holding
+// exactly the bytes the platform's base-app upgrade writes. The caller asks
+// only for a project on the foundation. Fails OPEN on a read error (logged),
+// like the database check: a container hiccup must not invent a finding.
+let platformFoundationHashCache = null;
+export async function readFoundationEdits({ containerName, base = null }) {
+  try {
+    if (!platformFoundationHashCache) platformFoundationHashCache = platformFoundationHashes(scaffoldFoundationFiles());
+    const r = await containerSh(containerName, buildFoundationChangeReadScript({ appDir: APP_DIR, base }), { timeoutMs: 120000 });
+    if (r?.code !== 0 && !r?.stdout) return [];
+    return foundationEditRefusals({ changes: parseFoundationChangeRead(r.stdout || ''), platformHashes: platformFoundationHashCache });
+  } catch (e) {
+    console.warn('[mock2] foundation/ change read failed (not blocking):', e?.message);
+    return [];
+  }
+}
+
+// Put foundation/ back as it was at the base (the files readFoundationEdits
+// refuses, nothing else). The finish guard of both lanes runs it when it
+// refuses, so the build continues from the platform's foundation/, and
+// checkpointAndRecord runs it before every commit in a project on the
+// foundation, so no checkpoint — a halt, a pause, a stop, a concluded finish
+// budget — carries a build's foundation/ change into the history a resumed
+// segment then starts from. Returns what it put back and, read again
+// afterwards, what is still changed. Exported for the SDK runner.
+export async function restoreFoundationEdits({ containerName, base = null }) {
+  const refusals = await readFoundationEdits({ containerName, base });
+  if (!refusals.length) return { restored: [], remaining: [] };
+  try {
+    const r = await containerSh(containerName, buildFoundationRestoreScript({ appDir: APP_DIR, base, refusals }), { timeoutMs: 120000 });
+    if (r?.code !== 0) console.warn(`[mock2] foundation/ restore non-zero: ${(r?.stdout || r?.stderr || '').trim().slice(-300)}`);
+  } catch (e) {
+    console.warn('[mock2] foundation/ restore failed:', e?.message);
+  }
+  const remaining = await readFoundationEdits({ containerName, base });
+  const left = new Set(remaining.map((x) => x.path));
+  return { restored: refusals.filter((x) => !left.has(x.path)), remaining };
+}
+
 // Exported for the component-submission route ("promote what the last build
 // wrote" reads the proposed files straight out of the running container).
 export async function readFileInContainer(containerName, path) {
@@ -3751,16 +3830,25 @@ export async function runGateBattery(cycleId, containerName, gateScripts) {
   // read from mock2.db and assigned on every gate's own command line (empty
   // when none), so nothing in the repository or the guest's environment can
   // set it. The battery's profile rides along (constitution-lint keeps its
-  // debt-prone sub-checks blocking in the full build only).
+  // debt-prone sub-checks blocking in the full build only), and so does
+  // whether the project is on the foundation (projects.foundation_version):
+  // a project from before it gets engines it already had as an advisory. An
+  // unreadable row is the strict rule (gateRunEnv).
+  let gateProjectId = null;
+  try { gateProjectId = getCycle(cycleId)?.project_id ?? null; } catch { gateProjectId = null; }
   let dbException = '';
-  try { dbException = gateExceptionValue(getDatabaseException(getCycle(cycleId)?.project_id)); } catch { dbException = ''; }
+  try { dbException = gateExceptionValue(getDatabaseException(gateProjectId)); } catch { dbException = ''; }
+  let onFoundation = true;
+  try {
+    const p = gateProjectId != null ? getProject(gateProjectId) : null;
+    onFoundation = p ? isFoundationProject(p) : true;
+  } catch { onFoundation = true; }
   for (let i = 0; i < gateScripts.length; i++) {
     reports[i].status = 'running';
     reports[i].started_at = nowIso();
     updateCycle(cycleId, { current_gate: gateScripts[i].name, gates_json: JSON.stringify(reports) });
     const f = gateFilename(gateScripts[i], i);
-    const profile = /^(quick|mvp|full)$/.test(String(gateScripts[i].profile || '')) ? gateScripts[i].profile : '';
-    const env = `MOCK2_DATABASE_EXCEPTION='${dbException === 'sqlite' ? 'sqlite' : ''}' MOCK2_GATE_PROFILE='${profile}'`;
+    const env = gateRunEnv({ databaseException: dbException, foundation: onFoundation, profile: gateScripts[i].profile });
     const script = `cd '${APP_DIR}' 2>/dev/null || cd /\n${env} sh '${GATES_DIR}/${f}' 2>&1\necho "__MOCK2_GATE_EXIT__:$?"`;
     const r = await containerSh(containerName, script, { timeoutMs: 300000 });
     const out = r.stdout || '';
@@ -3812,6 +3900,24 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
   } catch (e) { console.warn('[mock2] task files before checkpoint skipped:', e?.message); }
   assertTaskMirrorSettled({ result: taskFilesResult, lock: getLock(projectId) });
 
+  // 0c) foundation/ is platform-owned (constitution §2; finish-guard-logic.js):
+  //     in a project on the foundation, whatever this cycle changed under it
+  //     is put back BEFORE the commit, so no checkpoint carries it — the finish
+  //     guard already refused it. The platform's own upgrade bytes stay.
+  let foundationRestore = { restored: [], remaining: [] };
+  if (isFoundationProject(project)) {
+    foundationRestore = await restoreFoundationEdits({ containerName, base: cycleBases.get(Number(cycle.id)) || null });
+    if (foundationRestore.restored.length || foundationRestore.remaining.length) {
+      try {
+        insertCycleEvent({
+          projectId, cycleId: cycle.id, kind: 'note', role: 'system',
+          content: `foundation/ is platform-owned — put back before this checkpoint: ${foundationRestore.restored.map((x) => `${x.path} (${x.change})`).join(', ') || 'nothing'}${foundationRestore.remaining.length ? `; could NOT be put back: ${foundationRestore.remaining.map((x) => x.path).join(', ')}` : ''}.`,
+          meta: { foundation_restored: foundationRestore.restored, foundation_not_restored: foundationRestore.remaining },
+        });
+      } catch { /* best effort */ }
+    }
+  }
+
   // 1) Commit + push into the bare repo (over the ADR-011 mount).
   const commitScript = buildCheckpointScript({ appDir: APP_DIR, message: summary || 'checkpoint: mock2 cycle' });
   const cp = await containerSh(containerName, commitScript, { timeoutMs: 120000 });
@@ -3838,7 +3944,11 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
   // in the record so any cycle can be reproduced from its change record alone.
   let phaseLine = null;
   try { phaseLine = phaseMapRecordLine(parseRoutingJson(getCycle(cycle.id)?.routing_json)); } catch { /* best effort */ }
-  const recordSummaryText = `${summary || 'checkpoint'}${phaseLine ? `\n\n${phaseLine}` : ''}${diffStat ? `\n\nDiff (this checkpoint):\n${diffStat}` : ''}`;
+  const foundationLine = foundationRestore.restored.length || foundationRestore.remaining.length
+    ? `foundation/ is platform-owned; this build's changes to it were put back before the checkpoint: ${foundationRestore.restored.map((x) => `${x.path} (${x.change})`).join(', ') || 'none'}`
+      + `${foundationRestore.remaining.length ? `. Could NOT be put back (review before deploying): ${foundationRestore.remaining.map((x) => x.path).join(', ')}` : ''}.`
+    : null;
+  const recordSummaryText = `${summary || 'checkpoint'}${phaseLine ? `\n\n${phaseLine}` : ''}${foundationLine ? `\n\n${foundationLine}` : ''}${diffStat ? `\n\nDiff (this checkpoint):\n${diffStat}` : ''}`;
 
   // 3) Insert the hash-chained change record.
   const gatesRun = (gateReports || []).map((g) => ({ name: g.name, result: g.status }));

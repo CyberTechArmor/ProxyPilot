@@ -160,9 +160,11 @@ export function fileEngineHits(path, text) {
 }
 
 // introducedEngineHits({ files: [{ path, base, current }], exception })
-// → the refused-engine hits in `current` that `base` (the file at HEAD) did
-// not already have, minus what a recorded exception allows. Pre-existing
-// engines are the gate's business; this answers "did THIS build add one?".
+// → the refused-engine hits in `current` that `base` (the file at the commit
+// the cycle started from) did not already have, minus what a recorded
+// exception allows. Pre-existing engines are the gate's business (refused on
+// the foundation, reported in an app from before it); this answers "did THIS
+// build add one?" for every project.
 export function introducedEngineHits({ files = [], exception = null } = {}) {
   const out = [];
   for (const f of Array.isArray(files) ? files : []) {

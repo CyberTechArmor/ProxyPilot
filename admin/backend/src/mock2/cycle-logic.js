@@ -270,7 +270,10 @@ export function gateProfileForMode(mode) {
 // exactly where apps drifted to SQLite while it ran in full builds only. The
 // seed declares `"tier": "quick"`; the name keeps it in every tier for a
 // framework version that lost the field. Its non-database sub-checks report
-// as advisory below full (MOCK2_GATE_PROFILE, see gatesForProfile).
+// as advisory below full (MOCK2_GATE_PROFILE, see gatesForProfile). A project
+// from before the foundation (MOCK2_FOUNDATION=0, see gateRunEnv) is not
+// wedged by an engine it already had: the script reports those as advisory
+// and keeps, in the full build, exactly the refusals it had before.
 const QUICK_TIER_NAME_RE = /^(tsc|typecheck|type-check|types|lint|compile|constitution-lint)$/i;
 // The MVP tier is "look and act right": rendering, interaction, structure.
 const MVP_TIER_NAME_RE = /(^|-)(ui|ui-checks?|ui-interaction|smoke|render|responsive|mobile|a11y|accessibility|build)($|-)/i;
@@ -323,6 +326,22 @@ export function gatesForProfile(gates = [], profile = 'full') {
     .map((g) => (gateIsAdvisoryIn(g?.name, profile)
       ? { ...g, script: asAdvisory(g.script, g.name), advisory: true, profile }
       : { ...g, profile }));
+}
+
+// gateRunEnv — the variables runGateBattery assigns on EVERY gate's own
+// command line. Each comes from host state only (mock2.db), and each is set
+// even when empty, so nothing in the repository or the guest's environment
+// decides it:
+//   MOCK2_DATABASE_EXCEPTION  'sqlite' | ''   the user's recorded SQLite request
+//   MOCK2_FOUNDATION          '1' | '0'       projects.foundation_version set or
+//                                             not ('1' — the strict rule — unless
+//                                             the host knows the project predates
+//                                             the foundation)
+//   MOCK2_GATE_PROFILE        quick|mvp|full|''  the battery the gate was selected for
+export function gateRunEnv({ databaseException = '', foundation = true, profile = '' } = {}) {
+  const exc = databaseException === 'sqlite' ? 'sqlite' : '';
+  const prof = /^(quick|mvp|full)$/.test(String(profile || '')) ? profile : '';
+  return `MOCK2_DATABASE_EXCEPTION='${exc}' MOCK2_FOUNDATION='${foundation === false ? '0' : '1'}' MOCK2_GATE_PROFILE='${prof}'`;
 }
 
 // withBaselineGates — append the backend-owned baseline gates for this profile.

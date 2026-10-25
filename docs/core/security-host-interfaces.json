@@ -63,6 +63,23 @@
       "host_namespace: const hostCommand = `nsenter -t 1 -m -u -n -i sh -c ${JSON.stringify(command)}`;": 1,
       "process_api: import { exec } from 'child_process';": 1
     },
+    "admin/backend/src/lib/caddy-log-proof.js": {
+      "host_command: const probe = await runHostCapture('python3', ['-c', ACTIVE_PROOF_BOOTSTRAP, `${installed.source_dir}/scripts/secure-mcp-caddy-logs.py`, domain], { timeoutMs: 30000, maxCapture: MAX_OUTPUT });": 1,
+      "host_command: export async function readCaddyLogProof({ domain, selfUpdateInstalled, runHostCapture }) {": 1
+    },
+    "admin/backend/src/lib/caddy-log-proof.test.js": {
+      "host_command: assert.deepEqual(await readCaddyLogProof(deps({ runHostCapture })), failure());": 1,
+      "host_command: assert.deepEqual(await readCaddyLogProof(deps({ runHostCapture: async () => ({ status: 0, stdout: JSON.stringify(value) }) })), failure());": 1,
+      "host_command: const result = await readCaddyLogProof(deps({ runHostCapture: async () => ({ status: 0, stdout: JSON.stringify(value), stderr: secret }) }));": 1,
+      "host_command: const result = await readCaddyLogProof(deps({ selfUpdateInstalled: async () => ({ configured: false, source_dir: sourceDir }), runHostCapture: async () => { invoked = true; } }));": 1,
+      "host_command: const result = await readCaddyLogProof(deps({ selfUpdateInstalled: async () => ({ configured: true, source_dir }), runHostCapture: async () => { invoked = true; } }));": 1,
+      "host_command: const runHostCapture = async (command, args, options) => {": 1,
+      "host_command: const runtime = deps({ selfUpdateInstalled: async () => ({ configured: true, source_dir }), runHostCapture });": 1,
+      "host_command: for (const runHostCapture of [async () => ({ status: 0, stdout: secret, stderr: secret }), async () => ({ status: 1, stdout: JSON.stringify(proof()), stderr: secret }), async () => { throw new Error(secret); }, async () => null, async () => ({ status: 0, stdout: ' '.repeat(65537) + JSON.stringify(proof()) })]) {": 1,
+      "host_command: return { domain, selfUpdateInstalled: async () => ({ configured: true, source_dir: sourceDir }), runHostCapture: async () => ({ status: 0, stdout: JSON.stringify(proof()) }), ...overrides };": 1,
+      "host_command: runHostCapture: async (...args) => { calls.push(['run', ...args]); return { status: 0, stdout: JSON.stringify(proof()), stderr: secret }; },": 1,
+      "process_api: import { spawnSync } from 'node:child_process';": 1
+    },
     "admin/backend/src/lib/cert-mount-reconciler.js": {
       "host_namespace: // nsenter pivot inside the admin container is centralised \u2014 see": 1,
       "host_namespace: `nsenter -t 1 -m -u -n -i sh -c ${shellSingleQuote(command)}`,": 1,
@@ -572,6 +589,7 @@
       "host_command: runHostCapture, LXC_PREFIX,": 1
     },
     "admin/backend/src/routes/mcp-tools/edge.js": {
+      "host_command: const credentialRedaction = await readCaddyLogProof({ domain, selfUpdateInstalled: ctx.selfUpdateInstalled, runHostCapture });": 1,
       "host_command: const r = await runHostCapture('caddy', ['list-modules'], { timeoutMs: 15000 }).catch(() => null);": 2,
       "host_command: const r = await runHostCapture('tail', ['-c', String(tailBytes), logPath], { timeoutMs: 20000, maxCapture: tailBytes + 65536 });": 1,
       "host_command: getDb, getSetting, setSetting, runHostCapture, LXC_PREFIX, LXC_NAME_REGEX, fetchLxcInstance, lxcReachableAddress,": 1

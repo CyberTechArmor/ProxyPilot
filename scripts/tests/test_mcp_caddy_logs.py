@@ -245,10 +245,22 @@ class Verification(unittest.TestCase):
         config['apps']['http']['servers']['srv0']['errors'] = {'routes': [{'handle': [{'handler': 'log_name'}]}]}
         variants.append(config)
         config = self.domain_config()
-        config['apps']['http']['servers']['other'] = {'routes': [{'match': [{'host': ['app.example.test']}]}]}
+        config['apps']['http']['servers']['other'] = {'logs': {}, 'routes': [{'match': [{'host': ['app.example.test']}]}]}
         variants.append(config)
         for config in variants:
             with self.assertRaises(ValueError): logs.prove_domain(config, 'app.example.test')
+
+    def test_disabled_access_logging_on_other_servers_is_safe(self):
+        for with_null in (False, True):
+            config = self.domain_config()
+            other = {'routes': [{'handle': [{'handler': 'respond'}]}]}
+            if with_null:
+                other['logs'] = None
+            config['apps']['http']['servers']['redirect'] = other
+            self.assertEqual(logs.prove_domain(config, 'app.example.test'), ['log0'])
+        config['apps']['http']['servers']['redirect']['logs'] = {}
+        with self.assertRaises(ValueError):
+            logs.prove_domain(config, 'app.example.test')
 
     def test_domain_proof_default_and_unique_wildcard_bindings(self):
         config = self.domain_config()

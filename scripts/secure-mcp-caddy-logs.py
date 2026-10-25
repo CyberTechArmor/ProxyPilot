@@ -161,7 +161,7 @@ def prove_config(config, expected_encoder):
             include = logger.get('include', [])
             require(include and all(item.startswith('http.log.access.') for item in include))
     servers = config.get('apps', {}).get('http', {}).get('servers', {})
-    require(all(not server.get('logs', {}).get('should_log_credentials', False)
+    require(all(not (server.get('logs') or {}).get('should_log_credentials', False)
                 for server in servers.values()))
     return {'global_default_encoder': True, 'debug_disabled': True,
             'credential_headers_disabled': True}
@@ -442,6 +442,10 @@ def prove_domain(config, domain):
         route_nodes = list(walk(server.get('routes', []))) + list(walk(server.get('errors', {})))
         route_match = any(route_could_match(route, domain) for route in server.get('routes', []))
         if not any(matches_host(host, domain) for host in mappings) and not route_match:
+            continue
+        # Caddy disables access logging when Server.Logs is absent/null;
+        # an explicit empty object enables default logging and must be checked.
+        if server.get('logs') is None:
             continue
         bound_servers += 1
         require(settings)

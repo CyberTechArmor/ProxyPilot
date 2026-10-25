@@ -151,3 +151,29 @@ test('the GET overview read: probe rows plus the active index, one round trip', 
   }
   assert.ok(!indexes.some((x) => x.id === 'ix_view0001'), 'a retired index is not the active one');
 });
+
+test('the reembed promotion read-back: real row counts and the declared vector type, never the app-maintained item_count alone', { skip }, async () => {
+  prepare();
+  const { buildReembedCheckSql, checkReembedPromotion } = await import('../mock2/foundation-logic.js');
+  q(`CREATE TABLE IF NOT EXISTS mock2_foundation.vec_ix_rsrc0001 (source text, item_id text, chunk int, embedding vector(3));
+CREATE TABLE IF NOT EXISTS mock2_foundation.vec_ix_rdst0001 (source text, item_id text, chunk int, embedding halfvec(2048));
+INSERT INTO mock2_foundation.vec_ix_rsrc0001 VALUES ('a', '1', 0, '[1,2,3]'), ('a', '2', 0, '[1,2,3]');
+INSERT INTO mock2_foundation.vector_indexes (id, provider, model, dimensions, metric, state, table_name, item_count) VALUES ('ix_rdst0001', 'openai_compatible', 'm', 2048, 'cosine', 'ready', 'vec_ix_rdst0001', 2) ON CONFLICT DO NOTHING;`);
+  const read = () => {
+    const r = psql(buildReembedCheckSql({ targetIndex: 'ix_rdst0001', sourceIndex: 'ix_rsrc0001' }));
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(parseMarker(r.stdout, SQL_MARKERS.ok)[0], 'checked');
+    return parseJsonRows(r.stdout).find((x) => x.type === 'recheck');
+  };
+  const planned = { provider: 'openai_compatible', model: 'm', dimensions: 2048 };
+  let check = read();
+  assert.deepEqual([check.column_type, check.target_rows, check.source_rows, check.item_count], ['halfvec(2048)', 0, 2, 2]);
+  assert.match(checkReembedPromotion({ check, planned, sourceIndex: 'ix_rsrc0001' }).error, /reports 2 item\(s\) but holds 0/);
+  const v = `[${Array(2048).fill(0.5).join(',')}]`;
+  q(`INSERT INTO mock2_foundation.vec_ix_rdst0001 VALUES ('a', '1', 0, '${v}'), ('a', '2', 0, '${v}');`);
+  check = read();
+  assert.deepEqual(checkReembedPromotion({ check, planned, sourceIndex: 'ix_rsrc0001' }), { ok: true, items: 2 });
+  // A missing table is an error, never a pass.
+  const gone = psql(buildReembedCheckSql({ targetIndex: 'ix_rnone001', sourceIndex: 'ix_rsrc0001' }));
+  assert.notEqual(gone.code, 0);
+});

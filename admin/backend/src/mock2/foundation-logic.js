@@ -854,6 +854,57 @@ export function promoteIndexStatements(indexId) {
   ];
 }
 
+// The host's read-back of a validated index before it is promoted (run as the
+// superuser): the index row, the declared type of its vector column (Postgres
+// enforces it on every row) and the REAL row counts of the target and the
+// source tables — not the item_count the app maintains.
+export function buildReembedCheckSql({ targetIndex, sourceIndex = null }) {
+  const target = vectorTableName(targetIndex);
+  const source = sourceIndex == null || sourceIndex === '' ? null : vectorTableName(sourceIndex);
+  return `${SQL_PREAMBLE}SELECT ${sqlLiteral(SQL_MARKERS.json)} || json_build_object('type', 'recheck', 'id', ix.id, 'state', ix.state, 'provider', ix.provider, 'model', ix.model, 'dimensions', ix.dimensions, 'item_count', ix.item_count, `
+    + `'column_type', (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = ${sqlLiteral(`mock2_foundation.${target}`)}::regclass AND a.attname = 'embedding' AND NOT a.attisdropped), `
+    + `'target_rows', (SELECT count(*) FROM mock2_foundation.${target}), `
+    + `'source_rows', ${source ? `(SELECT count(*) FROM mock2_foundation.${source})` : 'NULL'})::text FROM mock2_foundation.vector_indexes ix WHERE ix.id = ${sqlLiteral(targetIndex)};
+SELECT ${sqlLiteral(`${SQL_MARKERS.ok}checked`)};
+`;
+}
+
+// checkReembedPromotion({ check, planned, sourceIndex }) → { ok } | { ok: false, error }.
+//   check: the buildReembedCheckSql row; planned: the job's params.to.
+export function checkReembedPromotion({ check, planned = {}, sourceIndex = null } = {}) {
+  if (!plain(check)) return { ok: false, error: 'the new index could not be read back' };
+  const problems = [];
+  if (!['ready', 'active'].includes(check.state)) problems.push(`it is ${check.state || 'missing'}, not ready`);
+  for (const k of ['provider', 'model']) if (planned?.[k] != null && check[k] !== planned[k]) problems.push(`its ${k} is ${check[k]}, not the planned ${planned[k]}`);
+  const dims = Number(planned?.dimensions ?? check.dimensions);
+  if (Number(check.dimensions) !== dims) problems.push(`it has ${check.dimensions} dimensions, not the planned ${dims}`);
+  let type = null;
+  try { type = vectorColumnPlan(dims).type; } catch { problems.push('its dimensions are invalid'); }
+  if (type && check.column_type !== type) problems.push(`its vector column is ${check.column_type || 'missing'}, not ${type}`);
+  const rows = Number(check.target_rows);
+  if (check.target_rows == null || !Number.isInteger(rows)) problems.push('its rows could not be counted');
+  else {
+    if (Number(check.item_count) !== rows) problems.push(`it reports ${check.item_count} item(s) but holds ${rows}`);
+    if (sourceIndex && Number(check.source_rows) !== rows) problems.push(`it holds ${rows} item(s) but the active index ${sourceIndex} holds ${check.source_rows}`);
+  }
+  return problems.length ? { ok: false, error: `the new index does not check out: ${problems.join('; ')}` } : { ok: true, items: rows };
+}
+
+// checkStorageCopyPromotion({ progress, test, targetCount }) → { ok } | { ok: false, error }.
+//   progress: the job's progress (objects_done = verified, objects_total, failed);
+//   test: the pending provider's storage-test, run again now;
+//   targetCount: the target's object count, or null when nobody could count it.
+export function checkStorageCopyPromotion({ progress = {}, test = null, targetCount = null } = {}) {
+  const done = Number.isInteger(progress?.objects_done) ? progress.objects_done : null;
+  const total = Number.isInteger(progress?.objects_total) ? progress.objects_total : null;
+  const no = (error) => ({ ok: false, error });
+  if (done != null && total != null && done !== total) return no(`the job reports ${done} of ${total} object(s) verified`);
+  if (Number(progress?.failed) > 0) return no(`the job reports ${progress.failed} failed object(s)`);
+  if (!test?.ok) return no(`the new provider did not pass its test again (${test?.status || 'no answer'})`);
+  if (done != null && Number.isInteger(targetCount) && targetCount < done) return no(`the new provider holds ${targetCount} object(s), fewer than the ${done} the job verified`);
+  return { ok: true };
+}
+
 export function buildCancelJobSql({ jobId, indexId = null }) {
   if (!isValidJobId(jobId)) throw new Error('invalid job id');
   const lines = [SQL_PREAMBLE, 'BEGIN;'];

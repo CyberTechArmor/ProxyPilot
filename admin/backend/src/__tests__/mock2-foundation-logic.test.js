@@ -212,6 +212,28 @@ test('GET: an active index that does not match the embeddings provider is warned
   assert.equal(projectFoundation({ project: PROJECT, rows, secretNames: [] }).warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false, 'no index, no warning');
 });
 
+test('promotion read-back: the reembed check SQL interpolates only validated ids; the checks name every mismatch', async () => {
+  const { buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion } = await import('../mock2/foundation-logic.js');
+  const sql = buildReembedCheckSql({ targetIndex: 'ix_new0001', sourceIndex: 'ix_old0001' });
+  assert.match(sql, /'mock2_foundation\.vec_ix_new0001'::regclass/);
+  assert.match(sql, /count\(\*\) FROM mock2_foundation\.vec_ix_new0001\)/);
+  assert.match(sql, /'source_rows', \(SELECT count\(\*\) FROM mock2_foundation\.vec_ix_old0001\)/);
+  assert.match(buildReembedCheckSql({ targetIndex: 'ix_new0001' }), /'source_rows', NULL/);
+  for (const bad of ["x'; DROP TABLE y; --", 'IX', '']) assert.throws(() => buildReembedCheckSql({ targetIndex: bad }));
+  assert.throws(() => buildReembedCheckSql({ targetIndex: 'ix_ok', sourceIndex: 'a b' }));
+  const good = { state: 'ready', provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536, item_count: 7, column_type: 'vector(1536)', target_rows: 7, source_rows: 7 };
+  const planned = { provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 };
+  assert.deepEqual(checkReembedPromotion({ check: good, planned, sourceIndex: 'ix_old' }), { ok: true, items: 7 });
+  assert.match(checkReembedPromotion({ check: { ...good, dimensions: 3072, column_type: 'halfvec(3072)' }, planned, sourceIndex: 'ix_old' }).error, /3072 dimensions/);
+  assert.match(checkReembedPromotion({ check: { ...good, model: 'other' }, planned }).error, /model is other/);
+  assert.match(checkReembedPromotion({ check: { ...good, state: 'building' }, planned }).error, /building, not ready/);
+  assert.equal(checkReembedPromotion({ check: undefined, planned }).ok, false);
+  assert.equal(checkReembedPromotion({ check: { ...good, source_rows: 9 }, planned }).ok, true, 'no source index planned: not compared');
+  assert.equal(checkStorageCopyPromotion({ progress: { objects_done: 3, objects_total: 3, failed: 0 }, test: { ok: true }, targetCount: null }).ok, true, 'no count reported: the re-test decides');
+  assert.equal(checkStorageCopyPromotion({ progress: {}, test: { ok: false, status: 'unavailable' } }).ok, false);
+  assert.equal(checkStorageCopyPromotion({ progress: { objects_done: 3 }, test: { ok: true }, targetCount: 5 }).ok, true, 'a target may already hold other objects');
+});
+
 test('embeddings: OpenAI-compatible needs base_url, model and dimensions; its key is optional and never reused at a new address', () => {
   assert.equal(validateEmbeddingsConfig('openai_compatible', { model: 'm', dimensions: 768 }).status, 400);
   assert.equal(validateEmbeddingsConfig('openai_compatible', { base_url: 'http://10.0.0.5:8080/v1', dimensions: 768 }).status, 400);

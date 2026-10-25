@@ -28,6 +28,7 @@ import {
   parseHealthOutput, projectFoundation, projectJob, credentialSecretNames, parseJsonObject, parseJsonRows, newJobId, newIndexId,
   buildJobInsertSql, buildJobPollSql, buildActiveIndexSql, buildOverviewReadSql, buildCancelJobSql, promoteIndexStatements,
   SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId, needsReembed, indexSpace,
+  buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion,
 } from './foundation-logic.js';
 import { SECRET_NAMES } from './foundation-contract.js';
 
@@ -260,6 +261,57 @@ async function promote(project, feature, { indexId = null } = {}) {
   return { ok: true, generation: s.generation, ...(serviceNote ? { warning: serviceNote } : {}) };
 }
 
+// ---- the host's look before a job's promotion ------------------------------------
+//
+// TRUST BOUNDARY. The app role owns the app database (it can write the jobs and
+// vector_indexes rows and its own vec_* tables) and the foundation CLI runs
+// inside the guest, so a job's 'succeeded' and an index's 'ready' are the
+// guest's word. Before switching, the host looks for itself where it cheaply
+// can, and refuses the promotion on a mismatch (the job stays 'running' with
+// the reason; nothing is switched):
+//   storage_migrate — the job's own counts must agree (every object verified,
+//     none failed); the pending provider is tested again NOW (storage-test
+//     --pending); and the target's object count — taken by the HOST with the
+//     platform's admin identity when the target is the bundled storage,
+//     reported by the CLI for an external target when it reports one
+//     (detail.object_count) — must not be below the job's verified count.
+//   reembed — the host reads the target index back as the superuser: its row
+//     (state, provider, model, dimensions), the declared type of its vector
+//     column (Postgres enforces it on every row) and the REAL row counts of
+//     the target and source tables; the target must hold exactly what its row
+//     claims, and as many items as the source.
+// What stays the guest's word: the per-object size/sha256 verification and the
+// self-retrieval sample (the host neither re-reads object bytes nor re-embeds
+// a sample), and an external target's object count. A guest that lies
+// consistently about those can still get a switch promoted; the source (the
+// preserved bundled volume, the retired index) is never deleted by a
+// promotion, so it can be switched back.
+export const PROMOTION_RECHECK_MS = 60_000;
+
+async function verifyBeforePromotion(project, job, params, appProgress) {
+  try {
+    if (job.kind === 'storage_migrate') {
+      const test = await testPending(project, 'storage', []);
+      let targetCount = null;
+      if (params.to?.provider === 'bundled') {
+        targetCount = await bundledObjectCount(project);
+        if (targetCount == null && Number.isInteger(appProgress.objects_done)) return { ok: false, error: 'the bundled storage could not be counted' };
+      } else if (Number.isInteger(test?.detail?.object_count)) {
+        targetCount = test.detail.object_count;
+      }
+      return checkStorageCopyPromotion({ progress: appProgress, test, targetCount });
+    }
+    const r = await store.appPsql(project.container_name, buildReembedCheckSql({ targetIndex: params.target_index, sourceIndex: params.source_index || null }), { timeoutMs: 120_000 });
+    if (Number(r?.code) !== 0 || !parseMarker(r.stdout, SQL_MARKERS.ok).length) {
+      return { ok: false, error: `the new index could not be read back: ${redactSecrets(String(r?.stderr || r?.stdout || 'no answer')).trim().slice(-200)}` };
+    }
+    const check = parseJsonRows(r.stdout).find((x) => x.type === 'recheck');
+    return checkReembedPromotion({ check, planned: params.to || {}, sourceIndex: params.source_index || null });
+  } catch (e) {
+    return { ok: false, error: redactSecrets(e?.message || String(e)).slice(0, 200) };
+  }
+}
+
 // ---- jobs -----------------------------------------------------------------------
 
 async function startJob(project, feature, { kind, params, index = null }, { userId }) {
@@ -395,7 +447,12 @@ async function refreshJobOnce(project, staleJob) {
   // deployment lock cancelJob takes, so a cancel can never answer "cancelled"
   // while the switch completes. The job is re-read inside: a cancel that won
   // the lock first leaves it finished, and a busy lock means the next poll
-  // promotes.
+  // promotes. A promotion the host's own check refused is looked at again
+  // once per PROMOTION_RECHECK_MS, not on every poll.
+  const lastCheck = Date.parse(hostProgress.promotion_checked_at || '') || 0;
+  if (hostProgress.phase === 'verifying' && Date.now() - lastCheck < PROMOTION_RECHECK_MS) {
+    return store.updateJob(job.id, { progress: { last_poll_at: nowIso() } });
+  }
   const done = await exclusive(project.id, async () => {
     const current = store.getJob(job.id);
     if (!current || !['queued', 'running'].includes(current.state)) return current;
@@ -406,6 +463,10 @@ async function refreshJobOnce(project, staleJob) {
     if (job.kind === 'reembed' && !['ready', 'active'].includes(index?.state)) {
       updatePending(project.id, feature, { job_id: null });
       return store.updateJob(job.id, { state: 'failed', error: `the new index did not validate (state ${index?.state || 'missing'}); the active index is unchanged`, progress: appProgress, finished: true });
+    }
+    const check = await verifyBeforePromotion(project, job, params, appProgress);
+    if (!check.ok) {
+      return store.updateJob(job.id, { state: 'running', error: `promotion refused: ${check.error}; nothing was switched`, progress: { ...appProgress, phase: 'verifying', promotion_checked_at: nowIso() } });
     }
     const p = await promote(project, feature, { indexId: job.kind === 'reembed' ? params.target_index : null });
     if (!p.ok) return store.updateJob(job.id, { state: 'running', error: `promotion pending: ${p.error}`, progress: { ...appProgress, phase: 'promoting' } });

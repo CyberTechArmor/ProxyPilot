@@ -76,6 +76,15 @@ class ManagedRetrofit(unittest.TestCase):
         self.assertIn('request>headers>Referer query', after)
         self.assertEqual(logs.transform_managed_service(after, self.domain), after)
 
+    def test_source_backed_output_only_legacy_logger_migrates(self):
+        before = self.site().replace('        format json\n', '')
+        after = logs.transform_managed_service(before, self.domain)
+        self.assertTrue(logs.PREFLIGHT_CHECKS['terminal_output_only_logger'])
+        self.assertEqual(before.split('    log {')[0], after.split('    log {')[0])
+        self.assertIn('request>uri query', after)
+        self.assertIn('request>headers>Referer query', after)
+        self.assertEqual(logs.transform_managed_service(after, self.domain), after)
+
     def test_custom_ambiguous_mismatched_or_altered_site_refused(self):
         good = self.site()
         variants = [
@@ -170,6 +179,44 @@ class ManagedRetrofit(unittest.TestCase):
             config = logs.adapt(path)
             encoders = [log.get('encoder') for log in config.get('logging', {}).get('logs', {}).values()]
             self.assertIn(logs.SERVICE_ENCODER, encoders)
+
+class ManagedDiagnostics(unittest.TestCase):
+    def setUp(self):
+        logs.PREFLIGHT_CHECKS.clear()
+        self.fixture = ManagedRetrofit()
+
+    def test_header_failure_reports_only_fixed_boolean_metadata(self):
+        text = self.fixture.site().replace('# Generated:', '# PrivateGenerated:')
+        text = text.replace('# Services: / (container_service)', '# Services: PRIVATE_CANDIDATE_SECRET')
+        with self.assertRaises(ValueError):
+            logs.transform_managed_service(text, logs.KNOWN_MANAGED_SERVICE_DOMAIN)
+        self.assertEqual(logs.STAGE, 'service_header')
+        self.assertFalse(logs.PREFLIGHT_CHECKS['header_generated_timestamp'])
+        self.assertTrue(logs.PREFLIGHT_CHECKS['header_services'])
+        self.assertTrue(all(isinstance(value, bool) for value in logs.PREFLIGHT_CHECKS.values()))
+        self.assertNotIn('PRIVATE', json.dumps(logs.PREFLIGHT_CHECKS))
+
+    def test_terminal_and_marker_failures_have_distinct_static_stages(self):
+        text = self.fixture.site().replace('format json', 'format console')
+        with self.assertRaises(ValueError):
+            logs.transform_managed_service(text, logs.KNOWN_MANAGED_SERVICE_DOMAIN)
+        self.assertEqual(logs.STAGE, 'service_terminal_logger')
+        self.assertFalse(logs.PREFLIGHT_CHECKS['terminal_legacy_logger'])
+        logs.PREFLIGHT_CHECKS.clear()
+        with self.assertRaises(ValueError):
+            logs.transform_managed_service(self.fixture.site().replace('# ProxyPilot Managed Configuration', '# altered'), logs.KNOWN_MANAGED_SERVICE_DOMAIN)
+        self.assertEqual(logs.STAGE, 'service_marker')
+        self.assertEqual(logs.PREFLIGHT_CHECKS, {})
+
+    def test_preflight_dashboard_and_global_failures_have_fixed_stages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.fixture.setup_root(directory)
+            (root / 'sites' / 'dashboard').unlink()
+            with self.assertRaises(ValueError): logs.prepare_configuration(root)
+            self.assertEqual(logs.STAGE, 'dashboard_count')
+            (root / 'Caddyfile').unlink()
+            with self.assertRaises(ValueError): logs.prepare_configuration(root)
+            self.assertEqual(logs.STAGE, 'global_path')
 
 class Verification(unittest.TestCase):
     def setUp(self):

@@ -112,6 +112,7 @@ LIMIT = 8 * 1024 * 1024
 COMMAND_TIMEOUT = 20
 STAGE = "startup"
 PROBE_VERSION = "unknown"
+PREFLIGHT_CHECKS = {}
 
 def stage(name):
     global STAGE
@@ -123,33 +124,61 @@ def stage(name):
 
 def transform_managed_service(text, domain):
     """Replace only the canonical terminal logger of one known managed site."""
+    stage('service_domain')
     require(domain == KNOWN_MANAGED_SERVICE_DOMAIN and valid_domain(domain))
+    stage('service_line_endings')
     require('\r' not in text)
+    stage('service_marker')
     require(text.count('# ProxyPilot Managed Configuration') == 1)
+    stage('service_domain_marker')
     require(text.count('# Domain: ') == 1)
     header = (r'\A(?:# proxypilot: healthpath=[^\r\n]+\n)?'
               r'# ProxyPilot Managed Configuration\n# Domain: ' + re.escape(domain) +
               r'\n# Services: [^\r\n]+\n'
               r'# Generated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\n\n'
               r'(?:http://)?' + re.escape(domain) + r' \{\n')
+    PREFLIGHT_CHECKS.update({
+        'header_managed_marker': bool(re.search(r'(?m)^# ProxyPilot Managed Configuration$', text)),
+        'header_domain': bool(re.search(r'(?m)^# Domain: ' + re.escape(domain) + r'$', text)),
+        'header_services': bool(re.search(r'(?m)^# Services: [^\r\n]+$', text)),
+        'header_generated_timestamp': bool(re.search(r'(?m)^# Generated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$', text)),
+        'header_site_address': bool(re.search(r'(?m)^(?:http://)?' + re.escape(domain) + r' \{$', text)),
+    })
+    stage('service_header')
     require(re.match(header, text))
     start = '    log {\n        output file /var/log/caddy/' + domain + '.log\n'
     end = '    }\n}\n'
+    # The pre-hardening services.js renderer emitted this exact output-only
+    # block (Caddy's default JSON), without an explicit format directive.
+    output_only = start + end
     old = start + '        format json\n' + end
     new = start + '\n'.join('        ' + line for line in SERVICE_FORMAT.splitlines()) + '\n' + end
-    require(text.endswith(old) or text.endswith(new))
-    logger = old if text.endswith(old) else new
+    PREFLIGHT_CHECKS.update({
+        'terminal_output_only_logger': text.endswith(output_only),
+        'terminal_legacy_logger': text.endswith(old),
+        'terminal_filtered_logger': text.endswith(new),
+        'expected_log_output': '        output file /var/log/caddy/' + domain + '.log\n' in text,
+        'legacy_json_format_line': '        format json\n' in text,
+    })
+    stage('service_terminal_logger')
+    require(text.endswith(output_only) or text.endswith(old) or text.endswith(new))
+    logger = output_only if text.endswith(output_only) else old if text.endswith(old) else new
     prefix = text[:-len(logger)]
     # Caddy braces in placeholders/quoted strings are not block delimiters.
+    stage('service_tokenize')
     lexer = shlex.shlex(text, posix=False)
     lexer.whitespace_split = True
     lexer.commenters = '#'
     lexer.quotes = '"`'
     tokens = list(lexer)
+    stage('service_token_address')
     require(tokens[:2] in ([domain, '{'], ['http://' + domain, '{']))
+    stage('service_token_log_count')
     require(tokens.count('log') == 1)
+    stage('service_token_forbidden_directive')
     require(not any(token in ('debug', 'log_credentials', 'import', 'invoke') or
                     token.startswith('log_') for token in tokens))
+    stage('service_token_blocks')
     depth = 0
     sites = 0
     for token in tokens:
@@ -159,37 +188,52 @@ def transform_managed_service(text, domain):
         elif token == '}':
             depth -= 1
             require(depth >= 0)
+    stage('service_token_single_site')
     require(depth == 0 and sites == 1)
     # The route prefix may contain no hidden format or logger directives.
+    stage('service_prefix_directives')
     require(not re.search(r'^\s*(?:format|log|log_[A-Za-z_]+|debug|import|invoke)\b', prefix, re.M))
     return prefix + new
 
 
 def prepare_configuration(root):
     """Preflight every owned file before any write; leave other sites untouched."""
+    stage('configuration_root')
     require(not root.is_symlink() and root.is_dir())
     sites_dir = root / 'sites'
+    stage('configuration_sites_dir')
     require(not sites_dir.is_symlink() and sites_dir.is_dir())
     global_path = root / 'Caddyfile'
+    stage('global_path')
     require(not global_path.is_symlink() and global_path.is_file())
+    stage('dashboard_scan')
     dashboards = []
     for path in sites_dir.iterdir():
         if path.is_symlink() or not path.is_file():
             continue
         if b'# ProxyPilot Admin Dashboard' in path.read_bytes():
             dashboards.append(path)
+    stage('dashboard_count')
     require(len(dashboards) == 1)
     paths = [global_path, dashboards[0]]
+    stage('owned_regular_files')
     require(all(not path.is_symlink() and path.is_file() for path in paths))
+    stage('owned_read')
     originals = [path.read_bytes().decode('utf-8') for path in paths]
-    changed = [transform(originals[0], True), transform(originals[1])]
+    stage('global_transform')
+    changed = [transform(originals[0], True)]
+    stage('dashboard_transform')
+    changed.append(transform(originals[1]))
     domain = KNOWN_MANAGED_SERVICE_DOMAIN
     target = sites_dir / domain
     service = {'domain': domain, 'present': False, 'change': 'absent', 'active_verified': False}
     # A dangling symlink also fails; never treat it as an absent optional site.
+    stage('service_path_symlink')
     require(not target.is_symlink())
     if target.exists():
+        stage('service_regular_file')
         require(target.is_file() and target not in paths)
+        stage('service_read')
         original = target.read_bytes().decode('utf-8')
         replacement = transform_managed_service(original, domain)
         paths.append(target)
@@ -639,6 +683,7 @@ def active_proof_cli(args):
 
 def main():
     global PROBE_VERSION
+    PREFLIGHT_CHECKS.clear()
     stage('version')
     PROBE_VERSION = safe_version()[0]
     stage('identify_configuration')
@@ -673,6 +718,7 @@ if __name__ == '__main__':
     except Exception:
         print(json.dumps({'type': 'proxypilot.caddy-log-verification', 'version': 1,
                           'result': 'failed', 'active_global_verified': False,
-                          'phase': STAGE, 'caddy_version': PROBE_VERSION}), flush=True)
+                          'phase': STAGE, 'caddy_version': PROBE_VERSION,
+                          'preflight_checks': PREFLIGHT_CHECKS}), flush=True)
         print('MCP log hardening or verification failed; review Caddy logging locally before continuing.', file=sys.stderr)
         sys.exit(1)

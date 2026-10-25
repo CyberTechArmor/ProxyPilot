@@ -28,7 +28,7 @@ import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
@@ -100,12 +100,19 @@ function fakeVector(text, dims) {
 }
 
 function fakeEmbeddingServer({ dims, apiKey = null }) {
-  const stats = { requests: 0, inputs: 0, bodies: [], auth: [] };
+  // stats.fail = true makes it answer 503 (an outage), counted in stats.failed.
+  const stats = { requests: 0, inputs: 0, bodies: [], auth: [], fail: false, failed: 0 };
   const server = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => { raw += c; });
     req.on('end', () => {
       if (req.method !== 'POST' || req.url !== '/v1/embeddings') { res.writeHead(404); res.end(); return; }
+      if (stats.fail) {
+        stats.failed += 1;
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'temporarily unavailable' } }));
+        return;
+      }
       stats.auth.push(req.headers.authorization || null);
       if (apiKey && req.headers.authorization !== `Bearer ${apiKey}`) {
         res.writeHead(401, { 'content-type': 'application/json' });
@@ -126,6 +133,45 @@ function fakeEmbeddingServer({ dims, apiKey = null }) {
   });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve({ server, stats, baseUrl: `http://127.0.0.1:${server.address().port}/v1` }));
+  });
+}
+
+// A TCP proxy in front of an S3 server that passes the client's bytes on at
+// bytesPerSec (answers unthrottled): a slow upload link. SigV4 still verifies,
+// since the Host header the client signed is what reaches the server. A
+// client that drops its connection drops the upstream one too.
+function throttleProxy(port, bytesPerSec) {
+  const sockets = new Set();
+  const server = net.createServer((client) => {
+    const upstream = net.connect(port, '127.0.0.1');
+    sockets.add(client);
+    sockets.add(upstream);
+    const slice = Math.max(1024, Math.floor(bytesPerSec / 20));
+    const slow = new Transform({
+      transform(chunk, _enc, cb) {
+        let off = 0;
+        const step = () => {
+          if (off >= chunk.length) { cb(); return; }
+          const part = chunk.subarray(off, off + slice);
+          off += part.length;
+          this.push(part);
+          setTimeout(step, Math.ceil((part.length / bytesPerSec) * 1000));
+        };
+        step();
+      },
+    });
+    const kill = () => { client.destroy(); upstream.destroy(); slow.destroy(); sockets.delete(client); sockets.delete(upstream); };
+    for (const s of [client, upstream, slow]) s.on('error', kill);
+    client.on('close', kill);
+    upstream.on('close', kill);
+    client.pipe(slow).pipe(upstream);
+    upstream.pipe(client);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      port: server.address().port,
+      close: () => { for (const s of sockets) s.destroy(); server.close(); },
+    }));
   });
 }
 
@@ -705,6 +751,213 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     await baseline();
   });
 
+  // Shared by the two tests below: stage a switch to the external S3 (bucket
+  // ext) under a prefix, insert the host's job row, read the target directly.
+  const stageExternal = async (config) => {
+    await setFeature('storage', { provider: 'bundled', config: bundledConfig(), pending: { provider: 'external', config, mode: 'copy', test: { at: new Date().toISOString() } } });
+    await setSecret('pending.storage.access_key_id', W.appB.accessKeyId);
+    await setSecret('pending.storage.secret_access_key', W.appB.secretAccessKey);
+    await W.rt.config.reloadFoundation();
+  };
+  const insertCopyJob = async (id, to, extra = {}) => {
+    const c = bundledConfig();
+    const params = { from: { provider: 'bundled', endpoint: c.endpoint, bucket: c.bucket, region: c.region, prefix: c.prefix }, to: { provider: 'external', ...to }, verify: ['size', 'sha256'], ...extra };
+    await W.su.query("INSERT INTO mock2_foundation.jobs (id, kind, state, params) VALUES ($1, 'storage_migrate', 'queued', $2::jsonb)", [id, JSON.stringify(params)]);
+  };
+  const extObject = async (key) => {
+    const { s3, client } = W.extS3;
+    try {
+      const r = await client.send(new s3.GetObjectCommand({ Bucket: 'ext', Key: key }));
+      return Buffer.from(await r.Body.transformToByteArray());
+    } catch (err) {
+      if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) return null;
+      throw err;
+    }
+  };
+  const extKeys = async (prefix) => {
+    const { s3, client } = W.extS3;
+    const keys = [];
+    let token;
+    do {
+      const r = await client.send(new s3.ListObjectsV2Command({ Bucket: 'ext', Prefix: prefix, ContinuationToken: token }));
+      for (const c of r.Contents || []) keys.push(c.Key);
+      token = r.IsTruncated ? r.NextContinuationToken : undefined;
+    } while (token);
+    return keys.sort();
+  };
+  const sourceKeys = async () => {
+    const keys = [];
+    for await (const it of W.rt.storage.storage.listAll()) if (!it.key.startsWith('.mock2-health/')) keys.push(it.key);
+    return keys.sort();
+  };
+
+  test('storage_migrate follows the source to the end: a same-size overwrite is copied again, a deleted key is deleted from the target (only keys the job wrote), the source is never deleted from; storage-test --pending counts the target', { timeout: 300000 }, async () => {
+    const { storage } = W.rt.storage;
+    const { runJob } = W.rt.jobs;
+    const { s3, client } = W.extS3;
+    const objects = new Map();
+    for (let i = 0; i < 30; i += 1) objects.set(`conv/a-${String(i).padStart(2, '0')}.bin`, crypto.randomBytes(4096));
+    for (const [k, v] of objects) await storage.put(k, v);
+    // On the target before the job, and not the job's: never touched.
+    await client.send(new s3.PutObjectCommand({ Bucket: 'ext', Key: 'conv1/unrelated.txt', Body: 'already here, not from the source' }));
+    await client.send(new s3.PutObjectCommand({ Bucket: 'ext', Key: 'elsewhere/keep.txt', Body: 'outside the prefix' }));
+    const config = externalConfig('conv1/');
+    await stageExternal(config);
+    await insertCopyJob('conv-1', { endpoint: config.endpoint, bucket: 'ext', region: config.region, prefix: 'conv1/' }, { concurrency: 1 });
+
+    // While pass 1 still copies, the app overwrites an object that is already
+    // verified on the target with other bytes of the SAME size, and deletes
+    // another verified one.
+    const overwritten = crypto.randomBytes(4096);
+    let mutation = null;
+    const out = await runJob('conv-1', {
+      onProgress: (p, s) => {
+        if (!mutation && p.pass === 1 && s.copied >= 3) {
+          mutation = (async () => { await storage.put('conv/a-00.bin', overwritten); await storage.delete('conv/a-01.bin'); })();
+        }
+      },
+    });
+    await mutation;
+    assert.equal(out.job.state, 'succeeded', JSON.stringify(out));
+    assert.equal(out.job.progress.converged, true);
+    assert.ok(out.job.progress.passes >= 3, `a pass copied the changes, a later one was quiet (${out.job.progress.passes})`);
+    assert.equal(sha(await extObject('conv1/conv/a-00.bin')), sha(overwritten), 'the same-size overwrite reached the target');
+    assert.equal(await extObject('conv1/conv/a-01.bin'), null, 'the object deleted from the source is gone from the target');
+    assert.equal(out.job.progress.deleted_from_target, 1);
+    assert.equal(out.stats.deleted_from_target, 1);
+    assert.equal(out.job.progress.bytes_in_flight, 0);
+    for (const [k, v] of objects) if (k !== 'conv/a-00.bin' && k !== 'conv/a-01.bin') assert.equal(sha(await extObject(`conv1/${k}`)), sha(v), k);
+    // Nothing the job did not write was touched, on either side of the prefix.
+    assert.equal(String(await extObject('conv1/unrelated.txt')), 'already here, not from the source');
+    assert.equal(String(await extObject('elsewhere/keep.txt')), 'outside the prefix');
+    // The source lost only what the app deleted: the job never deletes there.
+    const src = await sourceKeys();
+    assert.deepEqual(src.filter((k) => k.startsWith('conv/')), [...objects.keys()].filter((k) => k !== 'conv/a-01.bin').sort());
+    assert.ok(sha(await storage.getBuffer('conv/a-00.bin')) === sha(overwritten));
+    // The job's record follows the source too, and holds no object names
+    // outside storage_migration_items.
+    const items = (await W.su.query("SELECT key, sha256, state FROM mock2_foundation.storage_migration_items WHERE job_id = 'conv-1'")).rows;
+    assert.equal(items.length, src.length);
+    assert.ok(items.every((i) => i.state === 'verified'));
+    assert.ok(!items.some((i) => i.key === 'conv/a-01.bin'));
+    assert.equal(items.find((i) => i.key === 'conv/a-00.bin').sha256, sha(overwritten));
+    const sources = (await W.su.query("SELECT key_sha256, fingerprint, written FROM mock2_foundation.storage_migration_sources WHERE job_id = 'conv-1'")).rows;
+    assert.equal(sources.length, src.length);
+    assert.ok(sources.every((r) => /^[0-9a-f]{64}$/.test(r.key_sha256) && r.written === true));
+
+    // storage-test --pending reports how many objects the target holds under
+    // its prefix (probe keys left out) — here the copies plus the one that was
+    // already there.
+    const probe = await cli(['storage-test', '--pending', '--json'], W.cliEnv);
+    assert.equal(probe.status, 0, probe.stdout + probe.stderr);
+    const onTarget = (await extKeys('conv1/')).filter((k) => !k.startsWith('conv1/.mock2-health/'));
+    assert.equal(onTarget.length, out.job.progress.objects_done + 1);
+    assert.equal(probe.json.detail.object_count, onTarget.length);
+    // A listing that fails gives no count, never a guess.
+    await setSecret('pending.storage.secret_access_key', 'not-the-secret');
+    const refused = await cli(['storage-test', '--pending', '--json'], W.cliEnv);
+    assert.equal(refused.status, 2);
+    assert.equal(refused.json.detail.object_count, undefined);
+
+    for (const k of objects.keys()) await storage.delete(k);
+    await client.send(new s3.DeleteObjectCommand({ Bucket: 'ext', Key: 'elsewhere/keep.txt' }));
+    await W.su.query("DELETE FROM mock2_foundation.secrets WHERE name LIKE 'pending.%'");
+    await baseline();
+  });
+
+  test('a slow object keeps its job alive (the row moves while it is in flight), a cancel stops it mid-object, a relaunched run resumes after the finished objects', { timeout: 300000 }, async () => {
+    const { storage } = W.rt.storage;
+    const { runJob } = W.rt.jobs;
+    const RATE = 192 * 1024;
+    const BIG = 3 * 1024 * 1024; // ~16 s through the throttled link
+    const slow = await throttleProxy(W.s3bPort, RATE);
+    const slowEndpoint = `http://127.0.0.1:${slow.port}`;
+    const objects = new Map([['slow/a.bin', crypto.randomBytes(2048)], ['slow/b.bin', crypto.randomBytes(2048)], ['slow/c.bin', crypto.randomBytes(2048)]]);
+    objects.set('slow/z-big.bin', crypto.randomBytes(BIG));
+    for (const [k, v] of objects) await storage.put(k, v);
+    const total = (await sourceKeys()).length;
+    const slowConfig = (prefix, endpoint = slowEndpoint) => ({ endpoint, region: 'us-east-1', bucket: 'ext', prefix, force_path_style: true });
+    const jobRow = async (id) => (await W.su.query('SELECT state, updated_at, progress FROM mock2_foundation.jobs WHERE id = $1', [id])).rows[0];
+    const inFlight = (row) => Number(row.progress.bytes_in_flight) || 0;
+    try {
+      // 1. The host's watchdog reads jobs.updated_at: while the big object
+      //    crawls through the link the row keeps moving (and says how many
+      //    bytes are in flight), so the job never looks dead.
+      await stageExternal(slowConfig('slow1/'));
+      await insertCopyJob('slow-1', { endpoint: slowEndpoint, bucket: 'ext', region: 'us-east-1', prefix: 'slow1/' }, { concurrency: 1 });
+      const samples = [];
+      let running = true;
+      const watch = (async () => {
+        while (running) {
+          const r = await jobRow('slow-1');
+          samples.push({ at: Date.now(), age: Date.now() - new Date(r.updated_at).getTime(), inFlight: inFlight(r), updated: new Date(r.updated_at).getTime() });
+          await sleep(100);
+        }
+      })();
+      const started = Date.now();
+      const one = await runJob('slow-1', { heartbeatMs: 200 });
+      running = false;
+      await watch;
+      assert.equal(one.job.state, 'succeeded', JSON.stringify(one));
+      assert.ok(Date.now() - started > 8000, `the big object was slow (${Date.now() - started} ms)`);
+      const during = samples.filter((x) => x.inFlight >= BIG);
+      assert.ok(during.length >= 40, `sampled while the big object was in flight (${during.length})`);
+      assert.ok(new Set(during.map((x) => x.updated)).size >= 20, 'the job row was written again and again while one object was in flight');
+      const oldest = Math.max(...during.map((x) => x.age));
+      assert.ok(oldest < 2500, `the row was never older than ${oldest} ms while the object was in flight (the host gives up after 10 min)`);
+      assert.equal(sha(await extObject('slow1/slow/z-big.bin')), sha(objects.get('slow/z-big.bin')));
+
+      // 2. A cancel mid-object stops the job within moments — not when the
+      //    object is done — and the aborted upload leaves nothing behind.
+      await stageExternal(slowConfig('slow2/'));
+      await insertCopyJob('slow-2', { endpoint: slowEndpoint, bucket: 'ext', region: 'us-east-1', prefix: 'slow2/' }, { concurrency: 1 });
+      const second = runJob('slow-2', { heartbeatMs: 200 });
+      await until(async () => inFlight(await jobRow('slow-2')) >= BIG, { timeout: 60000, every: 50, what: 'the big object in flight' });
+      await sleep(1000);
+      const cancelledAt = Date.now();
+      await W.su.query("UPDATE mock2_foundation.jobs SET state = 'cancelled' WHERE id = 'slow-2'");
+      const two = await second;
+      const stopMs = Date.now() - cancelledAt;
+      assert.equal(two.cancelled, true, JSON.stringify(two));
+      assert.ok(stopMs < 3000, `stopped ${stopMs} ms after the cancel (the object alone takes ~16 s)`);
+      assert.equal((await jobRow('slow-2')).state, 'cancelled');
+      await sleep(1000);
+      assert.equal(await extObject('slow2/slow/z-big.bin'), null, 'the aborted upload left no object');
+
+      // 3. The CLI, as the host runs it (default heartbeat), is killed while
+      //    the big object is in flight. Its row moved meanwhile; the relaunched
+      //    run skips every finished object and copies only the big one. (The
+      //    plan names no endpoint, so it can finish over the direct link.)
+      await stageExternal(slowConfig('slow3/'));
+      await insertCopyJob('slow-3', { bucket: 'ext', region: 'us-east-1', prefix: 'slow3/' }, { concurrency: 1 });
+      const child = spawn(process.execPath, [contract.FOUNDATION_CLI, 'job-run', 'slow-3', '--json'], { cwd: W.app, env: { ...process.env, ...W.cliEnv }, stdio: 'ignore' });
+      const exited = new Promise((resolve) => child.on('exit', resolve));
+      const first = await until(async () => { const r = await jobRow('slow-3'); return inFlight(r) >= BIG ? r : null; }, { timeout: 60000, every: 50, what: 'a heartbeat with the big object in flight' });
+      const firstAt = new Date(first.updated_at).getTime();
+      await until(async () => { const r = await jobRow('slow-3'); return new Date(r.updated_at).getTime() > firstAt && inFlight(r) >= BIG; }, { timeout: 9000, every: 100, what: 'the next heartbeat of the CLI' });
+      child.kill('SIGKILL');
+      await exited;
+      const verifiedAtKill = Number((await W.su.query("SELECT count(*) AS n FROM mock2_foundation.storage_migration_items WHERE job_id = 'slow-3' AND state = 'verified'")).rows[0].n);
+      assert.equal(verifiedAtKill, total - 1, 'every object but the big one was finished');
+      await stageExternal(slowConfig('slow3/', W.s3b));
+      let three;
+      for (let i = 0; i < 40; i += 1) {
+        three = await runJob('slow-3').catch((e) => e);
+        if (!(three && three.code === 'JOB_BUSY')) break;
+        await sleep(250);
+      }
+      assert.equal(three.job.state, 'succeeded', JSON.stringify(three));
+      assert.equal(three.stats.skipped_verified, total - 1);
+      assert.equal(three.stats.copied, 1);
+      assert.equal(sha(await extObject('slow3/slow/z-big.bin')), sha(objects.get('slow/z-big.bin')));
+    } finally {
+      slow.close();
+      for (const k of objects.keys()) await storage.delete(k);
+      await W.su.query("DELETE FROM mock2_foundation.secrets WHERE name LIKE 'pending.%'");
+      await baseline();
+    }
+  });
+
   test('reembed builds a validated 1536-dimension index from the stored content; the active index is untouched and vector spaces never mix', { timeout: 300000 }, async () => {
     const { vector } = W.rt.vector;
     const { runJob, JobInterrupted, SELF_RETRIEVAL } = W.rt.jobs;
@@ -846,6 +1099,175 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     await W.rt.config.reloadFoundation();
     await assert.rejects(vector.upsert({ source: 'atlas', itemId: 'x', content: 'x y' }), (e) => e.code === 'INDEX_PROVIDER_MISMATCH');
     await assert.rejects(vector.search({ query: 'quartz' }), (e) => e.code === 'INDEX_PROVIDER_MISMATCH');
+    await baseline();
+  });
+
+  test('re-embed on a busy app: writes reach the new index while it builds and until it is promoted, validation compares the sets, a pending-provider outage is caught up — also across the promotion', { timeout: 300000 }, async () => {
+    const { vector } = W.rt.vector;
+    const { runJob } = W.rt.jobs;
+    // A fresh start: the test above left a promoted 1536 index beside local embeddings.
+    await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'retired', retired_at = now() WHERE state IN ('active','building','ready')");
+    await W.su.query("DELETE FROM mock2_foundation.secrets WHERE name LIKE 'pending.%'");
+    await baseline();
+    const words = ['amber', 'basalt', 'cedar', 'delta', 'ember', 'fjord', 'granite', 'harbor', 'iris', 'juniper', 'kelp', 'lagoon', 'marble'];
+    const pick = () => words[Math.floor(Math.random() * words.length)];
+    // Each text carries its item id as a word of its own, so it finds itself.
+    const text = (id) => `${id} ${pick()} ${pick()} ${pick()} notes`;
+    const expected = new Map();
+    let serial = 0;
+    const seed = [];
+    for (let i = 0; i < 80; i += 1) {
+      const id = `bz${serial++}`;
+      const content = text(id);
+      seed.push({ source: 'busy', itemId: id, content });
+      expected.set(id, content);
+    }
+    await vector.upsertMany(seed);
+    const L = await vector.activeIndex();
+    assert.equal(L.provider, 'local');
+    const T = 'ix_busy_1536';
+    const tableOf = (id) => `mock2_foundation.${contract.vectorTableName(id)}`;
+    const diff = async () => (await W.su.query(
+      'SELECT count(*) FILTER (WHERE d.item_id IS NULL)::int AS missing, count(*) FILTER (WHERE s.item_id IS NULL)::int AS extra, '
+      + 'count(*) FILTER (WHERE s.item_id IS NOT NULL AND d.item_id IS NOT NULL AND s.content_sha256 <> d.content_sha256)::int AS stale '
+      + `FROM ${tableOf(L.id)} s FULL JOIN ${tableOf(T)} d ON d.source = s.source AND d.item_id = s.item_id AND d.chunk = s.chunk`,
+    )).rows[0];
+    const contentOf = async (id) => new Map((await W.su.query(`SELECT item_id, content_sha256 FROM ${tableOf(id)} WHERE source = 'busy'`)).rows.map((r) => [r.item_id, r.content_sha256]));
+    const asWritten = async (id) => {
+      const rows = await contentOf(id);
+      assert.equal(rows.size, expected.size, `${id} holds as many items as the app wrote`);
+      for (const [itemId, content] of expected) assert.equal(rows.get(itemId), sha(Buffer.from(content)), `${id}: ${itemId}`);
+    };
+    const byItem = (a, b) => (a.item_id < b.item_id ? -1 : a.item_id > b.item_id ? 1 : 0);
+    const catchups = async () => (await W.su.query('SELECT index_id, item_id FROM mock2_foundation.vector_catchup')).rows.sort(byItem);
+
+    // The host stages the switch: pending OpenAI 1536 + its key, the target
+    // index ('building') and the job.
+    await setFeature('embeddings', { provider: 'local', config: localEmbeddings(), pending: { provider: 'openai', config: openaiEmbeddings(1536) } });
+    await setSecret('pending.embeddings.api_key', OPENAI_KEY);
+    await W.rt.config.reloadFoundation();
+    await W.su.query(
+      "INSERT INTO mock2_foundation.vector_indexes (id, provider, model, dimensions, metric, state, table_name) VALUES ($1, 'openai', $2, 1536, 'cosine', 'building', $3)",
+      [T, OPENAI_MODEL, contract.vectorTableName(T)],
+    );
+    await W.su.query("INSERT INTO mock2_foundation.jobs (id, kind, state, params) VALUES ('busy-1', 'reembed', 'queued', $1::jsonb)", [JSON.stringify({
+      from: { provider: 'local', model: LOCAL_MODEL, dimensions: 384, metric: 'cosine', index: L.id },
+      to: { provider: 'openai', model: OPENAI_MODEL, dimensions: 1536, metric: 'cosine', index: T },
+      source_index: L.id, target_index: T, batch_size: 2,
+    })]);
+
+    // The busy app: new items, changed content and removals, nonstop.
+    let busy = true;
+    let ops = 0;
+    let opError = null;
+    const app = (async () => {
+      while (busy) {
+        try {
+          const r = Math.random();
+          const ids = [...expected.keys()];
+          if (r < 0.4 || ids.length < 20) {
+            const id = `bz${serial++}`;
+            const content = text(id);
+            await vector.upsert({ source: 'busy', itemId: id, content });
+            expected.set(id, content);
+          } else if (r < 0.8) {
+            const id = ids[Math.floor(Math.random() * ids.length)];
+            const content = text(id);
+            await vector.upsert({ source: 'busy', itemId: id, content });
+            expected.set(id, content);
+          } else {
+            const id = ids[Math.floor(Math.random() * ids.length)];
+            await vector.remove({ source: 'busy', itemId: id });
+            expected.delete(id);
+          }
+          ops += 1;
+        } catch (err) {
+          opError = err;
+          busy = false;
+        }
+        await sleep(3);
+      }
+    })();
+    const opsBefore = ops;
+    const built = await runJob('busy-1');
+    const opsDuring = ops - opsBefore;
+    assert.equal(built.job.state, 'succeeded', JSON.stringify(built));
+    const target = (await W.su.query('SELECT state, validation FROM mock2_foundation.vector_indexes WHERE id = $1', [T])).rows[0];
+    assert.equal(target.state, 'ready');
+    assert.equal(target.validation.passed, true, JSON.stringify(target.validation));
+    assert.ok(opsDuring > 0, 'the app wrote while the index was built');
+    // ... and goes on writing while the host has not promoted it yet.
+    const opsAtReady = ops;
+    await until(() => ops >= opsAtReady + 30 || opError, { timeout: 60000, what: 'writes while promotion is pending' });
+    busy = false;
+    await app;
+    assert.equal(opError, null, opError && opError.stack);
+    assert.deepEqual(await diff(), { missing: 0, extra: 0, stale: 0 }, 'the new index has every write the active one has');
+    await asWritten(L.id);
+    await asWritten(T);
+    assert.deepEqual((await W.su.query(`SELECT DISTINCT vector_dims(embedding) AS d FROM ${tableOf(T)}`)).rows, [{ d: 1536 }]);
+    assert.deepEqual((await W.su.query(`SELECT DISTINCT vector_dims(embedding) AS d FROM ${tableOf(L.id)}`)).rows, [{ d: 384 }]);
+    assert.deepEqual(await catchups(), []);
+
+    // The pending provider goes down. The app's writes still succeed; the new
+    // index drops its older copy and records a catch-up instead.
+    W.openai.stats.fail = true;
+    const failedFrom = W.openai.stats.failed;
+    const changedId = [...expected.keys()][0];
+    const c1 = text('ou1');
+    await vector.upsert({ source: 'busy', itemId: 'ou1', content: c1 });
+    expected.set('ou1', c1);
+    const askedOnce = W.openai.stats.failed;
+    assert.ok(askedOnce > failedFrom, 'the pending provider was asked');
+    const quick = Date.now();
+    const c2 = text(changedId);
+    await vector.upsert({ source: 'busy', itemId: changedId, content: c2 });
+    expected.set(changedId, c2);
+    await vector.upsert({ source: 'busy', itemId: 'ou2', content: text('ou2') });
+    await vector.remove({ source: 'busy', itemId: 'ou2' });
+    assert.ok(Date.now() - quick < 1500, 'writes right after a failure do not wait for the failing provider again');
+    assert.equal(W.openai.stats.failed, askedOnce);
+    assert.deepEqual(await catchups(), [{ index_id: T, item_id: changedId }, { index_id: T, item_id: 'ou1' }].sort(byItem));
+    const inTarget = await contentOf(T);
+    assert.ok(!inTarget.has('ou1') && !inTarget.has(changedId), 'no older copy stays in the new index');
+    await asWritten(L.id);
+
+    // Back up: the catch-up embeds them with the pending provider.
+    W.openai.stats.fail = false;
+    const drained = await vector.drainCatchup();
+    assert.deepEqual(drained, { embedded: 2, dropped: 0, skipped: 0, remaining: 0 });
+    assert.deepEqual(await diff(), { missing: 0, extra: 0, stale: 0 });
+    await asWritten(T);
+
+    // Down again right before the promotion: this write's catch-up is for the
+    // index the host is about to promote.
+    W.openai.stats.fail = true;
+    const c3 = text('ou3');
+    await vector.upsert({ source: 'busy', itemId: 'ou3', content: c3 });
+    expected.set('ou3', c3);
+    W.openai.stats.fail = false;
+    assert.deepEqual(await catchups(), [{ index_id: T, item_id: 'ou3' }]);
+    // The host promotes. The app has not heard of it yet when it writes next:
+    // that write reaches the NEW active index (it re-reads the configuration
+    // instead of refusing), and the catch-up follows into it.
+    await W.su.query('BEGIN');
+    await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'retired', retired_at = now() WHERE id = $1", [L.id]);
+    await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'active', activated_at = now() WHERE id = $1 AND state = 'ready'", [T]);
+    await W.su.query('COMMIT');
+    await setSecret('embeddings.api_key', OPENAI_KEY);
+    await setFeature('embeddings', { provider: 'openai', config: openaiEmbeddings(1536) });
+    await deleteSecret('pending.embeddings.api_key');
+    const c4 = text('ou4');
+    const w = await vector.upsert({ source: 'busy', itemId: 'ou4', content: c4 });
+    expected.set('ou4', c4);
+    assert.equal(w.indexId, T);
+    await until(async () => (await catchups()).length === 0, { timeout: 30000, what: 'the catch-up into the promoted index' });
+    await asWritten(T);
+    const hits = await vector.search({ query: c3, k: 1 });
+    assert.equal(hits[0].itemId, 'ou3');
+
+    W.openai.stats.fail = false;
+    await W.su.query("UPDATE mock2_foundation.vector_indexes SET state = 'retired', retired_at = now() WHERE state = 'active'");
     await baseline();
   });
 

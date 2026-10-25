@@ -1110,9 +1110,13 @@ export class FoundationStorage {
     if (o.cacheControl) params.CacheControl = o.cacheControl;
     const bytes = toBytes(body);
     if (!bytes && !isStreamLike(body)) throw new FoundationError('INVALID_BODY', 'put() takes a Buffer, Uint8Array, string or readable stream.');
+    // options.signal aborts the upload; options.onProgress hears each part.
+    const signal = o.signal || null;
+    let onAbort = null;
     try {
+      if (signal && signal.aborted) throw signal.reason || new Error('aborted');
       if (bytes && bytes.length <= MULTIPART_THRESHOLD) {
-        const res = await this.client.send(new s3.PutObjectCommand(Object.assign({}, params, { Body: bytes, ContentLength: bytes.length })));
+        const res = await this.client.send(new s3.PutObjectCommand(Object.assign({}, params, { Body: bytes, ContentLength: bytes.length })), signal ? { abortSignal: signal } : undefined);
         return { key, etag: res.ETag || null, size: bytes.length };
       }
       const upload = new this.sdk.lib.Upload({
@@ -1122,17 +1126,28 @@ export class FoundationStorage {
         queueSize: 4,
         leavePartsOnError: false,
       });
+      if (typeof o.onProgress === 'function') {
+        upload.on('httpUploadProgress', (p) => { try { o.onProgress(p); } catch (e) { /* observer only */ } });
+      }
+      if (signal) {
+        onAbort = () => { Promise.resolve(upload.abort()).catch(() => {}); };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
       const res = await upload.done();
       return { key, etag: res.ETag || null, size: bytes ? bytes.length : null };
     } catch (err) {
       throw wrapError(err, 'put', key);
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
     }
   }
 
-  async get(key) {
+  // options.signal aborts the request (and the body stream).
+  async get(key, options) {
     const full = this.fullKey(key);
+    const signal = options && options.signal ? options.signal : null;
     try {
-      const res = await this.client.send(new this.sdk.s3.GetObjectCommand({ Bucket: this.bucket, Key: full }));
+      const res = await this.client.send(new this.sdk.s3.GetObjectCommand({ Bucket: this.bucket, Key: full }), signal ? { abortSignal: signal } : undefined);
       return {
         key,
         body: res.Body,
@@ -1304,7 +1319,7 @@ export async function openStorage(options) {
 // The active storage, ready to use: storage.put('reports/1.pdf', buffer).
 export const storage = Object.freeze({
   async put(key, body, options) { return (await openStorage()).put(key, body, options); },
-  async get(key) { return (await openStorage()).get(key); },
+  async get(key, options) { return (await openStorage()).get(key, options); },
   async getBuffer(key) { return (await openStorage()).getBuffer(key); },
   async head(key) { return (await openStorage()).head(key); },
   async delete(key) { return (await openStorage()).delete(key); },
@@ -1325,7 +1340,12 @@ export interface PutOptions {
   contentType?: string;
   metadata?: Record<string, string>;
   cacheControl?: string;
+  /** Aborts the upload. */
+  signal?: AbortSignal;
+  /** Called as parts of a multipart upload complete. */
+  onProgress?: (progress: { loaded?: number; total?: number; part?: number }) => void;
 }
+export interface GetOptions { signal?: AbortSignal }
 export interface PutResult { key: string; etag: string | null; size: number | null }
 export interface StoredObject {
   key: string;
@@ -1367,7 +1387,7 @@ export declare class FoundationStorage {
   readonly forcePathStyle: boolean;
   info(): StorageDescription;
   put(key: string, body: StorageBody, options?: PutOptions): Promise<PutResult>;
-  get(key: string): Promise<StoredObject>;
+  get(key: string, options?: GetOptions): Promise<StoredObject>;
   getBuffer(key: string): Promise<Buffer>;
   sha256(key: string): Promise<{ sha256: string; size: number }>;
   head(key: string): Promise<ObjectInfo | null>;
@@ -1385,7 +1405,7 @@ export declare function openStorage(options?: { pending?: boolean }): Promise<Fo
 
 export declare const storage: {
   put(key: string, body: StorageBody, options?: PutOptions): Promise<PutResult>;
-  get(key: string): Promise<StoredObject>;
+  get(key: string, options?: GetOptions): Promise<StoredObject>;
   getBuffer(key: string): Promise<Buffer>;
   head(key: string): Promise<ObjectInfo | null>;
   delete(key: string): Promise<void>;
@@ -1673,14 +1693,42 @@ function vectorMjs() {
 // changes, ProxyPilot re-embeds into a NEW index (jobs.mjs reembed), validates
 // it, and only then switches. Upserting with a different provider is refused
 // (INDEX_PROVIDER_MISMATCH) rather than mixing vector spaces.
+//
+// While such a new index exists for the PENDING provider (state 'building'
+// or 'ready', i.e. until the host promotes it), upsert and remove write it
+// too, embedded with the pending provider, in the same transaction as the
+// active index: the new index then has every write, also those made after the
+// re-embed job's last pass. If the pending provider cannot embed right now,
+// the app's write still succeeds: the target's copy of the item is removed
+// and the item is recorded in mock2_foundation.vector_catchup, which
+// drainCatchup() (run after later writes and on every configuration change,
+// i.e. also right after the promotion) embeds into that index later.
 import crypto from 'node:crypto';
-import { getPool } from './config.mjs';
+import { getPool, getFoundation, reloadFoundation, onFoundationChange } from './config.mjs';
 import { vectorTableName, vectorColumnPlan } from './contract.mjs';
 import { openEmbeddings } from './embeddings.mjs';
 import { FoundationError, FoundationUnavailableError } from './errors.mjs';
 
 const SCHEMA = 'mock2_foundation';
 const OPERATORS = Object.freeze({ cosine: '<=>', l2: '<->', ip: '<#>' });
+const CATCHUP_TABLE = SCHEMA + '.vector_catchup';
+const CATCHUP_DDL = 'CREATE TABLE IF NOT EXISTS ' + CATCHUP_TABLE + ' ('
+  + 'index_id text NOT NULL, '
+  + 'source text NOT NULL, '
+  + 'item_id text NOT NULL, '
+  + 'chunk integer NOT NULL, '
+  + 'content text NOT NULL, '
+  + 'content_sha256 text NOT NULL, '
+  + "metadata jsonb NOT NULL DEFAULT '{}'::jsonb, "
+  + 'updated_at timestamptz NOT NULL, '
+  + 'reason text, '
+  + 'PRIMARY KEY (index_id, source, item_id, chunk))';
+// After the pending provider failed, the app's writes do not ask it again for
+// this long (they record catch-ups straight away), so an outage does not slow
+// every write down.
+const PENDING_RETRY_MS = 15000;
+const DRAIN_BATCH = 200;
+const defaultLog = (msg) => { console.warn(msg); };
 
 export function qualifiedTable(indexId) {
   return SCHEMA + '.' + vectorTableName(indexId);
@@ -1805,14 +1853,34 @@ export async function ensureActiveIndex(options) {
   }
 }
 
+// Same vector space: the provider, model and dimensions an index was built with.
+function sameSpace(index, emb) {
+  return index.provider === emb.provider && index.model === emb.model && Number(index.dimensions) === emb.dimensions;
+}
+
 function assertMatches(index, emb) {
-  if (index.provider !== emb.provider || index.model !== emb.model || index.dimensions !== emb.dimensions) {
+  if (!sameSpace(index, emb)) {
     throw new FoundationUnavailableError('INDEX_PROVIDER_MISMATCH',
       'The active vector index (' + index.id + ') was built with ' + index.provider + ' ' + index.model + ' (' + index.dimensions + ' dimensions), '
       + 'but the active embedding provider is ' + emb.provider + ' ' + emb.model + ' (' + emb.dimensions + ' dimensions). '
       + 'Vector spaces are never mixed: the index must be re-embedded first (ProxyPilot does this when the provider changes).',
       { index: index.id });
   }
+}
+
+// The active index with the active embedder. Right after the host promotes a
+// new index this process may hold the previous provider until its NOTIFY
+// reload arrives: the configuration is read once more before refusing.
+async function activeWithEmbedder() {
+  let emb = await openEmbeddings();
+  let index = await ensureActiveIndex({ embedder: emb });
+  if (!sameSpace(index, emb)) {
+    await reloadFoundation();
+    emb = await openEmbeddings();
+    index = await ensureActiveIndex({ embedder: emb });
+  }
+  assertMatches(index, emb);
+  return { emb, index };
 }
 
 function validateItem(item) {
@@ -1829,40 +1897,150 @@ function validateItem(item) {
   return { source, itemId, chunk, content: item.content, metadata };
 }
 
+const keyOf = (source, itemId, chunk) => source + '\u0000' + itemId + '\u0000' + chunk;
+
+function clampInt(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isInteger(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+let catchupReady = null;
+async function ensureCatchupTable(db) {
+  if (!catchupReady) {
+    catchupReady = (async () => {
+      const r = await db.query("SELECT to_regclass('" + CATCHUP_TABLE + "') AS t");
+      if (r.rows[0] && r.rows[0].t) return true;
+      try {
+        await db.query(CATCHUP_DDL);
+      } catch (err) {
+        // Two processes creating it at once: the loser finds the winner's table.
+        if (!err || (err.code !== '42P07' && err.code !== '23505')) throw err;
+      }
+      return true;
+    })().catch((err) => { catchupReady = null; throw err; });
+  }
+  return catchupReady;
+}
+
+// Writes that record or apply a catch-up, and remove(), take this per-item
+// lock (in one fixed order, so two of them never deadlock): a removed item
+// can then never be brought back by a catch-up.
+async function lockItems(client, sources, itemIds) {
+  await client.query(
+    "SELECT pg_advisory_xact_lock(hashtext('mock2_foundation.vector_item'), h) FROM "
+    + "(SELECT DISTINCT hashtext(length(s)::text || ':' || s || i) AS h FROM unnest($1::text[], $2::text[]) AS t(s, i) ORDER BY 1) x",
+    [sources, itemIds],
+  );
+}
+
+async function knownShas(db, index, keys) {
+  const r = await db.query(
+    'SELECT t.source, t.item_id, t.chunk, t.content_sha256 FROM ' + qualifiedTable(index.id) + ' t '
+    + 'JOIN unnest($1::text[], $2::text[], $3::int[]) AS k(source, item_id, chunk) '
+    + 'ON t.source = k.source AND t.item_id = k.item_id AND t.chunk = k.chunk',
+    keys,
+  );
+  return new Map(r.rows.map((row) => [keyOf(row.source, row.item_id, row.chunk), row.content_sha256]));
+}
+
+// The new index(es) a pending embedding switch is building or has built and
+// the host has not promoted yet: state 'building' or 'ready', the pending
+// provider, model and dimensions, and a table (the re-embed job creates it).
+export async function pendingIndexes(db) {
+  const f = getFoundation();
+  const row = f && f.features ? f.features.embeddings : null;
+  const pending = row ? row.pending : null;
+  if (!pending || !pending.provider) return [];
+  const cfg = pending.config || {};
+  const dims = Number(cfg.dimensions);
+  if (!cfg.model || !Number.isInteger(dims)) return [];
+  const r = await (db || getPool()).query(
+    "SELECT * FROM mock2_foundation.vector_indexes WHERE state IN ('building','ready') AND provider = $1 AND model = $2 AND dimensions = $3 "
+    + "AND to_regclass('" + SCHEMA + ".' || table_name) IS NOT NULL ORDER BY created_at, id",
+    [String(pending.provider), String(cfg.model), dims],
+  );
+  return r.rows.map(normalizeIndex);
+}
+
+let pendingRetryAt = 0;
+
+// Embed with the PENDING provider for the pending index(es). Never throws: a
+// provider that cannot embed now gives { vectors: null, error }, and writes do
+// not ask it again for PENDING_RETRY_MS.
+async function embedForPending(targets, contents) {
+  if (Date.now() < pendingRetryAt) {
+    return { vectors: null, error: new FoundationUnavailableError('PENDING_PROVIDER_BACKOFF', 'The pending embedding provider failed moments ago.') };
+  }
+  try {
+    const pemb = await openEmbeddings({ pending: true });
+    for (const t of targets) {
+      if (!sameSpace(t, pemb)) throw new FoundationError('PENDING_MISMATCH', 'The pending embedding provider does not match vector index ' + t.id + '.');
+    }
+    const vectors = await pemb.embed(contents);
+    pendingRetryAt = 0;
+    return { vectors, error: null };
+  } catch (err) {
+    pendingRetryAt = Date.now() + PENDING_RETRY_MS;
+    defaultLog('[foundation] the pending embedding provider could not embed (' + (err && err.code ? err.code : 'error') + '); the new index catches up later');
+    return { vectors: null, error: err };
+  }
+}
+
 // Insert or update items in the active index. An item whose content is
 // unchanged (same sha256) is NOT re-embedded; only its metadata is updated.
+// While a provider switch is pending, the new index gets the same write
+// (embedded with the pending provider) in the same transaction.
 export async function upsertMany(items) {
   if (!Array.isArray(items)) throw new FoundationError('INVALID_INPUT', 'upsertMany() takes an array of items.');
   const list = items.map(validateItem);
   if (!list.length) return [];
-  const emb = await openEmbeddings();
-  const index = await ensureActiveIndex({ embedder: emb });
-  assertMatches(index, emb);
+  const { emb, index } = await activeWithEmbedder();
   const plan = vectorColumnPlan(index.dimensions);
   const table = qualifiedTable(index.id);
   const pool = getPool();
   const shas = list.map((it) => sha256Hex(it.content));
-  const existing = await pool.query(
-    'SELECT t.source, t.item_id, t.chunk, t.content_sha256 FROM ' + table + ' t '
-    + 'JOIN unnest($1::text[], $2::text[], $3::int[]) AS k(source, item_id, chunk) '
-    + 'ON t.source = k.source AND t.item_id = k.item_id AND t.chunk = k.chunk',
-    [list.map((i) => i.source), list.map((i) => i.itemId), list.map((i) => i.chunk)],
-  );
-  const known = new Map(existing.rows.map((r) => [r.source + '\u0000' + r.item_id + '\u0000' + r.chunk, r.content_sha256]));
+  const keys = [list.map((i) => i.source), list.map((i) => i.itemId), list.map((i) => i.chunk)];
+  const k = list.map((it) => keyOf(it.source, it.itemId, it.chunk));
+  const known = await knownShas(pool, index, keys);
   const toEmbed = [];
   list.forEach((it, i) => {
-    if (known.get(it.source + '\u0000' + it.itemId + '\u0000' + it.chunk) !== shas[i]) toEmbed.push(i);
+    if (known.get(k[i]) !== shas[i]) toEmbed.push(i);
   });
   const vectors = toEmbed.length ? await emb.embed(toEmbed.map((i) => list[i].content)) : [];
   const vectorFor = new Map(toEmbed.map((i, n) => [i, vectors[n]]));
+  // The pending switch's new index(es): what any of them lacks is embedded
+  // once with the pending provider.
+  const copies = [];
+  for (const t of await pendingIndexes(pool)) {
+    if (t.id === index.id) continue;
+    copies.push({ index: t, plan: vectorColumnPlan(t.dimensions), table: qualifiedTable(t.id), known: await knownShas(pool, t, keys), added: 0 });
+  }
+  const pendingFor = new Map();
+  let pendingError = null;
+  if (copies.length) {
+    const need = [];
+    list.forEach((it, i) => { if (copies.some((c) => c.known.get(k[i]) !== shas[i])) need.push(i); });
+    if (need.length) {
+      const out = await embedForPending(copies.map((c) => c.index), need.map((i) => list[i].content));
+      if (out.vectors) need.forEach((i, n) => pendingFor.set(i, out.vectors[n]));
+      else pendingError = out.error;
+    }
+  }
+  await ensureCatchupTable(pool);
   const client = await pool.connect();
   const results = [];
   let added = 0;
+  // Catch-up records this write makes obsolete: (index, item) pairs it wrote.
+  const clear = { ids: [], sources: [], itemIds: [], chunks: [] };
+  const cleared = (id, it) => { clear.ids.push(id); clear.sources.push(it.source); clear.itemIds.push(it.itemId); clear.chunks.push(it.chunk); };
   try {
     await client.query('BEGIN');
+    if (pendingError) await lockItems(client, keys[0], keys[1]);
     for (let i = 0; i < list.length; i += 1) {
       const it = list[i];
       const meta = JSON.stringify(it.metadata);
+      cleared(index.id, it);
       if (!vectorFor.has(i)) {
         await client.query('UPDATE ' + table + ' SET metadata = $4::jsonb, updated_at = now() WHERE source = $1 AND item_id = $2 AND chunk = $3 AND metadata IS DISTINCT FROM $4::jsonb',
           [it.source, it.itemId, it.chunk, meta]);
@@ -1882,6 +2060,46 @@ export async function upsertMany(items) {
       results.push({ indexId: index.id, embedded: true, inserted });
     }
     if (added) await client.query('UPDATE mock2_foundation.vector_indexes SET item_count = item_count + $2 WHERE id = $1', [index.id, added]);
+    for (const c of copies) {
+      for (let i = 0; i < list.length; i += 1) {
+        const it = list[i];
+        const meta = JSON.stringify(it.metadata);
+        if (c.known.get(k[i]) === shas[i]) {
+          await client.query('UPDATE ' + c.table + ' SET metadata = $4::jsonb, updated_at = now() WHERE source = $1 AND item_id = $2 AND chunk = $3 AND metadata IS DISTINCT FROM $4::jsonb',
+            [it.source, it.itemId, it.chunk, meta]);
+          cleared(c.index.id, it);
+        } else if (pendingFor.has(i)) {
+          const r = await client.query(
+            'INSERT INTO ' + c.table + ' (source, item_id, chunk, content, content_sha256, embedding, metadata, updated_at) '
+            + 'VALUES ($1, $2, $3, $4, $5, $6::' + c.plan.type + ', $7::jsonb, now()) '
+            + 'ON CONFLICT (source, item_id, chunk) DO UPDATE SET content = EXCLUDED.content, content_sha256 = EXCLUDED.content_sha256, '
+            + 'embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata, updated_at = now() '
+            + 'RETURNING (xmax = 0) AS inserted',
+            [it.source, it.itemId, it.chunk, it.content, shas[i], toVectorLiteral(pendingFor.get(i)), meta],
+          );
+          if (r.rows[0].inserted) c.added += 1;
+          cleared(c.index.id, it);
+        } else {
+          // The pending provider cannot embed it now. The new index must not
+          // keep an older version: its copy goes, and the item is recorded
+          // for catch-up (the app's write itself succeeds).
+          const d = await client.query('DELETE FROM ' + c.table + ' WHERE source = $1 AND item_id = $2 AND chunk = $3', [it.source, it.itemId, it.chunk]);
+          c.added -= d.rowCount || 0;
+          await client.query(
+            'INSERT INTO ' + CATCHUP_TABLE + ' (index_id, source, item_id, chunk, content, content_sha256, metadata, updated_at, reason) '
+            + 'VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now(), $8) ON CONFLICT (index_id, source, item_id, chunk) DO UPDATE SET '
+            + 'content = EXCLUDED.content, content_sha256 = EXCLUDED.content_sha256, metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at, reason = EXCLUDED.reason',
+            [c.index.id, it.source, it.itemId, it.chunk, it.content, shas[i], meta, String((pendingError && pendingError.code) || 'PENDING_PROVIDER_ERROR')],
+          );
+        }
+      }
+      if (c.added) await client.query('UPDATE mock2_foundation.vector_indexes SET item_count = GREATEST(item_count + $2, 0) WHERE id = $1', [c.index.id, c.added]);
+    }
+    await client.query(
+      'DELETE FROM ' + CATCHUP_TABLE + ' c USING unnest($1::text[], $2::text[], $3::text[], $4::int[]) AS k(index_id, source, item_id, chunk) '
+      + 'WHERE c.index_id = k.index_id AND c.source = k.source AND c.item_id = k.item_id AND c.chunk = k.chunk',
+      [clear.ids, clear.sources, clear.itemIds, clear.chunks],
+    );
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -1889,6 +2107,8 @@ export async function upsertMany(items) {
   } finally {
     client.release();
   }
+  // The pending provider answered: catch up what earlier writes could not embed.
+  if (copies.length && !pendingError) scheduleDrain(0);
   return results;
 }
 
@@ -1904,9 +2124,7 @@ export async function search(options) {
   const k = o.k === undefined ? 10 : o.k;
   if (!Number.isInteger(k) || k < 1 || k > 200) throw new FoundationError('INVALID_INPUT', 'k must be an integer from 1 to 200.');
   if (o.source !== undefined && (typeof o.source !== 'string' || !o.source)) throw new FoundationError('INVALID_INPUT', 'source must be a non-empty string.');
-  const emb = await openEmbeddings();
-  const index = await ensureActiveIndex({ embedder: emb });
-  assertMatches(index, emb);
+  const { emb, index } = await activeWithEmbedder();
   const [qv] = await emb.embed([o.query]);
   return searchIndex(index, qv, { k, source: o.source });
 }
@@ -1953,19 +2171,177 @@ export async function searchIndex(index, queryVector, options) {
   }
 }
 
-// Remove every chunk of an item from the active index. Needs no embedding
-// provider, so it works with embeddings switched off.
+// Remove every chunk of an item from the active index — and from a new index
+// a pending switch is building or has built, and any catch-up record of it.
+// Needs no embedding provider, so it works with embeddings switched off.
 export async function remove(options) {
   const o = options || {};
   if (typeof o.source !== 'string' || !o.source) throw new FoundationError('INVALID_INPUT', 'remove() needs a source.');
   const itemId = o.itemId === undefined || o.itemId === null ? '' : String(o.itemId);
   if (!itemId) throw new FoundationError('INVALID_INPUT', 'remove() needs an itemId.');
-  const index = await getActiveIndex();
-  if (!index) return { removed: 0 };
   const pool = getPool();
-  const r = await pool.query('DELETE FROM ' + qualifiedTable(index.id) + ' WHERE source = $1 AND item_id = $2', [o.source, itemId]);
-  if (r.rowCount) await pool.query('UPDATE mock2_foundation.vector_indexes SET item_count = GREATEST(item_count - $2, 0) WHERE id = $1', [index.id, r.rowCount]);
-  return { removed: r.rowCount || 0 };
+  const ix = await pool.query(
+    "SELECT * FROM mock2_foundation.vector_indexes WHERE state IN ('active','building','ready') "
+    + "AND to_regclass('" + SCHEMA + ".' || table_name) IS NOT NULL ORDER BY created_at, id",
+  );
+  const indexes = ix.rows.map(normalizeIndex);
+  if (!indexes.length) return { removed: 0 };
+  await ensureCatchupTable(pool);
+  const client = await pool.connect();
+  let removed = 0;
+  try {
+    await client.query('BEGIN');
+    await lockItems(client, [o.source], [itemId]);
+    for (const index of indexes) {
+      const r = await client.query('DELETE FROM ' + qualifiedTable(index.id) + ' WHERE source = $1 AND item_id = $2', [o.source, itemId]);
+      const n = r.rowCount || 0;
+      if (index.state === 'active') removed = n;
+      if (n) await client.query('UPDATE mock2_foundation.vector_indexes SET item_count = GREATEST(item_count - $2, 0) WHERE id = $1', [index.id, n]);
+    }
+    await client.query('DELETE FROM ' + CATCHUP_TABLE + ' WHERE source = $1 AND item_id = $2', [o.source, itemId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  return { removed };
+}
+
+// Embed what earlier writes recorded for catch-up into the index it was meant
+// for: a pending switch's new index with the PENDING provider, the active
+// index with the active one (a record made before the host promoted it).
+// Records of an index that was retired or failed are dropped. A record a later
+// write replaced, or a remove() deleted, is never applied, and a row written
+// after the record is kept. Resolves { embedded, dropped, skipped, remaining }.
+// Runs by itself after writes and configuration changes (then a pending
+// provider that failed moments ago is not asked again yet); an explicit call
+// asks it now.
+let draining = null;
+let drainTimer = null;
+let drainAgain = false;
+
+function startDrain(options) {
+  const run = runDrain(options).finally(() => {
+    if (draining === run) draining = null;
+    if (drainAgain && !draining) {
+      drainAgain = false;
+      scheduleDrain(1000);
+    }
+  });
+  draining = run;
+  return run;
+}
+
+export async function drainCatchup(options) {
+  while (draining) await draining.catch(() => {});
+  return startDrain(Object.assign({}, options || {}, { scheduled: false }));
+}
+
+function scheduleDrain(delayMs) {
+  if (draining) { drainAgain = true; return; }
+  if (drainTimer) return;
+  drainTimer = setTimeout(() => {
+    drainTimer = null;
+    if (!getFoundation() || draining) return;
+    startDrain({ scheduled: true }).catch((err) => defaultLog('[foundation] vector catch-up did not run: ' + (err && err.message ? err.message : String(err))));
+  }, delayMs || 0);
+  if (typeof drainTimer.unref === 'function') drainTimer.unref();
+}
+
+// A configuration change (a promotion included) may make catch-ups possible.
+onFoundationChange((next, previous) => {
+  pendingRetryAt = 0;
+  if (previous) scheduleDrain(200);
+});
+
+async function runDrain(options) {
+  const limit = clampInt(options && options.limit, 1, 5000, DRAIN_BATCH);
+  const respectBackoff = !!(options && options.scheduled);
+  const out = { embedded: 0, dropped: 0, skipped: 0, remaining: 0 };
+  if (!getFoundation()) return out;
+  const pool = getPool();
+  const exists = await pool.query("SELECT to_regclass('" + CATCHUP_TABLE + "') AS t");
+  if (!exists.rows[0] || !exists.rows[0].t) return out;
+  const r = await pool.query(
+    'SELECT c.index_id, c.source, c.item_id, c.chunk, c.content, c.content_sha256, c.metadata, c.updated_at::text AS updated_at, '
+    + 'i.state, i.provider, i.model, i.dimensions, i.metric, '
+    + "(i.table_name IS NOT NULL AND to_regclass('" + SCHEMA + ".' || i.table_name) IS NOT NULL) AS has_table "
+    + 'FROM ' + CATCHUP_TABLE + ' c LEFT JOIN mock2_foundation.vector_indexes i ON i.id = c.index_id ORDER BY c.updated_at LIMIT $1',
+    [limit],
+  );
+  const groups = new Map();
+  for (const row of r.rows) {
+    if (!groups.has(row.index_id)) groups.set(row.index_id, []);
+    groups.get(row.index_id).push(row);
+  }
+  for (const [id, rows] of groups) {
+    const head = rows[0];
+    if (!['building', 'ready', 'active'].includes(head.state)) {
+      const d = await pool.query('DELETE FROM ' + CATCHUP_TABLE + ' WHERE index_id = $1', [id]);
+      out.dropped += d.rowCount || 0;
+      continue;
+    }
+    const index = { id, provider: head.provider, model: head.model, dimensions: Number(head.dimensions), metric: head.metric };
+    const pendingSide = head.state !== 'active';
+    let emb = null;
+    try {
+      if (!head.has_table) throw new Error('no table yet');
+      if (pendingSide && respectBackoff && Date.now() < pendingRetryAt) throw new Error('backoff');
+      emb = pendingSide ? await openEmbeddings({ pending: true }) : await openEmbeddings();
+      if (!sameSpace(index, emb)) throw new Error('another vector space');
+    } catch (err) {
+      out.skipped += rows.length;
+      continue;
+    }
+    let vectors;
+    try {
+      vectors = await emb.embed(rows.map((x) => x.content));
+      if (pendingSide) pendingRetryAt = 0;
+    } catch (err) {
+      if (pendingSide) pendingRetryAt = Date.now() + PENDING_RETRY_MS;
+      out.skipped += rows.length;
+      continue;
+    }
+    const plan = vectorColumnPlan(index.dimensions);
+    const table = qualifiedTable(id);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await lockItems(client, rows.map((x) => x.source), rows.map((x) => x.item_id));
+      let added = 0;
+      for (let n = 0; n < rows.length; n += 1) {
+        const x = rows[n];
+        // Applied only while it is still the latest record for the item.
+        const del = await client.query(
+          'DELETE FROM ' + CATCHUP_TABLE + ' WHERE index_id = $1 AND source = $2 AND item_id = $3 AND chunk = $4 AND content_sha256 = $5 AND updated_at = $6::timestamptz',
+          [id, x.source, x.item_id, x.chunk, x.content_sha256, x.updated_at],
+        );
+        if (!del.rowCount) continue;
+        const w = await client.query(
+          'INSERT INTO ' + table + ' AS d (source, item_id, chunk, content, content_sha256, embedding, metadata, updated_at) '
+          + 'VALUES ($1, $2, $3, $4, $5, $6::' + plan.type + ', $7::jsonb, $8::timestamptz) '
+          + 'ON CONFLICT (source, item_id, chunk) DO UPDATE SET content = EXCLUDED.content, content_sha256 = EXCLUDED.content_sha256, '
+          + 'embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at '
+          + 'WHERE d.updated_at <= EXCLUDED.updated_at RETURNING (xmax = 0) AS inserted',
+          [x.source, x.item_id, Number(x.chunk), x.content, x.content_sha256, toVectorLiteral(vectors[n]), JSON.stringify(x.metadata || {}), x.updated_at],
+        );
+        if (w.rows[0] && w.rows[0].inserted) added += 1;
+        out.embedded += 1;
+      }
+      if (added) await client.query('UPDATE mock2_foundation.vector_indexes SET item_count = item_count + $2 WHERE id = $1', [id, added]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+  const left = await pool.query('SELECT count(*)::bigint AS n FROM ' + CATCHUP_TABLE);
+  out.remaining = Number(left.rows[0].n);
+  return out;
 }
 
 export const vector = Object.freeze({
@@ -1975,6 +2351,8 @@ export const vector = Object.freeze({
   remove,
   activeIndex: () => getActiveIndex(),
   listIndexes: () => listIndexes(),
+  pendingIndexes: () => pendingIndexes(),
+  drainCatchup: (options) => drainCatchup(options),
 });
 `;
 }
@@ -2034,6 +2412,9 @@ export declare function upsertMany(items: readonly VectorItemInput[]): Promise<U
 export declare function search(options: SearchOptions): Promise<SearchHit[]>;
 export declare function searchIndex(index: VectorIndex, queryVector: readonly number[], options?: { k?: number; source?: string }): Promise<SearchHit[]>;
 export declare function remove(options: { source: string; itemId: string }): Promise<{ removed: number }>;
+export interface CatchupResult { embedded: number; dropped: number; skipped: number; remaining: number }
+export declare function pendingIndexes(): Promise<VectorIndex[]>;
+export declare function drainCatchup(options?: { limit?: number }): Promise<CatchupResult>;
 export declare const vector: {
   upsert(item: VectorItemInput): Promise<UpsertResult>;
   upsertMany(items: readonly VectorItemInput[]): Promise<UpsertResult[]>;
@@ -2041,6 +2422,10 @@ export declare const vector: {
   remove(options: { source: string; itemId: string }): Promise<{ removed: number }>;
   activeIndex(): Promise<VectorIndex | null>;
   listIndexes(): Promise<VectorIndex[]>;
+  /** The new index(es) of a pending provider switch, which writes also reach. */
+  pendingIndexes(): Promise<VectorIndex[]>;
+  /** Embed what earlier writes could not embed for a new index (runs by itself after writes and changes). */
+  drainCatchup(options?: { limit?: number }): Promise<CatchupResult>;
 };
 `;
 }
@@ -2053,7 +2438,10 @@ function healthMjs() {
 // Health from REAL operations only — a filled-in setting is never readiness:
 //   database    a query plus a vector operation ('[1,2,3]' <-> '[1,2,4]' = 1)
 //   storage     put -> get -> delete of .mock2-health/<uuid>, plus an
-//               unauthenticated GET that must be refused
+//               unauthenticated GET that must be refused; for the PENDING
+//               provider also detail.object_count, the objects under its
+//               bucket + prefix (probe keys left out; omitted when the
+//               listing fails), which the host compares with a copy job
 //   embeddings  one embedding of a probe text, dimensions checked
 // Statuses are HEALTH_STATUSES; results are written to mock2_foundation.health.
 import crypto from 'node:crypto';
@@ -2063,6 +2451,7 @@ import { openStorage } from './storage.mjs';
 import { openEmbeddings, isLocalEmbeddings } from './embeddings.mjs';
 
 const PROBE_TEXT = 'mock2 foundation health probe';
+const PROBE_PREFIX = '.mock2-health/';
 const OFF_CODES = new Set(['STORAGE_OFF', 'EMBEDDINGS_OFF']);
 const CREDENTIAL_CODES = new Set(['MISSING_CREDENTIALS', 'MISSING_MASTER_KEY', 'PROVIDER_REJECTED_CREDENTIALS', 'STORAGE_REJECTED_CREDENTIALS']);
 
@@ -2118,6 +2507,18 @@ export async function probeDatabase() {
   return { component: 'database', status: 'ready', detail: { target, vector: true, latency_ms: Date.now() - started } };
 }
 
+// The objects under the storage's bucket + prefix, probe keys left out (every
+// page of the listing), or null when the listing fails: never a guess.
+export async function countObjects(st) {
+  try {
+    let n = 0;
+    for await (const item of st.listAll()) if (!item.key.startsWith(PROBE_PREFIX)) n += 1;
+    return n;
+  } catch (err) {
+    return null;
+  }
+}
+
 export async function probeStorage(options) {
   const pending = !!(options && options.pending);
   let st;
@@ -2126,9 +2527,18 @@ export async function probeStorage(options) {
   } catch (err) {
     return failure('storage', err, { pending });
   }
+  const result = await probeOpenedStorage(st, pending);
+  if (pending) {
+    const n = await countObjects(st);
+    if (n !== null) result.detail = Object.assign({}, result.detail, { object_count: n });
+  }
+  return result;
+}
+
+async function probeOpenedStorage(st, pending) {
   const started = Date.now();
   const info = { pending, provider: st.provider, bucket: st.bucket, endpoint: safeEndpoint(st.endpoint) };
-  const key = '.mock2-health/' + crypto.randomUUID();
+  const key = PROBE_PREFIX + crypto.randomUUID();
   const payload = crypto.randomBytes(64);
   let wrote = false;
   try {
@@ -2262,6 +2672,7 @@ export interface HealthReport {
 }
 export declare function probeDatabase(): Promise<HealthResult>;
 export declare function probeStorage(options?: { pending?: boolean }): Promise<HealthResult>;
+export declare function countObjects(storage: { listAll(): AsyncIterable<{ key: string }> }): Promise<number | null>;
 export declare function probeEmbeddings(options?: { pending?: boolean }): Promise<HealthResult>;
 export declare function databaseUnreachableResults(err: unknown): HealthResult[];
 export declare function runHealth(options?: { write?: boolean }): Promise<HealthResult[]>;
@@ -2285,10 +2696,19 @@ function jobsMjs() {
 //                    .pending + the pending.* secrets). from/to are the
 //                    host's record of what it planned; the job refuses to run
 //                    when they disagree with the app database. Each object is
-//                    streamed (sha256 computed on the way), uploaded, checked
+//                    read (sha256 computed on the way), uploaded, checked
 //                    by size (HEAD) and re-read from the target to compare the
-//                    sha256. One storage_migration_items row per key. The job
-//                    succeeds only when EVERY object is verified.
+//                    sha256. One storage_migration_items row per key, plus one
+//                    storage_migration_sources row (keyed by the sha256 of the
+//                    key) with the object's listed size/ETag/Last-Modified, the
+//                    listing that last saw it and whether this job wrote it to
+//                    the target. A key whose listing changes is copied again; a
+//                    key gone from the source is deleted from the target when
+//                    this job wrote it there (never anything else, and never
+//                    anything on the source). The job succeeds only when EVERY
+//                    object is verified. While an object is in flight the job
+//                    row is touched every few seconds (heartbeat), so a long
+//                    object is not taken for a dead job.
 //   reembed          params { from, to, source_index, target_index }: the
 //                    host inserted the target vector_indexes row (state
 //                    'building', the PENDING provider/model/dimensions). Build
@@ -2297,9 +2717,12 @@ function jobsMjs() {
 //                    self-retrieval sample) and end with the target 'ready'
 //                    (validation json) or 'failed' (the reason). The host
 //                    promotes only from 'ready'; this job never changes the
-//                    active index or the features.
+//                    active index or the features. Writes the app makes while
+//                    the target is building or ready reach the target too
+//                    (vector.mjs), so validation compares the two indexes'
+//                    items in one statement after a final catch-up pass.
 import crypto from 'node:crypto';
-import { Transform } from 'node:stream';
+import { Readable } from 'node:stream';
 import { ensureFoundation, getPool } from './config.mjs';
 import { vectorTableName, vectorColumnPlan } from './contract.mjs';
 import { openStorage } from './storage.mjs';
@@ -2321,6 +2744,27 @@ const PROGRESS_INTERVAL_MS = 100;
 // job (SOURCE_STILL_CHANGING) instead of promoting a copy that misses objects.
 const MAX_LIST_PASSES = 5;
 const MAX_REEMBED_PASSES = 5;
+// While an object is in flight the job row (updated_at, bytes_in_flight) is
+// written every HEARTBEAT_MS: the host relaunches a job whose row has not moved
+// for 10 minutes. A transfer that moves no data for STALL_MS is given up (the
+// object is marked failed and retried by the next run), so a hung connection
+// does not keep a job looking alive forever.
+const HEARTBEAT_MS = 5000;
+const STALL_MS = 10 * 60 * 1000;
+// Objects up to this size are read into memory and uploaded in one request
+// (which an abort really stops); larger ones stream as a multipart upload.
+const BUFFER_MAX = 16 * 1024 * 1024;
+// Health probe objects (health.mjs) come and go in milliseconds: never copied,
+// so the job's verified count compares with the target's object_count.
+const PROBE_PREFIX = '.mock2-health/';
+const SOURCES_TABLE = 'mock2_foundation.storage_migration_sources';
+const SOURCES_DDL = 'CREATE TABLE IF NOT EXISTS ' + SOURCES_TABLE + ' ('
+  + 'job_id text NOT NULL, '
+  + 'key_sha256 text NOT NULL, '
+  + 'fingerprint text, '
+  + 'seen text, '
+  + 'written boolean NOT NULL DEFAULT false, '
+  + 'PRIMARY KEY (job_id, key_sha256))';
 
 export class JobCancelled extends Error {
   constructor() {
@@ -2404,6 +2848,12 @@ function makeContext(pool, job, opts) {
     progress: Object.assign({}, job.progress || {}),
     stats: {},
     lastFlush: 0,
+    heartbeatMs: clampInt(opts.heartbeatMs, 20, 600000, HEARTBEAT_MS),
+    stallMs: clampInt(opts.stallMs, 100, 24 * 3600 * 1000, STALL_MS),
+    // The first reason the whole job stopped (a cancel seen by the heartbeat,
+    // or the signal), and the transfers it stops with it.
+    aborted: null,
+    transfers: new Set(),
     async flush(force) {
       const now = Date.now();
       if (!force && now - ctx.lastFlush < PROGRESS_INTERVAL_MS) return;
@@ -2415,11 +2865,81 @@ function makeContext(pool, job, opts) {
       if (typeof opts.onProgress === 'function') {
         try { opts.onProgress(Object.assign({}, ctx.progress), Object.assign({}, ctx.stats)); } catch (e) { /* observer only */ }
       }
-      checkSignal(ctx.signal);
+      ctx.check();
       await ctx.flush(false);
     },
+    check() {
+      if (ctx.aborted) throw ctx.aborted;
+      checkSignal(ctx.signal);
+    },
+    abort(err) {
+      if (ctx.aborted) return;
+      ctx.aborted = err;
+      for (const t of ctx.transfers) t.abort(err);
+    },
+    // One object in flight: its abort signal, and the bytes it has moved.
+    transfer() {
+      const ac = new AbortController();
+      const t = {
+        signal: ac.signal,
+        bytes: 0,
+        lastProgressAt: Date.now(),
+        abort(err) { if (!ac.signal.aborted) ac.abort(err); },
+        moved(n) {
+          t.bytes += n;
+          t.lastProgressAt = Date.now();
+          ctx.progress.bytes_in_flight = inFlight();
+        },
+        touch() { t.lastProgressAt = Date.now(); },
+        done() {
+          ctx.transfers.delete(t);
+          ctx.progress.bytes_in_flight = inFlight();
+        },
+      };
+      ctx.transfers.add(t);
+      if (ctx.aborted) t.abort(ctx.aborted);
+      return t;
+    },
   };
+  const inFlight = () => {
+    let n = 0;
+    for (const t of ctx.transfers) n += t.bytes;
+    return n;
+  };
+  if (ctx.signal) {
+    const onSignal = () => {
+      const r = ctx.signal.reason;
+      ctx.abort(new JobInterrupted(r && r.message ? r.message : String(r || 'aborted')));
+    };
+    if (ctx.signal.aborted) onSignal();
+    else ctx.signal.addEventListener('abort', onSignal, { once: true });
+  }
   return ctx;
+}
+
+// While anything is in flight, write the job row every heartbeatMs (and hear a
+// cancel); give up a transfer that has moved nothing for stallMs.
+function startHeartbeat(ctx) {
+  let beating = false;
+  const timer = setInterval(() => {
+    if (beating || !ctx.transfers.size || ctx.aborted) return;
+    const now = Date.now();
+    let live = 0;
+    for (const t of ctx.transfers) {
+      if (now - t.lastProgressAt > ctx.stallMs) {
+        t.abort(new FoundationError('TRANSFER_STALLED', 'no data moved for ' + Math.round(ctx.stallMs / 1000) + ' s; the object is retried by the next run'));
+      } else {
+        live += 1;
+      }
+    }
+    if (!live) return;
+    beating = true;
+    ctx.flush(true)
+      .catch((err) => { if (err instanceof JobCancelled) ctx.abort(err); })
+      .finally(() => { beating = false; });
+  }, ctx.heartbeatMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return () => clearInterval(timer);
 }
 
 async function finish(pool, id, state, error) {
@@ -2450,13 +2970,18 @@ export async function runJob(jobId, options) {
     if (job.state === 'succeeded' || job.state === 'cancelled') return { job: publicJob(job), ran: false, stats: {} };
     await pool.query("UPDATE mock2_foundation.jobs SET state = 'running', error = NULL, finished_at = NULL, updated_at = now() WHERE id = $1 AND state <> 'cancelled'", [id]);
     const ctx = makeContext(pool, job, opts);
+    const stopHeartbeat = startHeartbeat(ctx);
     let outcome;
     try {
       if (job.kind === 'storage_migrate') outcome = await runStorageMigrate(ctx);
       else if (job.kind === 'reembed') outcome = await runReembed(ctx);
       else throw new FoundationError('JOB_KIND_UNKNOWN', 'Unknown job kind ' + job.kind + '.');
+      stopHeartbeat();
       await ctx.flush(true);
-    } catch (err) {
+    } catch (caught) {
+      stopHeartbeat();
+      // A stop the heartbeat or the signal saw wins over the error it caused.
+      const err = ctx.aborted && !(caught instanceof JobInterrupted) && !(caught instanceof JobCancelled) ? ctx.aborted : caught;
       if (err instanceof JobInterrupted) {
         await ctx.flush(true).catch(() => {});
         await pool.query("UPDATE mock2_foundation.jobs SET state = 'queued', error = $2, updated_at = now() WHERE id = $1 AND state = 'running'",
@@ -2492,27 +3017,107 @@ export async function runJob(jobId, options) {
 
 /* ------------------------------ storage_migrate --------------------------- */
 
-async function syncListing(ctx, source) {
+export function keySha256(key) {
+  return crypto.createHash('sha256').update(String(key), 'utf8').digest('hex');
+}
+
+// What a listing says about one object: size, ETag (quotes and a weak marker
+// dropped) and Last-Modified to the second. Two listings of an unchanged object
+// give the same string; an overwrite changes it even when the size stays.
+export function sourceFingerprint(item) {
+  const size = item && item.size !== undefined && item.size !== null ? String(Number(item.size)) : '';
+  const etag = item && item.etag ? String(item.etag).replace(/^W\//, '').replace(/"/g, '') : '';
+  const t = item && item.lastModified ? Date.parse(item.lastModified) : NaN;
+  return size + '|' + etag + '|' + (Number.isFinite(t) ? String(Math.floor(t / 1000)) : '');
+}
+
+async function ensureTable(pool, ddl) {
+  try {
+    await pool.query(ddl);
+  } catch (err) {
+    // Two processes creating it at once: the loser finds the winner's table.
+    if (!err || (err.code !== '42P07' && err.code !== '23505')) throw err;
+  }
+}
+
+// List the whole source once (this listing is "token"). A new key, or one
+// whose size, ETag or Last-Modified changed, becomes 'pending' (copied again);
+// every listed key is marked seen by this listing. Returns how many keys were
+// new or changed.
+async function syncListing(ctx, source, token) {
   let changed = 0;
   let cursor = null;
   do {
-    checkSignal(ctx.signal);
+    ctx.check();
     const page = await source.list({ cursor, limit: 1000 });
-    if (page.items.length) {
+    const items = page.items.filter((i) => !i.key.startsWith(PROBE_PREFIX));
+    if (items.length) {
       const r = await ctx.pool.query(
-        "INSERT INTO mock2_foundation.storage_migration_items (job_id, key, size, state) "
-        + "SELECT $1, k, s, 'pending' FROM unnest($2::text[], $3::bigint[]) AS t(k, s) "
+        'WITH page AS (SELECT k, s, h, fp FROM unnest($2::text[], $3::bigint[], $4::text[], $5::text[]) AS t(k, s, h, fp)), '
+        + 'prev AS (SELECT p.k, p.s, p.h, p.fp, (i.key IS NOT NULL) AS known, f.fingerprint AS old_fp FROM page p '
+        + 'LEFT JOIN mock2_foundation.storage_migration_items i ON i.job_id = $1 AND i.key = p.k '
+        + 'LEFT JOIN ' + SOURCES_TABLE + ' f ON f.job_id = $1 AND f.key_sha256 = p.h), '
+        + 'marked AS (INSERT INTO ' + SOURCES_TABLE + ' (job_id, key_sha256, fingerprint, seen) SELECT $1, h, fp, $6 FROM prev '
+        + 'ON CONFLICT (job_id, key_sha256) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, seen = EXCLUDED.seen), '
+        + 'changed AS (INSERT INTO mock2_foundation.storage_migration_items (job_id, key, size, state) '
+        + "SELECT $1, k, s, 'pending' FROM prev WHERE NOT known OR old_fp IS DISTINCT FROM fp "
         + "ON CONFLICT (job_id, key) DO UPDATE SET size = EXCLUDED.size, state = 'pending', sha256 = NULL, error = NULL, updated_at = now() "
-        + 'WHERE storage_migration_items.size IS DISTINCT FROM EXCLUDED.size '
-        + 'RETURNING key',
-        [ctx.id, page.items.map((i) => i.key), page.items.map((i) => i.size)],
+        + 'RETURNING key) '
+        + 'SELECT count(*)::int AS n FROM changed',
+        [ctx.id, items.map((i) => i.key), items.map((i) => i.size), items.map((i) => keySha256(i.key)), items.map(sourceFingerprint), token],
       );
-      changed += r.rowCount || 0;
+      changed += r.rows[0].n;
     }
     cursor = page.cursor;
     await ctx.checkpoint();
   } while (cursor);
   return changed;
+}
+
+// The ONLY delete this job ever issues: a key on the PENDING target that this
+// job wrote there itself. The source is never deleted from.
+async function deleteFromTarget(target, key) {
+  if (!target || target.pending !== true) {
+    throw new FoundationError('JOB_INTERNAL', 'Refusing to delete ' + key + ': a storage migration only ever deletes from the pending target.');
+  }
+  await target.delete(key);
+  if (await target.head(key)) throw new FoundationError('TARGET_DELETE_FAILED', 'The target still holds ' + key + ' after it was deleted.');
+}
+
+// A key that no longer exists on the source: the copy this job wrote (if it
+// wrote one) is deleted from the target, then the key is forgotten.
+async function forgetKey(ctx, target, key, written) {
+  if (written) {
+    await deleteFromTarget(target, key);
+    ctx.stats.deleted_from_target += 1;
+    ctx.progress.deleted_from_target += 1;
+  }
+  await ctx.pool.query('DELETE FROM mock2_foundation.storage_migration_items WHERE job_id = $1 AND key = $2', [ctx.id, key]);
+  await ctx.pool.query('DELETE FROM ' + SOURCES_TABLE + ' WHERE job_id = $1 AND key_sha256 = $2', [ctx.id, keySha256(key)]);
+}
+
+// Keys an earlier listing saw that the latest one (token) did not are gone
+// from the source. Returns how many there were.
+async function dropVanished(ctx, target, token) {
+  let gone = 0;
+  for (;;) {
+    ctx.check();
+    const r = await ctx.pool.query(
+      'SELECT i.key, i.state, f.written FROM mock2_foundation.storage_migration_items i '
+      + 'LEFT JOIN ' + SOURCES_TABLE + " f ON f.job_id = i.job_id AND f.key_sha256 = encode(sha256(convert_to(i.key, 'UTF8')), 'hex') "
+      + 'WHERE i.job_id = $1 AND f.seen IS DISTINCT FROM $2 ORDER BY i.key LIMIT 200',
+      [ctx.id, token],
+    );
+    if (!r.rows.length) return gone;
+    for (const row of r.rows) {
+      // An item recorded before this job had a sources row: copied/verified
+      // means this job wrote it.
+      const written = row.written === null || row.written === undefined ? (row.state === 'copied' || row.state === 'verified') : !!row.written;
+      await forgetKey(ctx, target, row.key, written);
+      gone += 1;
+    }
+    await ctx.checkpoint();
+  }
 }
 
 async function refreshTotals(ctx) {
@@ -2538,17 +3143,76 @@ async function setItem(ctx, key, fields) {
   );
 }
 
+// Recorded BEFORE the upload starts: from then on the target may hold a copy
+// this job wrote (and must delete if the key leaves the source).
+async function markWritten(ctx, key) {
+  await ctx.pool.query(
+    'INSERT INTO ' + SOURCES_TABLE + ' (job_id, key_sha256, written) VALUES ($1, $2, true) ON CONFLICT (job_id, key_sha256) DO UPDATE SET written = true',
+    [ctx.id, keySha256(key)],
+  );
+}
+
+// Destroy a body stream when its transfer is aborted (cancel, stop, stall).
+function abortStream(t, stream) {
+  const onAbort = () => {
+    if (stream && typeof stream.destroy === 'function') stream.destroy(t.signal.reason instanceof Error ? t.signal.reason : new Error('aborted'));
+  };
+  t.signal.addEventListener('abort', onAbort, { once: true });
+  return () => t.signal.removeEventListener('abort', onAbort);
+}
+
+// Size by HEAD, then the sha256 of the bytes read back from the target.
+async function verifyOnTarget(target, key, size, sha, t) {
+  const head = await target.head(key);
+  if (!head) throw new Error('the object is not on the target after the upload');
+  if (head.size !== size) throw new Error('the target holds ' + head.size + ' bytes, expected ' + size);
+  const obj = await target.get(key, { signal: t.signal });
+  const hash = crypto.createHash('sha256');
+  const release = abortStream(t, obj.body);
+  try {
+    for await (const chunk of obj.body) {
+      hash.update(chunk);
+      t.touch();
+    }
+  } finally {
+    release();
+  }
+  if (hash.digest('hex') !== sha) throw new Error('the sha256 read back from the target does not match the source');
+}
+
 async function copyOne(ctx, source, target, item) {
   const p = ctx.progress;
   const s = ctx.stats;
+  const t = ctx.transfer();
   try {
+    // An earlier run uploaded this object but did not get to verify it (it
+    // was stopped or crashed): verify what is there before uploading again.
+    if (item.state === 'copied' && item.sha256 && item.size !== null && item.size !== undefined) {
+      let ok = false;
+      try {
+        await verifyOnTarget(target, item.key, Number(item.size), item.sha256, t);
+        ok = true;
+      } catch (err) {
+        if (ctx.aborted) throw ctx.aborted;
+      }
+      if (ok) {
+        await setItem(ctx, item.key, { state: 'verified' });
+        s.copied += 1;
+        s.resumed_verified += 1;
+        p.objects_done += 1;
+        p.bytes_done += Number(item.size);
+        return;
+      }
+    }
     let got;
     try {
-      got = await source.get(item.key);
+      got = await source.get(item.key, { signal: t.signal });
     } catch (err) {
       if (err && err.code === 'NOT_FOUND') {
-        // Deleted from the source since it was listed: nothing to copy.
-        await ctx.pool.query('DELETE FROM mock2_foundation.storage_migration_items WHERE job_id = $1 AND key = $2', [ctx.id, item.key]);
+        // Deleted from the source since it was listed: nothing to copy, and a
+        // copy this job wrote earlier must not outlive it on the target.
+        const w = await ctx.pool.query('SELECT written FROM ' + SOURCES_TABLE + ' WHERE job_id = $1 AND key_sha256 = $2', [ctx.id, keySha256(item.key)]);
+        await forgetKey(ctx, target, item.key, w.rows[0] ? !!w.rows[0].written : item.state === 'copied');
         s.vanished += 1;
         p.objects_total -= 1;
         if (item.state === 'failed') p.failed -= 1;
@@ -2558,54 +3222,69 @@ async function copyOne(ctx, source, target, item) {
     }
     const hash = crypto.createHash('sha256');
     let bytes = 0;
-    const tap = new Transform({
-      transform(chunk, _enc, cb) {
-        hash.update(chunk);
-        bytes += chunk.length;
-        cb(null, chunk);
-      },
-    });
-    got.body.on('error', (e) => tap.destroy(e));
-    got.body.pipe(tap);
-    const putOptions = {};
+    const take = (chunk) => {
+      const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      hash.update(b);
+      bytes += b.length;
+      t.moved(b.length);
+      return b;
+    };
+    const putOptions = { signal: t.signal, onProgress: () => t.touch() };
     if (got.contentType) putOptions.contentType = got.contentType;
     if (got.metadata && Object.keys(got.metadata).length) putOptions.metadata = got.metadata;
-    await target.put(item.key, tap, putOptions);
+    const release = abortStream(t, got.body);
+    try {
+      await markWritten(ctx, item.key);
+      if (got.size !== null && got.size <= BUFFER_MAX) {
+        // Read it, then one PUT: an abort stops the request itself.
+        const chunks = [];
+        for await (const chunk of got.body) chunks.push(take(chunk));
+        t.touch();
+        await target.put(item.key, Buffer.concat(chunks, bytes), putOptions);
+      } else {
+        const body = Readable.from((async function* counted() {
+          for await (const chunk of got.body) yield take(chunk);
+        })());
+        await target.put(item.key, body, putOptions);
+      }
+    } finally {
+      release();
+    }
     const sha = hash.digest('hex');
     if (got.size !== null && bytes !== got.size) throw new Error('read ' + bytes + ' bytes from the source, which reported ' + got.size);
     await setItem(ctx, item.key, { state: 'copied', size: bytes, sha256: sha });
-    const head = await target.head(item.key);
-    if (!head) throw new Error('the object is not on the target after the upload');
-    if (head.size !== bytes) throw new Error('the target holds ' + head.size + ' bytes, expected ' + bytes);
-    const again = await target.sha256(item.key);
-    if (again.sha256 !== sha) throw new Error('the sha256 read back from the target does not match the source');
+    await verifyOnTarget(target, item.key, bytes, sha, t);
     await setItem(ctx, item.key, { state: 'verified' });
     s.copied += 1;
     p.objects_done += 1;
     p.bytes_done += bytes;
     if (item.state === 'failed') p.failed -= 1;
   } catch (err) {
+    if (ctx.aborted) throw ctx.aborted;
     if (err instanceof JobInterrupted || err instanceof JobCancelled) throw err;
-    await setItem(ctx, item.key, { state: 'failed', error: String(err && err.message ? err.message : err).slice(0, 500) });
+    const why = t.signal.aborted && t.signal.reason instanceof Error ? t.signal.reason : err;
+    await setItem(ctx, item.key, { state: 'failed', error: String(why && why.message ? why.message : why).slice(0, 500) });
     s.failed += 1;
     if (item.state !== 'failed') p.failed += 1;
     // A credentials or availability problem fails every object: stop now.
     if (err instanceof FoundationUnavailableError || (err && err.code === 'STORAGE_REJECTED_CREDENTIALS')) throw err;
+  } finally {
+    t.done();
   }
 }
 
 async function copyPending(ctx, source, target, states, concurrency) {
   let lastKey = '';
   for (;;) {
-    checkSignal(ctx.signal);
+    ctx.check();
     const r = await ctx.pool.query(
-      'SELECT key, size, state FROM mock2_foundation.storage_migration_items WHERE job_id = $1 AND state = ANY($2::text[]) AND key > $3 ORDER BY key LIMIT 200',
+      'SELECT key, size, sha256, state FROM mock2_foundation.storage_migration_items WHERE job_id = $1 AND state = ANY($2::text[]) AND key > $3 ORDER BY key LIMIT 200',
       [ctx.id, states, lastKey],
     );
     if (!r.rows.length) return;
     lastKey = r.rows[r.rows.length - 1].key;
     await mapLimit(r.rows, concurrency, async (item) => {
-      checkSignal(ctx.signal);
+      ctx.check();
       await copyOne(ctx, source, target, item);
       await ctx.checkpoint();
     });
@@ -2649,25 +3328,32 @@ async function runStorageMigrate(ctx) {
     throw new FoundationError('JOB_PARAMS_MISMATCH', 'The job was planned for other storage than the app database now holds (' + disagree.join('; ') + '); nothing was copied.');
   }
   if (sameLocation(source, target)) throw new FoundationError('JOB_PARAMS_INVALID', 'The pending storage is the same bucket and prefix as the active one.');
-  Object.assign(ctx.stats, { copied: 0, skipped_verified: 0, failed: 0, vanished: 0 });
+  await ensureTable(ctx.pool, SOURCES_DDL);
+  Object.assign(ctx.stats, { copied: 0, skipped_verified: 0, failed: 0, vanished: 0, deleted_from_target: 0, resumed_verified: 0 });
+  ctx.progress.bytes_in_flight = 0;
+  ctx.progress.deleted_from_target = Number(ctx.progress.deleted_from_target) || 0;
   ctx.progress.phase = 'listing';
   // The app keeps writing to the ACTIVE storage while this runs, so one
-  // listing is not enough: after each copy pass the source is listed again and
-  // the delta copied, until a listing finds nothing new or changed (progress:
-  // pass, passes, converged). The window that remains is the time between that
-  // last quiet listing and the host's promotion (it polls a running job every
-  // few seconds) plus the app's reload on the NOTIFY: an object written to the
-  // old provider inside it is not copied. It is not lost — it stays on the old
-  // provider (bundled: in the preserved volume) — but the app does not see it
-  // after the switch until it is copied again.
+  // listing is not enough: after each copy pass the source is listed again,
+  // what is new or changed (size, ETag or Last-Modified) is copied, and what
+  // is gone is deleted from the target (only keys this job wrote there) —
+  // until a listing finds nothing new, changed or gone (progress: pass,
+  // passes, converged, deleted_from_target). The window that remains is the
+  // time between that last quiet listing and the host's promotion (it polls a
+  // running job every few seconds) plus the app's reload on the NOTIFY: an
+  // object written to the old provider inside it is not copied. It is not lost
+  // — it stays on the old provider (bundled: in the preserved volume) — but the
+  // app does not see it after the switch until it is copied again.
   let converged = false;
   for (let pass = 1; pass <= MAX_LIST_PASSES; pass += 1) {
     ctx.progress.pass = pass;
     ctx.progress.passes = pass;
-    const changed = await syncListing(ctx, source);
+    const token = ctx.id + ':' + Date.now().toString(36) + ':' + crypto.randomBytes(6).toString('hex');
+    const changed = await syncListing(ctx, source, token);
+    const gone = await dropVanished(ctx, target, token);
     await refreshTotals(ctx);
     if (pass === 1) ctx.stats.skipped_verified = ctx.progress.objects_done;
-    else if (changed === 0) { converged = true; break; } // nothing new or changed since the last pass
+    else if (changed === 0 && gone === 0) { converged = true; break; } // nothing new, changed or gone since the last pass
     ctx.progress.phase = 'copying';
     // The first pass also retries what an earlier run left copied or failed;
     // later passes only what appeared or changed meanwhile.
@@ -2704,7 +3390,7 @@ async function embedPass(ctx, src, dst, emb, plan) {
   let last = null;
   let embedded = 0;
   for (;;) {
-    checkSignal(ctx.signal);
+    ctx.check();
     const params = [batch];
     let after = '';
     if (last) {
@@ -2712,7 +3398,7 @@ async function embedPass(ctx, src, dst, emb, plan) {
       after = ' AND (s.source, s.item_id, s.chunk) > ($2, $3, $4)';
     }
     const r = await ctx.pool.query(
-      'SELECT s.source, s.item_id, s.chunk, s.content, s.content_sha256, s.metadata, s.updated_at FROM ' + src + ' s '
+      'SELECT s.source, s.item_id, s.chunk, s.content, s.content_sha256, s.metadata, s.updated_at::text AS updated_at FROM ' + src + ' s '
       + 'LEFT JOIN ' + dst + ' d ON d.source = s.source AND d.item_id = s.item_id AND d.chunk = s.chunk '
       + 'WHERE d.content_sha256 IS DISTINCT FROM s.content_sha256' + after
       + ' ORDER BY s.source, s.item_id, s.chunk LIMIT $1',
@@ -2721,13 +3407,17 @@ async function embedPass(ctx, src, dst, emb, plan) {
     if (!r.rows.length) return embedded;
     last = r.rows[r.rows.length - 1];
     const vectors = await emb.embed(r.rows.map((row) => row.content));
+    // The app writes the target too while it builds (vector.mjs), with the
+    // time of its write; a row it wrote after this batch was read is newer
+    // and is kept (the timestamps are the source rows' own, exact).
     await ctx.pool.query(
-      'INSERT INTO ' + dst + ' (source, item_id, chunk, content, content_sha256, embedding, metadata, updated_at) '
+      'INSERT INTO ' + dst + ' AS d (source, item_id, chunk, content, content_sha256, embedding, metadata, updated_at) '
       + 'SELECT u.source, u.item_id, u.chunk, u.content, u.sha, u.embedding::' + plan.type + ', u.metadata::jsonb, u.updated_at::timestamptz '
       + 'FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[]) '
       + 'AS u(source, item_id, chunk, content, sha, embedding, metadata, updated_at) '
       + 'ON CONFLICT (source, item_id, chunk) DO UPDATE SET content = EXCLUDED.content, content_sha256 = EXCLUDED.content_sha256, '
-      + 'embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at',
+      + 'embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata, updated_at = EXCLUDED.updated_at '
+      + 'WHERE d.updated_at <= EXCLUDED.updated_at',
       [
         r.rows.map((row) => row.source),
         r.rows.map((row) => row.item_id),
@@ -2736,7 +3426,7 @@ async function embedPass(ctx, src, dst, emb, plan) {
         r.rows.map((row) => row.content_sha256),
         vectors.map((v) => '[' + v.join(',') + ']'),
         r.rows.map((row) => JSON.stringify(row.metadata || {})),
-        r.rows.map((row) => new Date(row.updated_at || Date.now()).toISOString()),
+        r.rows.map((row) => row.updated_at || new Date().toISOString()),
       ],
     );
     embedded += r.rows.length;
@@ -2751,13 +3441,43 @@ async function count(pool, table, where, params) {
   return Number(r.rows[0].n);
 }
 
+// The active index (src) against the target (dst), item by item, in ONE
+// statement (one snapshot): keys the target lacks, keys only the target has,
+// and keys whose content differs. Counts taken at different moments would
+// disagree on a busy app; a set comparison does not.
+async function compareIndexes(pool, src, dst) {
+  if (!src) {
+    const n = await count(pool, dst);
+    return { missing: 0, extra: n, stale: 0, n_src: 0, n_dst: n };
+  }
+  const r = await pool.query(
+    'SELECT count(*) FILTER (WHERE d.item_id IS NULL)::bigint AS missing, count(*) FILTER (WHERE s.item_id IS NULL)::bigint AS extra, '
+    + 'count(*) FILTER (WHERE s.item_id IS NOT NULL AND d.item_id IS NOT NULL AND s.content_sha256 <> d.content_sha256)::bigint AS stale, '
+    + 'count(s.item_id)::bigint AS n_src, count(d.item_id)::bigint AS n_dst '
+    + 'FROM ' + src + ' s FULL JOIN ' + dst + ' d ON d.source = s.source AND d.item_id = s.item_id AND d.chunk = s.chunk',
+  );
+  const row = r.rows[0];
+  return { missing: Number(row.missing), extra: Number(row.extra), stale: Number(row.stale), n_src: Number(row.n_src), n_dst: Number(row.n_dst) };
+}
+
+const differs = (d) => d.missing > 0 || d.extra > 0 || d.stale > 0;
+
+// Rows of the target whose item the active index no longer has.
+async function removeExtra(pool, src, dst) {
+  const r = await pool.query('DELETE FROM ' + dst + ' d WHERE NOT EXISTS (SELECT 1 FROM ' + src + ' s WHERE s.source = d.source AND s.item_id = d.item_id AND s.chunk = d.chunk)');
+  return r.rowCount || 0;
+}
+
 async function validateIndex(ctx, args) {
-  const { src, dst, target, emb, sourceIndexId } = args;
+  const { diff, dst, target, emb, sourceIndexId } = args;
   const pool = ctx.pool;
   const reasons = [];
-  const nSrc = src ? await count(pool, src) : 0;
-  const nDst = await count(pool, dst);
-  if (nSrc !== nDst) reasons.push('item count ' + nDst + ' does not match the active index (' + nSrc + ')');
+  const nSrc = diff.n_src;
+  const nDst = diff.n_dst;
+  if (differs(diff)) {
+    reasons.push('after the final catch-up the new index still differs from the active one (' + diff.missing + ' items missing, '
+      + diff.extra + ' extra, ' + diff.stale + ' with other content; ' + nDst + ' vs ' + nSrc + ' items)');
+  }
   const badDims = await count(pool, dst, ' WHERE vector_dims(embedding) <> $1', [target.dimensions]);
   if (badDims) reasons.push(badDims + ' vectors do not have ' + target.dimensions + ' dimensions');
   const sample = (await pool.query(
@@ -2765,17 +3485,28 @@ async function validateIndex(ctx, args) {
     [SELF_RETRIEVAL.sample],
   )).rows;
   let hits = 0;
+  let changed = 0;
   if (sample.length) {
     const queries = await emb.embed(sample.map((s) => s.content));
     const index = { id: target.id, dimensions: Number(target.dimensions), metric: target.metric };
     for (let i = 0; i < sample.length; i += 1) {
-      checkSignal(ctx.signal);
+      ctx.check();
       const found = await searchIndex(index, queries[i], { k: SELF_RETRIEVAL.k });
       const s = sample[i];
-      if (found.some((h) => (h.source === s.source && h.itemId === s.item_id && h.chunk === Number(s.chunk)) || h.contentSha256 === s.content_sha256)) hits += 1;
+      if (found.some((h) => (h.source === s.source && h.itemId === s.item_id && h.chunk === Number(s.chunk)) || h.contentSha256 === s.content_sha256)) {
+        hits += 1;
+        continue;
+      }
+      // An item the app changed or removed since it was sampled says nothing
+      // about the index: it leaves the sample instead of counting as a miss.
+      const still = await pool.query('SELECT 1 FROM ' + dst + ' WHERE source = $1 AND item_id = $2 AND chunk = $3 AND content_sha256 = $4',
+        [s.source, s.item_id, s.chunk, s.content_sha256]);
+      if (!still.rowCount) changed += 1;
     }
   }
-  const hitRate = sample.length ? hits / sample.length : null;
+  const judged = sample.length - changed;
+  const hitRate = judged > 0 ? hits / judged : null;
+  if (sample.length && !judged) reasons.push('every sampled item changed during the self-retrieval check; it could not be judged');
   if (hitRate !== null && hitRate < SELF_RETRIEVAL.threshold) {
     reasons.push('self-retrieval ' + Math.round(hitRate * 1000) / 10 + '% is below ' + SELF_RETRIEVAL.threshold * 100 + '%');
   }
@@ -2785,6 +3516,10 @@ async function validateIndex(ctx, args) {
     source_index_id: sourceIndexId,
     item_count_source: nSrc,
     item_count_target: nDst,
+    items_missing: diff.missing,
+    items_extra: diff.extra,
+    items_stale: diff.stale,
+    catch_up_rounds: args.rounds || 0,
     dimensions: Number(target.dimensions),
     dimension_mismatches: badDims,
     provider: target.provider,
@@ -2792,6 +3527,7 @@ async function validateIndex(ctx, args) {
     metric: target.metric,
     self_retrieval: {
       sample_size: sample.length,
+      changed_while_sampled: changed,
       k: SELF_RETRIEVAL.k,
       hits,
       hit_rate: hitRate,
@@ -2878,25 +3614,38 @@ async function buildIndex(ctx, target, targetId) {
     ctx.progress.items_done = ctx.stats.already_present;
     await ctx.checkpoint();
     // Repeat until the new index has caught up with writes made meanwhile.
+    // (Writes the app makes from now on reach the target too: vector.mjs.)
     for (let pass = 1; pass <= MAX_REEMBED_PASSES; pass += 1) {
       ctx.progress.pass = pass;
       const embedded = await embedPass(ctx, src, dst, emb, plan);
-      const removed = await pool.query('DELETE FROM ' + dst + ' d WHERE NOT EXISTS (SELECT 1 FROM ' + src + ' s WHERE s.source = d.source AND s.item_id = d.item_id AND s.chunk = d.chunk)');
-      ctx.stats.removed += removed.rowCount || 0;
-      if (embedded === 0 && !removed.rowCount) break;
+      const removed = await removeExtra(pool, src, dst);
+      ctx.stats.removed += removed;
+      if (embedded === 0 && !removed) break;
       ctx.progress.items_total = await count(pool, src);
     }
   }
   ctx.progress.phase = 'validating';
   await ctx.checkpoint();
   await ctx.flush(true); // a cancel that arrived meanwhile stops us before validating
-  const validation = await validateIndex(ctx, { src, dst, target, emb, sourceIndexId: active ? active.id : null });
+  // The final catch-up: compare the two indexes item by item, and catch up
+  // whatever still differs (a write that raced the last pass, or one the app
+  // could not embed for the target) until they agree.
+  let diff = await compareIndexes(pool, src, dst);
+  let rounds = 0;
+  while (src && differs(diff) && rounds < MAX_REEMBED_PASSES) {
+    rounds += 1;
+    ctx.progress.catch_up_rounds = rounds;
+    await embedPass(ctx, src, dst, emb, plan);
+    ctx.stats.removed += await removeExtra(pool, src, dst);
+    diff = await compareIndexes(pool, src, dst);
+  }
+  const validation = await validateIndex(ctx, { diff, rounds, dst, target, emb, sourceIndexId: active ? active.id : null });
   // 'ready' is what the host promotes from, so it is written only if the job
   // is not cancelled at that very moment (one statement, no race).
   const done = await pool.query(
-    "UPDATE mock2_foundation.vector_indexes SET state = $2, item_count = $3, validation = $4::jsonb WHERE id = $1 AND state = 'building' "
-    + "AND NOT EXISTS (SELECT 1 FROM mock2_foundation.jobs WHERE id = $5 AND state = 'cancelled') RETURNING id",
-    [targetId, validation.passed ? 'ready' : 'failed', validation.item_count_target, JSON.stringify(validation), ctx.id],
+    "UPDATE mock2_foundation.vector_indexes SET state = $2, item_count = (SELECT count(*) FROM " + dst + "), validation = $3::jsonb WHERE id = $1 AND state = 'building' "
+    + "AND NOT EXISTS (SELECT 1 FROM mock2_foundation.jobs WHERE id = $4 AND state = 'cancelled') RETURNING id",
+    [targetId, validation.passed ? 'ready' : 'failed', JSON.stringify(validation), ctx.id],
   );
   if (!done.rowCount) {
     const j = await pool.query('SELECT state FROM mock2_foundation.jobs WHERE id = $1', [ctx.id]);
@@ -2934,8 +3683,14 @@ export interface JobOutcome {
 export interface RunJobOptions {
   signal?: AbortSignal;
   onProgress?: (progress: Record<string, unknown>, stats: Record<string, number>) => void;
+  /** How often the job row is written while an object is in flight (default 5000 ms). */
+  heartbeatMs?: number;
+  /** A transfer that moves no data for this long is given up (default 10 min). */
+  stallMs?: number;
 }
 export declare const SELF_RETRIEVAL: { readonly sample: number; readonly k: number; readonly threshold: number };
+export declare function keySha256(key: string): string;
+export declare function sourceFingerprint(item: { size?: number | null; etag?: string | null; lastModified?: string | null }): string;
 export declare class JobCancelled extends Error {}
 export declare class JobInterrupted extends Error {}
 export declare function runJob(jobId: string, options?: RunJobOptions): Promise<JobOutcome>;
@@ -2967,11 +3722,11 @@ export { DEPENDENT_CAPABILITIES, FOUNDATION_VERSION } from './runtime/contract.m
 function indexDts() {
   return `${HEADER}
 export { storage, openStorage, FoundationStorage } from './runtime/storage.mjs';
-export type { StorageBody, PutOptions, PutResult, StoredObject, ObjectInfo, ListItem, ListPage, ListOptions, StorageDescription } from './runtime/storage.mjs';
+export type { StorageBody, PutOptions, GetOptions, PutResult, StoredObject, ObjectInfo, ListItem, ListPage, ListOptions, StorageDescription } from './runtime/storage.mjs';
 export { embeddings, openEmbeddings, isLocalEmbeddings, FoundationEmbeddings, LOCAL_EMBEDDINGS_WARNING } from './runtime/embeddings.mjs';
 export type { EmbeddingProvider, VectorMetric, EmbeddingsDescription } from './runtime/embeddings.mjs';
 export { vector } from './runtime/vector.mjs';
-export type { VectorItemInput, UpsertResult, SearchOptions, SearchHit, VectorIndex } from './runtime/vector.mjs';
+export type { VectorItemInput, UpsertResult, SearchOptions, SearchHit, VectorIndex, CatchupResult } from './runtime/vector.mjs';
 export { healthReport, runHealth } from './runtime/health.mjs';
 export type { HealthStatus, HealthComponent, HealthResult, HealthReport } from './runtime/health.mjs';
 export { getFoundation, ensureFoundation, onFoundationChange, describeConfig } from './runtime/config.mjs';

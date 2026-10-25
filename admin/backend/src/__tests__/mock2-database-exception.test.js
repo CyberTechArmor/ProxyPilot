@@ -25,6 +25,7 @@ import {
   buildChangedEngineReadScript, parseChangedEngineRead, databaseEngineRejectionMessage,
   initFinishGuard, recordFinishRejection, FINISH_REJECTION_BUDGET,
 } from '../mock2/finish-guard-logic.js';
+import { gateRunEnv } from '../mock2/cycle-logic.js';
 import { registerDatabaseExceptionRoutes } from '../mock2/database-exception-routes.js';
 import { commandAllowed, foundationCommandPolicy, refusedDatabaseInstall } from '../mock2/harness-safety.js';
 import { makePreToolUseGuard } from '../mock2/runner-sdk-hooks.js';
@@ -198,17 +199,63 @@ test('the runners wire the finish guard before acceptance, pass the exception to
   const runner = await readFile(new URL('../mock2/runner.js', import.meta.url), 'utf8');
   const guard = runner.indexOf("validator: 'database-engine'");
   assert.ok(guard > 0, 'the hand-rolled finish rejects through rejectFinishOrConclude');
-  assert.ok(runner.indexOf('readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId })') < guard);
+  const read = runner.indexOf('readIntroducedDatabaseEngines({ containerSh, containerName, appDir: APP_DIR, projectId, base: cycleBase })');
+  assert.ok(read > 0 && read < guard, 'judged against the commit the cycle started from');
   assert.ok(guard < runner.indexOf("validator: 'acceptance-demonstrated'"), 'checked before the acceptance verdict');
-  // The gate's env comes from mock2.db on every gate command line — empty when nothing is recorded.
+  assert.match(runner.slice(runner.indexOf('export async function runCycle('), guard), /const cycleBase = await readCycleBase\(containerName, cycle\.id\);/);
+  // The gate's env comes from mock2.db on every gate command line — empty when nothing is recorded —
+  // and so does whether the project predates the foundation (gateRunEnv; unreadable → strict).
   const battery = runner.slice(runner.indexOf('export async function runGateBattery'), runner.indexOf('export function formatGateReports'));
-  assert.match(battery, /gateExceptionValue\(getDatabaseException\(getCycle\(cycleId\)\?\.project_id\)\)/);
-  assert.match(battery, /MOCK2_DATABASE_EXCEPTION='\$\{dbException === 'sqlite' \? 'sqlite' : ''\}'/);
-  assert.match(battery, /MOCK2_GATE_PROFILE=/);
-  // The SDK lane: same check, same exception in its governance file and Bash guard.
+  assert.match(battery, /gateExceptionValue\(getDatabaseException\(gateProjectId\)\)/);
+  assert.match(battery, /onFoundation = p \? isFoundationProject\(p\) : true;/);
+  assert.match(battery, /catch \{ onFoundation = true; \}/);
+  assert.match(battery, /const env = gateRunEnv\(\{ databaseException: dbException, foundation: onFoundation, profile: gateScripts\[i\]\.profile \}\);/);
+  assert.match(battery, /\$\{env\} sh '\$\{GATES_DIR\}\/\$\{f\}'/);
+  // The SDK lane: same check, same base, same exception in its governance file and Bash guard.
   const sdk = await readFile(new URL('../mock2/runner-sdk.js', import.meta.url), 'utf8');
-  assert.match(sdk, /readIntroducedDatabaseEngines\(/);
+  assert.match(sdk, /readIntroducedDatabaseEngines\(\{ containerSh, containerName, appDir: APP_DIR, projectId, base: cycleBase \}\)/);
+  assert.match(sdk, /const cycleBase = await readCycleBase\(containerName, cycle\.id\);/);
   assert.match(sdk, /databaseException,\n/);
+});
+
+test('gateRunEnv: all three variables on every gate command line, from host state, strict unless the host knows better', () => {
+  assert.equal(gateRunEnv({ databaseException: 'sqlite', foundation: true, profile: 'quick' }),
+    "MOCK2_DATABASE_EXCEPTION='sqlite' MOCK2_FOUNDATION='1' MOCK2_GATE_PROFILE='quick'");
+  assert.equal(gateRunEnv({ databaseException: '', foundation: false, profile: 'full' }),
+    "MOCK2_DATABASE_EXCEPTION='' MOCK2_FOUNDATION='0' MOCK2_GATE_PROFILE='full'");
+  // Unknown → the strict rule; nothing but the exact values passes through.
+  assert.equal(gateRunEnv(), "MOCK2_DATABASE_EXCEPTION='' MOCK2_FOUNDATION='1' MOCK2_GATE_PROFILE=''");
+  for (const foundation of [null, undefined, 0, '', 'no']) assert.match(gateRunEnv({ foundation }), /MOCK2_FOUNDATION='1'/);
+  assert.match(gateRunEnv({ databaseException: "sqlite'; rm -rf /; '", profile: "full'; x" }), /^MOCK2_DATABASE_EXCEPTION='' MOCK2_FOUNDATION='1' MOCK2_GATE_PROFILE=''$/);
+});
+
+test('the engine read script takes the cycle\'s base: a commit made mid-cycle still counts as this build\'s', { skip: spawnSync('git', ['--version']).status !== 0 }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'db-guard-base-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const git = (...args) => {
+    const r = spawnSync('git', ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  const put = async (p, c) => { await mkdir(dirname(join(dir, p)), { recursive: true }); await writeFile(join(dir, p), c); };
+  git('init', '-q');
+  await put('package.json', `${JSON.stringify({ name: 'a', dependencies: { pg: '8' } }, null, 2)}\n`);
+  await put('src/app.ts', "import pg from 'pg';\n");
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  const base = git('rev-parse', 'HEAD').trim();
+  // The build adds an engine and commits it itself.
+  await put('src/store.ts', "import Database from 'better-sqlite3';\n");
+  git('add', '-A');
+  git('commit', '-q', '-m', 'builder commit');
+  const sh = (s) => spawnSync('sh', ['-c', s], { encoding: 'utf8' }).stdout;
+  assert.deepEqual(introducedEngineHits({ files: parseChangedEngineRead(sh(buildChangedEngineReadScript({ appDir: dir }))) }), [], 'against HEAD it is invisible');
+  const hits = introducedEngineHits({ files: parseChangedEngineRead(sh(buildChangedEngineReadScript({ appDir: dir, base }))) });
+  assert.deepEqual(hits.map((h) => `${h.path}:${h.line} ${h.name}`), ['src/store.ts:1 better-sqlite3']);
+  // A base that is not in the checkout (or not a commit name at all) falls back to HEAD.
+  for (const b of ['f'.repeat(40), 'HEAD; rm -rf /', '']) {
+    assert.deepEqual(introducedEngineHits({ files: parseChangedEngineRead(sh(buildChangedEngineReadScript({ appDir: dir, base: b }))) }), [], b);
+  }
 });
 
 test('buildChangedEngineReadScript → parseChangedEngineRead → introducedEngineHits against a real git checkout', { skip: spawnSync('git', ['--version']).status !== 0 }, async (t) => {

@@ -51,6 +51,24 @@ async function fixture(t, files) {
   return dir;
 }
 
+const HAVE_GIT = spawnSync('git', ['--version']).status === 0;
+
+function git(dir, ...args) {
+  const r = spawnSync('git', ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+function commitAll(dir) {
+  if (spawnSync('git', ['rev-parse', '--git-dir'], { cwd: dir }).status !== 0) git(dir, 'init', '-q');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '--allow-empty', '-m', 'state');
+}
+async function committed(t, files) {
+  const dir = await fixture(t, files);
+  commitAll(dir);
+  return dir;
+}
+
 function runGate(dir, env = {}) {
   const r = spawnSync('sh', ['-c', lint.script], {
     cwd: dir, encoding: 'utf8',
@@ -310,4 +328,160 @@ test('the seeded scaffold (buildSeedFiles) passes the gate as it is written', { 
   const r = runGate(dir);
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /constitution-lint: OK/);
+  // As the platform runs it for a project on the foundation, in every tier, committed or not.
+  for (const p of ['quick', 'mvp', 'full']) {
+    const f = runGate(dir, { MOCK2_FOUNDATION: '1', MOCK2_GATE_PROFILE: p });
+    assert.equal(f.code, 0, `${p}: ${f.out}`);
+    assert.match(f.out, /constitution-lint: OK/);
+    assert.doesNotMatch(f.out, /WARNING|FAIL/);
+  }
+  if (HAVE_GIT) {
+    commitAll(dir);
+    for (const p of ['quick', 'mvp', 'full']) assert.equal(runGate(dir, { MOCK2_FOUNDATION: '1', MOCK2_GATE_PROFILE: p }).code, 0, p);
+  }
+});
+
+// ---- apps from before the foundation (MOCK2_FOUNDATION=0, from projects.foundation_version) ----
+//
+// The review finding: constitution-lint moved to every tier and reads the whole
+// repository, so an app created before the foundation with a pre-existing
+// sqlite3 devDependency, knex / prisma, drizzle's sqlite-core or
+// DATABASE_URL=file: failed every quick and MVP build where it used to pass.
+// Now: what such an app already has at HEAD is an advisory, the full build
+// keeps exactly the refusals it had before, and what a build ADDS blocks in
+// every tier (and at finish, on the host).
+
+const LEGACY = { MOCK2_FOUNDATION: '0' };
+
+// The database refusal constitution-lint had before the application foundation
+// (gates.json before 2026-10-24), verbatim: in the full build, the ONLY one an
+// app from before the foundation is held to for what it already has.
+const PRE_FOUNDATION_DB_CHECK = `if [ ! -f package.json ] && [ ! -d src ]; then exit 0; fi
+if [ -d src ]; then
+  hits=$(grep -REln "(from|require)[^\\n]*(mysql2|better-sqlite3|sqlite3|mongoose|mongodb|typeorm|sequelize|prisma|knex)" src 2>/dev/null)
+  if [ -n "$hits" ]; then exit 1; fi
+fi
+exit 0
+`;
+
+// What legacy apps really carry. `old` is what the pre-foundation check said.
+const LEGACY_APPS = {
+  'a sqlite3 devDependency': [{ 'package.json': JSON.stringify({ name: 'a', dependencies: { pg: '8' }, devDependencies: { sqlite3: '5' } }, null, 2), 'src/index.ts': 'export {};\n' }, 0],
+  'knex and prisma dependencies': [{ 'package.json': JSON.stringify({ name: 'a', dependencies: { knex: '3', prisma: '5', '@prisma/client': '5' } }, null, 2), 'src/index.ts': 'export {};\n' }, 0],
+  "drizzle's sqlite-core": [{ 'package.json': PKG, 'src/schema.ts': "import { sqliteTable, text } from 'drizzle-orm/sqlite-core';\n" }, 0],
+  'DATABASE_URL=file:': [{ 'package.json': PKG, 'src/index.ts': 'export {};\n', '.env.example': 'DATABASE_URL=file:./dev.db\n' }, 0],
+  'node:sqlite': [{ 'package.json': PKG, 'src/db.ts': "import { DatabaseSync } from 'node:sqlite';\n" }, 0],
+  'a dynamic import of mongoose': [{ 'package.json': PKG, 'src/db.ts': "export const open = () => import('mongoose');\n" }, 0],
+  'sqlite3 outside src/': [{ 'package.json': PKG, 'src/index.ts': 'export {};\n', 'server/db.js': "const sqlite3 = require('sqlite3');\n" }, 0],
+  'a better-sqlite3 import under src/': [{ 'package.json': PKG, 'src/db.ts': "import Database from 'better-sqlite3';\n" }, 1],
+  'a knex require under src/': [{ 'package.json': PKG, 'src/db.js': "const knex = require('knex')({ client: 'pg' });\n" }, 1],
+  'a @prisma/client import under src/': [{ 'package.json': PKG, 'src/db.ts': "import { PrismaClient } from '@prisma/client';\n" }, 1],
+  'a mysql2/promise import under src/': [{ 'package.json': PKG, 'src/db.ts': "import mysql from 'mysql2/promise';\n" }, 1],
+};
+
+test('an app from before the foundation: what it already has is an advisory below the full build, and the full build refuses exactly what it refused before', { skip: !HAVE_SH || !HAVE_GIT }, async (t) => {
+  for (const [label, [files, old]] of Object.entries(LEGACY_APPS)) {
+    const dir = await committed(t, files);
+    const before = spawnSync('sh', ['-c', PRE_FOUNDATION_DB_CHECK], { cwd: dir, encoding: 'utf8' }).status;
+    assert.equal(before, old, `${label}: the pre-foundation check said ${old}`);
+    for (const p of ['quick', 'mvp']) {
+      const r = runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: p });
+      assert.equal(r.code, 0, `${label} (${p}) must not block:\n${r.out}`);
+      assert.equal(r.status, 'passed');
+      assert.match(r.out, /constitution-lint: WARNING \(advisory, does not block this build\) — this app was created before the application foundation/, `${label} (${p})`);
+      assert.match(r.out, /Already in the app: /);
+      assert.match(r.out, /Moving this app onto the foundation is a separate, explicit step that no build takes on its own: its data access is rewritten to PostgreSQL through Drizzle \(DATABASE_URL from the environment\), its data is moved into the foundation's PostgreSQL, and the foundation runtime and stack are installed\./);
+      assert.match(r.out, /a build that adds another engine is refused/);
+    }
+    const full = runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: 'full' });
+    assert.equal(full.code, before, `${label}: the full build behaves as before the foundation:\n${full.out}`);
+    if (old === 0) assert.match(full.out, /WARNING \(advisory, does not block this build\)/, `${label}: still reported in the full build`);
+    else assert.match(full.out, /constitution-lint: FAIL — PostgreSQL via Drizzle is the only application database \(constitution §2\)\. Found: src\/db\.[jt]s:1 /);
+    // The same repository on the foundation: refused in every tier.
+    for (const p of ['quick', 'mvp', 'full']) {
+      const f = runGate(dir, { MOCK2_FOUNDATION: '1', MOCK2_GATE_PROFILE: p });
+      assert.equal(f.code, 1, `${label} on the foundation (${p}) is refused:\n${f.out}`);
+      assert.match(f.out, /constitution-lint: FAIL — PostgreSQL \(with pgvector, from the application foundation\) is the only application database/);
+      assert.doesNotMatch(f.out, /created before the application foundation/);
+    }
+  }
+});
+
+test('an app from before the foundation: an engine this build ADDS (not at HEAD) blocks in every tier, beside the advisory for the old one', { skip: !HAVE_SH || !HAVE_GIT }, async (t) => {
+  const added = {
+    'a new import': ['src/store.ts', "import mysql from 'mysql2';\n", 'src/store.ts:1 mysql2 (MySQL)'],
+    'a new dependency': ['package.json', JSON.stringify({ name: 'a', dependencies: { pg: '8', mongoose: '8' }, devDependencies: { sqlite3: '5' } }, null, 2), 'package.json dependency mongoose (MongoDB)'],
+    'a new DATABASE_URL': ['.env.example', 'DATABASE_URL=sqlite:./app.db\n', '.env.example:1 DATABASE_URL is a SQLite'],
+    'a new SQLite import': ['src/cache.ts', "import { sqliteTable } from 'drizzle-orm/sqlite-core';\n", 'src/cache.ts:1 drizzle-orm/sqlite-core (SQLite)'],
+  };
+  for (const [label, [path, content, named]] of Object.entries(added)) {
+    const dir = await committed(t, { 'package.json': JSON.stringify({ name: 'a', dependencies: { pg: '8' }, devDependencies: { sqlite3: '5' } }, null, 2), 'src/index.ts': 'export {};\n' });
+    await mkdir(dirname(join(dir, path)), { recursive: true });
+    await writeFile(join(dir, path), content);
+    for (const p of ['quick', 'mvp', 'full']) {
+      const r = runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: p });
+      assert.equal(r.code, 1, `${label} (${p}):\n${r.out}`);
+      const fail = r.out.split('\n').find((l) => l.startsWith('constitution-lint: FAIL'));
+      assert.ok(fail && fail.includes(named), `${label} (${p}) names it: ${r.out}`);
+      assert.match(fail, /This app was created before the application foundation/);
+      assert.match(fail, /a build cannot\./);
+      const warn = r.out.split('\n').find((l) => l.startsWith('constitution-lint: WARNING (advisory'));
+      assert.ok(warn && warn.includes('package.json dependency sqlite3 (SQLite)'), `${label} (${p}): the old devDependency stays an advisory: ${r.out}`);
+      assert.ok(!warn.includes(named), `${label} (${p}): the new one is not an advisory`);
+    }
+    // Once it is committed it is the app's own — the host's finish check is what stops a build committing it.
+    commitAll(dir);
+    assert.equal(runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: 'quick' }).code, 0, `${label}: at HEAD it is an advisory`);
+  }
+});
+
+test('an app from before the foundation: the SQLite exception still allows SQLite, in the full build too; no git checkout means everything found is reported, not added', { skip: !HAVE_SH || !HAVE_GIT }, async (t) => {
+  const dir = await committed(t, { 'package.json': PKG, 'src/db.ts': "import Database from 'better-sqlite3';\nimport mysql from 'mysql2';\n" });
+  const r = runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: 'full', MOCK2_DATABASE_EXCEPTION: 'sqlite' });
+  assert.equal(r.code, 1, 'mysql2 under src/ is still refused in the full build');
+  assert.match(r.out, /SQLite allowed for this project by the user's recorded request[^\n]*src\/db\.ts:1 better-sqlite3/);
+  assert.doesNotMatch(r.out.split('\n').find((l) => l.includes('FAIL')), /better-sqlite3/);
+  await writeFile(join(dir, 'src/db.ts'), "import Database from 'better-sqlite3';\n");
+  commitAll(dir);
+  assert.equal(runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: 'full', MOCK2_DATABASE_EXCEPTION: 'sqlite' }).code, 0);
+
+  const plain = await fixture(t, { 'package.json': JSON.stringify({ name: 'a', devDependencies: { sqlite3: '5' } }), 'src/db.ts': "import Database from 'better-sqlite3';\n" });
+  const q = runGate(plain, { ...LEGACY, MOCK2_GATE_PROFILE: 'quick' });
+  assert.equal(q.code, 0, q.out);
+  assert.match(q.out, /Already in the app: [^\n]*src\/db\.ts:1 better-sqlite3[^\n]*package\.json dependency sqlite3/);
+  assert.equal(runGate(plain, { ...LEGACY, MOCK2_GATE_PROFILE: 'full' }).code, 1, 'the pre-foundation refusal holds without git too');
+});
+
+test('an app from before the foundation: src/ without a package.json is reported, not refused (the check did not exist for it)', { skip: !HAVE_SH }, async (t) => {
+  const dir = await fixture(t, { 'src/main.py': 'print(1)\n' });
+  for (const p of ['quick', 'mvp', 'full']) {
+    const r = runGate(dir, { ...LEGACY, MOCK2_GATE_PROFILE: p });
+    assert.equal(r.code, 0, `${p}: ${r.out}`);
+    assert.match(r.out, /WARNING \(advisory\) — src\/ exists but there is no package\.json[^\n]*created before the application foundation/);
+    assert.equal(runGate(dir, { MOCK2_FOUNDATION: '1', MOCK2_GATE_PROFILE: p }).code, 1, `${p} on the foundation`);
+  }
+});
+
+test('the adapters rule (rule 5) is for projects on the foundation only, as the host says — not as a file in the repository says', { skip: !HAVE_SH }, async (t) => {
+  const s3 = "import { S3Client } from '@aws-sdk/client-s3';\n";
+  // The host says "before the foundation": a copied foundation CLI does not bring rule 5 with it.
+  const legacy = await fixture(t, { ...ON_FOUNDATION, 'package.json': FOUNDATION_PKG, 'src/files.ts': s3 });
+  for (const p of ['quick', 'mvp', 'full']) {
+    const r = runGate(legacy, { ...LEGACY, MOCK2_GATE_PROFILE: p });
+    assert.equal(r.code, 0, `${p}: ${r.out}`);
+    assert.doesNotMatch(r.out, /rule 5/);
+  }
+  // The host says "on the foundation": deleting the CLI does not switch rule 5 off.
+  const noMarker = await fixture(t, { 'package.json': FOUNDATION_PKG, 'src/files.ts': s3 });
+  for (const p of ['quick', 'mvp', 'full']) {
+    const r = runGate(noMarker, { MOCK2_FOUNDATION: '1', MOCK2_GATE_PROFILE: p });
+    assert.equal(r.code, 1, `${p}: ${r.out}`);
+    assert.match(r.out, /only through the foundation adapters \(constitution §2 rule 5\)[^\n]*src\/files\.ts:1 imports @aws-sdk\/client-s3/);
+  }
+  // Run by hand (no MOCK2_FOUNDATION): the marker decides, as before.
+  assert.equal(runGate(legacy).code, 1);
+  assert.equal(runGate(noMarker).code, 0);
+  // Only the exact values count; anything else is the by-hand behaviour, never "before the foundation".
+  const engine = await fixture(t, { 'package.json': JSON.stringify({ name: 'a', devDependencies: { sqlite3: '5' } }), 'src/index.ts': 'export {};\n' });
+  for (const v of ['', 'no', 'false', '00', ' 0']) assert.equal(runGate(engine, { MOCK2_FOUNDATION: v, MOCK2_GATE_PROFILE: 'quick' }).code, 1, JSON.stringify(v));
 });

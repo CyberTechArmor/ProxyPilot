@@ -56,11 +56,14 @@ export function clearDatabaseException(projectId) {
 // by the host (one round trip) and judged here — so a build cannot talk its way
 // past it by editing the gate script copied into the container. Fails OPEN on
 // a read error: the constitution-lint gate still scans the whole repository in
-// every tier, and a container hiccup must not invent a finding.
+// every tier (in an app from before the foundation it blocks what is not at
+// HEAD), and a container hiccup must not invent a finding.
 //   containerSh(containerName, script, { timeoutMs }) → { code, stdout }
-export async function readIntroducedDatabaseEngines({ containerSh, containerName, appDir, projectId }) {
+//   base: the commit the cycle started from (runner.readCycleBase), so a
+//         commit the build made mid-cycle is still judged; HEAD when null.
+export async function readIntroducedDatabaseEngines({ containerSh, containerName, appDir, projectId, base = null }) {
   try {
-    const r = await containerSh(containerName, buildChangedEngineReadScript({ appDir }), { timeoutMs: 120000 });
+    const r = await containerSh(containerName, buildChangedEngineReadScript({ appDir, base }), { timeoutMs: 120000 });
     if (r?.code !== 0 && !r?.stdout) return [];
     return introducedEngineHits({ files: parseChangedEngineRead(r.stdout || ''), exception: getDatabaseException(projectId) });
   } catch (e) {

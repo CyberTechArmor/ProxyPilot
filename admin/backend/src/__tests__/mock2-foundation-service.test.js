@@ -330,6 +330,35 @@ test('sweep: a job whose app row stopped moving is relaunched (resumable), then 
   assert.match(j.error, /stopped making progress/);
 });
 
+test('polls that overlap a promotion (sweep + GET job + GET foundation) promote once and never report the job failed', async () => {
+  // A promotion takes seconds (sync, stop the unused service, a health probe).
+  // A second poll during it saw the app job succeeded with the switch no longer
+  // staged and marked the promoted job failed — for good when its write landed
+  // last (found while writing foundation-e2e.docker.test.js).
+  for (const lateMs of [30, 160]) {
+    const { guest, calls, stack } = setup({ objects: 2 });
+    const r = routes();
+    const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+    const jobId = res.body.job.id;
+    guest.jobs[jobId].state = 'succeeded';
+    const cli = stack.foundationCli;
+    stack.foundationCli = async (...a) => { await new Promise((ok) => setTimeout(ok, 120)); return cli(...a); };
+    const psql = stack.foundationPsql;
+    stack.foundationPsql = async (c, sql, o) => { if (sql.includes("'type', 'job'")) await new Promise((ok) => setTimeout(ok, 80)); return psql(c, sql, o); };
+    const seen = [];
+    const sweep = service.sweepFoundationJobs();
+    await new Promise((ok) => setTimeout(ok, lateMs));
+    const viaJob = r.call('get', '/projects/:id/foundation/jobs/:jobId', { params: { jobId } }).then((x) => seen.push(x.body.job.state));
+    const viaGet = service.getFoundation(1, { refresh: true }).then((f) => seen.push(f.jobs[0].state));
+    await Promise.all([sweep, viaJob, viaGet]);
+    assert.deepEqual(seen, ['succeeded', 'succeeded'], `overlap at ${lateMs} ms`);
+    const job = store.getJob(jobId);
+    assert.deepEqual([job.state, job.error], ['succeeded', null]);
+    assert.equal(store.readFeatureRows(1).storage.provider, 'external');
+    assert.deepEqual(calls.services.filter(([, a]) => a === 'stop'), [['storage', 'stop']], 'promoted once');
+  }
+});
+
 test('a service that will not start refuses the change and changes nothing (a throw or a non-zero result)', async () => {
   const { stack, calls } = setup({ objects: 0 });
   const r = routes();

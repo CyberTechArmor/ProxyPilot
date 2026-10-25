@@ -42,7 +42,8 @@ The image tags were checked to exist on 2026-10-24; pin each by digest for the t
 at deployment. The `foundation-stack-2026-10-24` compatibility entry is `pending-evidence`: no
 run of the stack is recorded in this release, so the pins are a selection, not proof that the stack
 works on a given host. Existing applications are not given the foundation stack by an upgrade; moving
-one onto it is an explicit migration.
+one onto it is an explicit migration that a person confirms, that starts from a restorable snapshot
+and rolls back to it on failure or on request, and that deletes nothing (PRO current §W.6 rule 8).
 
 For **existing applications**, capture their actual stack in project-owned `state/stack.json` and
 retain its major/minor lines. Default to maintenance patches unless the developer asks to upgrade

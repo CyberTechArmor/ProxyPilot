@@ -554,6 +554,7 @@ export function validateRunnerJob(job) {
     }
     if (p.dumpsDir != null && !/^\/[A-Za-z0-9._\/-]+$/.test(String(p.dumpsDir))) return { ok: false, reason: 'dumpsDir must be an absolute path inside the guest' };
     if (p.guardKey != null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(p.guardKey))) return { ok: false, reason: 'guardKey must be an environment key name' };
+    if (p.foundation != null && typeof p.foundation !== 'boolean') return { ok: false, reason: 'foundation must be a boolean' };
   }
   if (job.kind === 'restore_snapshot') {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(String(p.snapshot || ''))) return { ok: false, reason: 'snapshot must be a snapshot name' };

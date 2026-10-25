@@ -14,6 +14,8 @@
 // that point in time — and survives rehydrate, which depends only on the bare
 // repo (ADR-006). Restore replays the snapshot found in the RESTORED tree.
 
+import { foundationCheckpointDumpCommand, foundationSuperuserPsqlCommand } from './foundation-stack-logic.js';
+
 // Where the per-checkpoint database snapshot lives inside the working clone.
 export const DB_SNAPSHOT_PATH = 'state/db/snapshot.sql';
 
@@ -50,15 +52,24 @@ export function validateRestoreRequest({ record, latestSeq, runningCycles = 0, l
 // time. Best-effort by design — always exits 0: a container without Postgres
 // (install is non-fatal at provision) just skips, and a dump failure must never
 // fail the checkpoint it rides on.
-export function buildDbSnapshotScript({ appDir = '/srv/app' } = {}) {
+//
+// foundation: the database runs in the guest's foundation stack — pg_dump runs
+// inside its postgres service and leaves out the platform-held tables
+// (CHECKPOINT_EXCLUDED_TABLES: the snapshot is committed, so no sealed secret
+// goes into the repository).
+export function buildDbSnapshotScript({ appDir = '/srv/app', foundation = false } = {}) {
+  const ready = foundation
+    ? `command -v docker >/dev/null 2>&1 && ${foundationSuperuserPsqlCommand()} -tAc 'SELECT 1' >/dev/null 2>&1`
+    : `command -v pg_dump >/dev/null 2>&1 && su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1`;
+  const dump = foundation ? foundationCheckpointDumpCommand() : 'su - postgres -c "pg_dump --clean --if-exists app"';
   return `set -e
 APP_DIR="${appDir}"
 [ -d "$APP_DIR" ] || exit 0
 mkdir -p "$APP_DIR/$(dirname '${DB_SNAPSHOT_PATH}')"
-if command -v pg_dump >/dev/null 2>&1 && su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1; then
+if ${ready}; then
   # --clean --if-exists: replaying the snapshot resets schema AND data, so a
   # restore lands exactly on the dumped state instead of layering on top.
-  if su - postgres -c "pg_dump --clean --if-exists app" > "$APP_DIR/${DB_SNAPSHOT_PATH}.tmp" 2>/dev/null; then
+  if ${dump} > "$APP_DIR/${DB_SNAPSHOT_PATH}.tmp" 2>/dev/null; then
     mv "$APP_DIR/${DB_SNAPSHOT_PATH}.tmp" "$APP_DIR/${DB_SNAPSHOT_PATH}"
     echo "[mock2] db snapshot written to ${DB_SNAPSHOT_PATH}"
   else
@@ -85,11 +96,15 @@ exit 0
 // Machine-readable markers on stdout (parse with parseRestoreOutput):
 //   MOCK2_DB_RESTORE=restored|no_snapshot|no_postgres|failed
 //   MOCK2_RESTORED_SHA=<sha of the new restore commit>
-export function buildRestoreScript({ appDir = '/srv/app', commitSha, message = 'restore checkpoint' } = {}) {
+export function buildRestoreScript({ appDir = '/srv/app', commitSha, message = 'restore checkpoint', foundation = false } = {}) {
   const sha = String(commitSha || '').trim();
   if (!isValidCommitSha(sha)) throw new Error('buildRestoreScript: invalid commit sha');
   const msg = String(message).replace(/["'`$\\]/g, '');
   const preserved = RESTORE_PRESERVED_PATHS.join(' ');
+  const dbReady = foundation
+    ? `command -v docker >/dev/null 2>&1 && ${foundationSuperuserPsqlCommand()} -tAc 'SELECT 1' >/dev/null 2>&1`
+    : `command -v psql >/dev/null 2>&1 && su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1`;
+  const dbReplay = foundation ? `${foundationSuperuserPsqlCommand()} -v ON_ERROR_STOP=0 -q -d app` : 'su - postgres -c "psql -v ON_ERROR_STOP=0 -q app"';
   return `set -e
 APP_DIR="${appDir}"
 TARGET="${sha}"
@@ -115,8 +130,8 @@ done
 rm -rf "$KEEP"
 # 4) Replay the database snapshot the RESTORED tree carries (ADR-008 Postgres).
 if [ -f "${DB_SNAPSHOT_PATH}" ]; then
-  if command -v psql >/dev/null 2>&1 && su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1; then
-    if su - postgres -c "psql -v ON_ERROR_STOP=0 -q app" < "${DB_SNAPSHOT_PATH}" >/dev/null 2>&1; then
+  if ${dbReady}; then
+    if ${dbReplay} < "${DB_SNAPSHOT_PATH}" >/dev/null 2>&1; then
       echo "MOCK2_DB_RESTORE=restored"
     else
       echo "MOCK2_DB_RESTORE=failed"

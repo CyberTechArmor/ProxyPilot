@@ -31,8 +31,8 @@ service, so these are selected systems for new applications, not optional tools.
 required: the database is PostgreSQL 18.6 with pgvector 0.8.7 from the image
 `pgvector/pgvector:0.8.7-pg18`. Object storage defaults to SeaweedFS 4.48
 (`chrislusf/seaweedfs:4.48`), replaceable per deployment by any S3-compatible provider through the
-host storage adapter. Embeddings default to text-embeddings-inference 1.9.0
-(`ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0`) serving `BAAI/bge-small-en-v1.5` with 384
+host storage adapter. Embeddings default to text-embeddings-inference 1.9.4
+(`ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4`) serving `BAAI/bge-small-en-v1.5` with 384
 dimensions; this local model is development quality and is reported as such. The production
 provider is OpenAI through the host embeddings adapter, with the model and dimensions always explicit
 (`text-embedding-3-small`, 1536), or any OpenAI-compatible provider through the same adapter.

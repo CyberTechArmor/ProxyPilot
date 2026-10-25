@@ -14,6 +14,7 @@
 import { authDataProbeScript, parseAuthDataProbe, normalizeDataGuard } from '../../mock2/auth-data-logic.js';
 import { masterKeyRowsCode, DEV_MASTER_SECRET_LITERAL } from '../../mock2/readiness-logic.js';
 import { verificationState } from './logic.js';
+import { foundationPgExecPrefix } from '../../mock2/foundation-stack-logic.js';
 
 export const DEFAULT_UNIT = 'mock2-dev.service';
 export const UNIT_RE = /^[A-Za-z0-9@._-]+\.service$/;
@@ -417,13 +418,19 @@ export function parseStaleWriters(stdout) {
 // the deployed commit and the migration command. Every line is a marker, so
 // a copy that could not be taken is recorded as such, never assumed.
 export const DB_DUMPS_DIR = '/var/backups/proxypilot-db';
-export function protectedCopiesScript(jobId, { appDir = '/srv/app', unitPath = '/etc/systemd/system/mock2-dev.service', environmentFile = '/etc/environment', dumpsDir = DB_DUMPS_DIR, withDatabase = true } = {}) {
+// foundation: the app database runs in the guest's foundation stack (no
+// in-guest server, no postgres OS user): pg_dump runs inside its postgres
+// service (foundationPgExecPrefix), so the client matches the server.
+export function protectedCopiesScript(jobId, { appDir = '/srv/app', unitPath = '/etc/systemd/system/mock2-dev.service', environmentFile = '/etc/environment', dumpsDir = DB_DUMPS_DIR, withDatabase = true, foundation = false } = {}) {
   const id = String(jobId || 'adhoc');
   if (!JOB_ID_RE.test(id)) throw new Error('job id must be a plain identifier');
   for (const pth of [appDir, unitPath, environmentFile, dumpsDir]) if (!/^\/[A-Za-z0-9._\/-]+$/.test(pth)) throw new Error('paths must be absolute');
+  const [haveDump, dumpCmd, noDump] = foundation
+    ? ['command -v docker >/dev/null 2>&1', `${foundationPgExecPrefix()} pg_dump -U postgres --clean --if-exists app`, 'no docker for the foundation stack']
+    : ['command -v pg_dump >/dev/null 2>&1', 'su - postgres -c "pg_dump --clean --if-exists app"', 'no pg_dump'];
   return [
     withDatabase
-      ? `D='${dumpsDir}'; mkdir -p "$D" 2>/dev/null; f="$D/app-pre-deploy-${id}.sql"; if command -v pg_dump >/dev/null 2>&1; then if su - postgres -c "pg_dump --clean --if-exists app" > "$f.tmp" 2>/dev/null; then mv -f "$f.tmp" "$f" && chmod 600 "$f" && echo "DBDUMP:$f:$(wc -c < "$f" | tr -d ' '):$(sha256sum "$f" | cut -d' ' -f1)"; else rm -f "$f.tmp"; echo "DBDUMP:none:pg_dump failed"; fi; else echo "DBDUMP:none:no pg_dump"; fi`
+      ? `D='${dumpsDir}'; mkdir -p "$D" 2>/dev/null; f="$D/app-pre-deploy-${id}.sql"; if ${haveDump}; then if ${dumpCmd} > "$f.tmp" 2>/dev/null; then mv -f "$f.tmp" "$f" && chmod 600 "$f" && echo "DBDUMP:$f:$(wc -c < "$f" | tr -d ' '):$(sha256sum "$f" | cut -d' ' -f1)"; else rm -f "$f.tmp"; echo "DBDUMP:none:pg_dump failed"; fi; else echo "DBDUMP:none:${noDump}"; fi`
       : 'echo "DBDUMP:skipped:no migration command"',
     `if [ -f '${unitPath}' ]; then cp -p '${unitPath}' '${unitPath}.pre-${id}' && echo "UNITCOPY:${unitPath}.pre-${id}"; else echo "UNITCOPY:none:no unit yet"; fi`,
     `umask 077; if [ -f '${environmentFile}' ]; then cp -p '${environmentFile}' '${environmentFile}.pre-${id}' && chmod 600 '${environmentFile}.pre-${id}' && echo "ENVCOPY:${environmentFile}.pre-${id}"; else echo "ENVCOPY:none:no environment file"; fi`,

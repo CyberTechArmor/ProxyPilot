@@ -209,6 +209,21 @@ export function bundledAdminCredentials(projectId) {
   return accessKey && secret ? { accessKeyId: accessKey, secretAccessKey: secret } : null;
 }
 
+// The bundled bucket's object count the host last took (it lists the bucket
+// only when a switch needs to know), kept so GET /foundation can show it
+// without a listing per request. A count, never a key or a value.
+const OBJECT_COUNT_KEY_PREFIX = 'foundation_object_count.';
+export function recordObjectCount(projectId, count) {
+  if (!Number.isInteger(count) || count < 0) return;
+  getMock2Db().prepare('INSERT INTO mock2_settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, NULL) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
+    .run(`${OBJECT_COUNT_KEY_PREFIX}${Number(projectId)}`, JSON.stringify({ count, at: nowIso() }), nowIso());
+}
+export function readObjectCount(projectId) {
+  const raw = getMock2Db().prepare('SELECT value FROM mock2_settings WHERE key = ?').get(`${OBJECT_COUNT_KEY_PREFIX}${Number(projectId)}`)?.value;
+  const v = parseJsonObject(raw, null);
+  return v && Number.isInteger(v.count) && v.count >= 0 ? { count: v.count, at: v.at || null } : null;
+}
+
 // ---- the app database -------------------------------------------------------
 
 // appPsql(containerName, sql) → { code, stdout, stderr } through the stack's

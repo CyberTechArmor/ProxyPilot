@@ -258,7 +258,7 @@ export async function runDeployOperation({ params, exec, job = noopJob(), log = 
   //      runner's retry class. Recorded on the checkpoint; nothing here
   //      changes the app.
   report('start');
-  const copies = parseProtectedCopies((await guest('protect', protectedCopiesScript(jobId, { appDir, environmentFile, unitPath: UNIT_PATH, withDatabase: !!migrateStep }), 10 * 60 * 1000)).stdout);
+  const copies = parseProtectedCopies((await guest('protect', protectedCopiesScript(jobId, { appDir, environmentFile, unitPath: UNIT_PATH, withDatabase: !!migrateStep, foundation: !!p.foundation }), 10 * 60 * 1000)).stdout);
   recovery.protected = { dbDump: copies.dbDump, dbDumpNote: copies.dbDumpNote, unitCopy: copies.unitCopy, envCopy: copies.envCopy, sourceCommit: copies.commit, takenBefore: 'stop, migrate, mint, unit' };
   recovery.migration = migrateStep ? classifyMigrateScript((await guest('migrate_class', `grep -o '"migrate"[[:space:]]*:[[:space:]]*"[^"]*"' '${appDir}/package.json' 2>/dev/null | head -1 | sed 's/^/MIGRATE_SCRIPT:/'; [ -d '${appDir}/migrations' ] && echo MIGRATIONS_DIR:yes || echo MIGRATIONS_DIR:no`, 15_000)).stdout, migrateStep.command) : { command: null, retry: 'none', note: 'no migration command' };
   if (migrateStep && !copies.dbDump) job.event?.('warning', `no protected database copy before the migration (${copies.dbDumpNote || 'unknown'}); the migration runner's own ledger (${recovery.migration.ledger || 'none'}) is the only way back`, { dbDumpNote: copies.dbDumpNote });

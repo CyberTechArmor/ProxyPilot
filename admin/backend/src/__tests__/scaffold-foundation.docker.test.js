@@ -40,7 +40,8 @@ import { SCAFFOLD_DEPENDENCIES } from '../mock2/scaffold.js';
 
 const E2E = process.env.FOUNDATION_E2E === '1';
 const SKIP = E2E ? false : 'set FOUNDATION_E2E=1 to run the real-stack foundation test (Docker + npm registry)';
-const TAG = `a4-${process.pid}`;
+// FOUNDATION_E2E_TAG lets a run on a shared Docker daemon pick its own prefix.
+const TAG = `${/^[a-z0-9-]{1,16}$/.test(process.env.FOUNDATION_E2E_TAG || '') ? process.env.FOUNDATION_E2E_TAG : 'a4'}-${process.pid}`;
 const PG = `${TAG}-pg`;
 const S3A = `${TAG}-s3-bundled`;
 const S3B = `${TAG}-s3-external`;
@@ -666,6 +667,38 @@ describe('the generated foundation against a real stack', { skip: SKIP }, () => 
     assert.equal(Number((await W.su.query("SELECT count(*) AS n FROM mock2_foundation.storage_migration_items WHERE job_id = 'mig-4'")).rows[0].n), 0);
     await job('mig-5', 'tenant3/', { verify: ['md5'] });
     assert.equal((await runJob('mig-5')).error.code, 'JOB_PARAMS_INVALID');
+
+    // 6. An object written to the source WHILE the copy runs is caught by the
+    //    next listing pass: the job ends only on a listing that finds nothing new.
+    await pendingTo('tenant6/');
+    await job('mig-6', 'tenant6/', { concurrency: 2 });
+    const lateBuf = crypto.randomBytes(2048);
+    let late = null;
+    const six = await runJob('mig-6', {
+      onProgress: (p) => { if (!late && p.phase === 'copying' && p.pass === 1) late = storage.put('mig/late-during-copy.bin', lateBuf); },
+    });
+    await late;
+    assert.equal(six.job.state, 'succeeded', JSON.stringify(six));
+    assert.equal(six.job.progress.converged, true);
+    assert.ok(six.job.progress.passes >= 2, `passes ${six.job.progress.passes}`);
+    assert.equal(six.job.progress.objects_total, total + 1);
+    assert.equal(await targetSha('tenant6/mig/late-during-copy.bin'), sha(lateBuf), 'the object written mid-copy is on the target');
+
+    // 7. A source that never stops changing is not reported as copied.
+    await pendingTo('tenant7/');
+    await job('mig-7', 'tenant7/', { concurrency: 4 });
+    let churning = true;
+    let churned = 0;
+    const churn = (async () => { while (churning) { await storage.put(`mig/churn-${churned}.bin`, crypto.randomBytes(64)); churned += 1; } })();
+    const seven = await runJob('mig-7');
+    churning = false;
+    await churn;
+    assert.equal(seven.job.state, 'failed', JSON.stringify(seven.job));
+    assert.equal(seven.error.code, 'SOURCE_STILL_CHANGING');
+    assert.equal(seven.job.progress.converged, false);
+    assert.equal(seven.job.progress.passes, 5);
+    for (let i = 0; i < churned; i += 1) await storage.delete(`mig/churn-${i}.bin`);
+    await storage.delete('mig/late-during-copy.bin');
 
     for (const k of objects.keys()) await storage.delete(k);
     await W.su.query("DELETE FROM mock2_foundation.secrets WHERE name LIKE 'pending.%'");

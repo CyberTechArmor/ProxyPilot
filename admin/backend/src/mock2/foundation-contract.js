@@ -74,7 +74,7 @@ export const STACK = Object.freeze({
   }),
   embeddings: Object.freeze({
     service: 'embeddings',
-    image: 'ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0',
+    image: 'ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4',
     listen: '127.0.0.1',
     port: 8088,
     volume: 'mock2_embed_cache',
@@ -280,7 +280,7 @@ export const FOUNDATION_NOTIFY_CHANNEL = 'mock2_foundation_changed';
 // and connection tests through it.
 export const FOUNDATION_CLI = 'foundation/bin/foundation.mjs';
 export const FOUNDATION_CLI_COMMANDS = Object.freeze([
-  'health',            // --json: run real probes, write mock2_foundation.health, print [{component,status,detail}]
+  'health',            // --json: run real probes, write mock2_foundation.health, print { ok, components: [{component,status,detail}] }
   'job-run',           // <job_id>: run one jobs row (storage_migrate | reembed); resumable, idempotent
   'storage-test',      // --pending --json: connectivity + put/get/delete probe against the pending provider
   'embeddings-test',   // --pending --json: one probe embedding against the pending provider; checks dimensions

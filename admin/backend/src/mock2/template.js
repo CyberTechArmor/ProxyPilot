@@ -47,15 +47,27 @@ export const DEFAULT_WEB_PORT = 3000;
 // block DECLARES how the app installs/migrates/builds/starts — the deploy step
 // obeys it verbatim and NEVER sniffs the tree for a start command (declared, not
 // discovered, exactly like ports).
-export function defaultManifest({ webPort = DEFAULT_WEB_PORT } = {}) {
+// foundation (the default — every new project is seeded on the application
+// foundation): the database has no port at all. PostgreSQL runs in the guest's
+// foundation stack and listens on its Unix socket only, so the manifest says
+// so instead of declaring an internal 5432 that nothing listens on. Nothing
+// reads ports other than \`web\` (parseManifestWebPort); the line is for the
+// person and the builder reading the file.
+export function defaultManifest({ webPort = DEFAULT_WEB_PORT, foundation = true } = {}) {
+  const database = foundation
+    ? `# The database has no port: PostgreSQL + pgvector run in this guest's
+# application foundation stack and listen on the Unix socket in
+# ${STACK.postgres.socketDir} only (DATABASE_URL=${FOUNDATION_DATABASE_URL}).
+`
+    : `  postgres: 5432   # internal — Postgres runs inside this container (ADR-008)
+`;
   return `# mock2.yaml — project topology manifest + run contract (ADR-005).
 # Ports are DECLARED here, never discovered. ProxyPilot registers exactly one
 # HTTPS route, to \`web\`; everything else stays internal to the project bridge.
 version: 1
 ports:
   web: ${webPort}        # exposed — the one HTTPS route ProxyPilot publishes
-  postgres: 5432   # internal — Postgres runs inside this container (ADR-008)
-# How the app runs. The deploy step runs these verbatim (declared, not sniffed).
+${database}# How the app runs. The deploy step runs these verbatim (declared, not sniffed).
 run:
   runtime: ${DEFAULT_RUN_CONTRACT.runtime}
   install: ${DEFAULT_RUN_CONTRACT.install}

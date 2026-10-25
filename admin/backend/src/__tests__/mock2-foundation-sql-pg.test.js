@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { FOUNDATION_SCHEMA_SQL, STACK, sealForApp, openForApp, generateMasterKey, FOUNDATION_NOTIFY_CHANNEL } from '../mock2/foundation-contract.js';
 import {
-  buildSyncSql, buildJobInsertSql, buildJobPollSql, buildCancelJobSql, buildActiveIndexSql, buildHealthReadSql,
+  buildSyncSql, buildJobInsertSql, buildJobPollSql, buildCancelJobSql, buildActiveIndexSql, buildHealthReadSql, buildOverviewReadSql,
   promoteIndexStatements, buildGuardProbeSql, buildGuardRowsSql, parseGeneration, parseJsonRows, parseMarker, SQL_MARKERS, featureRowsFrom,
 } from '../mock2/foundation-logic.js';
 
@@ -132,4 +132,22 @@ test('health read and the data-guard probes', { skip }, () => {
   assert.deepEqual(parseJsonRows(psql(buildGuardRowsSql(guard)).stdout), [{ rows: false }], 'an empty secret is not a stored secret');
   q("INSERT INTO public.auth_connections (secret_ciphertext) VALUES ('abc');");
   assert.deepEqual(parseJsonRows(psql(buildGuardRowsSql(guard)).stdout), [{ rows: true }]);
+});
+
+test('the GET overview read: probe rows plus the active index, one round trip', { skip }, () => {
+  prepare();
+  q(`INSERT INTO mock2_foundation.health (component, status, detail) VALUES ('storage', 'ready', '{"latency_ms":5}') ON CONFLICT (component) DO UPDATE SET status = EXCLUDED.status;`);
+  q("INSERT INTO mock2_foundation.vector_indexes (id, provider, model, dimensions, metric, state, table_name, item_count, activated_at) VALUES ('ix_view0001', 'local', 'BAAI/bge-small-en-v1.5', 384, 'cosine', 'retired', 'vec_ix_view0001', 3, now()) ON CONFLICT DO NOTHING;");
+  const r = psql(buildOverviewReadSql());
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(parseMarker(r.stdout, SQL_MARKERS.ok)[0], 'read');
+  const rows = parseJsonRows(r.stdout);
+  assert.ok(rows.some((x) => x.component === 'storage' && x.status === 'ready'));
+  const indexes = rows.filter((x) => x.type === 'index');
+  assert.ok(indexes.length <= 1, 'one active index at most');
+  for (const ix of indexes) {
+    assert.equal(ix.state, 'active');
+    assert.deepEqual(Object.keys(ix).sort(), ['dimensions', 'id', 'item_count', 'metric', 'model', 'provider', 'state', 'type']);
+  }
+  assert.ok(!indexes.some((x) => x.id === 'ix_view0001'), 'a retired index is not the active one');
 });

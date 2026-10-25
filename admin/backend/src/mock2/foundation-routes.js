@@ -41,7 +41,13 @@ const embeddingsSchema = z.object({
 
 function send(res, result, okStatus = 200) {
   if (result && result.ok === false) {
-    return res.status(result.status || 409).json({ code: result.code, message: result.message, options: result.options || [] });
+    // job_id (FOUNDATION_JOB_RUNNING) and object_count (STORAGE_HAS_OBJECTS)
+    // ride along so the dashboard can offer the cancel / the copy directly.
+    return res.status(result.status || 409).json({
+      code: result.code, message: result.message, options: result.options || [],
+      ...(result.job_id ? { job_id: result.job_id } : {}),
+      ...(Number.isInteger(result.object_count) ? { object_count: result.object_count } : {}),
+    });
   }
   return res.status(okStatus).json(result);
 }

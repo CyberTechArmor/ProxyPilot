@@ -74,6 +74,15 @@ export const SCAFFOLD_DEPENDENCIES = {
   },
 };
 
+// The repair set for one project: SCAFFOLD_DEPENDENCIES, plus the foundation's
+// own SDKs (FOUNDATION_DEPENDENCIES) only in a project that carries the
+// foundation runtime (FOUNDATION_CLI present) — a project from before the
+// foundation never gets them.
+export function scaffoldRepairDependencies({ foundation = false } = {}) {
+  if (!foundation) return SCAFFOLD_DEPENDENCIES;
+  return { ...SCAFFOLD_DEPENDENCIES, dependencies: { ...SCAFFOLD_DEPENDENCIES.dependencies, ...FOUNDATION_DEPENDENCIES } };
+}
+
 // The Mock2 standards' verification scripts (mock2-core v0.2.0, "Mock2 production
 // checklist" rule): `npm run check` runs every check and REPORTS — the `;`
 // chaining is deliberate, a red item never stops the next one, because a check is

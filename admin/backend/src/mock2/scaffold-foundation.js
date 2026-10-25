@@ -2315,7 +2315,11 @@ import { FoundationError, FoundationUnavailableError } from './errors.mjs';
 export const SELF_RETRIEVAL = Object.freeze(${JSON.stringify(SELF_RETRIEVAL)});
 
 const PROGRESS_INTERVAL_MS = 100;
-const MAX_LIST_PASSES = 4;
+// storage_migrate lists the source again after every copy pass and copies what
+// appeared or changed meanwhile, until a listing finds nothing new (converged),
+// at most MAX_LIST_PASSES listings. A source still changing after that fails the
+// job (SOURCE_STILL_CHANGING) instead of promoting a copy that misses objects.
+const MAX_LIST_PASSES = 5;
 const MAX_REEMBED_PASSES = 5;
 
 export class JobCancelled extends Error {
@@ -2514,7 +2518,8 @@ async function syncListing(ctx, source) {
 async function refreshTotals(ctx) {
   const r = await ctx.pool.query(
     "SELECT count(*)::bigint AS total, count(*) FILTER (WHERE state = 'verified')::bigint AS done, "
-    + "COALESCE(sum(size) FILTER (WHERE state = 'verified'), 0)::bigint AS bytes, count(*) FILTER (WHERE state = 'failed')::bigint AS failed "
+    + "COALESCE(sum(size) FILTER (WHERE state = 'verified'), 0)::bigint AS bytes, COALESCE(sum(size), 0)::bigint AS bytes_total, "
+    + "count(*) FILTER (WHERE state = 'failed')::bigint AS failed "
     + 'FROM mock2_foundation.storage_migration_items WHERE job_id = $1',
     [ctx.id],
   );
@@ -2522,6 +2527,7 @@ async function refreshTotals(ctx) {
   ctx.progress.objects_total = Number(row.total);
   ctx.progress.objects_done = Number(row.done);
   ctx.progress.bytes_done = Number(row.bytes);
+  ctx.progress.bytes_total = Number(row.bytes_total);
   ctx.progress.failed = Number(row.failed);
 }
 
@@ -2645,12 +2651,23 @@ async function runStorageMigrate(ctx) {
   if (sameLocation(source, target)) throw new FoundationError('JOB_PARAMS_INVALID', 'The pending storage is the same bucket and prefix as the active one.');
   Object.assign(ctx.stats, { copied: 0, skipped_verified: 0, failed: 0, vanished: 0 });
   ctx.progress.phase = 'listing';
+  // The app keeps writing to the ACTIVE storage while this runs, so one
+  // listing is not enough: after each copy pass the source is listed again and
+  // the delta copied, until a listing finds nothing new or changed (progress:
+  // pass, passes, converged). The window that remains is the time between that
+  // last quiet listing and the host's promotion (it polls a running job every
+  // few seconds) plus the app's reload on the NOTIFY: an object written to the
+  // old provider inside it is not copied. It is not lost — it stays on the old
+  // provider (bundled: in the preserved volume) — but the app does not see it
+  // after the switch until it is copied again.
+  let converged = false;
   for (let pass = 1; pass <= MAX_LIST_PASSES; pass += 1) {
     ctx.progress.pass = pass;
+    ctx.progress.passes = pass;
     const changed = await syncListing(ctx, source);
     await refreshTotals(ctx);
     if (pass === 1) ctx.stats.skipped_verified = ctx.progress.objects_done;
-    else if (changed === 0) break; // nothing new or changed since the last pass
+    else if (changed === 0) { converged = true; break; } // nothing new or changed since the last pass
     ctx.progress.phase = 'copying';
     // The first pass also retries what an earlier run left copied or failed;
     // later passes only what appeared or changed meanwhile.
@@ -2658,8 +2675,17 @@ async function runStorageMigrate(ctx) {
     ctx.progress.phase = 'listing';
   }
   await refreshTotals(ctx);
+  ctx.progress.converged = converged;
   ctx.progress.phase = 'done';
   const p = ctx.progress;
+  if (!converged) {
+    return {
+      ok: false,
+      code: 'SOURCE_STILL_CHANGING',
+      error: 'objects were still being added or changed in the current storage after ' + MAX_LIST_PASSES + ' listing passes, so the copy is not complete; '
+        + 'run the job again at a quieter moment (verified objects are skipped), or switch with mode "fresh".',
+    };
+  }
   if (p.failed > 0 || p.objects_done !== p.objects_total) {
     return {
       ok: false,

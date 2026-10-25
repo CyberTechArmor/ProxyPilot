@@ -280,6 +280,7 @@ function checkoutRestoreRoute(handler) {
 import { listChangeRecords, lastChangeRecord, verifyProjectChain, insertChangeRecord, changeRecordMirror } from './change-records.js';
 import { redoContextSection } from './contract-classifier-logic.js';
 import { buildRestoreScript, parseRestoreOutput, restoreSummary, validateRestoreRequest } from './restore-logic.js';
+import { isFoundationProject } from './foundation-stack-logic.js';
 import { buildCheckpointScript } from './template.js';
 import { listCycleEvents, listProjectCycleEvents, recordCycleFeedback, getCycleFeedback, listCycleActivity, lastCycleEventAt } from './cycle-events.js';
 import { listKeyRows, getKeyRow, upsertKey, deleteKey, describeKeySource } from './project-keys.js';
@@ -4635,6 +4636,7 @@ export function createMock2Router() {
 
     const containerName = containerNameForProject(project);
     const script = buildRestoreScript({
+      foundation: isFoundationProject(project),
       commitSha: record.commit_sha,
       message: `mock2: restore to checkpoint #${seq} (${String(record.commit_sha).slice(0, 8)})`,
     });

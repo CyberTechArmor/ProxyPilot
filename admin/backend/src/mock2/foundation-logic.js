@@ -252,9 +252,12 @@ export function validateCredentials(feature, provider, credentials) {
 //     credentials: 'supplied'|'reuse_active'|'bundled_identity'|'none', values: {name→plaintext} (pending names),
 //     startService: name|null, warnings }
 
-const jobRunning = (current) => refusal(CODES.FOUNDATION_JOB_RUNNING,
-  `A ${current.activeJob.kind === 'reembed' ? 're-embedding' : 'storage copy'} job (${current.activeJob.id}) is still running for this deployment; wait for it to finish or cancel it first.`,
-  [{ action: 'cancel_job', job_id: current.activeJob.id }]);
+const jobRunning = (current) => ({
+  ...refusal(CODES.FOUNDATION_JOB_RUNNING,
+    `A ${current.activeJob.kind === 'reembed' ? 're-embedding' : 'storage copy'} job (${current.activeJob.id}) is still running for this deployment; wait for it to finish or cancel it first.`,
+    [{ action: 'cancel_job', job_id: current.activeJob.id }]),
+  job_id: current.activeJob.id,
+});
 
 const has = (current, name) => (current.secretNames instanceof Set ? current.secretNames.has(name) : (current.secretNames || []).includes(name));
 
@@ -283,9 +286,12 @@ export function planStorageAction({ current, request, facts = {} }) {
         'The bundled storage could not be checked for objects, so it cannot be turned off safely. Make sure the storage service is running and try again, or switch to an external S3 provider.',
         [{ action: 'off', description: 'Try again once the storage service answers.' }, ...storageSwitchOptions()]);
     }
-    return refusal(CODES.STORAGE_HAS_OBJECTS,
-      `The bundled storage still holds ${count} object(s), so it cannot be turned off. Choose an external S3 provider and either copy everything over or deliberately start fresh there.`,
-      storageSwitchOptions());
+    return {
+      ...refusal(CODES.STORAGE_HAS_OBJECTS,
+        `The bundled storage still holds ${count} object(s), so it cannot be turned off. Choose an external S3 provider and either copy everything over or deliberately start fresh there.`,
+        storageSwitchOptions()),
+      object_count: count,
+    };
   }
   if (action === 'on') {
     if (current.state === 'on') return { ok: true, plan: { op: 'noop', reason: 'storage is already on' } };
@@ -605,7 +611,10 @@ export function projectJob(row) {
 //   project: the mock2_projects row; rows: { storage, embeddings } (parsed);
 //   secretNames: the names held (never values); jobs: mock2_foundation_jobs rows;
 //   health: [{ component, status, detail, checked_at }] | null (app DB unreachable).
-export function projectFoundation({ project, rows, secretNames = [], jobs = [], health = null, healthError = null }) {
+//   activeIndex: the app database's active vector index row, or null;
+//   objectCount: { count, at } — the bundled bucket's object count the host
+//   last took (an S3 listing it runs only when a switch needs it), or null.
+export function projectFoundation({ project, rows, secretNames = [], jobs = [], health = null, healthError = null, activeIndex = null, objectCount = null }) {
   if (!project?.foundation_version) {
     return { foundation_version: null, database: null, storage: null, embeddings: null, jobs: [], warnings: [] };
   }
@@ -624,7 +633,18 @@ export function projectFoundation({ project, rows, secretNames = [], jobs = [], 
     dependents: [],
   };
   const storage = projectFeature({ feature: 'storage', row: rows.storage, names, probe: probes.get('storage') || null });
+  if (rows.storage.provider === 'bundled' && Number.isInteger(objectCount?.count) && objectCount.count >= 0) {
+    storage.object_count = objectCount.count;
+    storage.object_count_checked_at = objectCount.at || null;
+  }
   const embeddings = projectFeature({ feature: 'embeddings', row: rows.embeddings, names, probe: probes.get('embeddings') || null });
+  embeddings.index = plain(activeIndex) && VECTOR_INDEX_ID_RE.test(String(activeIndex.id || ''))
+    ? {
+      id: activeIndex.id, state: 'active', provider: activeIndex.provider ?? null, model: activeIndex.model ?? null,
+      dimensions: Number.isInteger(Number(activeIndex.dimensions)) ? Number(activeIndex.dimensions) : null,
+      item_count: Number.isFinite(Number(activeIndex.item_count)) ? Number(activeIndex.item_count) : null,
+    }
+    : null;
   const warnings = [];
   if (rows.embeddings.provider === 'local' || rows.embeddings.pending?.provider === 'local') warnings.push({ code: 'LOCAL_EMBEDDINGS', message: LOCAL_EMBEDDINGS_WARNING });
   for (const r of [rows.embeddings.config, rows.embeddings.pending?.config]) {
@@ -768,6 +788,16 @@ export function buildJobPollSql({ jobId, indexId = null }) {
 
 export function buildActiveIndexSql() {
   return `${SQL_PREAMBLE}SELECT ${sqlLiteral(SQL_MARKERS.json)} || json_build_object('type', 'index', 'id', id, 'provider', provider, 'model', model, 'dimensions', dimensions, 'metric', metric, 'item_count', item_count)::text FROM mock2_foundation.vector_indexes WHERE state = 'active';
+SELECT ${sqlLiteral(`${SQL_MARKERS.ok}read`)};
+`;
+}
+
+// The GET /foundation read: the probe rows plus the active vector index, in
+// one round trip (rows with `component` are probes, the `type: 'index'` row
+// is the active index).
+export function buildOverviewReadSql() {
+  return `${SQL_PREAMBLE}SELECT ${sqlLiteral(SQL_MARKERS.json)} || json_build_object('component', component, 'status', status, 'detail', detail, 'checked_at', checked_at)::text FROM mock2_foundation.health;
+SELECT ${sqlLiteral(SQL_MARKERS.json)} || json_build_object('type', 'index', 'id', id, 'state', state, 'provider', provider, 'model', model, 'dimensions', dimensions, 'metric', metric, 'item_count', item_count)::text FROM mock2_foundation.vector_indexes WHERE state = 'active';
 SELECT ${sqlLiteral(`${SQL_MARKERS.ok}read`)};
 `;
 }

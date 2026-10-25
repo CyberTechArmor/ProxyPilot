@@ -253,3 +253,61 @@ test('eslint blocks only in the full tier; quick and mvp report it as advisory (
   await writeFile(join(dir, 'src/db.ts'), "import Database from 'better-sqlite3';\n");
   for (const p of ['quick', 'mvp', 'full']) assert.equal(runGate(dir, { MOCK2_GATE_PROFILE: p }).code, 1, p);
 });
+
+// ---- the foundation adapters (constitution §2 rule 5) ----
+
+const ON_FOUNDATION = { 'foundation/bin/foundation.mjs': '// the platform-owned CLI\n' };
+const FOUNDATION_PKG = JSON.stringify({ name: 'app', dependencies: { pg: '^8', '@aws-sdk/client-s3': '^3', '@aws-sdk/lib-storage': '^3' } }, null, 2);
+
+test('on the foundation: a direct S3 client or embeddings call outside foundation/ is refused in every tier, pointing at the adapters', { skip: !HAVE_SH }, async (t) => {
+  const cases = [
+    ["import { S3Client } from '@aws-sdk/client-s3';", 'imports @aws-sdk/client-s3'],
+    ["import { Upload } from '@aws-sdk/lib-storage';", 'imports @aws-sdk/lib-storage'],
+    ["const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');", 'imports @aws-sdk/s3-request-presigner'],
+    ["const Minio = await import('minio');", 'imports minio'],
+    ['const r = await fetch(`${base}/v1/embeddings`, { method: "POST" });', 'calls an embeddings API URL (/v1/embeddings)'],
+    ["const url = 'https://api.openai.com/v1/embeddings';", 'calls an embeddings API URL (/v1/embeddings)'],
+    ["const r = await fetch(process.env.EMBED_BASE + '/embeddings', { method: 'POST' });", 'requests an /embeddings URL'],
+    ['const out = await openai.embeddings.create({ model, input });', 'calls an SDK embeddings API'],
+  ];
+  for (const [line, what] of cases) {
+    const dir = await fixture(t, { ...ON_FOUNDATION, 'package.json': FOUNDATION_PKG, 'src/features/files.ts': `// feature code\n${line}\n` });
+    for (const p of ['quick', 'mvp', 'full']) {
+      const r = runGate(dir, { MOCK2_GATE_PROFILE: p });
+      assert.equal(r.code, 1, `${line} (${p}): ${r.out}`);
+      assert.match(r.out, /only through the foundation adapters \(constitution §2 rule 5\)/);
+      assert.match(r.out, /from '#foundation'/);
+      assert.ok(r.out.includes(`src/features/files.ts:2 ${what}`), `${line}: ${r.out}`);
+    }
+  }
+});
+
+test('the adapters check reads only source outside foundation/: the SDK deps, the adapters, comments, the app\'s own /api routes and pre-foundation apps pass', { skip: !HAVE_SH }, async (t) => {
+  const ok = await fixture(t, {
+    ...ON_FOUNDATION,
+    'package.json': FOUNDATION_PKG,
+    'foundation/runtime/storage.mjs': "const s3 = await import('@aws-sdk/client-s3');\n",
+    'foundation/runtime/embeddings.mjs': "const r = await fetch(base + '/embeddings', { method: 'POST' });\n",
+    'src/features/files.ts': "import { storage, embeddings } from '#foundation';\n// never: import { S3Client } from '@aws-sdk/client-s3' or fetch('/v1/embeddings')\n/* fetch(`${base}/v1/embeddings`) */\nexport const list = () => fetch('/api/embeddings');\n",
+    'src/routes/search.ts': "router.post('/embeddings', handler);\n",
+    'README.md': 'Never call /v1/embeddings directly; @aws-sdk/client-s3 is the adapter\'s.\n',
+  });
+  const r = runGate(ok);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /constitution-lint: OK/);
+
+  // An app from before the foundation (no foundation/bin/foundation.mjs) is not judged by this rule.
+  const legacy = await fixture(t, { 'package.json': FOUNDATION_PKG, 'src/files.ts': "import { S3Client } from '@aws-sdk/client-s3';\n" });
+  const l = runGate(legacy);
+  assert.equal(l.code, 0, l.out);
+});
+
+test('the seeded scaffold (buildSeedFiles) passes the gate as it is written', { skip: !HAVE_SH }, async (t) => {
+  const { buildSeedFiles } = await import('../mock2/template.js');
+  const seed = buildSeedFiles({ name: 'Demo App' });
+  assert.ok(seed.some((f) => f.path === 'foundation/bin/foundation.mjs'), 'the seed carries the foundation, so the adapters rule applies');
+  const dir = await fixture(t, Object.fromEntries(seed.map((f) => [f.path, f.content])));
+  const r = runGate(dir);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /constitution-lint: OK/);
+});

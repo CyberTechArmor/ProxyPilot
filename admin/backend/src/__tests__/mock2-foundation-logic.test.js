@@ -258,7 +258,9 @@ test('projection: DEPENDENT_CAPABILITIES on every feature, LOCAL_EMBEDDINGS_WARN
   assert.deepEqual(p.warnings.map((w) => w.code), ['LOCAL_EMBEDDINGS']);
   assert.equal(p.database.config.socket_dir, STACK.postgres.socketDir);
   assert.deepEqual(Object.keys(p).sort(), ['database', 'embeddings', 'foundation_version', 'jobs', 'storage', 'warnings']);
-  for (const f of ['storage', 'embeddings']) assert.deepEqual(Object.keys(p[f]).filter((k) => k !== 'warning').sort(), ['config', 'dependents', 'has_secret', 'health', 'pending', 'provider', 'state']);
+  for (const f of ['storage', 'embeddings']) assert.deepEqual(Object.keys(p[f]).filter((k) => k !== 'warning' && !(f === 'embeddings' && k === 'index')).sort(), ['config', 'dependents', 'has_secret', 'health', 'pending', 'provider', 'state']);
+  assert.equal(p.embeddings.index, null, 'no active index reported → null, never a guess');
+  assert.equal('object_count' in p.storage, false, 'no count taken yet → not reported');
   assert.deepEqual(projectFoundation({ project: { id: 1, foundation_version: null } }), { foundation_version: null, database: null, storage: null, embeddings: null, jobs: [], warnings: [] }, 'a pre-foundation project has no switches');
 });
 

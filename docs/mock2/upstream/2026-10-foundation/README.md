@@ -63,9 +63,9 @@ and size before it was edited.
 | `core/cpr/AI-Data-Standards.md` | `b916f3c9a2d093ab0f19391c2234cdbd20457317b12f03aa6fc9a6327fcd76c6` | `40cc61f1ae23203b333b2cff02509a55acc2bfef41d97ecdbe929b285d9ff42e` | diff + full |
 | `core/cpr/CPR-v1.1-addendum-A.md` | `bb7dfb4b7fcfffe862e9dbc1c5828aebc92eda2a45d9e6bdd61a6fd1d014203f` | `d1ea0e1602a1c28b01d3b369bbd1c0f55f7cc88bb0f5d7ff4441be4b4cedc62c` | diff |
 | `core/cpr/CPR-v1.1-current.md` | `cfa32d3f6a4b07eb9fc86a05d60b7f1bd405a53fd0ee3dfdf7dd18654c10a0b6` | `08301ba4b6155e2922c5fcbaaf2487b2288867c75f129fff8be59a978f62de90` | diff |
-| `core/cpr/Stack-Version-Table.md` | `d62905897c8b2ddd181c0ea0cb4ebe9bdbbfd533876bedd5be08d1b33b1074f0` | `1f5f2567458cc086729291f753cfe5bfc4d85dc34176d0c2f0cfb1542e53f15f` | diff + full (generated) |
-| `core/cpr/Stack-Versions.md` | `84d6243c5fd2f0f6aa42afbd9128f9768ed52c631606a35b57c570e9ab9ceb92` | `7e746de136044f3cd27ff5ad14ddf2d3e66552f4f3a4e969cdcc5a7d1711bf36` | diff + full |
-| `core/cpr/stack.versions.json` | `830ccdc1fd64e986bf0e4e67811849456d7307006fd63601b82e806a32585066` | `a67ae9ca6cd6b6bdca0254e228a33f24a49ad200a76dbbda16e0272d0c9dc14e` | diff + full |
+| `core/cpr/Stack-Version-Table.md` | `d62905897c8b2ddd181c0ea0cb4ebe9bdbbfd533876bedd5be08d1b33b1074f0` | `75aee4f15479ea3c0476b63af7fb8603c2c96fb4d0043284a40c80021d5e0123` | diff + full (generated) |
+| `core/cpr/Stack-Versions.md` | `84d6243c5fd2f0f6aa42afbd9128f9768ed52c631606a35b57c570e9ab9ceb92` | `0986f1475698197d7e801e6618fb053350cbcf7920d6e66ac29decc12e7290d8` | diff + full |
+| `core/cpr/stack.versions.json` | `830ccdc1fd64e986bf0e4e67811849456d7307006fd63601b82e806a32585066` | `f3d01e08d656bb005488c8b5b7f3d11fbcaf4ccf7d3516d3ed54d9054fd2e41d` | diff + full |
 | `core/mock2/profiles/profile-cpr.md` | `91113d06344838b765b93b9f00c44445d99afaf154e6c8ae8de6cb981191c281` | `1799511f246a04d7f48715862428696b5f9e9ac4a66875e33c71fcd0cd3f397d` | diff + full |
 | `core/mock2/templates/repo/.mock2/foundation/README.md.tpl` | `25e33513cbe7a0dd69d21dfdd77c791645abadc2923696a01886b7804b9e69b3` | `d7a032dc73808de5eb0a0a712a1e89562100dd3b3fa62eceb770960feecf3167` | diff |
 | `core/mock2/templates/repo/.mock2/foundation/server.ts.tpl` | `e5c3aaebeb28f14cac5d2c17b53a1744ea6e5c1abb1af8ab76c807eb10f4927d` | `64fec0772dd36505ea659358f9eb0d6d6554ec41a21dd50198db6c25960dd728` | diff |
@@ -89,7 +89,7 @@ What each change says, in short:
   a new *Readiness is a real operation* section.
 - **`stack.versions.json`** (+ the generated table and `Stack-Versions.md`) — `pgvector`,
   `docker-engine` and `docker-compose` selected (not optional); new systems `seaweedfs` 4.48,
-  `text-embeddings-inference` 1.9.0, `local-embedding-model` `BAAI/bge-small-en-v1.5` (384) and
+  `text-embeddings-inference` 1.9.4, `local-embedding-model` `BAAI/bge-small-en-v1.5` (384) and
   optional `openai-embeddings` `text-embedding-3-small` (1536), each with its image where it has
   one; compatibility entry `foundation-stack-2026-10-24` marked `pending-evidence`.
 - **`core/claude/CLAUDE.md` §9** and the rules `mock2-stack-ai.md`, `mock2-cpr.md`,
@@ -149,8 +149,11 @@ produced by the publish flow ("Generated; do not hand-edit"), so they are not in
 - Verified: each base file matched `release.json`; the patch applies cleanly to those bytes and
   reproduces the result hashes; the table generator reproduces the 1.38.0 table exactly; the image
   tags `pgvector/pgvector:0.8.7-pg18`, `chrislusf/seaweedfs:4.48` and
-  `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.0` exist (registry lookups,
-  2026-10-24); `stack.versions.json` parses and its pins match ProxyPilot's
+  `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4` exist (registry lookups,
+  2026-10-24; `cpu-1.9.4` resolves to the index digest
+  `sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d`, and there is no
+  `cpu-1.9.5`). The package was regenerated on 2026-10-24 with `diff -u` against the
+  hash-verified 1.38.0 bytes after the TEI pin moved from 1.9.0 to 1.9.4; `stack.versions.json` parses and its pins match ProxyPilot's
   `admin/backend/src/mock2/foundation-contract.js` (`mock2-upstream-foundation-package.test.js`).
 - Not verified: the model page for `BAAI/bge-small-en-v1.5` (huggingface.co was not reachable from
   the drafting session); any run of the stack (`foundation-stack-2026-10-24` stays

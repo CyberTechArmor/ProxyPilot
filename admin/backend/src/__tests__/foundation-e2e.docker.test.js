@@ -314,7 +314,7 @@ describe('application foundation end to end (host control plane + guest stack + 
       keyFile: path.join(W.base, 'key', 'master.key'),
       socketDir: path.join(W.base, 'sock'),
       volumes: { postgres: `${PROJECT}-pg`, storage: `${PROJECT}-s3`, embeddings: `${PROJECT}-embed` },
-      ports: { storage: BUNDLED_S3_PORT, embeddings: await freePort() },
+      ports: { postgres: await freePort(), storage: BUNDLED_S3_PORT, embeddings: await freePort() },
     });
     fs.writeFileSync(W.guestEnv, [
       `DATABASE_URL=postgres:///app?host=${W.layout.socketDir}&user=app`,

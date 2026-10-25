@@ -47,7 +47,14 @@
 // v11: GET /api/foundation/health (admin) and a "Foundation services" card in
 // the admin console, both inert (404 / hidden) in a project without the
 // application foundation (scaffold-foundation.js).
-export const PLATFORM_MODULE_VERSION = 'mock2-platform-v11';
+// v12: read-only SQL works on the application foundation. A Unix-socket
+// DATABASE_URL (the foundation's) gave the connection string an EMPTY host;
+// it now names the guest's 127.0.0.1:5432, where the stack publishes the one
+// TCP path its pg_hba admits — the reporting role, under the fixed name
+// app_readonly (a different READONLY_DB_ROLE is reported, never silently
+// broken). The admin switch also shows the connection string it issued: the
+// list refresh after issuing used to overwrite it with nothing.
+export const PLATFORM_MODULE_VERSION = 'mock2-platform-v12';
 
 /* ---------------------------------------------------------------------------
    Drizzle schema. Registered by src/db/index.ts alongside the app's own tables.
@@ -55,6 +62,7 @@ export const PLATFORM_MODULE_VERSION = 'mock2-platform-v11';
 import {
   pushSchemaTs, pushMigrationSql, pushTs, pushClientJs, pushAdminMarkup, PUSH_CSS,
 } from './scaffold-push.js';
+import { STACK } from './foundation-contract.js';
 
 function platformSchemaTs() {
   return `import { pgTable, text, boolean, integer, bigint, jsonb, serial, timestamp, uniqueIndex, index } from 'drizzle-orm/pg-core';
@@ -556,7 +564,10 @@ export function tokenFromRequest(req: { headers: Record<string, unknown> }): str
    Read-only SQL.
    --------------------------------------------------------------------------- */
 function readonlyTs() {
+  const fpg = STACK.postgres;
   return `import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { config } from '../config.js';
@@ -580,6 +591,17 @@ import { config } from '../config.js';
 
 export const RO_SCHEMA = 'api_read';
 export const RO_ROLE = process.env.READONLY_DB_ROLE || 'app_readonly';
+
+// The application foundation (foundation/ at the repository root, present
+// only in an app provisioned on the foundation stack). Its Postgres admits the
+// app over the Unix socket only. The ONE TCP path its platform-owned pg_hba
+// opens is this reporting role, under a FIXED name, with SCRAM passwords, on
+// the guest's ${fpg.listen}:${fpg.port} — reached like a native Postgres, by an SSH
+// tunnel or a port forward. Any other role name cannot connect there.
+export const FOUNDATION_RO_ROLE = '${fpg.readonlyRole}';
+const FOUNDATION_TCP = { host: '${fpg.listen}', port: '${fpg.port}' };
+const FOUNDATION_MARKER = new URL('../../foundation/bin/foundation.mjs', import.meta.url);
+const ROLE_NOT_ADMITTED = 'READONLY_ROLE_NOT_ADMITTED';
 
 // The published surface. Deliberately narrower than the tables behind it.
 // Extend this when a build adds a table worth reporting on — and project only
@@ -644,18 +666,53 @@ async function roleExists(role: string): Promise<boolean> {
   return ((r as unknown as { rows: unknown[] }).rows ?? []).length > 0;
 }
 
-export async function status(): Promise<{ enabled: boolean; role: string; schema: string }> {
-  if (!(await roleExists(RO_ROLE))) return { enabled: false, role: RO_ROLE, schema: RO_SCHEMA };
-  const r = await db.execute(sql.raw(\`SELECT rolcanlogin FROM pg_roles WHERE rolname = \${literal(RO_ROLE)}\`));
+async function canLogin(role: string): Promise<boolean> {
+  const r = await db.execute(sql.raw(\`SELECT rolcanlogin FROM pg_roles WHERE rolname = \${literal(role)}\`));
   const rows = (r as unknown as { rows: { rolcanlogin: boolean }[] }).rows ?? [];
-  return { enabled: !!rows[0]?.rolcanlogin, role: RO_ROLE, schema: RO_SCHEMA };
+  return !!rows[0]?.rolcanlogin;
+}
+
+// libpq reads a Unix-socket URL two ways: no host part
+// (postgres:///app?host=/run/…) or a host= parameter naming a directory, which
+// wins over the host part.
+function isSocketUrl(u: URL): boolean {
+  return u.hostname === '' || (u.searchParams.get('host') ?? '').startsWith('/');
+}
+function databaseUrl(): URL | null {
+  try { return new URL(config.DATABASE_URL); } catch { return null; }
+}
+// The database is the foundation stack's: reached over its socket, with the
+// foundation runtime installed. Pointed elsewhere by DATABASE_URL, that
+// server's own rules apply.
+function onFoundationStack(): boolean {
+  const u = databaseUrl();
+  return !!u && isSocketUrl(u) && fs.existsSync(fileURLToPath(FOUNDATION_MARKER));
+}
+function roleNotAdmitted(): string {
+  return \`On the application foundation the database admits TCP connections for one role only, "\${FOUNDATION_RO_ROLE}". \`
+    + \`READONLY_DB_ROLE is set to "\${RO_ROLE}", so no credential can be issued for it: unset READONLY_DB_ROLE (or set it to \${FOUNDATION_RO_ROLE}).\`;
+}
+
+export async function status(): Promise<{ enabled: boolean; role: string; schema: string; code?: string; message?: string }> {
+  if (onFoundationStack() && RO_ROLE !== FOUNDATION_RO_ROLE) {
+    // The switch shows whether the one role the stack admits can still log in,
+    // so it can always be turned off.
+    return { enabled: await canLogin(FOUNDATION_RO_ROLE), role: RO_ROLE, schema: RO_SCHEMA, code: ROLE_NOT_ADMITTED, message: roleNotAdmitted() };
+  }
+  if (!(await roleExists(RO_ROLE))) return { enabled: false, role: RO_ROLE, schema: RO_SCHEMA };
+  return { enabled: await canLogin(RO_ROLE), role: RO_ROLE, schema: RO_SCHEMA };
 }
 
 export class DbPrivilegeError extends Error { code = 'DB_PRIVILEGE'; }
+// A configuration answer as well (409 with the fix), so the route treats it
+// like a missing privilege.
+export class ReadonlyRoleError extends DbPrivilegeError { code = ROLE_NOT_ADMITTED; }
 
 // Issuing rotates: the previous password stops working immediately, which is
 // also the revocation story.
 export async function enableReadonly(): Promise<{ role: string; schema: string; url: string; odbc: string }> {
+  const foundation = onFoundationStack();
+  if (foundation && RO_ROLE !== FOUNDATION_RO_ROLE) throw new ReadonlyRoleError(roleNotAdmitted());
   const role = quoteIdent(RO_ROLE);
   const password = crypto.randomBytes(24).toString('base64url');
   await ensureViews();
@@ -673,6 +730,13 @@ export async function enableReadonly(): Promise<{ role: string; schema: string; 
     // may refuse this. That is a legitimate configuration, not a bug — answer
     // with the exact statement a DBA must run.
     if (/permission denied to create role|must be superuser|permission denied for/i.test(msg)) {
+      if (foundation) {
+        throw new DbPrivilegeError(
+          "This application's database role may not create roles yet, so it cannot issue the read-only credential. "
+          + 'On the application foundation ProxyPilot grants it CREATEROLE (which manages only the roles the app creates) '
+          + 'whenever it brings the foundation stack up; a stack started before that change gets it at its next bring-up.',
+        );
+      }
       throw new DbPrivilegeError(
         "This application's database role may not create roles, so it cannot issue the read-only credential itself. "
         + 'Ask a database administrator to run:  ALTER ROLE <app_role> CREATEROLE;  '
@@ -685,10 +749,15 @@ export async function enableReadonly(): Promise<{ role: string; schema: string; 
 }
 
 export async function disableReadonly(): Promise<{ enabled: false; role: string }> {
-  if (await roleExists(RO_ROLE)) {
-    // NOLOGIN rather than DROP: dropping fails while the role owns or is granted
-    // anything, and an operator disabling access wants it to stop NOW.
-    await db.execute(sql.raw(\`ALTER ROLE \${quoteIdent(RO_ROLE)} WITH NOLOGIN\`));
+  // On the foundation, off always closes the one TCP path, whatever
+  // READONLY_DB_ROLE says.
+  const roles = onFoundationStack() && RO_ROLE !== FOUNDATION_RO_ROLE ? [RO_ROLE, FOUNDATION_RO_ROLE] : [RO_ROLE];
+  for (const name of roles) {
+    if (await roleExists(name)) {
+      // NOLOGIN rather than DROP: dropping fails while the role owns or is granted
+      // anything, and an operator disabling access wants it to stop NOW.
+      await db.execute(sql.raw(\`ALTER ROLE \${quoteIdent(name)} WITH NOLOGIN\`));
+    }
   }
   return { enabled: false, role: RO_ROLE };
 }
@@ -696,6 +765,18 @@ export async function disableReadonly(): Promise<{ enabled: false; role: string 
 function parts() {
   let u: URL | null = null;
   try { u = new URL(config.DATABASE_URL); } catch { u = null; }
+  // A Unix-socket URL names no host a reporting tool could use. Its TCP
+  // endpoint is the guest's loopback: on the foundation the stack publishes
+  // the reporting role there (MOCK2_FOUNDATION_PG_PORT moves it, as it does
+  // the portable foundation/compose.yaml), and a native Postgres listens there.
+  if (u && isSocketUrl(u)) {
+    const port = process.env.MOCK2_FOUNDATION_PG_PORT ?? '';
+    return {
+      host: FOUNDATION_TCP.host,
+      port: /^[0-9]{1,5}$/.test(port) ? port : FOUNDATION_TCP.port,
+      database: u.pathname.replace(/^\\//, '') || '${fpg.database}',
+    };
+  }
   return {
     host: u?.hostname ?? '127.0.0.1',
     port: u?.port ?? '5432',
@@ -2155,10 +2236,13 @@ function platformAdminJs() {
       var d = await api('/db/readonly');
       $('pf-ro-enabled').checked = !!d.enabled;
       $('pf-ro-url').value = d.connectionUrl || d.url || '';
-      note('pf-ro-status', d.enabled ? 'Enabled.' : 'Not enabled.');
-      var views = d.views || [];
+      // A configuration answer (e.g. a role the database does not admit) is
+      // shown as such, not as a plain "Not enabled.".
+      note('pf-ro-status', d.message || (d.enabled ? 'Enabled.' : 'Not enabled.'), !!d.code);
+      // The views come as { view: [columns] }.
+      var views = Array.isArray(d.views) ? d.views.map(function (v) { return v.name || v; }) : Object.keys(d.views || {});
       $('pf-ro-views').textContent = views.length
-        ? 'Readable views: ' + views.map(function (v) { return v.name || v; }).join(', ')
+        ? 'Readable views: ' + views.join(', ')
         : 'No views are exposed yet.';
     } catch (e) { note('pf-ro-status', e.message, true); }
   }
@@ -2166,8 +2250,13 @@ function platformAdminJs() {
     var on = this.checked;
     note('pf-ro-status', on ? 'Enabling…' : 'Disabling…');
     try {
-      await api('/db/readonly', { method: on ? 'POST' : 'DELETE' });
+      var d = await api('/db/readonly', { method: on ? 'POST' : 'DELETE' });
       await loadReadonly();
+      // The password exists only in the issuing response: show it now, once.
+      if (on && d && d.url) {
+        $('pf-ro-url').value = d.url;
+        note('pf-ro-status', (d.warning || 'Enabled.') + (d.odbc ? ' ODBC: ' + d.odbc : ''));
+      }
     } catch (e) { this.checked = !on; note('pf-ro-status', e.message, true); }
   });
 

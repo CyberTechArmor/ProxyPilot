@@ -15,9 +15,16 @@
 // a temp dir without touching anything named mock2-foundation.
 //
 // Design points, each verified against the pinned images (see the docker test):
-//   * Postgres has no TCP at all: network_mode none + listen_addresses=''.
-//     Its socket directory is bind-mounted at STACK.postgres.socketDir and the
-//     only pg_hba line is `local all all peer map=mock2`. At RUNTIME the ident
+//   * The app and the superuser reach Postgres only through its socket
+//     directory, bind-mounted at STACK.postgres.socketDir, with
+//     `local all all peer map=mock2`. The ONE TCP path is the read-only
+//     reporting role (STACK.postgres.readonlyRole): the server listens on the
+//     container's IPv4 addresses, Docker publishes the port on the guest's
+//     127.0.0.1 only (same reachability as a native Postgres: an SSH tunnel or
+//     a ProxyPilot port forward), and pg_hba admits TCP for exactly that role
+//     on database app with scram-sha-256 from the container's own networks
+//     (`samenet`: the published port arrives from the bridge gateway), then
+//     rejects every other TCP connection. At RUNTIME the ident
 //     map admits exactly one OS user, root (→ app or → postgres). The image's
 //     own first-initialization scripts run as the container's postgres user
 //     (uid 999); that one mapping is granted through an include file that the
@@ -116,7 +123,7 @@ export const DEFAULT_LAYOUT = Object.freeze({
   keyFile: STACK.keyFile,
   socketDir: STACK.postgres.socketDir,
   volumes: Object.freeze({ postgres: STACK.postgres.volume, storage: STACK.storage.volume, embeddings: STACK.embeddings.volume }),
-  ports: Object.freeze({ storage: STACK.storage.port, embeddings: STACK.embeddings.port }),
+  ports: Object.freeze({ postgres: STACK.postgres.port, storage: STACK.storage.port, embeddings: STACK.embeddings.port }),
 });
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -187,13 +194,29 @@ export function composeArgsError(args) {
 export const PG_CONF_DIR = '/etc/mock2';            // inside the postgres container
 export const PG_INIT_IDENT = '/run/mock2-init/pg_ident.conf'; // container-local, first initialization only
 
-export function buildPgHbaConf() {
+// The pg_hba TCP line admits `samenet`: the subnets of the server's own
+// interfaces, i.e. the container's loopback and its private Compose bridge
+// network (no other container is attached to it). The published port on the
+// guest's 127.0.0.1 always arrives from that bridge's gateway — through
+// docker-proxy, or masqueraded to the gateway when the userland proxy is off —
+// so no fixed subnet has to be pinned (a pinned one could collide with another
+// network in the guest). A packet routed to the container address from
+// anywhere else keeps its own source address and is rejected. The network is
+// IPv4-only and the server listens on 0.0.0.0, so there is no IPv6 path; the
+// final `host all all all reject` covers both families anyway.
+export function buildPgHbaConf({ role = STACK.postgres.readonlyRole, database = STACK.postgres.database } = {}) {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role) || !/^[a-z_][a-z0-9_]{0,62}$/.test(database)) throw new Error('invalid role or database name');
   return `# mock2-foundation — platform-owned (ProxyPilot). Edits are overwritten.
-# Unix socket only (the server has no network and listen_addresses=''), peer
-# authentication through the mock2 ident map. There is no host line and no
-# password anywhere.
-# TYPE  DATABASE  USER  METHOD
-local   all       all   peer map=mock2
+# The app and the superuser: Unix socket only, peer authentication through the
+# mock2 ident map. Neither has a password.
+# The ONE TCP path: the read-only reporting role ${role} on database ${database},
+# SCRAM only, from the container's own networks (the port is published on the
+# guest's 127.0.0.1). Every other TCP connection — the app role and the
+# superuser included, whatever password is offered — is rejected.
+# TYPE  DATABASE  USER          ADDRESS  METHOD
+local   all       all                    peer map=mock2
+host    ${database}       ${role}  samenet  scram-sha-256
+host    all       all           all      reject
 `;
 }
 
@@ -239,8 +262,12 @@ export function buildFoundationInitSql({ role = STACK.postgres.role, database = 
   return `-- mock2-foundation (${FOUNDATION_VERSION}) — platform-owned. Idempotent.
 -- The app role logs in over the socket by peer authentication only: it has no
 -- password. CREATEDB lets the app's test tooling create scratch databases.
-SELECT 'CREATE ROLE ${role} LOGIN CREATEDB' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}')\\gexec
-ALTER ROLE ${role} WITH LOGIN CREATEDB NOSUPERUSER PASSWORD NULL;
+-- CREATEROLE lets the app issue and rotate its read-only reporting role
+-- (${STACK.postgres.readonlyRole}, the only role pg_hba admits over TCP). Since PostgreSQL 16 a
+-- CREATEROLE role manages only the roles it holds ADMIN OPTION on (the ones it
+-- created) and can never grant SUPERUSER, REPLICATION or BYPASSRLS.
+SELECT 'CREATE ROLE ${role} LOGIN CREATEDB CREATEROLE' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}')\\gexec
+ALTER ROLE ${role} WITH LOGIN CREATEDB CREATEROLE NOSUPERUSER PASSWORD NULL;
 SELECT 'CREATE DATABASE ${database} OWNER ${role}' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${database}')\\gexec
 \\connect ${database}
 ${FOUNDATION_SCHEMA_SQL.trim()}
@@ -251,7 +278,8 @@ export function buildPgSealScript() {
   return `# mock2-foundation — sourced by the image's entrypoint as the last init file.
 # Removes the first-initialization ident mapping and leaves the data
 # directory's own (unused) pg_hba/pg_ident equal to the platform's, so even a
-# server started without the -c overrides would be socket + peer only.
+# server started without the -c overrides would admit only socket + peer and
+# the read-only reporting role over TCP.
 cp '${PG_CONF_DIR}/pg_hba.conf' "\${PGDATA}/pg_hba.conf"
 cp '${PG_CONF_DIR}/pg_ident.conf' "\${PGDATA}/pg_ident.conf"
 rm -f '${PG_INIT_IDENT}'
@@ -279,17 +307,26 @@ export function buildFoundationComposeModel({ portable = false, layout = DEFAULT
     [pg.service]: {
       image: FOUNDATION_IMAGES.postgres,
       restart: 'unless-stopped',
-      network_mode: 'none',
       entrypoint: ['bash', `${PG_CONF_DIR}/entrypoint.sh`],
-      command: ['postgres', '-c', `hba_file=${PG_CONF_DIR}/pg_hba.conf`, '-c', `ident_file=${PG_CONF_DIR}/pg_ident.conf`, '-c', 'listen_addresses='],
+      // listen_addresses: the container's IPv4 addresses, for the read-only
+      // reporting role only (pg_hba). password_encryption is PostgreSQL 18's
+      // default, stated so a password the app sets is always a SCRAM verifier.
+      command: ['postgres', '-c', `hba_file=${PG_CONF_DIR}/pg_hba.conf`, '-c', `ident_file=${PG_CONF_DIR}/pg_ident.conf`,
+        '-c', 'listen_addresses=0.0.0.0', '-c', 'password_encryption=scram-sha-256'],
       environment: {
         // Required by the image to initialize without a superuser password. It
         // only writes a `host … trust` line into the data directory's own
         // pg_hba.conf, which this server never reads (hba_file above; the seal
-        // script overwrites it too) — and there is no TCP to reach it with.
+        // script overwrites it too).
         POSTGRES_HOST_AUTH_METHOD: 'trust',
         POSTGRES_INITDB_ARGS: '--auth-local=peer --auth-host=reject',
       },
+      // Guest loopback only, never 0.0.0.0: the reporting role is reached the
+      // way a native Postgres is (SSH tunnel, or a ProxyPilot port forward).
+      ports: [`${pg.listen}:${env('MOCK2_FOUNDATION_PG_PORT', L.ports.postgres)}:5432`],
+      // Its own network: nothing else is attached to it, so pg_hba's samenet
+      // is the bridge gateway the published port arrives from.
+      networks: ['postgres'],
       volumes: [
         `${volumeRef('postgres')}:/var/lib/postgresql`,
         `${socketDir}:/var/run/postgresql`,
@@ -354,8 +391,8 @@ export function buildFoundationComposeModel({ portable = false, layout = DEFAULT
   return {
     name: portable ? '${MOCK2_FOUNDATION_PROJECT:-mock2-foundation}' : L.composeProject,
     services,
-    // One network per service: neither can reach the other's internal ports.
-    networks: { storage: {}, embeddings: {} },
+    // One network per service: none can reach another's ports.
+    networks: { postgres: {}, storage: {}, embeddings: {} },
     volumes,
   };
 }
@@ -388,9 +425,10 @@ function emitYaml(value, indent) {
 function composeHeader(portable) {
   const common = [
     `# Mock2 application foundation (${FOUNDATION_VERSION}) — PostgreSQL + pgvector, S3 storage, embeddings.`,
-    '# No secret lives in this file. Postgres listens on no TCP port: connect through the',
-    `# socket directory with peer authentication (${FOUNDATION_DATABASE_URL}).`,
-    '# S3 and the embedding server are published on 127.0.0.1 only.',
+    '# No secret lives in this file. The app connects to Postgres through the socket',
+    `# directory with peer authentication (${FOUNDATION_DATABASE_URL}).`,
+    `# Postgres' only TCP path is the read-only reporting role ${STACK.postgres.readonlyRole} (SCRAM), on`,
+    `# ${STACK.postgres.listen}:${STACK.postgres.port}; S3 and the embedding server are published on 127.0.0.1 only too.`,
     '# Turning a feature off is `docker compose stop <service>`; never `down -v` (that deletes data).',
   ];
   if (!portable) {
@@ -400,7 +438,7 @@ function composeHeader(portable) {
   return [...common,
     '# Portable copy shipped with the application: the same stack outside ProxyPilot.',
     '#   docker compose -f foundation/compose.yaml up -d            (as root; the app connects as root)',
-    '#   env overrides: MOCK2_FOUNDATION_PROJECT, MOCK2_FOUNDATION_SOCKET_DIR,',
+    '#   env overrides: MOCK2_FOUNDATION_PROJECT, MOCK2_FOUNDATION_SOCKET_DIR, MOCK2_FOUNDATION_PG_PORT,',
     '#                  MOCK2_FOUNDATION_S3_PORT, MOCK2_FOUNDATION_EMBEDDINGS_PORT',
     '# S3 identities are NOT in this repository. Create them once, keys on stdin:',
     `#   printf 's3.configure -user ${STORAGE_APP_USER} -access_key <id> -secret_key <secret> -buckets ${STACK.storage.bucket} -actions ${STORAGE_APP_ACTIONS} -apply\\n' \\`,

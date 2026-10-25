@@ -120,6 +120,8 @@ import { registerDatabaseExceptionRoutes } from './database-exception-routes.js'
 import { getDatabaseException, setDatabaseException, clearDatabaseException } from './database-exception.js';
 import { registerFoundationRoutes } from './foundation-routes.js';
 import * as foundationService from './foundation-service.js';
+import { registerFoundationAdoptRoutes } from './foundation-adopt-routes.js';
+import * as foundationAdoptService from './foundation-adopt-service.js';
 import { routeChatMessage, currentTaskForProject } from './task-sync.js';
 import {
   startProvision,
@@ -2035,6 +2037,13 @@ export function createMock2Router() {
     if (project.lifecycle === 'provisioning') return res.status(409).json({ error: 'Cannot archive a project while it is still provisioning' });
     if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
       return res.status(409).json({ error: `Cannot archive a project in state "${project.lifecycle}"` });
+    }
+    // An unfinished foundation adoption (running, rolling back or failed)
+    // keeps its rollback point in the guest: archiving would delete it.
+    const adoptionRefused = foundationAdoptService.archiveAdoptionRefusal(project.id);
+    if (adoptionRefused) {
+      logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE_REFUSED', 'mock2_project', project.id, { name: project.name, code: adoptionRefused.code }, req.ip);
+      return res.status(409).json({ error: adoptionRefused.message, code: adoptionRefused.code, message: adoptionRefused.message, options: adoptionRefused.options || [] });
     }
     // Archive destroys the guest, and a foundation project's bundled storage
     // objects live only in it (no checkpoint): refused while it holds any or
@@ -6131,6 +6140,15 @@ export function createMock2Router() {
     requireRole: requireMock2Role, requireSudo, refuseIfArchived,
     audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
     service: foundationService,
+  });
+
+  // Application foundation ADOPTION — an existing (pre-foundation) project
+  // moves onto the foundation: plan (read-only), confirm (sudo, audited),
+  // resume, rollback (docs/features/app-foundation.md § Existing projects).
+  registerFoundationAdoptRoutes(router, {
+    requireRole: requireMock2Role, requireSudo, refuseIfArchived,
+    audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
+    service: foundationAdoptService,
   });
 
   return router;

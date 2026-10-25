@@ -996,7 +996,7 @@ async function wakeProjectJob(project) {
 
 // Poll `incus list <name> --format json` for a global-scope IPv4 on the
 // container's primary interface (mirrors lxc.js extractIPv4 semantics).
-async function waitForContainerIp(containerName, { attempts = 30, delayMs = 1000 } = {}) {
+export async function waitForContainerIp(containerName, { attempts = 30, delayMs = 1000 } = {}) {
   for (let i = 0; i < attempts; i++) {
     await new Promise((r) => setTimeout(r, delayMs));
     const r = await sh(`incus list ${containerName} --format json 2>/dev/null`, { timeoutMs: 8000 });

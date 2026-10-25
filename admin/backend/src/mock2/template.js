@@ -621,6 +621,19 @@ if ! docker info >/dev/null 2>&1; then
   exit 43
 fi
 echo "[mock2] foundation runtime ready: $(docker --version), compose $(docker compose version --short 2>/dev/null)"`;
+// The same install, alone, for an EXISTING guest that is adopted onto the
+// foundation (foundation-adopt-service.js): the package index first, then the
+// foundation branch above, byte for byte — nothing else of the setup script.
+export function foundationRuntimeInstallScript() {
+  return `#!/bin/sh
+set -e
+export DEBIAN_FRONTEND=noninteractive
+mkdir -p /etc/apt/apt.conf.d
+printf 'Acquire::ForceIPv4 "true";\\n' > /etc/apt/apt.conf.d/00mock2-ipv4
+apt-get update -y || true
+${FOUNDATION_SETUP_INSTALL}
+`;
+}
 const FOUNDATION_SETUP_BOOTSTRAP = `# The app's PostgreSQL (with pgvector), storage and embeddings run in the
 # guest's foundation stack (/opt/mock2-foundation), brought up by the platform
 # right after this script. No database server is installed in the guest.`;

@@ -305,6 +305,67 @@ test('an unreachable database is an explicit error naming the target after the r
   }
 });
 
+// A stand-in `pg` for the runtime's state reads (features, secrets, meta):
+// rows come from globalThis.__fakeFoundationDb, so the key rules below run
+// without a database.
+function fakePg(dir) {
+  const pkg = path.join(dir, 'node_modules', 'pg');
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'pg', version: '0.0.0-test', main: 'index.js' }));
+  fs.writeFileSync(path.join(pkg, 'index.js'), `
+const answer = async (sql) => {
+  const w = globalThis.__fakeFoundationDb || {};
+  if (/FROM mock2_foundation\\.features/.test(sql)) return { rows: w.features || [] };
+  if (/FROM mock2_foundation\\.secrets/.test(sql)) return { rows: w.secrets || [] };
+  return { rows: [] };
+};
+class Client { on() {} removeListener() {} async connect() {} async end() {} query(sql) { return answer(sql); } escapeIdentifier(s) { return '"' + s + '"'; } }
+class Pool { on() {} query(sql) { return answer(sql); } async connect() { return Object.assign(new Client(), { release() {} }); } async end() {} }
+module.exports = { Client, Pool };
+`);
+}
+
+test('embeddings: an OpenAI-compatible provider is asked without a key unless one is stored; OpenAI always needs one', async () => {
+  // The host allows a key-less OpenAI-compatible provider (credentialsRequired:
+  // openai only); the app used to refuse it as MISSING_CREDENTIALS, so the
+  // switch could never pass its pending test (found by foundation-e2e).
+  const dir = materialize();
+  fakePg(dir);
+  const keyFile = path.join(dir, 'master.key');
+  const masterKey = contract.generateMasterKey();
+  fs.writeFileSync(keyFile, `${masterKey}\n`, { mode: 0o600 });
+  const saved = { url: process.env.DATABASE_URL, key: process.env.FOUNDATION_KEY_FILE };
+  process.env.DATABASE_URL = 'postgres:///app?host=/nonexistent&user=app';
+  process.env.FOUNDATION_KEY_FILE = keyFile;
+  const row = (provider, extra = {}) => ({ feature: 'embeddings', state: 'on', provider, config: { base_url: 'http://127.0.0.1:1/v1', model: 'm', dimensions: 8 }, pending: null, generation: 1, ...extra });
+  const sealed = (name, value) => ({ name, sealed: contract.sealForApp(masterKey, name, value), generation: 1 });
+  try {
+    const cfg = await import(pathToFileURL(path.join(dir, 'foundation/runtime/config.mjs')).href);
+    const emb = await import(pathToFileURL(path.join(dir, 'foundation/runtime/embeddings.mjs')).href);
+    const set = async (w) => { globalThis.__fakeFoundationDb = w; await cfg.reloadFoundation(); };
+    await set({ features: [row('openai_compatible')], secrets: [] });
+    assert.equal((await emb.resolveEmbeddingsConfig()).apiKey, null, 'no key stored: asked without one');
+    await set({ features: [row('openai_compatible')], secrets: [sealed('embeddings.api_key', 'k-stored-1')] });
+    assert.equal((await emb.resolveEmbeddingsConfig()).apiKey, 'k-stored-1', 'a stored key is sent');
+    await set({ features: [row('openai_compatible', { pending: { provider: 'openai_compatible', config: { base_url: 'http://127.0.0.1:2/v1', model: 'n', dimensions: 4 } } })], secrets: [sealed('embeddings.api_key', 'k-active')] });
+    assert.equal((await emb.resolveEmbeddingsConfig({ pending: true })).apiKey, null, 'the pending provider never borrows the active key');
+    await set({ features: [row('openai')], secrets: [] });
+    await assert.rejects(emb.resolveEmbeddingsConfig(), (e) => e.code === 'MISSING_CREDENTIALS');
+    await set({ features: [row('openai')], secrets: [sealed('embeddings.api_key', 'sk-openai-1')] });
+    assert.equal((await emb.resolveEmbeddingsConfig()).apiKey, 'sk-openai-1');
+    // A stored key that cannot be opened is reported, not silently dropped.
+    process.env.FOUNDATION_KEY_FILE = path.join(dir, 'missing.key');
+    await set({ features: [row('openai_compatible')], secrets: [sealed('embeddings.api_key', 'k-stored-1')] });
+    await assert.rejects(emb.resolveEmbeddingsConfig(), (e) => e.code === 'MISSING_MASTER_KEY');
+    await set({ features: [row('openai_compatible')], secrets: [] });
+    assert.equal((await emb.resolveEmbeddingsConfig()).apiKey, null, 'no key to open: no master key needed');
+  } finally {
+    delete globalThis.__fakeFoundationDb;
+    for (const [k, v] of [['DATABASE_URL', saved.url], ['FOUNDATION_KEY_FILE', saved.key]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function runCli(dir, args, env) {
   return spawnSync(process.execPath, [path.join(dir, contract.FOUNDATION_CLI), ...args], {
     cwd: dir,

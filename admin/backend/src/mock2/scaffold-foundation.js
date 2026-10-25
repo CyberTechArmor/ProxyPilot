@@ -1406,7 +1406,9 @@ function embeddingsMjs() {
 //   local              the bundled text-embeddings-inference server, no key
 //                      (development quality - LOCAL_EMBEDDINGS_WARNING)
 //   openai             https://api.openai.com/v1 + key, sends "dimensions"
-//   openai_compatible  config.base_url + key
+//   openai_compatible  config.base_url, + key when one is stored (a server
+//                      may take none; the host allows that, and a server
+//                      that wants one answers 401 -> missing_credentials)
 // Every vector it returns is checked against the configured dimensions; a
 // mismatch is refused (DIMENSIONS_MISMATCH), so vector spaces are never mixed.
 import { ensureFoundation, getFoundation, getSecret, onFoundationChange } from './config.mjs';
@@ -1458,13 +1460,15 @@ export async function resolveEmbeddingsConfig(options) {
   if (!baseUrl && provider === 'openai') baseUrl = OPENAI_BASE_URL;
   if (!baseUrl) throw new FoundationError('EMBEDDINGS_CONFIG_INVALID', 'An OpenAI-compatible provider needs a base_url.');
   let apiKey = null;
-  if (provider !== 'local') {
+  const keyName = pending ? pendingSecretName(SECRET_NAMES.embeddingsApiKey) : SECRET_NAMES.embeddingsApiKey;
+  // OpenAI always needs a key. An OpenAI-compatible server may take none: the
+  // host stores a key only when the person gave one, so one is sent if stored.
+  if (provider === 'openai' || (provider === 'openai_compatible' && f.secretNames.includes(keyName))) {
     if (!f.masterKey.present) {
       throw new FoundationUnavailableError('MISSING_MASTER_KEY', 'The deployment master key is ' + f.masterKey.problem + ' (' + f.masterKey.path + '), so the embedding API key cannot be opened.');
     }
-    const name = pending ? pendingSecretName(SECRET_NAMES.embeddingsApiKey) : SECRET_NAMES.embeddingsApiKey;
-    apiKey = getSecret(name);
-    if (!apiKey) throw new FoundationUnavailableError('MISSING_CREDENTIALS', 'The ' + provider + ' embedding provider has no API key (' + name + ').', { missing: [name] });
+    apiKey = getSecret(keyName);
+    if (!apiKey) throw new FoundationUnavailableError('MISSING_CREDENTIALS', 'The ' + provider + ' embedding provider has no API key (' + keyName + ').', { missing: [keyName] });
   }
   return {
     pending,

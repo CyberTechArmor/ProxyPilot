@@ -22,7 +22,9 @@
 // encrypted in mock2.db (lib/secrets.js, TOTP_ENCRYPTION_KEY) and syncs it
 // SEALED into the app database (mock2_foundation.secrets) under a per-deployment
 // master key (STACK.keyFile, 0600 root). The app connects to Postgres over a
-// Unix socket with peer authentication — no database password exists.
+// Unix socket with peer authentication — the app role has no password. The
+// only TCP path is the read-only reporting role (STACK.postgres.readonlyRole),
+// whose password the app issues and rotates itself.
 //
 // This module is the one place the host side (provisioning, routes, jobs) and
 // the generated app side (scaffold-foundation.js) agree on names, shapes and
@@ -62,6 +64,13 @@ export const STACK = Object.freeze({
     volume: 'mock2_pg_data',
     database: 'app',
     role: 'app',
+    // The ONE TCP path: the app's read-only reporting role (Admin → read-only
+    // SQL), SCRAM only, published on the guest's 127.0.0.1 like a native
+    // Postgres. No other role is admitted over TCP; the app and the superuser
+    // stay socket + peer only.
+    readonlyRole: 'app_readonly',
+    listen: '127.0.0.1',
+    port: 5432,
   }),
   storage: Object.freeze({
     service: 'storage',

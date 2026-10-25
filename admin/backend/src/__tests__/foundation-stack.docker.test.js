@@ -4,31 +4,35 @@
 // The SAME generated files and the SAME exec module run against the local
 // Docker daemon: the guest runner is swapped for a local one and the layout
 // for an `a3-fstack-<pid>` Compose project in a temp dir (its own volume
-// names and published ports), so nothing named mock2-foundation is touched.
-// Everything created is removed afterwards (docker compose down -v on the
-// test's own project only).
+// names and published ports — Postgres' reporting port included), so nothing
+// named mock2-foundation is touched. FOUNDATION_E2E_TAG replaces the `a3`
+// prefix on a shared Docker daemon. Everything created is removed afterwards
+// (docker compose down -v on the test's own project only).
 //
 // NOT covered here: the embeddings service. Its image lives on ghcr.io and its
 // model on huggingface.co, both unreachable from this sandbox, so the test
 // runs with embeddings OFF (bring-up must then leave the service stopped).
 // The local embedding model is proven on a host.
 //
-//   FOUNDATION_E2E=1 node --test src/__tests__/foundation-stack.docker.test.js
+//   FOUNDATION_E2E=1 [FOUNDATION_E2E_TAG=xy] node --test src/__tests__/foundation-stack.docker.test.js
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, chmodSync, statSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, rmSync, chmodSync, statSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { tmpdir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
+import { createServer, connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import { generateMasterKey, STACK, FOUNDATION_DATABASE_URL } from '../mock2/foundation-contract.js';
 import {
   resolveLayout, composeArgv, foundationReadOnlySqlScript, foundationDumpScript,
   foundationCloneDumpArgv, foundationCloneRestoreArgv, foundationEnsureSql, buildFoundationComposeYaml,
+  buildFoundationComposeModel,
 } from '../mock2/foundation-stack-logic.js';
+import { buildPlatformFiles } from '../mock2/scaffold-platform.js';
+import { materializeReadonly, runReadonly } from './helpers/platform-readonly.js';
 import {
   _setFoundationGuestExecForTests, bringUpFoundation, ensureMasterKey, foundationCompose, foundationPsql,
   foundationServiceStatus, setFoundationService, bundledStorageObjectCount, writeFoundationFiles,
@@ -40,6 +44,8 @@ const skip = !ENABLED ? 'set FOUNDATION_E2E=1 to run the real-Docker foundation 
   : !IS_ROOT ? 'needs root: peer authentication maps the guest root to the app role' : false;
 
 const GUEST = 'a3-local';
+// A run on a shared Docker daemon picks its own prefix (projects, volumes).
+const PREFIX = /^[a-z0-9-]{1,16}$/.test(process.env.FOUNDATION_E2E_TAG || '') ? process.env.FOUNDATION_E2E_TAG : 'a3';
 
 function run(argv, { input = null, timeoutMs = 120000, uid = null, env = null } = {}) {
   return new Promise((resolve) => {
@@ -70,6 +76,17 @@ const keyId = () => `A3${randomBytes(9).toString('hex').toUpperCase()}`;
 const secret = () => randomBytes(30).toString('base64').replace(/=+$/, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 'open' when something accepts a TCP connection, 'refused' otherwise.
+function tcpProbe(host, port, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    const sock = tcpConnect({ host, port });
+    const done = (v) => { sock.destroy(); resolve(v); };
+    sock.setTimeout(timeoutMs, () => done('refused'));
+    sock.once('connect', () => done('open'));
+    sock.once('error', () => done('refused'));
+  });
+}
+
 async function waitFor(fn, { timeoutMs = 120000, intervalMs = 1000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -83,17 +100,23 @@ async function waitFor(fn, { timeoutMs = 120000, intervalMs = 1000 } = {}) {
 test('foundation stack on real Docker', { skip, timeout: 20 * 60 * 1000 }, async (t) => {
   const { S3Client, PutObjectCommand, GetObjectCommand, CreateBucketCommand, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
   const pg = (await import('pg')).default;
+  const pgConnect = async (url) => {
+    const c = new pg.Client({ connectionString: url, connectionTimeoutMillis: 10000 });
+    try { await c.connect(); } catch (e) { await c.end().catch(() => {}); throw e; }
+    return c;
+  };
 
   const base = mkdtempSync(join(tmpdir(), 'a3-fs-'));
   chmodSync(base, 0o755); // so the non-root client reaches the socket and is refused by PEER, not by the directory
   const pid = process.pid;
+  const project = `${PREFIX}-fstack-${pid}`;
   const layout = resolveLayout({
-    composeProject: `a3-fstack-${pid}`,
+    composeProject: project,
     dir: join(base, 'stack'),
     keyFile: join(base, 'key', 'master.key'),
     socketDir: join(base, 'sock'),
-    volumes: { postgres: `a3-fstack-${pid}-pg`, storage: `a3-fstack-${pid}-s3`, embeddings: `a3-fstack-${pid}-embed` },
-    ports: { storage: await freePort(), embeddings: await freePort() },
+    volumes: { postgres: `${project}-pg`, storage: `${project}-s3`, embeddings: `${project}-embed` },
+    ports: { postgres: await freePort(), storage: await freePort(), embeddings: await freePort() },
   });
   _setFoundationGuestExecForTests(localGuestExec, { layout });
   t.after(async () => {
@@ -154,12 +177,26 @@ test('foundation stack on real Docker', { skip, timeout: 20 * 60 * 1000 }, async
     assert.equal((await ensureMasterKey(GUEST, 'not-a-key')).ok, false);
   });
 
-  await t.test('postgres has no TCP: no published port, no network', async () => {
+  let gateway = null;
+  await t.test('postgres TCP: one port, published on 127.0.0.1 only, from its own network', async () => {
     const r = await run(['docker', 'inspect', '--format', '{{.HostConfig.NetworkMode}} {{json .NetworkSettings.Ports}}', `${layout.composeProject}-postgres-1`]);
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout.trim(), /^none (\{\}|null)$/);
-    const listen = await foundationPsql(GUEST, 'SHOW listen_addresses;', { database: 'postgres' });
-    assert.equal(listen.stdout.trim(), '');
+    const [mode, ports] = [r.stdout.trim().split(' ')[0], JSON.parse(r.stdout.trim().split(' ').slice(1).join(' '))];
+    assert.equal(mode, `${layout.composeProject}_postgres`);
+    assert.deepEqual(ports, { '5432/tcp': [{ HostIp: '127.0.0.1', HostPort: String(layout.ports.postgres) }] });
+    const net = await run(['docker', 'network', 'inspect', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}|{{len .Containers}}|{{.EnableIPv6}}', `${layout.composeProject}_postgres`]);
+    assert.equal(net.code, 0, net.stderr);
+    const [gw, members, v6] = net.stdout.trim().split('|');
+    gateway = gw.trim().split(' ')[0];
+    assert.match(gateway, /^\d+\.\d+\.\d+\.\d+$/);
+    assert.equal(members, '1', 'nothing but postgres is attached to its network');
+    assert.equal(v6, 'false', 'the postgres network is IPv4 only');
+    const show = await foundationPsql(GUEST, 'SHOW listen_addresses;\nSHOW password_encryption;\nSHOW hba_file;', { database: 'postgres' });
+    assert.deepEqual(show.stdout.trim().split('\n'), ['0.0.0.0', 'scram-sha-256', '/etc/mock2/pg_hba.conf']);
+    // Not reachable on any other address of this host (never 0.0.0.0).
+    const others = Object.values(networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => i.address);
+    for (const addr of others) assert.equal(await tcpProbe(addr, layout.ports.postgres), 'refused', `reachable on ${addr}`);
+    assert.equal(await tcpProbe('127.0.0.1', layout.ports.postgres), 'open');
   });
 
   await t.test('peer auth: root connects as app; other OS users are refused (uid 999 too)', async () => {
@@ -178,11 +215,130 @@ test('foundation stack on real Docker', { skip, timeout: 20 * 60 * 1000 }, async
     assert.notEqual(ident.code, 0, 'the init-only ident mapping still exists');
   });
 
-  await t.test('the app role: login + createdb, no superuser, no password', async () => {
-    const r = await foundationPsql(GUEST, "SELECT rolcanlogin, rolcreatedb, rolsuper, rolpassword IS NULL FROM pg_authid WHERE rolname = 'app';", { database: 'postgres' });
-    assert.equal(r.stdout.trim(), 't|t|f|t');
+  await t.test('the app role: login + createdb + createrole, no superuser, no password', async () => {
+    const r = await foundationPsql(GUEST, "SELECT rolcanlogin, rolcreatedb, rolcreaterole, rolsuper, rolpassword IS NULL FROM pg_authid WHERE rolname = 'app';", { database: 'postgres' });
+    assert.equal(r.stdout.trim(), 't|t|t|f|t');
     const owner = await foundationPsql(GUEST, "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = 'app';", { database: 'postgres' });
     assert.equal(owner.stdout.trim(), 'app');
+  });
+
+  // The generated app's own src/platform/readonly.ts, run as the app runs it:
+  // DATABASE_URL is the socket URL (peer: root → app), and the port override
+  // points its connection string at this test's published port.
+  const roDir = join(base, 'ro-app');
+  const roEnv = (over = {}) => ({ DATABASE_URL: FOUNDATION_DATABASE_URL.replace(STACK.postgres.socketDir, sock), MOCK2_FOUNDATION_PG_PORT: String(layout.ports.postgres), ...over });
+  let issued = null;
+
+  await t.test('read-only SQL: the app issues app_readonly over the socket; it reads its views over TCP and nothing else', async () => {
+    materializeReadonly(roDir, { foundation: true, real: true });
+    const migration = buildPlatformFiles().find((f) => f.path === 'migrations/0100_platform.sql').content;
+    const m = await psqlAs(migration);
+    assert.equal(m.code, 0, m.stderr);
+    assert.equal(runReadonly(roDir, 'status', roEnv()).result.enabled, false);
+
+    const en = runReadonly(roDir, 'enable', roEnv());
+    assert.equal(en.error, undefined, JSON.stringify(en.error));
+    issued = en.result;
+    assert.equal(issued.role, 'app_readonly');
+    assert.match(issued.url, new RegExp(`^postgres://app_readonly:[A-Za-z0-9_-]{32}@127\\.0\\.0\\.1:${layout.ports.postgres}/app$`));
+    assert.match(issued.odbc, new RegExp(`Server=127\\.0\\.0\\.1;Port=${layout.ports.postgres};Database=app;Uid=app_readonly;`));
+    assert.equal(runReadonly(roDir, 'status', roEnv()).result.enabled, true);
+
+    // A SCRAM verifier, and a role that cannot widen its own access.
+    const attrs = await foundationPsql(GUEST, "SELECT rolpassword LIKE 'SCRAM-SHA-256$%', rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication, rolbypassrls FROM pg_authid WHERE rolname = 'app_readonly';", { database: 'postgres' });
+    assert.equal(attrs.stdout.trim(), 't|t|f|f|f|f|f|f');
+    const admin = await foundationPsql(GUEST, "SELECT pg_has_role('app', 'app_readonly', 'USAGE WITH ADMIN OPTION');", { database: 'postgres' });
+    assert.equal(admin.stdout.trim(), 't', 'CREATEROLE: the app holds ADMIN on the role it created');
+
+    const c = await pgConnect(issued.url);
+    try {
+      const who = (await c.query('SELECT current_user AS u, system_user AS s, host(inet_client_addr()) AS a, current_database() AS d')).rows[0];
+      assert.deepEqual({ u: who.u, s: who.s, d: who.d }, { u: 'app_readonly', s: 'scram-sha-256:app_readonly', d: 'app' });
+      assert.equal(who.a, gateway, 'the published port arrives from the bridge gateway (pg_hba samenet)');
+      assert.equal((await c.query('SELECT org_name FROM api_read.branding')).rows[0].org_name, 'Application');
+      assert.ok((await c.query('SELECT count(*)::int AS n FROM api_read.api_keys')).rows[0].n >= 0);
+      for (const [label, q] of [
+        ['insert through a view', "INSERT INTO api_read.branding (id, org_name) VALUES (2, 'x')"],
+        ['update through a view', "UPDATE api_read.legal_pages SET title = 'x'"],
+        ['a base table', 'SELECT token_hash FROM public.api_keys'],
+        ['a base table', 'SELECT * FROM public.branding'],
+        ['the platform schema', 'SELECT * FROM mock2_foundation.secrets'],
+        ['create a table', 'CREATE TABLE public.ro_probe (x int)'],
+        ['create a view schema object', 'CREATE VIEW api_read.ro_probe AS SELECT 1'],
+      ]) {
+        await assert.rejects(c.query(q), /permission denied/, `${label}: ${q}`);
+      }
+    } finally { await c.end(); }
+  });
+
+  await t.test('TCP admits app_readonly on app only: wrong password, other databases, the app role and the superuser are refused', async () => {
+    const tcp = (user, password, database = 'app') => `postgres://${user}:${encodeURIComponent(password)}@127.0.0.1:${layout.ports.postgres}/${database}`;
+    await assert.rejects(pgConnect(tcp('app_readonly', 'not-the-password')), /password authentication failed for user "app_readonly"/);
+    await assert.rejects(pgConnect(issued.url.replace(/\/app$/, '/postgres')), /pg_hba\.conf rejects connection .*user "app_readonly", database "postgres"/);
+    // Give the app role and the superuser real passwords: TCP still refuses
+    // them, because pg_hba rejects before any password is asked for.
+    const set = await foundationPsql(GUEST, "ALTER ROLE app PASSWORD 'a3-tcp-probe-app';\nALTER ROLE postgres PASSWORD 'a3-tcp-probe-su';\n", { database: 'postgres' });
+    assert.equal(set.code, 0, set.stderr);
+    try {
+      for (const [user, pw] of [['app', 'a3-tcp-probe-app'], ['postgres', 'a3-tcp-probe-su'], ['app', ''], ['postgres', 'x']]) {
+        for (const database of ['app', 'postgres']) {
+          await assert.rejects(pgConnect(tcp(user, pw, database)), new RegExp(`pg_hba\\.conf rejects connection for host "${gateway.replace(/\./g, '\\.')}", user "${user}", database "${database}"`), `${user}@${database}`);
+        }
+      }
+      // Another role the app creates (CREATEROLE allows it) is not admitted either.
+      const other = await psqlAs("CREATE ROLE a3_other LOGIN PASSWORD 'a3-other-pw'");
+      assert.equal(other.code, 0, other.stderr);
+      await assert.rejects(pgConnect(tcp('a3_other', 'a3-other-pw')), /pg_hba\.conf rejects connection .*user "a3_other"/);
+    } finally {
+      await foundationPsql(GUEST, "ALTER ROLE app PASSWORD NULL;\nALTER ROLE postgres PASSWORD NULL;\nDROP ROLE IF EXISTS a3_other;\n", { database: 'postgres' });
+    }
+    // The socket path is unchanged: root still connects as app and postgres by peer.
+    assert.equal((await psqlAs('SELECT current_user')).stdout.trim(), 'app');
+    assert.equal((await psqlAs('SELECT current_user', { user: 'postgres' })).stdout.trim(), 'postgres');
+  });
+
+  await t.test('CREATEROLE stays narrow: the app cannot touch the superuser or hand out elevated attributes', async () => {
+    for (const q of [
+      "ALTER ROLE postgres PASSWORD 'x'",
+      'ALTER ROLE postgres NOLOGIN',
+      'ALTER ROLE app SUPERUSER',
+      'ALTER ROLE app_readonly SUPERUSER',
+      'ALTER ROLE app_readonly BYPASSRLS',
+      'CREATE ROLE a3_su SUPERUSER',
+      'CREATE ROLE a3_repl REPLICATION',
+      'GRANT pg_read_server_files TO app_readonly',
+      'GRANT pg_execute_server_program TO app',
+      'GRANT postgres TO app_readonly',
+      'GRANT app TO app_readonly',
+    ]) {
+      const r = await psqlAs(q);
+      assert.notEqual(r.code, 0, `the app role could run: ${q}`);
+      assert.match(r.stderr, /permission denied|must have|only roles with|must be superuser/i, `${q}: ${r.stderr}`);
+    }
+    const roles = await foundationPsql(GUEST, "SELECT string_agg(rolname || ':' || (rolsuper OR rolbypassrls OR rolreplication)::text, ',' ORDER BY rolname) FROM pg_roles WHERE rolname IN ('app', 'app_readonly', 'a3_su', 'a3_repl');", { database: 'postgres' });
+    assert.equal(roles.stdout.trim(), 'app:false,app_readonly:false');
+  });
+
+  await t.test('rotation, the fixed role name and disable', async () => {
+    const again = runReadonly(roDir, 'enable', roEnv());
+    assert.equal(again.error, undefined, JSON.stringify(again.error));
+    assert.notEqual(again.result.url, issued.url);
+    await assert.rejects(pgConnect(issued.url), /password authentication failed/, 'the previous password still works after a rotation');
+    const c = await pgConnect(again.result.url); await c.end();
+    issued = again.result;
+
+    const other = runReadonly(roDir, 'enable', roEnv({ READONLY_DB_ROLE: 'reporting' }));
+    assert.equal(other.error?.code, 'READONLY_ROLE_NOT_ADMITTED');
+    assert.match(other.error.message, /one role only, "app_readonly"/);
+    assert.equal((await foundationPsql(GUEST, "SELECT count(*) FROM pg_roles WHERE rolname = 'reporting';", { database: 'postgres' })).stdout.trim(), '0');
+    const st = runReadonly(roDir, 'status', roEnv({ READONLY_DB_ROLE: 'reporting' })).result;
+    assert.equal(st.code, 'READONLY_ROLE_NOT_ADMITTED');
+    assert.equal(st.enabled, true, 'the live app_readonly credential is shown, so it can be turned off');
+
+    const off = runReadonly(roDir, 'disable', roEnv({ READONLY_DB_ROLE: 'reporting' }));
+    assert.equal(off.error, undefined, JSON.stringify(off.error));
+    await assert.rejects(pgConnect(issued.url), /not permitted to log in/);
+    assert.equal(runReadonly(roDir, 'status', roEnv()).result.enabled, false);
   });
 
   await t.test('schema present and a vector operation works as app', async () => {
@@ -372,17 +528,57 @@ test('foundation stack on real Docker', { skip, timeout: 20 * 60 * 1000 }, async
     assert.equal(files.changed, false);
   });
 
+  await t.test('a stack from before the reporting port converges at bring-up: CREATEROLE, the port, the pg_hba line; data kept', async () => {
+    // The stack as the previous revision wrote it: no network and no port,
+    // listen_addresses empty, a socket-only pg_hba, an app role without
+    // CREATEROLE and no reporting role yet.
+    const model = buildFoundationComposeModel({ layout });
+    const prev = model.services.postgres;
+    delete prev.ports; delete prev.networks; delete model.networks.postgres;
+    prev.network_mode = 'none';
+    prev.command = ['postgres', '-c', 'hba_file=/etc/mock2/pg_hba.conf', '-c', 'ident_file=/etc/mock2/pg_ident.conf', '-c', 'listen_addresses='];
+    writeFileSync(layout.composeFile, `${JSON.stringify(model, null, 2)}\n`); // JSON is YAML
+    writeFileSync(join(layout.dir, 'postgres', 'pg_hba.conf'), '# the previous revision\nlocal   all       all   peer map=mock2\n');
+    const old = await foundationCompose(GUEST, ['up', '-d', 'postgres'], { timeoutMs: 180000 });
+    assert.equal(old.code, 0, old.stderr);
+    assert.ok(await waitFor(async () => (await foundationServiceStatus(GUEST))?.find((s) => s.service === 'postgres' && s.health === 'healthy'), { timeoutMs: 120000 }), 'the previous-revision postgres did not come up');
+    const reset = await foundationPsql(GUEST, 'ALTER ROLE app NOCREATEROLE;\nDROP OWNED BY app_readonly;\nDROP ROLE app_readonly;\n');
+    assert.equal(reset.code, 0, reset.stderr);
+    assert.equal(await tcpProbe('127.0.0.1', layout.ports.postgres), 'refused');
+    const before = runReadonly(roDir, 'enable', roEnv());
+    assert.equal(before.error?.code, 'DB_PRIVILEGE', JSON.stringify(before));
+    assert.match(before.error.message, /next bring-up/);
+
+    const r = await bringUpFoundation({ containerName: GUEST, features, masterKey, storageCredentials: creds });
+    assert.equal(r.ok, true, r.error);
+    const files = r.steps.find((s) => s.name === 'files').detail;
+    assert.match(files, /compose\.yaml/);
+    assert.match(files, /postgres\/pg_hba\.conf/);
+    assert.equal((await foundationPsql(GUEST, "SELECT rolcreaterole FROM pg_roles WHERE rolname = 'app';", { database: 'postgres' })).stdout.trim(), 't');
+    assert.equal((await psqlAs('SELECT count(*) FROM a3_items')).stdout.trim(), '3');
+    const en = runReadonly(roDir, 'enable', roEnv());
+    assert.equal(en.error, undefined, JSON.stringify(en.error));
+    const c = await pgConnect(en.result.url);
+    try { assert.equal((await c.query('SELECT org_name FROM api_read.branding')).rows[0].org_name, 'Application'); } finally { await c.end(); }
+    // And once more: nothing to change, still reachable.
+    const again = await bringUpFoundation({ containerName: GUEST, features, masterKey, storageCredentials: creds });
+    assert.equal(again.ok, true, again.error);
+    assert.equal(again.steps.find((s) => s.name === 'files').detail, 'unchanged');
+    const c2 = await pgConnect(en.result.url); await c2.end();
+  });
+
   await t.test('embeddings off: bring-up left it stopped, the volume is declared', async () => {
     const st = await foundationServiceStatus(GUEST);
     assert.notEqual(st.find((s) => s.service === 'embeddings').state, 'running');
   });
 
-  await t.test('compose model as Docker parses it: ports on 127.0.0.1, postgres offline', async () => {
+  await t.test('compose model as Docker parses it: every port on 127.0.0.1, postgres on its own network', async () => {
     const r = await run([...composeArgv(layout), 'config', '--format', 'json']);
     assert.equal(r.code, 0, r.stderr);
     const cfg = JSON.parse(r.stdout);
-    assert.equal(cfg.services.postgres.network_mode, 'none');
-    assert.equal(cfg.services.postgres.ports, undefined);
+    assert.equal(cfg.services.postgres.network_mode, undefined);
+    assert.deepEqual(Object.keys(cfg.services.postgres.networks), ['postgres']);
+    assert.deepEqual(cfg.services.postgres.ports.map((p) => [p.host_ip, String(p.published), p.target]), [['127.0.0.1', String(layout.ports.postgres), 5432]]);
     for (const s of ['storage', 'embeddings']) {
       assert.ok(cfg.services[s].ports.length > 0);
       for (const p of cfg.services[s].ports) assert.equal(p.host_ip, '127.0.0.1', `${s} publishes on ${p.host_ip}`);
@@ -399,11 +595,14 @@ test('foundation stack on real Docker', { skip, timeout: 20 * 60 * 1000 }, async
       (await import('node:fs')).writeFileSync(p, f.content, { mode: f.mode });
     }
     assert.ok(existsSync(join(dir, 'postgres/initdb/01-mock2-foundation.sql')));
-    const r = await run(['docker', 'compose', '-f', join(dir, 'compose.yaml'), 'config', '--format', 'json'], { env: { MOCK2_FOUNDATION_PROJECT: `a3-portable-${pid}` } });
+    const r = await run(['docker', 'compose', '-f', join(dir, 'compose.yaml'), 'config', '--format', 'json'], { env: { MOCK2_FOUNDATION_PROJECT: `${PREFIX}-portable-${pid}` } });
     assert.equal(r.code, 0, r.stderr);
     const cfg = JSON.parse(r.stdout);
-    assert.equal(cfg.name, `a3-portable-${pid}`);
-    assert.equal(cfg.services.postgres.network_mode, 'none');
+    assert.equal(cfg.name, `${PREFIX}-portable-${pid}`);
+    assert.equal(cfg.services.postgres.network_mode, undefined);
+    assert.deepEqual(cfg.services.postgres.ports.map((p) => [p.host_ip, String(p.published), p.target]), [['127.0.0.1', '5432', 5432]]);
+    const moved = await run(['docker', 'compose', '-f', join(dir, 'compose.yaml'), 'config', '--format', 'json'], { env: { MOCK2_FOUNDATION_PROJECT: `${PREFIX}-portable-${pid}`, MOCK2_FOUNDATION_PG_PORT: '15432' } });
+    assert.equal(JSON.parse(moved.stdout).services.postgres.ports[0].published, '15432');
     assert.ok(cfg.services.postgres.volumes.some((v) => v.target === '/var/run/postgresql' && v.source === STACK.postgres.socketDir));
     for (const s of ['storage', 'embeddings']) for (const p of cfg.services[s].ports) assert.equal(p.host_ip, '127.0.0.1');
     assert.equal(buildFoundationComposeYaml({ portable: true }).includes('mock2_pg_data:\n    name:'), false, 'portable volumes must be project-scoped');

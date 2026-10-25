@@ -41,10 +41,17 @@ is a bug in this document.
   identities exist before it can be reached. A service that never started is created the
   first time it is turned on. The app's runtime never calls `docker compose down -v`, and the harness
   refuses it, together with `docker volume rm` and `docker system prune`.
-- Postgres listens on **no TCP port**. Its socket is bind-mounted at
-  `/run/mock2-foundation/postgres`; `pg_hba` allows only `local … peer` with the ident
-  map `root → app` and `root → postgres`. There is no database password to store. The
-  image's first-start scripts run as the container's postgres user (uid 999) through a
+- The app and the superuser reach Postgres only through its socket, bind-mounted at
+  `/run/mock2-foundation/postgres`: `pg_hba` allows `local … peer` with the ident
+  map `root → app` and `root → postgres`, and neither role has a password. The **one TCP
+  path** is the app's read-only reporting role `app_readonly` (Admin → read-only SQL, a
+  fixed name in the contract): Postgres listens inside the container on its own Compose
+  network, Docker publishes it on the guest's `127.0.0.1:5432` only (reach it like a
+  native Postgres, by SSH tunnel or a ProxyPilot port forward), and `pg_hba` admits
+  `host app app_readonly samenet scram-sha-256` (the published port arrives from that
+  network's gateway), then `host all all all reject`. The app role holds `CREATEROLE` so
+  it can issue and rotate that role; bring-up re-applies the grant on an existing stack.
+  The image's first-start scripts run as the container's postgres user (uid 999) through a
   temporary mapping that is deleted when initialization ends, so a guest account that
   happens to have uid 999 is refused. `DATABASE_URL = postgres:///app?host=/run/mock2-foundation/postgres&user=app`
   goes in the unit as an ordinary `Environment=` line.
@@ -278,8 +285,9 @@ of `mock2_foundation`.
 - Cloning a project copies its database (vectors included) but not its stored objects.
 - On foundation deploys, the stored-credential check after the deploy is skipped,
   because the keys live in mock2.db. It needs a host-side probe.
-- The generated app's read-only SQL role (Admin → Integration) cannot connect: the
-  foundation Postgres has no TCP listener and allows peer authentication only.
+- A foundation guest provisioned before the read-only reporting port gets it (and the
+  app role's `CREATEROLE`) only at its next stack bring-up (provisioning or rehydrate);
+  an active project has no other trigger yet.
 - Restoring a checkpoint taken before a re-embed can bring back an index that does not
   match the current embeddings provider.
 - The local embedding model is proven only where its image and model can be fetched.

@@ -128,7 +128,7 @@ export declare const STACK: {
   readonly dir: string;
   readonly composeFile: string;
   readonly keyFile: string;
-  readonly postgres: { readonly service: string; readonly image: string; readonly socketDir: string; readonly volume: string; readonly database: string; readonly role: string };
+  readonly postgres: { readonly service: string; readonly image: string; readonly socketDir: string; readonly volume: string; readonly database: string; readonly role: string; readonly readonlyRole: string; readonly listen: string; readonly port: number };
   readonly storage: { readonly service: string; readonly image: string; readonly listen: string; readonly port: number; readonly volume: string; readonly bucket: string; readonly region: string };
   readonly embeddings: { readonly service: string; readonly image: string; readonly listen: string; readonly port: number; readonly volume: string; readonly model: string; readonly dimensions: number };
 };

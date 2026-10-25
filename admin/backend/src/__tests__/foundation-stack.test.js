@@ -62,11 +62,19 @@ test('compose: three services pinned to the contract tags (by digest), restart u
   for (const [k, v] of Object.entries(m.volumes)) assert.equal(v.name, k, 'platform volumes carry their contract names');
 });
 
-test('compose: postgres has no TCP — no network, no ports, listen_addresses empty, socket bind-mounted', () => {
-  const pg = L.buildFoundationComposeModel().services.postgres;
-  assert.equal(pg.network_mode, 'none');
-  assert.equal(pg.ports, undefined);
-  assert.ok(pg.command.includes('listen_addresses='));
+test('compose: postgres — socket bind-mounted; ONE TCP port, the reporting role\'s, on the guest\'s 127.0.0.1', () => {
+  const m = L.buildFoundationComposeModel();
+  const pg = m.services.postgres;
+  assert.equal(pg.network_mode, undefined);
+  assert.deepEqual(pg.ports, [`127.0.0.1:${STACK.postgres.port}:5432`], 'published on guest loopback only, never 0.0.0.0');
+  assert.equal(STACK.postgres.listen, '127.0.0.1');
+  assert.equal(STACK.postgres.readonlyRole, 'app_readonly');
+  assert.deepEqual(pg.networks, ['postgres'], 'its own network: samenet is the bridge the published port arrives from');
+  assert.ok(Object.prototype.hasOwnProperty.call(m.networks, 'postgres'));
+  for (const s of ['storage', 'embeddings']) assert.ok(!m.services[s].networks.includes('postgres'), `${s} must not share the postgres network`);
+  assert.ok(pg.command.includes('listen_addresses=0.0.0.0'), 'IPv4 inside the container; no IPv6 listener');
+  assert.ok(!pg.command.some((a) => a === 'listen_addresses=*'));
+  assert.ok(pg.command.includes('password_encryption=scram-sha-256'));
   assert.ok(pg.command.includes('hba_file=/etc/mock2/pg_hba.conf'));
   assert.ok(pg.command.includes('ident_file=/etc/mock2/pg_ident.conf'));
   assert.ok(pg.volumes.includes(`${STACK.postgres.socketDir}:/var/run/postgresql`));
@@ -94,7 +102,10 @@ test('compose: storage and embeddings are published on 127.0.0.1 only, at the co
 test('compose: no secret anywhere in the generated files', () => {
   for (const portable of [false, true]) {
     const yaml = L.buildFoundationComposeYaml({ portable }).split('\n').filter((l) => !l.startsWith('#')).join('\n');
-    assert.doesNotMatch(yaml, /PASSWORD|PGPASSWORD|AWS_SECRET|AWS_ACCESS|ACCESS_KEY|SECRET_KEY|API_KEY|_TOKEN|secret/i);
+    // The one setting with "password" in its name says how the server hashes
+    // a password (SCRAM); it carries none.
+    assert.equal(yaml.split('password_encryption=scram-sha-256').length, 2);
+    assert.doesNotMatch(yaml.replace('password_encryption=scram-sha-256', ''), /PASSWORD|PGPASSWORD|AWS_SECRET|AWS_ACCESS|ACCESS_KEY|SECRET_KEY|API_KEY|_TOKEN|secret/i);
     const model = L.buildFoundationComposeModel({ portable });
     for (const s of Object.values(model.services)) {
       for (const k of Object.keys(s.environment || {})) assert.doesNotMatch(k, /pass|secret|key|token/i, k);
@@ -112,7 +123,8 @@ test('compose: the YAML is the rendered model (a JSON-quoted subset Docker parse
   const yaml = L.buildFoundationComposeYaml();
   assert.match(yaml, /^# Mock2 application foundation/);
   assert.match(yaml, /\nname: "mock2-foundation"\n/);
-  assert.match(yaml, /\n {4}network_mode: "none"\n/);
+  assert.match(yaml, /\n {4}ports:\n {6}- "127\.0\.0\.1:5432:5432"\n {4}networks:\n {6}- "postgres"\n/);
+  assert.doesNotMatch(yaml, /network_mode/);
   // Compose interpolation: a literal $ in a healthcheck is written $$.
   assert.ok(yaml.includes('$$PGDATA'));
   assert.doesNotMatch(yaml.replace(/\$\$/g, ''), /\$[^{]/);
@@ -122,7 +134,11 @@ test('compose: the portable copy keeps the design and is overridable from the en
   const m = L.buildFoundationComposeModel({ portable: true });
   assert.equal(m.name, '${MOCK2_FOUNDATION_PROJECT:-mock2-foundation}');
   assert.ok(m.services.postgres.volumes.includes(`\${MOCK2_FOUNDATION_SOCKET_DIR:-${STACK.postgres.socketDir}}:/var/run/postgresql`));
-  assert.equal(m.services.postgres.network_mode, 'none');
+  assert.deepEqual(m.services.postgres.ports, ['127.0.0.1:${MOCK2_FOUNDATION_PG_PORT:-5432}:5432']);
+  assert.deepEqual(m.services.postgres.networks, ['postgres']);
+  // The repository copy carries the same pg_hba / pg_ident / init SQL.
+  const files = (portable) => Object.fromEntries(L.buildFoundationFiles({ portable }).filter((f) => f.path !== 'compose.yaml').map((f) => [f.path, f.content]));
+  assert.deepEqual(files(true), files(false));
   for (const v of Object.values(m.volumes)) assert.equal(v.name, undefined, 'portable volumes are project-scoped');
   assert.deepEqual(m.services.storage.ports, ['127.0.0.1:${MOCK2_FOUNDATION_S3_PORT:-8333}:8333']);
   const paths = L.buildFoundationFiles({ portable: true }).map((f) => f.path);
@@ -131,9 +147,23 @@ test('compose: the portable copy keeps the design and is overridable from the en
 
 // ------------------------------------------------------------- postgres files
 
-test('pg_hba: one line — unix socket, peer, the mock2 map; no host line', () => {
+test('pg_hba: socket + peer for everyone; TCP only for app_readonly on app with SCRAM; then reject', () => {
   const lines = L.buildPgHbaConf().split('\n').filter((l) => l.trim() && !l.startsWith('#'));
-  assert.deepEqual(lines.map((l) => l.trim().split(/\s+/)), [['local', 'all', 'all', 'peer', 'map=mock2']]);
+  assert.deepEqual(lines.map((l) => l.trim().split(/\s+/)), [
+    ['local', 'all', 'all', 'peer', 'map=mock2'],
+    ['host', 'app', 'app_readonly', 'samenet', 'scram-sha-256'],
+    ['host', 'all', 'all', 'all', 'reject'],
+  ]);
+  // pg_hba is first-match: nothing may admit TCP before the reporting line or
+  // between it and the reject, and no method is weaker than SCRAM.
+  for (const l of lines) {
+    const [type, , , , method] = l.trim().split(/\s+/);
+    assert.ok(['local', 'host'].includes(type), `unexpected line type: ${l}`);
+    if (type === 'host') assert.ok(['scram-sha-256', 'reject'].includes(method), `TCP method ${method}`);
+    assert.doesNotMatch(l, /\b(trust|password|md5|ident)\b/, l);
+  }
+  assert.equal(L.buildPgHbaConf(), L.buildPgHbaConf({ role: STACK.postgres.readonlyRole, database: STACK.postgres.database }));
+  assert.throws(() => L.buildPgHbaConf({ role: 'all samenet trust\nhost' }));
 });
 
 test('pg_ident: only root is mapped at runtime; the init mapping is an include the seal script deletes', () => {
@@ -148,10 +178,11 @@ test('pg_ident: only root is mapped at runtime; the init mapping is an include t
   assert.equal(syntaxOk(L.buildPgSealScript(), 'bash').status, 0);
 });
 
-test('init SQL: app role LOGIN CREATEDB without a password, database owned by app, the contract schema verbatim', () => {
+test('init SQL: app role LOGIN CREATEDB CREATEROLE without a password, database owned by app, the contract schema verbatim', () => {
   const sql = L.buildFoundationInitSql();
-  assert.match(sql, /CREATE ROLE app LOGIN CREATEDB/);
-  assert.match(sql, /ALTER ROLE app WITH LOGIN CREATEDB NOSUPERUSER PASSWORD NULL;/);
+  assert.match(sql, /'CREATE ROLE app LOGIN CREATEDB CREATEROLE'/);
+  // The ALTER is what converges an already-initialised stack at every bring-up.
+  assert.match(sql, /\nALTER ROLE app WITH LOGIN CREATEDB CREATEROLE NOSUPERUSER PASSWORD NULL;\n/);
   assert.match(sql, /CREATE DATABASE app OWNER app/);
   assert.match(sql, /\\connect app\n/);
   assert.ok(sql.includes(FOUNDATION_SCHEMA_SQL.trim()), 'FOUNDATION_SCHEMA_SQL must be applied verbatim');
@@ -316,6 +347,10 @@ test('resolveLayout validates names, paths and the socket path length', () => {
   assert.throws(() => L.resolveLayout({ dir: '/opt/../etc' }));
   assert.throws(() => L.resolveLayout({ socketDir: `/${'x'.repeat(95)}` }));
   assert.throws(() => L.resolveLayout({ ports: { storage: 0 } }));
+  assert.throws(() => L.resolveLayout({ ports: { postgres: 70000 } }));
+  assert.equal(L.resolveLayout().ports.postgres, STACK.postgres.port);
+  const moved = L.resolveLayout({ ports: { postgres: 15432 } });
+  assert.deepEqual(L.buildFoundationComposeModel({ layout: moved }).services.postgres.ports, ['127.0.0.1:15432:5432'], 'a test layout moves the published port, never the bind address');
   assert.equal(L.foundationPgExecPrefix(), "'docker' 'compose' '-p' 'mock2-foundation' '-f' '/opt/mock2-foundation/compose.yaml' exec -T postgres");
 });
 

@@ -529,7 +529,7 @@ test('the database defaults to the foundation socket (no password) and a failed 
 
 test('the platform module serves the admin-only foundation health route and stays inert without the foundation', () => {
   const routes = buildPlatformRoutes()[0].content;
-  assert.equal(PLATFORM_MODULE_VERSION, 'mock2-platform-v11');
+  assert.equal(PLATFORM_MODULE_VERSION, 'mock2-platform-v12');
   assert.match(routes, /platformRoutes\.get\('\/api\/foundation\/health', requireRole\('admin'\)/);
   assert.match(routes, /new URL\('\.\.\/\.\.\/foundation\/runtime\/health\.mjs', import\.meta\.url\)/);
   assert.match(routes, /FOUNDATION_NOT_INSTALLED/);

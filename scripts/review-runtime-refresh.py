@@ -833,8 +833,10 @@ class SelectedRefresh:
         # Reboots and the owned renewal job do not change the enrolled machine,
         # VM, effective network/Chromium policy or receipt signing identity.
         stable = ('machine_id', 'vm_uuid', 'vm_configuration_sha256', 'nft_sha256', 'managed_policy_sha256', 'key_id')
-        if any(identity.get(k) != transaction['identity'].get(k) for k in stable):
-            raise ValueError('Selected enrollment identity/policy changed')
+        changed_identity_fields = [k for k in stable if identity.get(k) != transaction['identity'].get(k)]
+        if changed_identity_fields:
+            # Only fixed field names are reported; never identities, keys or policy contents.
+            raise ValueError('Selected enrollment identity/policy changed: ' + ','.join(changed_identity_fields))
         protected = self.package.protected()
         units = self.h.unit_check(allow_failed_renewal=True)
         self.h.health(pins, identity['key_id'], True, allow_work=allow_work, allow_failed_renewal=True)

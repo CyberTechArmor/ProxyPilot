@@ -223,7 +223,21 @@ export function siteSecurityHeaderLines({ allowFramingRoute = null, frameAncesto
 // Bump when the rendered site-file shape changes in a way every existing file
 // must pick up. The backend compares it with app_settings.caddy_site_render_contract
 // at boot and regenerates all site files once (index.js).
-export const CADDY_SITE_RENDER_CONTRACT = '6'; // 3: allowlist refusals carry DENIED_BODY; 4: allowlist may apply to named paths only; 5: the refusal is an HTML page; 6: a neutral page
+export const CADDY_SITE_RENDER_CONTRACT = '7'; // 7: redact bearer credentials in service access logs.
+
+// Filter at encoding time only: the upstream still receives the original URL.
+// Keep the path and all other query fields for diagnostics. Referer can repeat
+// the same viewer URL, so apply the identical filter to that header as well.
+export function siteAccessLogFilterLines(indent = '        ') {
+  const lines = [`${indent}format filter {`, `${indent}    wrap json`];
+  for (const field of ['request>uri', 'request>headers>Referer']) {
+    lines.push(`${indent}    ${field} query {`);
+    for (const key of ['auth', 'rauth', 'login']) lines.push(`${indent}        delete ${key}`);
+    lines.push(`${indent}    }`);
+  }
+  lines.push(`${indent}}`);
+  return lines;
+}
 
 
 // ---- per-route edge options (migration 907; set_route_options over MCP) ----

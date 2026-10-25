@@ -16,6 +16,7 @@ import { parseCertificate, validateCertKeyPair, assembleServedChain, daysUntil, 
 import { encryptSecret, decryptSecret } from '../../lib/secrets.js';
 import { parseDns01List } from '../../lib/domain-provision-logic.js';
 import { intIn, stamp } from '../../lib/mcp-ext/logic.js';
+import { readCaddyLogProof } from '../../lib/caddy-log-proof.js';
 
 const CF_API = 'https://api.cloudflare.com/client/v4';
 const CF_TOKEN_SETTING = 'cloudflare_global_token';
@@ -377,7 +378,8 @@ export function createEdgeHandlers(kit) {
       if (pathFilter && !uri.startsWith(pathFilter)) continue;
       recent.push({ ts: j.ts ? new Date(j.ts * 1000).toISOString() : null, status, method: j.request?.method || null, uri, remote: j.request?.remote_ip || j.request?.client_ip || null, duration_ms: j.duration != null ? Math.round(j.duration * 1000) : null, bytes: j.size ?? null, user_agent: j.request?.headers?.['User-Agent']?.[0] || null });
     }
-    return ok({ domain, log: logPath, window_seconds: windowSeconds, ...summary, entries: recent, note: `Newest first; ${entries} entries max from the last ${Math.round(tailBytes / 1024)} KB of the log.` });
+    const credentialRedaction = await readCaddyLogProof({ domain, selfUpdateInstalled: ctx.selfUpdateInstalled, runHostCapture });
+    return ok({ domain, log: logPath, window_seconds: windowSeconds, ...summary, entries: recent, credential_redaction: credentialRedaction, note: `Newest first; ${entries} entries max from the last ${Math.round(tailBytes / 1024)} KB of the log.` });
   });
 
   /* ---------------------------------- DNS --------------------------------- */

@@ -7,11 +7,13 @@
 //     contract's openForApp), never syncs host-only ones, never puts a
 //     plaintext secret in the SQL, deletes app-DB secrets that no longer exist;
 //   * component secrets for foundation deployments (mint, never overwrite,
-//     delivered by the sync; a clone inherits its source's);
+//     delivered by the sync; a FULL clone takes only its source's data-guarding
+//     keys, a fresh clone none — the token signing key is always its own);
 //   * new projects get FOUNDATION_VERSION, a clone inherits, delete purges.
 // ./db.js and ./foundation-stack.js are stubbed at the module boundary.
 
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { installFoundationHooks, freshMock2Db, addProject, scriptedStack, world } from './helpers/foundation-world.js';
 import { MOCK2_MIGRATIONS } from '../mock2/migrations.js';
@@ -187,12 +189,12 @@ test('projects.createProject: a new project gets FOUNDATION_VERSION; a clone inh
   const cloneOfLegacy = projects.createProject({ name: 'Old clone', createdBy: 1, origin: { kind: 'clone', sourceProjectId: 50, mode: 'full' } });
   assert.equal(cloneOfLegacy.foundation_version, null, 'a clone of a pre-foundation project keeps the native stack');
   assert.equal(projects.getProject(50).foundation_version, null, 'existing rows untouched');
-  // The clone inherits its source's component secrets on its first provisioning inputs.
+  // The clone is its own deployment (its component keys: the next test).
   db.prepare('UPDATE mock2_projects SET container_name = ? WHERE id = ?').run('m2-src', fresh.id);
   store.getFoundationProvisionInputs(fresh.id);
   store.writeSecret(fresh.id, 'component.AUTH_MASTER_SECRET', 'source-master-secret-value');
   const cloneInputs = store.getFoundationProvisionInputs(cloneOfFoundation.id);
-  assert.equal(store.readSecret(cloneOfFoundation.id, 'component.AUTH_MASTER_SECRET'), 'source-master-secret-value');
+  assert.equal(store.hasSecret(cloneOfFoundation.id, 'component.AUTH_MASTER_SECRET'), false, 'a fresh clone takes no component key');
   assert.notEqual(cloneInputs.masterKey, store.readSecret(fresh.id, SECRET_NAMES.masterKey), 'the clone is its own deployment');
   store.insertJob({ id: 'fj_0123456789ab', projectId: fresh.id, kind: 'reembed' });
   assert.equal(projects.deleteProject(fresh.id), true);
@@ -200,6 +202,43 @@ test('projects.createProject: a new project gets FOUNDATION_VERSION; a clone inh
     assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE project_id = ?`).get(fresh.id).n, 0, t);
   }
   assert.ok(store.hasSecret(cloneOfFoundation.id, SECRET_NAMES.masterKey), 'other deployments untouched');
+});
+
+test('clones: a FULL clone takes only the data-guarding component keys; a fresh clone none; the JWT signing key is never shared', async () => {
+  const db = freshMock2Db();
+  const { guest } = scriptedStack();
+  guest.guardTable = false;
+  const components = await import('../mock2/components.js');
+  const { parseContractJson } = await import('../mock2/component-logic.js');
+  const seed = JSON.parse(readFileSync(new URL('../mock2/framework-seed/proxypilot-auth.component.json', import.meta.url), 'utf8'));
+  const { component, version } = components.insertComponent({ key: 'proxypilot-auth', name: 'Auth', files: [], contract: seed.contract, change_reason: 'seed', createdBy: 1 });
+  const configs = parseContractJson(JSON.stringify(seed.contract)).config.filter((c) => c.secret && c.generate);
+  assert.deepEqual(configs.map((c) => c.key), ['AUTH_JWT_SECRET', 'AUTH_MASTER_SECRET'], 'the real auth contract: a signing key and a data-guarding key');
+  const withContainer = (p, name) => { db.prepare('UPDATE mock2_projects SET container_name = ? WHERE id = ?').run(name, p.id); return store.getFoundationProject(p.id); };
+  const source = withContainer(projects.createProject({ name: 'Source', createdBy: 1 }), 'm2-src');
+  const pc = components.decideProjectComponent({ projectId: source.id, componentId: component.id, versionId: version.id, status: 'confirmed' });
+  components.markProjectComponentInstall({ id: pc.id, ok: true, versionId: version.id });
+  store.getFoundationProvisionInputs(source.id);
+  await store.mintFoundationComponentSecrets({ project: source, configs, newlyProvisioned: true });
+  const srcJwt = store.readSecret(source.id, 'component.AUTH_JWT_SECRET');
+  const srcMaster = store.readSecret(source.id, 'component.AUTH_MASTER_SECRET');
+  assert.ok(srcJwt && srcMaster);
+  for (const mode of ['full', 'fresh']) {
+    const clone = withContainer(projects.createProject({ name: `Clone ${mode}`, createdBy: 1, origin: { kind: 'clone', sourceProjectId: source.id, mode } }), `m2-c${mode}`);
+    store.getFoundationProvisionInputs(clone.id);
+    const taken = store.listSecretNames(clone.id).filter((n) => n.startsWith('component.'));
+    assert.deepEqual(taken, mode === 'full' ? ['component.AUTH_MASTER_SECRET'] : [], `${mode}: what the first provisioning takes from the source`);
+    // The clone's first deploy mints the rest (a full clone holds existing data).
+    const minted = await store.mintFoundationComponentSecrets({ project: clone, configs, newlyProvisioned: mode === 'fresh' });
+    assert.deepEqual(minted.deferred, [], mode);
+    const jwt = store.readSecret(clone.id, 'component.AUTH_JWT_SECRET');
+    assert.ok(jwt);
+    assert.notEqual(jwt, srcJwt, `${mode}: a token signed by the source must not verify on the clone`);
+    const master = store.readSecret(clone.id, 'component.AUTH_MASTER_SECRET');
+    if (mode === 'full') assert.equal(master, srcMaster, 'full: the copied rows stay readable');
+    else assert.notEqual(master, srcMaster, 'fresh: a new database gets its own key');
+  }
+  assert.equal(store.readSecret(source.id, 'component.AUTH_JWT_SECRET'), srcJwt, 'the source is untouched');
 });
 
 test('the project JSON the dashboard receives carries foundation_version', async () => {

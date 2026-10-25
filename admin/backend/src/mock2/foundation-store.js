@@ -32,8 +32,10 @@ import {
 import {
   BUNDLED_APP_IDENTITY, isStorableSecretName, appSecretNames, featureRowsFrom, buildSyncSql, parseGeneration,
   buildGuardProbeSql, buildGuardRowsSql, parseJsonRows, planFoundationComponentMint, redactSecrets, parseJsonObject,
-  isValidJobId,
+  isValidJobId, cloneInheritedSecretNames,
 } from './foundation-logic.js';
+import { listProjectComponents } from './components.js';
+import { parseContractJson } from './component-logic.js';
 
 const nowIso = () => new Date().toISOString();
 const stack = () => import('./foundation-stack.js');
@@ -146,19 +148,30 @@ function accessKeyId() {
 }
 const secretAccessKey = () => randomBytes(30).toString('base64url');
 
-// A clone of a foundation project brings its source's component secrets (a
-// full clone's database carries data encrypted under them); never the master
-// key or any storage identity — the clone is its own deployment.
-function inheritComponentSecrets(db, projectId) {
-  const raw = db.prepare('SELECT value FROM mock2_settings WHERE key = ?').get(`${PROJECT_ORIGIN_KEY_PREFIX}${projectId}`)?.value;
-  const origin = parseJsonObject(raw, null);
-  if (origin?.kind !== 'clone' || !Number.isInteger(Number(origin.sourceProjectId))) return 0;
+// A clone of a foundation project is its own deployment: never the master key
+// or any storage identity of its source. A FULL clone (its database is the
+// source's) takes only the component secrets that guard stored data — the
+// copied rows are encrypted under them (cloneInheritedSecretNames); every
+// other component key, a token signing key above all, is minted fresh by the
+// deploy. A fresh clone takes nothing.
+function inheritComponentSecrets(db, projectId, origin) {
   const src = Number(origin.sourceProjectId);
-  const rows = db.prepare("SELECT name, ciphertext FROM mock2_foundation_secrets WHERE project_id = ? AND name LIKE 'component.%'").all(src);
+  const sourceConfigs = listProjectComponents(src).flatMap((row) => parseContractJson(row.contract_json)?.config || []);
+  const names = cloneInheritedSecretNames({ origin, sourceNames: listSecretNames(src), sourceConfigs });
+  const read = db.prepare('SELECT ciphertext FROM mock2_foundation_secrets WHERE project_id = ? AND name = ?');
   const insert = db.prepare('INSERT OR IGNORE INTO mock2_foundation_secrets (project_id, name, ciphertext, created_at, rotated_at) VALUES (?, ?, ?, ?, NULL)');
   let n = 0;
-  for (const r of rows) n += insert.run(Number(projectId), r.name, r.ciphertext, nowIso()).changes;
+  for (const name of names) {
+    const row = read.get(src, name);
+    if (row) n += insert.run(Number(projectId), name, row.ciphertext, nowIso()).changes;
+  }
   return n;
+}
+
+function cloneOriginOf(db, projectId) {
+  const raw = db.prepare('SELECT value FROM mock2_settings WHERE key = ?').get(`${PROJECT_ORIGIN_KEY_PREFIX}${projectId}`)?.value;
+  const origin = parseJsonObject(raw, null);
+  return origin?.kind === 'clone' && Number.isInteger(Number(origin.sourceProjectId)) ? origin : null;
 }
 
 // getFoundationProvisionInputs(projectId) → { features, masterKey,
@@ -186,7 +199,8 @@ export function getFoundationProvisionInputs(projectId) {
       if (!hasSecret(pid, SECRET_NAMES.storageAccessKeyId)) writeSecret(pid, SECRET_NAMES.storageAccessKeyId, readSecret(pid, BUNDLED_APP_IDENTITY.accessKeyId));
       if (!hasSecret(pid, SECRET_NAMES.storageSecretAccessKey)) writeSecret(pid, SECRET_NAMES.storageSecretAccessKey, readSecret(pid, BUNDLED_APP_IDENTITY.secretAccessKey));
     }
-    if (first) inheritComponentSecrets(db, pid);
+    const origin = first ? cloneOriginOf(db, pid) : null;
+    if (origin) inheritComponentSecrets(db, pid, origin);
   });
   tx();
   const rows = readFeatureRows(pid);

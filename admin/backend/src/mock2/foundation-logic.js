@@ -871,6 +871,31 @@ SELECT ${sqlLiteral(SQL_MARKERS.ok)} || 'rows';
 //     the app; a foundation deployment needs an operator to decide).
 //   * a key that cannot be a foundation secret name is deferred.
 // probes: { [KEY]: 'no_table' | 'empty' | 'rows' | 'unknown' }.
+//
+// A key guards stored data when the contract says what it encrypts
+// (`protects`, the data guard secretDataGuards reads) or names the code that
+// migrates data encrypted under it (`requires_marker`).
+export function guardsStoredData(c) {
+  return !!(c && (c.protects?.table || c.requires_marker));
+}
+
+// cloneInheritedSecretNames({ origin, sourceNames, sourceConfigs }) → the
+// component.<KEY> names a clone takes from its source on its first
+// provisioning. Only a FULL clone carries the source's data, so only it takes
+// keys, and only the ones that guard stored data (the copied rows are
+// encrypted under them). Every other key is minted fresh for the clone — above
+// all a token signing key: the auth component's AUTH_JWT_SECRET signs stateless
+// HS256 tokens, so a shared one would make a token of either deployment valid
+// on the other. A fresh clone (new database) inherits nothing.
+//   sourceConfigs: the contract.config entries of the source's components.
+export function cloneInheritedSecretNames({ origin, sourceNames = [], sourceConfigs = [] } = {}) {
+  if (origin?.kind !== 'clone' || origin.mode !== 'full') return [];
+  const guarded = new Set((sourceConfigs || [])
+    .filter((c) => c && c.secret === true && c.generate === true && guardsStoredData(c))
+    .map((c) => componentSecretName(String(c.key || ''))));
+  return [...new Set(sourceNames)].filter((n) => guarded.has(n) && isValidSecretName(n)).sort();
+}
+
 export function planFoundationComponentMint({ configs = [], heldNames = [], newlyProvisioned = false, probes = {} } = {}) {
   const held = new Set(heldNames);
   const out = { held: [], mint: [], deferred: [] };
@@ -886,8 +911,7 @@ export function planFoundationComponentMint({ configs = [], heldNames = [], newl
       continue;
     }
     if (held.has(name)) { out.held.push(key); continue; }
-    const guarded = !!(c.protects?.table || c.requires_marker);
-    if (!guarded) { out.mint.push(key); continue; }
+    if (!guardsStoredData(c)) { out.mint.push(key); continue; }
     const probe = c.protects?.table ? (probes[key] || 'unknown') : 'no_table';
     if (newlyProvisioned && (probe === 'no_table' || probe === 'empty')) { out.mint.push(key); continue; }
     out.deferred.push({

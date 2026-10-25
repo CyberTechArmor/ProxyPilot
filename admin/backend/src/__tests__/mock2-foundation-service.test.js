@@ -107,8 +107,9 @@ test('storage: bundled holding objects cannot be turned off — 409 { code, mess
   const r = routes();
   const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'off' } });
   assert.equal(res.status, 409);
-  assert.deepEqual(Object.keys(res.body).sort(), ['code', 'message', 'options']);
+  assert.deepEqual(Object.keys(res.body).sort(), ['code', 'message', 'object_count', 'options']);
   assert.equal(res.body.code, CODES.STORAGE_HAS_OBJECTS);
+  assert.equal(res.body.object_count, 4);
   assert.equal(store.readFeatureRows(1).storage.state, 'on');
   assert.deepEqual(calls.services, []);
   assert.equal(calls.counts.length, 1);

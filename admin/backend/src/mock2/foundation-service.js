@@ -26,7 +26,7 @@ import * as store from './foundation-store.js';
 import {
   CODES, BUNDLED_APP_IDENTITY, refusal, planStorageAction, planEmbeddingsAction, serviceStillUsed, interpretCliTest,
   parseHealthOutput, projectFoundation, projectJob, credentialSecretNames, parseJsonObject, parseJsonRows, newJobId, newIndexId,
-  buildJobInsertSql, buildJobPollSql, buildActiveIndexSql, buildHealthReadSql, buildCancelJobSql, promoteIndexStatements,
+  buildJobInsertSql, buildJobPollSql, buildActiveIndexSql, buildOverviewReadSql, buildCancelJobSql, promoteIndexStatements,
   SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId,
 } from './foundation-logic.js';
 import { SECRET_NAMES } from './foundation-contract.js';
@@ -93,7 +93,9 @@ async function bundledObjectCount(project) {
     if (!creds) return null;
     const { bundledStorageObjectCount } = await stack();
     const n = await bundledStorageObjectCount(project.container_name, creds);
-    return Number.isInteger(n) && n >= 0 ? n : null;
+    if (!Number.isInteger(n) || n < 0) return null;
+    try { store.recordObjectCount(project.id, n); } catch { /* the count is still the answer */ }
+    return n;
   } catch { return null; }
 }
 
@@ -105,9 +107,15 @@ async function readHealth(project, { fresh = false } = {}) {
   if (!fresh && cached && Date.now() - cached.at < HEALTH_CACHE_MS) return cached.value;
   let value;
   try {
-    const r = await store.appPsql(project.container_name, buildHealthReadSql(), { timeoutMs: 15_000 });
-    value = Number(r?.code) === 0 && parseMarker(r.stdout, SQL_MARKERS.ok).length
-      ? { rows: parseJsonRows(r.stdout).map((h) => ({ component: h.component, status: h.status, detail: sanitizeDetail(h.detail), checked_at: h.checked_at || null })), error: null }
+    const r = await store.appPsql(project.container_name, buildOverviewReadSql(), { timeoutMs: 15_000 });
+    const answered = Number(r?.code) === 0 && parseMarker(r.stdout, SQL_MARKERS.ok).length;
+    const rows = answered ? parseJsonRows(r.stdout) : [];
+    value = answered
+      ? {
+        rows: rows.filter((h) => h.component).map((h) => ({ component: h.component, status: h.status, detail: sanitizeDetail(h.detail), checked_at: h.checked_at || null })),
+        activeIndex: rows.find((x) => x.type === 'index') || null,
+        error: null,
+      }
       : { rows: [], error: 'the app database did not answer' };
   } catch (e) {
     value = { rows: [], error: redactSecrets(e?.message || String(e)).slice(0, 200) };
@@ -116,20 +124,25 @@ async function readHealth(project, { fresh = false } = {}) {
   return value;
 }
 
-// Run the real probes now (the app CLI writes mock2_foundation.health).
+// Run the real probes now (the app CLI writes mock2_foundation.health), then
+// one read of the app database for what the GET shape carries besides the
+// probes (the active index) — so POST /foundation/health answers the GET shape.
 async function probeHealth(project) {
+  let value;
   try {
     const { foundationCli } = await stack();
     const r = await foundationCli(project.container_name, ['health', '--json'], { appDir: APP_DIR, timeoutMs: 90_000 });
     const rows = parseHealthOutput(r?.stdout);
-    const value = rows.length ? { rows, error: null } : { rows: [], error: `the health probe did not report (exit ${r?.code})` };
-    healthCache.set(project.id, { at: Date.now(), value });
-    return value;
+    value = rows.length ? { rows, error: null } : { rows: [], error: `the health probe did not report (exit ${r?.code})` };
   } catch (e) {
-    const value = { rows: [], error: redactSecrets(e?.message || String(e)).slice(0, 200) };
-    healthCache.set(project.id, { at: Date.now(), value });
-    return value;
+    value = { rows: [], error: redactSecrets(e?.message || String(e)).slice(0, 200) };
   }
+  if (value.rows.length) {
+    const db = await readHealth(project, { fresh: true });
+    if (!db.error) value = { ...value, activeIndex: db.activeIndex || null };
+  }
+  healthCache.set(project.id, { at: Date.now(), value });
+  return value;
 }
 
 function shape(project, health) {
@@ -140,6 +153,8 @@ function shape(project, health) {
     jobs: store.listJobs(project.id, 10),
     health: health?.rows || null,
     healthError: health?.error || null,
+    activeIndex: health?.activeIndex || null,
+    objectCount: store.readObjectCount(project.id),
   });
 }
 
@@ -260,7 +275,10 @@ async function startJob(project, feature, { kind, params, index = null }, { user
   }
   try {
     const { runFoundationJobDetached } = await stack();
-    await runFoundationJobDetached(project.container_name, id, { appDir: APP_DIR });
+    // It answers { ok:false, error } rather than throwing when the unit did
+    // not start; a unit that already exists is the job running (a retry).
+    const run = await runFoundationJobDetached(project.container_name, id, { appDir: APP_DIR });
+    if (run && run.ok === false && !run.alreadyRunning) throw new Error(run.error || 'the job unit did not start');
     store.updateJob(id, { progress: { launched_at: nowIso(), launches: 1 } });
   } catch (e) {
     store.updateJob(id, { state: 'failed', error: `the job could not be started in the guest: ${redactSecrets(e?.message || String(e)).slice(0, 200)}`, finished: true });
@@ -268,7 +286,36 @@ async function startJob(project, feature, { kind, params, index = null }, { user
     await store.appPsql(project.container_name, buildCancelJobSql({ jobId: id, indexId: index?.id || null })).catch(() => {});
     return refusal(CODES.FOUNDATION_UNAVAILABLE, 'The job could not be started in the guest; nothing was switched.', [{ action: 'retry' }]);
   }
+  watchJob(pid, id);
   return { ok: true, job: projectJob(store.getJob(id)) };
+}
+
+// While a job runs, the host polls it every JOB_WATCH_MS (not only on the
+// minute sweep or a GET), so a finished job is promoted within seconds: for a
+// storage copy that is the window in which the app still writes to the old
+// provider after the job's last listing pass. The sweep stays the backstop
+// (and re-attaches a watch after a restart). In-process only; timers unref'd.
+export const JOB_WATCH_MS = 3_000;
+const JOB_WATCH_MAX_MS = 24 * 60 * 60_000;
+const watchers = new Map();
+function watchJob(projectId, jobId, { everyMs = JOB_WATCH_MS } = {}) {
+  if (watchers.has(jobId)) return;
+  const started = Date.now();
+  const schedule = () => {
+    const t = setTimeout(() => { tick().catch(() => {}); }, everyMs);
+    t.unref?.();
+    watchers.set(jobId, t);
+  };
+  const tick = async () => {
+    watchers.delete(jobId);
+    const job = store.getJob(jobId);
+    if (!job || !['queued', 'running'].includes(job.state) || Date.now() - started > JOB_WATCH_MAX_MS) return;
+    const project = store.getFoundationProject(projectId);
+    if (project?.lifecycle === 'active' && project.container_name) await refreshJob(project, job).catch(() => {});
+    const after = store.getJob(jobId);
+    if (after && ['queued', 'running'].includes(after.state) && !watchers.has(jobId)) schedule();
+  };
+  schedule();
 }
 
 async function stopIfUnused(project, feature) {
@@ -277,8 +324,22 @@ async function stopIfUnused(project, feature) {
 }
 
 // Poll one active job against the app database; promote when it succeeded.
-export async function refreshJob(project, job) {
-  if (!job || !['queued', 'running'].includes(job.state)) return job;
+// One poll per job at a time in this process (the watch, a GET and the sweep
+// can ask together): a second caller shares the first one's answer, so a
+// promotion never runs twice and a stale row never overwrites its outcome.
+const refreshing = new Map();
+export function refreshJob(project, job) {
+  if (!job || !['queued', 'running'].includes(job.state)) return Promise.resolve(job);
+  const inflight = refreshing.get(job.id);
+  if (inflight) return inflight;
+  const p = refreshJobOnce(project, job).finally(() => { refreshing.delete(job.id); });
+  refreshing.set(job.id, p);
+  return p;
+}
+
+async function refreshJobOnce(project, staleJob) {
+  const job = store.getJob(staleJob.id) || staleJob;
+  if (!['queued', 'running'].includes(job.state)) return job;
   const params = parseJsonObject(job.params_json, {}) || {};
   const feature = FEATURE_OF_JOB[job.kind];
   let r;
@@ -384,7 +445,8 @@ export async function sweepFoundationJobs() {
       const project = store.getFoundationProject(job.project_id);
       if (!project) { store.updateJob(job.id, { state: 'failed', error: 'the project no longer exists', finished: true }); continue; }
       if (project.lifecycle !== 'active' || !project.container_name) continue;
-      await refreshJob(project, job);
+      const after = await refreshJob(project, job);
+      if (after && ['queued', 'running'].includes(after.state)) watchJob(project.id, job.id);
       out.polled += 1;
     } catch { out.errors += 1; }
   }
@@ -515,5 +577,7 @@ export async function featureAction(projectId, feature, request, { userId = null
 
 // For tests: drop in-process caches.
 export function resetFoundationServiceCaches() {
-  healthCache.clear(); lastRefresh.clear(); busy.clear();
+  healthCache.clear(); lastRefresh.clear(); busy.clear(); refreshing.clear();
+  for (const t of watchers.values()) clearTimeout(t);
+  watchers.clear();
 }

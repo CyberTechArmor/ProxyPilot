@@ -125,10 +125,14 @@ export function scriptedStack() {
         lines.push('MF_OK:polled');
         return ok(`${lines.join('\n')}\n`);
       }
+      if (sql.includes('FROM mock2_foundation.health')) {
+        // The GET overview: probes, plus the active index when asked for.
+        const ix = sql.includes("'type', 'index'") && guest.activeIndex ? [`MF_JSON:${JSON.stringify({ type: 'index', state: 'active', item_count: 0, ...guest.activeIndex })}`] : [];
+        return ok(`${[...guest.health.map((h) => `MF_JSON:${JSON.stringify(h)}`), ...ix].join('\n')}\nMF_OK:read\n`);
+      }
       if (sql.includes("WHERE state = 'active'") && sql.includes("'type', 'index'")) {
         return ok(`${guest.activeIndex ? `MF_JSON:${JSON.stringify({ type: 'index', ...guest.activeIndex })}\n` : ''}MF_OK:read\n`);
       }
-      if (sql.includes('FROM mock2_foundation.health')) return ok(`${guest.health.map((h) => `MF_JSON:${JSON.stringify(h)}`).join('\n')}\nMF_OK:read\n`);
       if (sql.includes('to_regclass')) return ok(`MF_JSON:${JSON.stringify({ exists: guest.guardTable })}\nMF_OK:probe\n`);
       if (sql.includes("'rows', EXISTS")) return ok(`MF_JSON:${JSON.stringify({ rows: guest.guardRows })}\nMF_OK:rows\n`);
       return { code: 1, stdout: '', stderr: 'unexpected SQL' };

@@ -120,6 +120,8 @@ import { registerDatabaseExceptionRoutes } from './database-exception-routes.js'
 import { getDatabaseException, setDatabaseException, clearDatabaseException } from './database-exception.js';
 import { registerFoundationRoutes } from './foundation-routes.js';
 import * as foundationService from './foundation-service.js';
+import { registerFoundationAdoptRoutes } from './foundation-adopt-routes.js';
+import * as foundationAdoptService from './foundation-adopt-service.js';
 import { routeChatMessage, currentTaskForProject } from './task-sync.js';
 import {
   startProvision,
@@ -6131,6 +6133,15 @@ export function createMock2Router() {
     requireRole: requireMock2Role, requireSudo, refuseIfArchived,
     audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
     service: foundationService,
+  });
+
+  // Application foundation ADOPTION — an existing (pre-foundation) project
+  // moves onto the foundation: plan (read-only), confirm (sudo, audited),
+  // resume, rollback (docs/features/app-foundation.md § Existing projects).
+  registerFoundationAdoptRoutes(router, {
+    requireRole: requireMock2Role, requireSudo, refuseIfArchived,
+    audit: (req, action, projectId, detail) => logAudit(req.user?.id, action, 'mock2_project', projectId, detail, req.ip),
+    service: foundationAdoptService,
   });
 
   return router;

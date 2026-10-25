@@ -738,13 +738,16 @@ if (mock2Gate.warning) {
 }
 if (mock2Gate.enabled) {
   try {
-    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, sweepTasksOnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt, sweepStalledBuilds, registerGitPushHooks, sweepFoundationJobs } = await import('./mock2/index.js');
+    const { initMock2Db, createMock2Router, createMock2GitRouter, sweepMock2OnBoot, sweepTasksOnBoot, reconcileMock2Domains, sweepIdleStops, reconcileMock2Firewall, reconcileMock2Egress, seedFrameworkV1, upgradeFrameworkFromSeed, seedBuiltinComponents, loadCustomDesignPresets, sweepMock2Locks, mock2TerminalAuthorize, sweepFrameworkAutoAdopt, sweepStalledBuilds, registerGitPushHooks, sweepFoundationJobs, sweepAdoptionsOnBoot } = await import('./mock2/index.js');
     initMock2Db();
     // Register the project-terminal authorizer into the core streaming-terminal
     // route now that the module is enabled (ADR-001: the core never imports mock2
     // statically). Off ⇒ never registered ⇒ /api/terminal/mock2/* stays a 404.
     setMock2TerminalAuthorizer(mock2TerminalAuthorize);
     sweepMock2OnBoot();
+    // Foundation adoptions interrupted by the restart become failed (resumable
+    // or rolled back by a person). Never throws.
+    sweepAdoptionsOnBoot();
     // Task continuity: tasks whose cycle/ask died with the process become
     // interrupted (with what was left uncertain). Never throws.
     await sweepTasksOnBoot();

@@ -2106,4 +2106,37 @@ export const MOCK2_MIGRATIONS = [
       `);
     },
   },
+  {
+    // App foundation — ADOPTION of an existing (pre-foundation) project
+    // (foundation-adopt-service.js). One row per adoption run: its state, the
+    // step it is at, each step's record, and the non-secret facts the run
+    // needs to resume or roll back (the rollback snapshot's name, the dump's
+    // size/sha256/row counts, the guest's original config values, the commits
+    // before and after, the moved secret NAMES). Never a secret value. At most
+    // one running/rolling-back adoption per project (partial unique index).
+    // New table only; a project delete removes its rows.
+    version: 566,
+    name: 'mock2_foundation_adoptions',
+    up: (d) => {
+      d.exec(`
+        CREATE TABLE IF NOT EXISTS mock2_foundation_adoptions (
+          id TEXT PRIMARY KEY,
+          project_id INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('running','succeeded','failed','rolling_back','rolled_back')),
+          step TEXT,
+          steps_json TEXT NOT NULL DEFAULT '[]',
+          data_json TEXT NOT NULL DEFAULT '{}',
+          error TEXT,
+          resumable INTEGER NOT NULL DEFAULT 0,
+          lock_token TEXT,
+          created_by TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock2_foundation_adoptions_project ON mock2_foundation_adoptions(project_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mock2_foundation_adoptions_active ON mock2_foundation_adoptions(project_id) WHERE state IN ('running','rolling_back');
+      `);
+    },
+  },
 ];

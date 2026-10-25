@@ -31,6 +31,7 @@ import {
   buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion, archiveStorageRefusal,
 } from './foundation-logic.js';
 import { SECRET_NAMES } from './foundation-contract.js';
+import { latestAdoption } from './foundation-adopt-store.js';
 
 const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
@@ -643,9 +644,21 @@ function pickSide(config = {}) {
 }
 
 // POST /foundation/storage and /foundation/embeddings.
+// A move onto the foundation (foundation-adopt-service.js) that is running,
+// rolling back or stopped at a step owns the deployment's stack: a switch
+// then would change what its resume or rollback expects.
+function adoptionRefusal(projectId) {
+  let row = null;
+  try { row = latestAdoption(projectId); } catch { return null; }
+  if (!row || !['running', 'rolling_back', 'failed'].includes(row.state)) return null;
+  return refusal(CODES.FOUNDATION_BUSY, 'This project is being moved onto the application foundation. Finish the move (resume) or roll it back before changing its switches.', [{ action: 'adoption' }]);
+}
+
 export async function featureAction(projectId, feature, request, { userId = null } = {}) {
   const { project, error } = requireFoundation(projectId);
   if (error) return error;
+  const adopting = adoptionRefusal(project.id);
+  if (adopting) return adopting;
   return exclusive(project.id, async () => {
     const { current } = currentFor(project.id, feature);
     let facts = {};

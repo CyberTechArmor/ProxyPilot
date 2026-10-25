@@ -10,14 +10,18 @@ addressed individually, not bundled.
 
 From the foundation build (docs/features/app-foundation.md).
 
-- **Existing projects have no adoption path yet.** Projects created before the
-  foundation keep their native in-guest Postgres. Moving one onto the stack
-  (data move, pgvector, storage, secrets out of `/etc/environment`) is a
-  separate, explicit step that is not built.
+- **Moving an existing project** (Foundation → Move onto the application
+  foundation) is proven against a scripted guest and a real-Docker harness
+  only. Real Incus snapshot restore, the guest restart with the Docker-ready
+  settings, Debian 13's Docker install and a real deploy are proven by the
+  first move on a host. A snapshot-retention rule could prune its rollback
+  snapshot (`SNAPSHOT_MISSING`). Removing the old database afterwards is not
+  built yet.
 - **Apps that already drifted to SQLite** (created before the foundation) get
   an advisory on quick and MVP builds, and the full build refuses what it
-  refused before. A build that adds an engine is refused in every tier. Moving
-  such an app onto the foundation is part of the missing adoption path.
+  refused before. A build that adds an engine is refused in every tier. Such an app
+  cannot be moved onto the foundation until its data access is PostgreSQL
+  (the move's plan blocks it).
 - **Not proven in the sandbox:** Docker inside a nested Incus guest, the
   Debian 13 `docker.io` / `docker-compose` / `postgresql-client` install (the
   failure path is proven), and the local embedding model (the TEI image and

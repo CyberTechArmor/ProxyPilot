@@ -257,9 +257,45 @@ Proof: `tests/foundation-panel.browser.mjs`, against a mocked API.
 
 ## Existing projects
 
-This applies to projects created after the revision (`projects.foundation_version` is
-set). Existing projects keep their native in-guest Postgres and are never rewritten.
-Their adoption path is an explicit, separate step (see Known gaps).
+New projects get the foundation at creation (`projects.foundation_version` is set).
+Existing projects keep their native in-guest Postgres until a person moves them.
+
+**Moving an existing project** (Dev Studio → project → Details → Build →
+*Application foundation* → *Move onto the application foundation*;
+`foundation-adopt-{logic,store,service,routes}.js`, mock2.db migration 566).
+
+- **Plan:** a read-only plan lists the steps, the downtime, the database size, the disk
+  needed and the secrets that move (names only).
+- **Blockers come first**, each with its next step:
+  - an app on SQLite or another engine;
+  - a VM guest;
+  - too little disk;
+  - a running build;
+  - and the like.
+- **Confirming** needs sudo and is audited. The plan token is recomputed from fresh
+  probes; a stale plan answers `PLAN_STALE`.
+- **The run** holds the checkout lock throughout and runs twelve recorded steps:
+  1. a `pre-foundation-<id>` guest snapshot;
+  2. the app stopped;
+  3. a dump with per-table row counts;
+  4. the native Postgres stopped and kept, with port 5432 checked free;
+  5. the Docker-ready guest settings and a restart;
+  6. Docker installed;
+  7. the stack started;
+  8. a restore in one transaction, verified table by table and owned by `app`;
+  9. the component secrets moved from `/etc/environment` into the encrypted store;
+  10. `foundation/` added as one platform commit;
+  11. a foundation deploy with a health check;
+  12. done.
+- **Resume and rollback:** a failed or interrupted run resumes at its step where that is
+  safe. Any run can be rolled back to its snapshot: the guest settings are put back, and
+  the repository is reset if the platform commit is still its tip. What was written
+  since is kept in a `pre-rollback-<id>` snapshot.
+- **Locks:** while a move is unfinished, the foundation switches and Archive are
+  refused.
+- **Nothing is deleted:** the snapshot, the native data directory and the dump stay
+  until a person removes them (a later, separate action).
+- No MCP tool reaches it.
 
 On foundation projects, `restore_project_db`, snapshot restores and the deploy's
 pre-migration dump all go through the stack. After a restore, the platform-held rows
@@ -281,7 +317,11 @@ of `mock2_foundation`.
 
 ## Known gaps
 
-- Adoption for existing projects.
+- Rolling back a move discards what the app wrote in the seconds between the snapshot
+  and the app stopping, unless it is recovered from the `pre-rollback-<id>` snapshot.
+- A snapshot-retention rule on the guest could prune the move's rollback snapshot;
+  the rollback then answers `SNAPSHOT_MISSING`.
+- Removing the old database after a successful move is not built yet.
 - Cloning a project copies its database (vectors included) but not its stored objects.
 - On foundation deploys, the stored-credential check after the deploy is skipped,
   because the keys live in mock2.db. It needs a host-side probe.

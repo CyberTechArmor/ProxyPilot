@@ -449,6 +449,21 @@ test('cancel: the job ends host-side, the guest is told, the staged switch is ab
   assert.deepEqual(r.audits.at(-1).detail, { job_id: 'fj_000000000000', outcome: 'refused', code: CODES.JOB_NOT_FOUND });
 });
 
+test('an unfinished move onto the foundation locks the switches until it is resumed or rolled back', async () => {
+  setup({ objects: 0 });
+  const r = routes();
+  const db = globalThis.__foundationWorld.db;
+  const now = new Date().toISOString();
+  db.prepare("INSERT INTO mock2_foundation_adoptions (id, project_id, state, step, created_at, updated_at) VALUES ('fa_test', 1, 'failed', 'deploy', ?, ?)").run(now, now);
+  const off = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'off' } });
+  assert.deepEqual([off.status, off.body.code], [409, CODES.FOUNDATION_BUSY]);
+  assert.match(off.body.message, /moved onto the application foundation/);
+  assert.equal(store.readFeatureRows(1).storage.state, 'on', 'nothing changed');
+  db.prepare("UPDATE mock2_foundation_adoptions SET state = 'succeeded' WHERE id = 'fa_test'").run();
+  const again = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'off' } });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+});
+
 test('a cancel never interleaves with a promotion: during it the cancel is refused busy; before it nothing is promoted', async () => {
   {
     const { guest, stack } = setup({ objects: 2 });

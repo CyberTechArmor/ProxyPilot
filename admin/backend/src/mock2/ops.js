@@ -32,7 +32,7 @@ export function planDigest(plan) {
 // resolveRestoreDbPlan({ containerName, projectId, file, environmentCopy, retryOf })
 // → { ok, plan, params, retryJob } | { ok: false, error }. Pure resolution:
 // names validated, the recovery set bound to a job record of THIS app.
-export function resolveRestoreDbPlan(db, { containerName, file, environmentCopy = null, retryOf = null, guard = null, guardKey = null, webPort = 3000, dumpsDir = undefined }) {
+export function resolveRestoreDbPlan(db, { containerName, file, environmentCopy = null, retryOf = null, guard = null, guardKey = null, webPort = 3000, dumpsDir = undefined, foundation = false }) {
   const dumpName = String(file || '').split('/').pop();
   if (!DUMP_NAME_RE.test(dumpName)) return { ok: false, error: `file must be a dump name inside the project's dump directory (from dump_project_db, a deploy's pre-deploy copy or a restore's pre-restore copy)` };
   const envCopyName = environmentCopy ? String(environmentCopy).split('/').pop() : null;
@@ -54,9 +54,10 @@ export function resolveRestoreDbPlan(db, { containerName, file, environmentCopy 
     dump: { name: dumpName },
     envCopy: envCopyName ? { name: envCopyName, originJobId: originJob.id } : null,
     guard: guard || null, guardKey: guardKey || null,
+    ...(foundation ? { foundation: true } : {}),
     ...(r.job ? { retryOf: r.job.id } : {}),
   };
-  const plan = { container: containerName, dump: dumpName, environment_copy: envCopyName, mode: envCopyName ? 'recovery_set' : 'current_configuration', recovery_set_job: originJob?.id || null, retry_of: r.job?.id || null };
+  const plan = { container: containerName, dump: dumpName, environment_copy: envCopyName, mode: envCopyName ? 'recovery_set' : 'current_configuration', recovery_set_job: originJob?.id || null, retry_of: r.job?.id || null, ...(foundation ? { database: 'foundation_stack' } : {}) };
   return { ok: true, plan, params, retryJob: r.job, digest: planDigest(plan) };
 }
 
@@ -65,11 +66,30 @@ export async function restoreProjectDb({ containerName, file, environmentCopy = 
   if (!store) return noStore();
   const db = store.getDb();
   const refs = await resolveDeployParams({ containerName });
-  const res = resolveRestoreDbPlan(db, { containerName, file, environmentCopy, retryOf, guard: refs.guard, guardKey: refs.guardKey || null, webPort: refs.webPort });
+  const foundation = !!refs.foundation;
+  const res = resolveRestoreDbPlan(db, { containerName, file, environmentCopy, retryOf, guard: refs.guard, guardKey: refs.guardKey || null, webPort: refs.webPort, foundation });
   if (!res.ok) return { ok: false, step: 'plan', error: res.error };
   const sub = submitRunnerJob(db, { kind: 'restore_db', app: containerName, params: res.params, configRefs: { dump: res.plan.dump, environmentCopy: res.plan.environment_copy, mode: res.plan.mode, guard: refs.guard || null, webPort: refs.webPort, unit: 'mock2-dev.service', environmentFile: '/etc/environment', appDir: '/srv/app' }, requestedBy, via, retryOf: res.retryJob?.id || null });
   if (sub.error) return { ok: false, step: 'submit', error: sub.error, code: sub.code, holder: sub.holder };
-  return runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach });
+  const out = await runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach });
+  // A foundation dump carries the platform-held rows of its own time (sealed
+  // secrets, feature switches, the generation). mock2.db is the source of
+  // truth, so once the restore has run they are re-synced over whatever the
+  // dump put back (the app reloads on the NOTIFY).
+  if (foundation && out && !detach && !out.refused && !out.queued && !['plan', 'submit', 'runner_unavailable', 'bind', 'inspect', 'compatibility', 'protect'].includes(out.step)) {
+    out.foundationSync = await resyncFoundation(refs.projectId);
+  }
+  return out;
+}
+
+async function resyncFoundation(projectId) {
+  try {
+    const { syncFoundationToApp } = await import('./foundation-store.js');
+    const s = await syncFoundationToApp(projectId);
+    return s.ok ? { ok: true, generation: s.generation } : { ok: false, error: s.error };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e).slice(0, 200) };
+  }
 }
 
 export function resolveRestoreSnapshotPlan(db, { containerName, snapshot, acceptPartial = false, retryOf = null, managed = false, webPort = null, guard = null }) {
@@ -93,7 +113,12 @@ export async function restoreSnapshot({ containerName, snapshot, acceptPartial =
   if (!res.ok) return { ok: false, step: 'plan', error: res.error };
   const sub = submitRunnerJob(db, { kind: 'restore_snapshot', app: containerName, params: res.params, configRefs: { snapshot: res.plan.restore_to, acceptPartial: res.plan.accept_partial, managed, ...(managed ? { guard: refs.guard || null, webPort: refs.webPort, unit: 'mock2-dev.service', environmentFile: '/etc/environment' } : {}) }, requestedBy, via, retryOf: res.retryJob?.id || null });
   if (sub.error) return { ok: false, step: 'submit', error: sub.error, code: sub.code, holder: sub.holder };
-  return runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach });
+  const out = await runSubmittedJob(db, sub.job, { store, deps: inProcessExecutorDeps(store), env: store.env || process.env, onEvent, detach });
+  // The snapshot brought back the guest's app database as it was, platform-
+  // held foundation rows included: re-sync them from mock2.db (as after a
+  // database restore).
+  if (refs.foundation && out?.ok && !detach && !out.submitted) out.foundationSync = await resyncFoundation(refs.projectId);
+  return out;
 }
 
 // retryProjectSecrets({ containerName, retryOf }) → { ok, minted, deferred,

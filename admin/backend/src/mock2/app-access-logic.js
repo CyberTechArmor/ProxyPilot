@@ -36,6 +36,8 @@
 //
 // Terminology (risk R7): nothing here is named "agent".
 
+import { foundationSuperuserPsqlCommand } from './foundation-stack-logic.js';
+
 // The auth component reserves this domain for the platform's own test fixtures
 // and excludes it from "a real user exists", which is what keeps the operator's
 // bootstrap open while the smoke checks have accounts to sign in as.
@@ -83,7 +85,9 @@ export function validateFirstAdmin({ email = '', password = '' } = {}) {
  *     that lists users and there should not be one.
  * -------------------------------------------------------------------------- */
 
-export function accessStateScript({ port = 3000 } = {}) {
+// foundation: the app database runs in the guest's foundation stack (no
+// in-guest server, no postgres OS user) — psql runs inside its postgres service.
+export function accessStateScript({ port = 3000, foundation = false } = {}) {
   const base = `http://127.0.0.1:${Number(port) || 3000}`;
   return [
     'set -u',
@@ -95,7 +99,9 @@ export function accessStateScript({ port = 3000 } = {}) {
     // The roster. psql as the postgres superuser: the platform has root in the
     // container, and the app's own role may not be able to read pg_catalog.
     // Unaligned, pipe-separated, no header — parsed line by line below.
-    'ROWS=$(su - postgres -c "psql -tAF\'|\' -d app -c \\"SELECT lower(email), role, is_active, provider FROM users ORDER BY id\\"" 2>/dev/null)',
+    foundation
+      ? `ROWS=$(${foundationSuperuserPsqlCommand()} -tA -F '|' -d app -c "SELECT lower(email), role, is_active, provider FROM users ORDER BY id" 2>/dev/null)`
+      : 'ROWS=$(su - postgres -c "psql -tAF\'|\' -d app -c \\"SELECT lower(email), role, is_active, provider FROM users ORDER BY id\\"" 2>/dev/null)',
     'RC=$?',
     'if [ -n "$ROWS" ]; then printf \'%s\\n\' "$ROWS" | while IFS= read -r r; do [ -n "$r" ] && echo "USER:$r"; done; fi',
     // ROSTER:ok ONLY when psql actually answered. The first version echoed a
@@ -275,7 +281,7 @@ export function parseFirstAdminResult(out) {
  * build simply re-seeds what it needs.
  * -------------------------------------------------------------------------- */
 
-export function freeFirstAdminSlotScript() {
+export function freeFirstAdminSlotScript({ foundation = false } = {}) {
   // The SQL goes in through a FILE, not a nested -c argument.
   //
   // `su - postgres -c 'psql -c "… LIKE \'%@fixture.invalid\' …"'` looks fine and
@@ -294,7 +300,9 @@ export function freeFirstAdminSlotScript() {
     "DELETE FROM users WHERE lower(email) LIKE '%@fixture.invalid' RETURNING lower(email);",
     'PP_FREE_SLOT_EOF',
     'chmod 0644 "$SQLF"',
-    'DELETED=$(su - postgres -c "psql -tA -d app -f $SQLF" 2>/dev/null)',
+    foundation
+      ? `DELETED=$(${foundationSuperuserPsqlCommand()} -tA -d app < "$SQLF" 2>/dev/null)`
+      : 'DELETED=$(su - postgres -c "psql -tA -d app -f $SQLF" 2>/dev/null)',
     'RC=$?',
     'if [ "$RC" -ne 0 ]; then echo "FREED:error"; exit 0; fi',
     "if [ -n \"$DELETED\" ]; then printf '%s\\n' \"$DELETED\" | while IFS= read -r r; do case \"$r\" in *@fixture.invalid) echo \"REMOVED:$r\";; esac; done; fi",

@@ -25,6 +25,7 @@ import { getProject, updateProject } from './projects.js';
 import { containerNameForProject } from './provision.js';
 import { buildCheckpointScript } from './template.js';
 import { buildDbSnapshotScript } from './restore-logic.js';
+import { isFoundationProject } from './foundation-stack-logic.js';
 import { getSlot, getConnector, decryptConnectorKey, effectivePrice, listConnectors, isSecretDecryptable } from './connectors.js';
 import { phaseRoutingApplies, detectPhaseProviders, applyProviderPreference, resolvePhaseModelMap, applyPhasePosture, phasePosture, phaseMapRecordLine, implementLaneForTask } from './phase-routing-logic.js';
 import { contractClassifierMode, CONTRACT_CLASSIFIER_PROMPT, buildContractClassifierTask, parseContractClassifierReply, applyInventoryAdditions, contractAmendmentMessage, BUILD_PLAN_SYSTEM_PROMPT, buildPlanTask, formatPlanForTask } from './contract-classifier-logic.js';
@@ -3795,7 +3796,7 @@ export async function checkpointAndRecord({ cycle, project, containerName, holde
   //    THIS checkpoint commit carries the database at this point in time —
   //    that's what makes a later restore bring the data back, not just the
   //    code. Best-effort: the script always exits 0 (no Postgres → skip).
-  const dbSnap = await containerSh(containerName, buildDbSnapshotScript({ appDir: APP_DIR }), { timeoutMs: 120000 });
+  const dbSnap = await containerSh(containerName, buildDbSnapshotScript({ appDir: APP_DIR, foundation: isFoundationProject(project) }), { timeoutMs: 120000 });
   if (dbSnap.code !== 0) {
     console.warn(`[mock2] db snapshot non-zero for cycle ${cycle.id}: ${(dbSnap.stdout || dbSnap.stderr || '').trim().slice(-300)}`);
   }

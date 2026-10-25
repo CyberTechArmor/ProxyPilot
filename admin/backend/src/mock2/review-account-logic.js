@@ -21,6 +21,7 @@
 // testable without a container.
 
 import crypto from 'node:crypto';
+import { FOUNDATION_CLI, FOUNDATION_DATABASE_URL } from './foundation-contract.js';
 
 // The reserved domain the auth component excludes from "a real user exists".
 // Changing it silently would let the review account consume the operator's
@@ -131,7 +132,10 @@ const SEED_NODE_SRC = [
   '  return ["scrypt", N, R, P, salt.toString("base64"), hash.toString("base64")].join("$");',
   '}',
   '',
-  'const url = process.env.DATABASE_URL || "postgres://app:app@127.0.0.1:5432/app";',
+  '// An app on the application foundation (foundation/ in the app dir, the cwd)',
+  '// reaches its database over the stack socket; DATABASE_URL is set only in its',
+  '// unit, never in an environment file this script would see.',
+  `const url = process.env.DATABASE_URL || (fs.existsSync("${FOUNDATION_CLI}") ? "${FOUNDATION_DATABASE_URL}" : "postgres://app:app@127.0.0.1:5432/app");`,
   'const client = new pg.Client({ connectionString: url });',
   '// connect() INSIDE the try: a database that is not up threw here, outside',
   '// any handler, and the process died with a stack trace instead of the one',

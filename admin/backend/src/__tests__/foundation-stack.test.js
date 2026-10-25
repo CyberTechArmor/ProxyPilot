@@ -457,10 +457,13 @@ test('smoke DB connector: the scratch DSN keeps a socket URL\'s query string (an
   assert.match(smokeScratchDbScript(), /NO_SCRATCH_DSN/);
 });
 
-test('e2e server: falls back to the foundation socket when DATABASE_URL is unset', () => {
+test('e2e server: a foundation app uses the socket and the bootstrap; only a pre-foundation app keeps the native URL', () => {
   const s = e2eServerMjs();
-  assert.ok(s.includes(`existsSync('${STACK.postgres.socketDir}/.s.PGSQL.5432') ? '${FOUNDATION_DATABASE_URL}'`));
-  assert.ok(s.includes("'postgres://app:app@127.0.0.1:5432/app'"), 'the native default stays');
+  assert.ok(s.includes("const BOOTSTRAP = './foundation/runtime/bootstrap.mjs';"));
+  assert.ok(s.includes(`(foundationApp ? '${FOUNDATION_DATABASE_URL}' : 'postgres://app:app@127.0.0.1:5432/app')`), 'the decision is "is this a foundation app", not "is the socket up right now"');
+  assert.doesNotMatch(s, /existsSync\('\/run\/mock2-foundation/, 'a stopped stack must not fall through to a TCP server that does not exist');
+  assert.ok(s.includes("spawn('node', [...(foundationApp ? ['--import=' + BOOTSTRAP] : []), 'dist/server.js']"), 'the e2e server loads the foundation bootstrap like the unit does');
+  assert.match(s, /cannot reach the database through/);
   // withDatabase keeps the socket query string.
   const u = new URL(FOUNDATION_DATABASE_URL); u.pathname = '/app_e2e';
   assert.equal(u.toString(), FOUNDATION_DATABASE_URL.replace('///app?', '///app_e2e?'));
@@ -483,11 +486,14 @@ test('provision wiring: Docker-ready launch, setup option and bring-up only for 
   assert.ok(src.includes("`incus exec ${sourceContainerName} -- su - postgres -c 'pg_dump --clean --if-exists app' | incus exec ${containerName} -- su - postgres -c 'psql -q -v ON_ERROR_STOP=0 app' 2>&1 | tail -n 3`"));
 });
 
-test('MCP SQL tools: foundation projects use the stack; restore is refused for them', async () => {
+test('MCP SQL tools: foundation projects use the stack, restore included', async () => {
   const src = await readFile(new URL('../routes/mcp-tools/project-config.js', import.meta.url), 'utf8');
   assert.match(src, /fstack \? fstack\.foundationReadOnlySqlScript\(\)/);
   assert.match(src, /fstack \? fstack\.foundationDumpScript\(\)/);
-  assert.match(src, /restore_project_db does not support foundation projects yet/);
+  assert.doesNotMatch(src, /restore_project_db does not support foundation projects/);
+  const ops = await readFile(new URL('../mock2/ops.js', import.meta.url), 'utf8');
+  assert.match(ops, /const foundation = !!refs\.foundation;/);
+  assert.match(ops, /out\.foundationSync = await resyncFoundation\(refs\.projectId\)/);
   const script = L.foundationReadOnlySqlScript();
   assert.match(script, /BEGIN READ ONLY/);
   assert.match(script, /statement_timeout = 30000/);

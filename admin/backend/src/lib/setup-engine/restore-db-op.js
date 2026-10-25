@@ -38,6 +38,9 @@ export function resolveRestoreDbPlan(params = {}) {
     guard: params.guard || null,
     guardKey: params.guardKey || null,
     runDir: String(params.runDir || CONTAINMENT_RUN_DIR),
+    // The app database runs in the guest's foundation stack (restore-logic
+    // drives its postgres service instead of an in-guest server).
+    foundation: params.foundation === true,
   };
 }
 
@@ -64,14 +67,14 @@ export async function runRestoreDbOperation({ params, exec, job = noopJob(), ori
 
   // 2) inspect, read-only.
   report('inspect', 'Reading the dump and the configuration it must match…');
-  const ins = parseInspect((await guest('inspect', inspectScript({ dumpsDir: p.dumpsDir, dumpName: p.dumpName, envCopyPath, environmentFile, guard: p.guard, guardKey: p.guardKey, unit }), 60_000)).stdout);
+  const ins = parseInspect((await guest('inspect', inspectScript({ dumpsDir: p.dumpsDir, dumpName: p.dumpName, envCopyPath, environmentFile, guard: p.guard, guardKey: p.guardKey, unit, foundation: p.foundation }), 60_000)).stdout);
   if (!ins.dump) return fail('inspect', `no such dump in ${container}: ${p.dumpsDir}/${p.dumpName}`);
   if (bind.expectedSha256 && ins.dump.sha256 !== bind.expectedSha256) return fail('bind', `${p.dumpName} is not the file job ${bind.origin} recorded (sha256 differs): the recovery set is broken`);
   const fmt = dumpHeaderVerdict(ins.head);
   if (!fmt.ok) return fail('inspect', `${p.dumpName}: ${fmt.reason}`);
   const srv = serverCompatible(fmt.dumpedFrom, ins.server && !/^(none|nopsql|unknown)$/.test(ins.server) ? ins.server : null);
   if (!srv.ok) return fail('inspect', srv.reason);
-  if (ins.server === 'nopsql') return fail('inspect', `psql is not available in ${container}`);
+  if (ins.server === 'nopsql') return fail('inspect', p.foundation ? `docker is not available in ${container} (its foundation stack runs the database)` : `psql is not available in ${container}`);
   if (envCopyPath && ins.envCopy !== 'present') return fail('bind', `the environment copy ${envCopyPath} is missing in ${container}`);
 
   // 3) compatibility: the dump's protected rows under the key that will be in force.
@@ -97,7 +100,7 @@ export async function runRestoreDbOperation({ params, exec, job = noopJob(), ori
     if (check.ok) { prot = { dbDump: { path: priorDump.name, bytes: check.bytes, sha256: check.sha256 }, dbDumpNote: null, envCopy: null, envCopyNote: null, reused: true }; job.event?.('reuse', `pre-restore dump ${priorDump.name} from the previous attempt revalidated (sha256 matches) and reused`, { path: priorDump.name }); } else job.event?.('reuse', `pre-restore dump from the previous attempt not reused: ${check.reason}; a new copy is taken`, { path: priorDump.name });
   }
   if (!prot || !prot.envCopy) {
-    const fresh = parseProtect((await guest('protect', protectScript(String(job.id || 'adhoc'), { dumpsDir: p.dumpsDir, environmentFile }), 20 * 60_000)).stdout);
+    const fresh = parseProtect((await guest('protect', protectScript(String(job.id || 'adhoc'), { dumpsDir: p.dumpsDir, environmentFile, foundation: p.foundation }), 20 * 60_000)).stdout);
     prot = prot ? { ...prot, envCopy: fresh.envCopy, envCopyNote: fresh.envCopyNote } : { ...fresh, reused: false };
     if (!prot.reused && prot.dbDump) job.generated({ kind: 'dump', name: prot.dbDump.path, where: container, sha256: prot.dbDump.sha256, bytes: prot.dbDump.bytes });
   }
@@ -115,7 +118,7 @@ export async function runRestoreDbOperation({ params, exec, job = noopJob(), ori
 
   let envSwapped = false;
   report('restore', `Restoring ${p.dumpName}…`);
-  const res = parseRestore((await guest('restore', restoreScript({ dumpsDir: p.dumpsDir, dumpName: p.dumpName }), 30 * 60_000)).stdout);
+  const res = parseRestore((await guest('restore', restoreScript({ dumpsDir: p.dumpsDir, dumpName: p.dumpName, foundation: p.foundation }), 30 * 60_000)).stdout);
   mark('restored', { app_stopped: true, disruptive: true, restore_in_progress: false, container, unit, webPort: p.webPort, recovery, restore_rc: res.rc, restore_errors: res.errors }, `psql finished (rc ${res.rc}, ${res.errors} error line(s))`);
   if (res.rc == null || res.rc === 98) {
     return await bringUp('restore', `the dump could not be handed to psql (rc ${res.rc ?? 'none'}); the database is whatever psql left; pre-restore dump ${prot.dbDump.path}`);

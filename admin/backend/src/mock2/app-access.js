@@ -13,6 +13,7 @@
 
 import { sh, b64 } from './host.js';
 import { DEFAULT_WEB_PORT } from './template.js';
+import { isFoundationProject } from './foundation-stack-logic.js';
 import {
   accessStateScript, parseAccessState, firstAdminScript, parseFirstAdminResult,
   validateFirstAdmin, freeFirstAdminSlotScript, parseFreeSlotResult,
@@ -38,7 +39,7 @@ export async function readAppAccess(project) {
   if (!project?.container_name || project.lifecycle !== 'active') return { ...OFFLINE };
   const port = project.web_port || DEFAULT_WEB_PORT;
   try {
-    const r = await containerSh(project.container_name, accessStateScript({ port }));
+    const r = await containerSh(project.container_name, accessStateScript({ port, foundation: isFoundationProject(project) }));
     return { ...parseAccessState(r.stdout || ''), offline: false };
   } catch (e) {
     console.warn(`[mock2] app-access read failed for project ${project.id}:`, e?.message);
@@ -88,7 +89,7 @@ export async function freeFirstAdminSlot(project) {
     return { ok: false, removed: [], error: 'The project is not online — start it, then try again.' };
   }
   try {
-    const r = await containerSh(project.container_name, freeFirstAdminSlotScript());
+    const r = await containerSh(project.container_name, freeFirstAdminSlotScript({ foundation: isFoundationProject(project) }));
     return parseFreeSlotResult(r.stdout || '');
   } catch (e) {
     console.warn(`[mock2] free first-admin slot failed for project ${project.id}:`, e?.message);

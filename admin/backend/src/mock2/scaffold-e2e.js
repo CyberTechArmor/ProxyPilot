@@ -37,6 +37,7 @@
 // Terminology (risk R7): nothing here is named "agent".
 
 import { STACK, FOUNDATION_DATABASE_URL } from './foundation-contract.js';
+import { FOUNDATION_BOOTSTRAP } from './scaffold-foundation.js';
 
 // The port the e2e webServer binds. Deliberately NOT the app's own port: the
 // suite must be runnable while the real app is serving (during a build, the
@@ -133,11 +134,16 @@ import pg from 'pg';
 
 const PORT = Number(process.env.E2E_PORT || ${E2E_PORT});
 const DB = process.env.E2E_DB_NAME || '${E2E_DB}';
-// No DATABASE_URL in the environment: a foundation guest's database is the
-// stack's Unix socket (peer authentication — the app role may CREATE DATABASE);
-// otherwise the native in-guest server.
+// An app on the application foundation carries its runtime in foundation/:
+// the server starts with the same bootstrap as the deployed unit, and with no
+// DATABASE_URL in the environment its database is the stack's Unix socket
+// (peer authentication — the app role may CREATE DATABASE). There is no other
+// default for it: a stopped stack fails here, naming the socket. Only an app
+// from before the foundation keeps the native in-guest server's URL.
+const BOOTSTRAP = './${FOUNDATION_BOOTSTRAP}';
+const foundationApp = existsSync(BOOTSTRAP);
 const appUrl = process.env.DATABASE_URL
-  || (existsSync('${STACK.postgres.socketDir}/.s.PGSQL.5432') ? '${FOUNDATION_DATABASE_URL}' : 'postgres://app:app@127.0.0.1:5432/app');
+  || (foundationApp ? '${FOUNDATION_DATABASE_URL}' : 'postgres://app:app@127.0.0.1:5432/app');
 
 // Swap the database name, keep the credentials/host (or the socket query
 // string) — the e2e DB lives on the same Postgres as the app's.
@@ -152,7 +158,13 @@ async function ensureDatabase() {
   // CREATE DATABASE cannot run inside a transaction or against the target
   // itself, so connect to the maintenance DB.
   const admin = new pg.Client({ connectionString: withDatabase(appUrl, 'postgres') });
-  await admin.connect();
+  try {
+    await admin.connect();
+  } catch (err) {
+    const where = foundationApp && !process.env.DATABASE_URL ? 'the foundation stack socket ${STACK.postgres.socketDir} (is the stack running?)' : 'DATABASE_URL';
+    console.error('[e2e] cannot reach the database through ' + where + ': ' + (err && err.message ? err.message : err));
+    process.exit(1);
+  }
   try {
     const { rows } = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [DB]);
     if (!rows.length) await admin.query('CREATE DATABASE ' + JSON.stringify(DB).replace(/"/g, '"'));
@@ -175,7 +187,7 @@ await ensureDatabase();
 run('npm', ['run', 'build']);
 run('node', ['scripts/migrate.mjs'], { DATABASE_URL: e2eUrl });
 
-const child = spawn('node', ['dist/server.js'], {
+const child = spawn('node', [...(foundationApp ? ['--import=' + BOOTSTRAP] : []), 'dist/server.js'], {
   stdio: 'inherit',
   env: { ...process.env, DATABASE_URL: e2eUrl, PORT: String(PORT), NODE_ENV: 'test' },
 });

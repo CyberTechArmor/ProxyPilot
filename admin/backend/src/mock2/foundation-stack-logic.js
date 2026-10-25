@@ -755,6 +755,19 @@ export const CLONE_EXCLUDED_TABLE_DATA = Object.freeze([
   'mock2_foundation.secrets', 'mock2_foundation.features', 'mock2_foundation.jobs',
   'mock2_foundation.storage_migration_items', 'mock2_foundation.health',
 ]);
+// A build checkpoint's database snapshot (state/db/snapshot.sql) is COMMITTED
+// into the app repository, which may be pushed to a remote: the platform-held
+// tables (sealed secrets, switches, jobs, probes, the generation counter) are
+// left out entirely — definition and data — so a snapshot never carries a
+// sealed secret and replaying one never rolls those rows back. The vector
+// indexes are app data and ride along.
+export const CHECKPOINT_EXCLUDED_TABLES = Object.freeze([...CLONE_EXCLUDED_TABLE_DATA, 'mock2_foundation.meta']);
+export function foundationCheckpointDumpCommand(layout = DEFAULT_LAYOUT) {
+  return `${foundationPgExecPrefix(layout)} pg_dump -U postgres --clean --if-exists ${CHECKPOINT_EXCLUDED_TABLES.map((t) => `--exclude-table=${t}`).join(' ')} ${STACK.postgres.database}`;
+}
+export function foundationSuperuserPsqlCommand(layout = DEFAULT_LAYOUT) {
+  return `${foundationPgExecPrefix(layout)} psql -U postgres -X`;
+}
 export function foundationCloneDumpArgv(layout = DEFAULT_LAYOUT) {
   return [...composeArgv(layout), 'exec', '-T', STACK.postgres.service, 'pg_dump', '-U', 'postgres', '--clean', '--if-exists',
     ...CLONE_EXCLUDED_TABLE_DATA.map((t) => `--exclude-table-data=${t}`), STACK.postgres.database];

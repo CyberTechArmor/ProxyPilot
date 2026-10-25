@@ -718,12 +718,10 @@ export function createProjectConfigHandlers(kit) {
     const guard = liveBuildGuard(p.m, p.project); if (guard) return err(guard);
     const file = pathUnder(DB_DUMPS_DIR, basename(String(args.file || '')));
     if (!file || !/\.sql$/.test(file)) return err(`file must be a dump name inside ${DB_DUMPS_DIR} (from dump_project_db, a deploy's pre-deploy copy, or a restore's pre-restore copy)`);
-    // The restore job (setup-engine restore-db-op) still drives the in-guest
-    // server through `su - postgres`. Refuse rather than run it against a
-    // foundation guest, where it would stop the app and then fail.
-    if (await foundationStackLogic(p.project)) {
-      return err(`restore_project_db does not support foundation projects yet: ${p.project.name}'s database runs in its foundation stack and the restore job still targets an in-guest server. Nothing was changed. The dump ${basename(file)} is a plain pg_dump --clean file; an operator can restore it inside the guest with \`docker compose -p mock2-foundation -f /opt/mock2-foundation/compose.yaml exec -T postgres psql -U postgres -d app < ${file}\` after stopping mock2-dev.service.`);
-    }
+    // A foundation project's database runs in its guest's foundation stack:
+    // the restore job drives the stack's postgres service, and the platform-
+    // held foundation rows the dump carries are re-synced from mock2.db after it.
+    const fstack = await foundationStackLogic(p.project);
     // The plan is resolved on the server: the dump name, the environment
     // copy it forms a recovery set with (bound by the job record of THIS app
     // that took them together — a file name alone binds nothing), the prior
@@ -740,7 +738,9 @@ export function createProjectConfigHandlers(kit) {
         ? `the dump's protected rows must decrypt under the key in ${resolved.plan.environment_copy}, which is then put in force as /etc/environment (the current one is copied first)`
         : 'the dump\'s protected rows must decrypt under the CURRENT configuration; otherwise the restore refuses before stopping anything (pass environment_copy for a recovery set)',
       pre_restore: `${DB_DUMPS_DIR}/app-pre-restore-<job>.sql and /etc/environment.pre-restore-<job>, taken before the stop`,
-      then: 'stop mock2-dev.service → psql -f <dump> (--clean --if-exists: the database lands exactly on the dumped state) → start → verify (a follow-up job checks the application)',
+      then: fstack
+        ? 'stop mock2-dev.service → psql < <dump> in the postgres service of the foundation stack (--clean --if-exists: the database lands exactly on the dumped state) → start → re-sync the foundation secrets and switches from the platform store → verify (a follow-up job checks the application)'
+        : 'stop mock2-dev.service → psql -f <dump> (--clean --if-exists: the database lands exactly on the dumped state) → start → verify (a follow-up job checks the application)',
     };
     const d = dry(args, plan); if (d) return d;
     const gate = confirmToken(args, auth, note, { tool: 'restore_project_db', subject: `${p.project.id}/${resolved.digest}`, action: `replace ${p.project.name}'s database with ${resolved.plan.dump}${resolved.plan.environment_copy ? ` and its configuration with ${resolved.plan.environment_copy}` : ''}`, preview: plan });
@@ -757,6 +757,7 @@ export function createProjectConfigHandlers(kit) {
       restored: true, job_id: out.jobId, file: resolved.plan.dump, mode: resolved.plan.mode, environment_copy: resolved.plan.environment_copy,
       pre_restore_dump: out.protected?.dbDump?.path || null, pre_restore_environment: out.protected?.envCopy || null, errors: out.errors ?? null, error_lines: (out.errorLines || []).slice(0, 20),
       compatibility: out.compatibility || null, verification: out.verificationJobId ? { pending: true, job_id: out.verificationJobId } : null,
+      ...(out.foundationSync ? { foundation_sync: out.foundationSync } : {}),
       reverse_with: out.protected?.dbDump?.path ? `restore_project_db({ project_id: ${p.project.id}, file: "${basename(out.protected.dbDump.path)}"${out.protected?.envCopy ? `, environment_copy: "${basename(out.protected.envCopy)}"` : ''} })` : null,
       next: 'The application was restarted; the follow-up verification job reports whether it can use its credentials. redeploy_project if the code must change too.',
     });
@@ -809,7 +810,7 @@ export function createProjectConfigHandlers(kit) {
   async function takePromoteSnapshot(p) {
     const x = await extra();
     const { buildDbSnapshotScript, DB_SNAPSHOT_PATH } = await import('../../mock2/restore-logic.js');
-    await projectSh(p.incusName, buildDbSnapshotScript({ appDir: M2_APP_DIR }), [], { timeoutMs: 10 * 60 * 1000 }).catch(() => null);
+    await projectSh(p.incusName, buildDbSnapshotScript({ appDir: M2_APP_DIR, foundation: !!(await foundationStackLogic(p.project)) }), [], { timeoutMs: 10 * 60 * 1000 }).catch(() => null);
     const cp = await projectSh(p.incusName, p.m.template.buildCheckpointScript({ appDir: M2_APP_DIR, message: 'checkpoint: pre-promote (mcp)' }), [], { timeoutMs: 120000 });
     const head = (await git(p.incusName, ['rev-parse', 'HEAD'])).stdout.trim();
     const snap = await takeLxcSnapshot(p.incusName, defaultSnapshotName(new Date(), 'pp-mcp-pre-promote'));

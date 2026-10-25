@@ -10,9 +10,27 @@ import re
 import subprocess
 import sys
 
-MARKER = '# ProxyPilot MCP credential redaction v1'
-FORMAT = '''format filter {
+LEGACY_MARKER = '# ProxyPilot MCP credential redaction v1'
+LEGACY_FORMAT = '''format filter {
             wrap json
+            request>uri regexp "/api/mcp[^ ]*" "[redacted MCP URL]"
+            request>headers>Referer delete
+            request>headers>Authorization delete
+            request>headers>Cookie delete
+        }'''
+MARKER = '# ProxyPilot MCP credential redaction v2'
+# Two encoder layers: retain the existing MCP URL mask, then remove bearer
+# query keys from every structured request URI (including HTTP error logs).
+# Neither layer modifies the request Caddy forwards to the upstream.
+FORMAT = '''format filter {
+            wrap filter {
+                wrap json
+                request>uri query {
+                    delete auth
+                    delete rauth
+                    delete login
+                }
+            }
             request>uri regexp "/api/mcp[^ ]*" "[redacted MCP URL]"
             request>headers>Referer delete
             request>headers>Authorization delete
@@ -20,8 +38,17 @@ FORMAT = '''format filter {
         }'''
 
 def transform(text, global_config=False):
+    if re.search(r'^\s*(?:log_credentials|debug)\b', text, re.M):
+        raise ValueError('Custom/debug logging needs local credential-redaction review')
     if MARKER in text:
+        if text.count(MARKER) != 1 or FORMAT not in text:
+            raise ValueError('Modified v2 log filter needs local review')
         return text
+    if LEGACY_MARKER in text:
+        expected = LEGACY_MARKER + '\n        ' + LEGACY_FORMAT
+        if text.count(LEGACY_MARKER) != 1 or expected not in text:
+            raise ValueError('Modified v1 log filter needs local review')
+        return text.replace(expected, MARKER + '\n        ' + FORMAT, 1)
     if re.search(r'^\s*(?:format|log_credentials|debug)\b', text, re.M):
         raise ValueError('Custom/debug logging needs local credential-redaction review')
     log = 'log {\n        ' + MARKER + '\n        ' + FORMAT + '\n'

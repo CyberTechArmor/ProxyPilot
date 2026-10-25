@@ -29,7 +29,7 @@ import { composeOperation } from '../lib/docker-compose-operation.js';
 import { verifyConfirmationFactor } from '../lib/auth-confirm.js';
 import { caddyAdapt, caddyReload } from '../lib/caddy-driver.js';
 import { checkRouteDrift } from '../lib/route-drift.js';
-import { parseCaddySiteFile, siteSecurityHeaderLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
+import { parseCaddySiteFile, siteSecurityHeaderLines, siteAccessLogFilterLines, dashboardFrameAncestor, CADDY_SITE_RENDER_CONTRACT, parseRouteEdgeOptions, routeEdgeOptionLines, wrapRouteBody } from '../lib/caddy-site-file.js';
 import { selfCheckForRoute, SELF_CHECK_HEADER, selfCheckSources } from '../lib/setup-engine/local-edge.js';
 import { agentSourcesForRoute } from '../lib/setup-engine/agent-network.js';
 import { platformRouteRefusal, platformOwnerOfRoute, platformHostnames, platformPanelLink } from '../lib/setup-engine/platform-hostnames.js';
@@ -6448,6 +6448,7 @@ function buildDomainCaddyConfig(entriesList, domain, tlsDecision = null, { frame
   // leak into the filename.
   lines.push(`    log {`);
   lines.push(`        output file /var/log/caddy/${caddyFileName(domain)}.log`);
+  lines.push(...siteAccessLogFilterLines());
   lines.push(`    }`);
 
   lines.push(`}`);

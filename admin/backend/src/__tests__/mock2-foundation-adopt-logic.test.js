@@ -21,6 +21,7 @@ import { FOUNDATION_DEPENDENCIES, FOUNDATION_NODE_IMPORT } from '../mock2/scaffo
 import { FOUNDATION_GUEST_CONFIG } from '../mock2/foundation-stack-logic.js';
 import { SNAPSHOT_NAME_RE } from '../lib/setup-engine/lifecycle-logic.js';
 import { buildSeedPayload } from '../mock2/seed-tar.js';
+import { foundationRuntimeInstallScript, buildContainerSetupScript } from '../mock2/template.js';
 
 const ID = 'fa_0123456789abcdef';
 
@@ -184,7 +185,8 @@ test('blockers: each refusal is { code, message } with a next step', () => {
     assert.ok(hit, `${code} for ${JSON.stringify(over).slice(0, 120)} (got ${list.map((b) => b.code).join(', ') || 'none'})`);
     assert.deepEqual(Object.keys(hit).sort(), ['code', 'message', 'next_step']);
     assert.match(hit.next_step, /\.$/, `${code} names a next step`);
-    assert.ok(hit.message.endsWith(hit.next_step), `${code}: the message ends with the next step`);
+    assert.match(hit.message, /\.$/, `${code}: the reason is a sentence`);
+    assert.equal(hit.message.includes(hit.next_step), false, `${code}: the next step is not repeated in the reason (the dashboard shows both)`);
   }
   // SQLite: says how to move data access first.
   const sqlite = L.adoptionBlockers(cleanFacts({ guest: { pkg: { text: JSON.stringify({ scripts: { start: 'node a.js' }, dependencies: { pg: '^8', sqlite3: '^5' } }) } } })).find((b) => b.code === 'APP_USES_SQLITE');
@@ -249,10 +251,16 @@ test('scripts: the dump is root-only, the restore runs as role app in one transa
   assert.match(restore, /--no-owner --no-acl --role=app --single-transaction --exit-on-error/);
   assert.match(restore, /EXTENSION/);
   assert.doesNotMatch(L.stopNativeScript(), /rm |PGDATA|\/var\/lib\/postgresql/, 'the native data directory is never touched');
-  for (const s of [L.adoptProbeScript(), L.stopAppScript(), L.dumpScript(ID), L.stopNativeScript(), L.restoreScript(), L.removeEnvironmentKeysScript(), L.moduleCommitScript()]) {
+  for (const s of [L.adoptProbeScript(), L.stopAppScript(), L.dumpScript(ID), L.stopNativeScript(), L.restoreScript(), L.removeEnvironmentKeysScript(), L.moduleCommitScript(), L.portCheckScript(), L.readEnvironmentScript(), foundationRuntimeInstallScript()]) {
     const r = spawnSync('sh', ['-n', '-c', s], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
   }
+  // The adoption's install is the foundation branch of the setup script, byte for byte.
+  const install = foundationRuntimeInstallScript();
+  const fragment = install.slice(install.indexOf('# Application foundation: Docker Engine')).trimEnd();
+  assert.ok(fragment.length > 500);
+  assert.ok(buildContainerSetupScript({ foundation: true }).includes(fragment), 'same install as a new foundation guest');
+  assert.equal(buildContainerSetupScript({ foundation: false }).includes(fragment), false);
 });
 
 test('Docker-ready config: the same five keys as new foundation guests; the rollback puts the originals back', () => {
@@ -371,4 +379,23 @@ test('the projection: exact keys; rollback after a failure or a success; resume 
     assert.equal(L.projectAdoption(row({ state })).resume_available, false, state);
   }
   assert.equal(L.projectAdoption(null), null);
+});
+
+test('the port check sees a listener on the port the foundation PostgreSQL publishes (real sh; /proc fallback without ss)', async () => {
+  const net = await import('node:net');
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const busy = spawnSync('sh', ['-c', L.portCheckScript({ port }), 'sh'], { encoding: 'utf8' });
+    assert.equal(busy.status, 0, busy.stderr);
+    assert.equal(L.parsePortCheck(busy.stdout).free, false);
+    assert.equal(L.parsePortCheck(busy.stdout).port, port);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+  const free = spawnSync('sh', ['-c', L.portCheckScript({ port }), 'sh'], { encoding: 'utf8' });
+  assert.equal(L.parsePortCheck(free.stdout).free, true);
+  assert.match(L.stopNativeScript(), /PORT_FREE:yes:5432/, 'the default is the contract port');
+  assert.throws(() => L.portCheckScript({ port: 'x' }), /invalid port/);
+  assert.throws(() => L.readEnvironmentScript({ file: 'relative' }), /invalid environment file/);
+  assert.throws(() => L.adoptProbeScript({ environmentFile: '/etc/../shadow' }), /invalid environment file/);
 });

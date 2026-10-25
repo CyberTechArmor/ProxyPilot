@@ -137,7 +137,12 @@ export function createAdoptWorld({ guest, leaseHeld = () => null, resolveDeployP
       const busy = shot('port_busy');
       return res(busy ? 1 : 0, `WAS_ENABLED:${was}\nNATIVE_STOPPED:yes\nPORT_FREE:${busy ? 'no' : 'yes'}:5432\n`);
     }
-    if (s.includes('NATIVE_ONLINE')) { record('guest', 'port_check'); return res(0, `NATIVE_ONLINE:${g.native.running ? 1 : 0}\nPORT_FREE:${g.native.running ? 'no' : 'yes'}:5432\n`); }
+    if (s.includes('NATIVE_ONLINE')) {
+      record('guest', 'port_check');
+      const busy = g.native.running || g.stack.up || !!g.portSquatter;
+      const owner = g.stack.up ? 'mock2-foundation' : 'none';
+      return res(0, `NATIVE_ONLINE:${g.native.running ? 1 : 0}\nPORT_FREE:${busy ? 'no' : 'yes'}:5432\n${g.docker ? `PORT_OWNER:${owner}\n` : ''}`);
+    }
     if (s.trim() === 'echo ADOPT_GUEST_UP') return res(0, 'ADOPT_GUEST_UP\n');
     if (s.includes('FOUNDATION SETUP FAILED')) {
       record('guest', 'install_runtime');
@@ -234,6 +239,10 @@ export function createAdoptWorld({ guest, leaseHeld = () => null, resolveDeployP
     bringUpFoundation: async ({ features }) => {
       record('stack', 'bring-up');
       const m = shot('start_foundation'); if (m) return { ok: false, steps: [{ name: 'pull', ok: false, detail: m }], error: m };
+      // A bring-up that started PostgreSQL and then failed (its port is now
+      // published by the stack itself).
+      const late = shot('start_foundation_late');
+      if (late) { g.stack.up = true; g.stackDir = true; g.stack.tables = g.stack.tables || {}; return { ok: false, steps: [{ name: 'up', ok: true }, { name: 'storage-identities', ok: false }], error: late }; }
       if (!g.docker) return { ok: false, steps: [{ name: 'docker', ok: false }], error: 'Docker is not installed in the guest' };
       if (g.native.running) return { ok: false, steps: [{ name: 'up', ok: false }], error: 'Bind for 127.0.0.1:5432 failed: port is already allocated' };
       g.stack.up = true; g.stack.features = clone(features); g.stackDir = true;

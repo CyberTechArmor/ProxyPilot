@@ -42,7 +42,7 @@ import {
   newAdoptionId, snapshotNameFor, preRollbackSnapshotNameFor, adoptProbeScript, parseProbe,
   adoptionBlockers, buildAdoptionPlan, planTokenOf, tokensEqual, secretsToMove, guestConfigFacts,
   stopAppScript, dumpScript, parseDump, stopNativeScript, portCheckScript, parsePortCheck, restoreScript, COUNT_SQL, OWNER_SQL, parseCounts, parseNotAppOwned,
-  compareCounts, describeMismatches, totalRows, formatBytes, READ_ENVIRONMENT_SCRIPT, removeEnvironmentKeysScript,
+  compareCounts, describeMismatches, totalRows, formatBytes, readEnvironmentScript, removeEnvironmentKeysScript,
   parseEnvRemaining, moduleCommitScript, parseModuleCommit, mergeFoundationPackageJson, configChanges, configRestore,
   projectAdoption, resumeAvailable,
 } from './foundation-adopt-logic.js';
@@ -92,8 +92,12 @@ export function _simulateRestartForTests() {
   repoHeadCache.clear();
 }
 
+// The guest paths and layout a run works with (the real-Docker test points
+// them at its temp app directory, environment file and Compose layout).
+const BASE_DEPS = Object.freeze({ native: NATIVE_DEFAULT, appDir: APP_DIR, environmentFile: '/etc/environment', layout: DEFAULT_LAYOUT, pgPort: null });
+
 async function deps() {
-  if (depsOverride) return { native: NATIVE_DEFAULT, ...depsOverride };
+  if (depsOverride) return { ...BASE_DEPS, ...depsOverride };
   if (!defaultDepsPromise) defaultDepsPromise = defaultDeps();
   return defaultDepsPromise;
 }
@@ -106,7 +110,7 @@ async function defaultDeps() {
   const repoPath = (project) => project.repo_path || `${dataDir}/repos/${Number(project.id)}.git`;
   const host = (argv, { timeoutMs = 2 * MIN, input = null } = {}) => runHost(argv[0], argv.slice(1), { timeoutMs, input });
   return {
-    native: NATIVE_DEFAULT,
+    ...BASE_DEPS,
     guest: (container, script, { args = [], input = null, timeoutMs = 2 * MIN } = {}) => runHost('incus', ['exec', String(container), '--', 'sh', '-c', script, 'sh', ...args.map(String)], { input, timeoutMs }),
     host,
     ensureMasterKey: stack.ensureMasterKey,
@@ -210,7 +214,7 @@ async function gatherFacts(projectId, d) {
   facts.instance = await readInstance(d, project.container_name);
   facts.components.secretKeys = installedSecretConfigKeys(projectId);
   if (facts.instance && String(facts.instance.status || '').toLowerCase() === 'running') {
-    const r = await d.guest(project.container_name, adoptProbeScript({ native: d.native }), { timeoutMs: 2 * MIN });
+    const r = await d.guest(project.container_name, adoptProbeScript({ appDir: d.appDir, native: d.native, environmentFile: d.environmentFile, layout: d.layout }), { timeoutMs: 2 * MIN });
     facts.guest = parseProbe(r.stdout);
   }
   return facts;
@@ -298,6 +302,7 @@ export async function startAdoption(projectId, body = {}, { userId = null } = {}
       db_size_bytes: g.native.sizeBytes,
       pre_commit: g.git.head,
       pre_remote: g.git.remote,
+      pre_deployed_commit: adoptStore.deployedCommit(pid),
       original_config: guestConfigFacts(facts.instance),
     };
     try {
@@ -416,11 +421,16 @@ const STEP_IMPL = {
     // come back on the port the stack publishes (stopping it again is the
     // same idempotent step 4).
     const port = ctx.d.pgPort || DEFAULT_LAYOUT.ports.postgres;
-    let pc = parsePortCheck((await ctx.d.guest(ctx.container, portCheckScript({ port }), { timeoutMs: MIN }))?.stdout);
-    if (pc.free !== true || (pc.nativeOnline || 0) > 0) {
-      const again = await ctx.d.guest(ctx.container, stopNativeScript({ port }), { timeoutMs: 3 * MIN });
-      pc = parsePortCheck(again?.stdout);
-      if (pc.free !== true) return fail(`port ${port} in the guest is in use (the foundation's PostgreSQL publishes it on 127.0.0.1) — find what listens (ss -ltnp in the guest), stop it, then resume`);
+    const composeProject = (ctx.d.layout || DEFAULT_LAYOUT).composeProject;
+    const check = async () => parsePortCheck((await ctx.d.guest(ctx.container, portCheckScript({ port, composeProject }), { timeoutMs: MIN }))?.stdout);
+    // Free, or published by this very stack (a resume after a bring-up that
+    // got as far as starting PostgreSQL).
+    const usable = (pc) => (pc.free === true || pc.owner === composeProject) && !((pc.nativeOnline || 0) > 0);
+    let pc = await check();
+    if (!usable(pc)) {
+      await ctx.d.guest(ctx.container, stopNativeScript({ port }), { timeoutMs: 3 * MIN });
+      pc = await check();
+      if (!usable(pc)) return fail(`port ${port} in the guest is in use (the foundation's PostgreSQL publishes it on 127.0.0.1)${(pc.nativeOnline || 0) > 0 ? ' and a native PostgreSQL cluster is still online' : ''} — find what listens (ss -ltnp in the guest), stop it, then resume`);
     }
     if (!adoptStore.getAdoptProject(pid)?.foundation_version) adoptStore.setFoundationVersion(pid, FOUNDATION_VERSION);
     const defaults = defaultFeatures();
@@ -470,7 +480,7 @@ const STEP_IMPL = {
     if (Object.keys(before).length === 0) {
       const dumpPath = ctx.data.dump?.path;
       if (!dumpPath) return fail('the dump of step 3 is not recorded', { retryable: false });
-      const { r, ok: done } = await guestOk(ctx, restoreScript(), { args: [dumpPath], timeoutMs: 90 * MIN });
+      const { r, ok: done } = await guestOk(ctx, restoreScript(ctx.d.layout), { args: [dumpPath], timeoutMs: 90 * MIN });
       if (!done || !/^RESTORE:done$/m.test(String(r?.stdout || ''))) return fail(`pg_restore into the foundation PostgreSQL failed (nothing was kept: it runs in one transaction): ${tail(r, 500)}`);
       restored = true;
     } else {
@@ -497,7 +507,7 @@ const STEP_IMPL = {
   async move_secrets(ctx) {
     const pid = ctx.pid;
     const keys = installedSecretConfigKeys(pid);
-    const read = await ctx.d.guest(ctx.container, READ_ENVIRONMENT_SCRIPT, { timeoutMs: MIN });
+    const read = await ctx.d.guest(ctx.container, readEnvironmentScript({ file: ctx.d.environmentFile }), { timeoutMs: MIN });
     if (read?.code !== 0) return fail('reading /etc/environment in the guest failed');
     const env = parseEnvironmentFile(read.stdout || '');
     const values = [];
@@ -518,7 +528,7 @@ const STEP_IMPL = {
     }
     if (env.has('DATABASE_URL')) remove.push('DATABASE_URL');
     if (remove.length) {
-      const { r, ok: done } = await guestOk(ctx, removeEnvironmentKeysScript(), { args: remove, timeoutMs: MIN });
+      const { r, ok: done } = await guestOk(ctx, removeEnvironmentKeysScript({ file: ctx.d.environmentFile }), { args: remove, timeoutMs: MIN });
       const left = parseEnvRemaining(r?.stdout);
       if (!done || left !== 0) return fail(`removing ${remove.length} line(s) from /etc/environment failed: ${redactSecrets(tail(r, 200), values)}`);
     }
@@ -533,12 +543,12 @@ const STEP_IMPL = {
   },
 
   async install_foundation_module(ctx) {
-    const pkg = await ctx.d.guest(ctx.container, `cat '${APP_DIR}/package.json'`, { timeoutMs: MIN });
+    const pkg = await ctx.d.guest(ctx.container, `cat '${ctx.d.appDir}/package.json'`, { timeoutMs: MIN });
     if (pkg?.code !== 0) return fail('reading package.json in the guest failed');
     const merge = mergeFoundationPackageJson(pkg.stdout);
     if (!merge.ok) return fail(`package.json cannot take the foundation entries: ${merge.error}`, { retryable: false });
     const files = [...scaffoldFoundationFiles(), { path: 'package.json', content: merge.content }];
-    const { r, ok: done } = await guestOk(ctx, moduleCommitScript(), { input: buildSeedPayload(files), timeoutMs: 5 * MIN });
+    const { r, ok: done } = await guestOk(ctx, moduleCommitScript({ appDir: ctx.d.appDir }), { input: buildSeedPayload(files), timeoutMs: 5 * MIN });
     const c = parseModuleCommit(r?.stdout);
     if (!done || !c.head || !c.pushed) return fail(`the platform commit or its push failed: ${tail(r, 400)}`);
     if (c.head !== ctx.data.pre_commit) ctx.save({ adopt_commit: c.head });
@@ -553,7 +563,7 @@ const STEP_IMPL = {
     if (!r?.ok) return fail(`the deploy failed at "${r?.step || 'unknown'}": ${redactSecrets(String(r?.error || 'unknown error')).slice(0, 500)}`);
     if (r.skipped) return fail('the deploy found no run contract in mock2.yaml, so nothing was started', { retryable: false });
     try { await ctx.d.stampDeployedCommit(project); } catch { /* advisory */ }
-    const h = await ctx.d.foundationCli(ctx.container, ['health', '--json'], { appDir: APP_DIR, timeoutMs: 2 * MIN });
+    const h = await ctx.d.foundationCli(ctx.container, ['health', '--json'], { appDir: ctx.d.appDir, timeoutMs: 2 * MIN });
     const rows = parseHealthOutput(h?.stdout);
     const status = (c) => rows.find((x) => x.component === c)?.status || 'unknown';
     if (status('database') !== 'ready') return fail(`the app was deployed, but its foundation reports the database ${status('database')}`);
@@ -767,6 +777,8 @@ async function driveRollback(id, driver) {
     }
     if (!driving(id, driver, 'rolling_back')) return;
     adoptStore.setFoundationVersion(pid, null);
+    // The commit the guest serves again is the one served before the run.
+    if (data.adopt_commit) adoptStore.setDeployedCommit(pid, data.pre_deployed_commit || null);
     const cleared = adoptStore.clearFoundationRows(pid);
     const tokenRow = adoptStore.getAdoption(id);
     if (tokenRow?.lock_token) settleCheckoutOperationLease(pid, tokenRow.lock_token);
@@ -777,6 +789,18 @@ async function driveRollback(id, driver) {
   } catch (e) {
     failRollback(redactSecrets(e?.message || String(e)).slice(0, 300));
   }
+}
+
+// archiveAdoptionRefusal(projectId) → a refusal while an adoption is
+// unfinished (running, rolling back or failed): archiving deletes the guest,
+// and with it the rollback snapshot. null otherwise. Synchronous (mock2.db).
+export function archiveAdoptionRefusal(projectId) {
+  let row = null;
+  try { row = adoptStore.latestAdoption(projectId); } catch { return null; }
+  if (!row || !['running', 'rolling_back', 'failed'].includes(row.state)) return null;
+  return adoptRefusal(ADOPT_CODES.ADOPTION_UNFINISHED, `The move onto the application foundation is ${row.state === 'failed' ? `stopped at "${row.step}"` : row.state.replace('_', ' ')}. Archiving deletes the guest and its rollback snapshot, so finish it (resume) or roll it back first.`, {
+    options: row.state === 'failed' ? [{ action: 'resume' }, { action: 'rollback' }] : [],
+  });
 }
 
 // ---- read ------------------------------------------------------------------------

@@ -94,6 +94,13 @@ export function touchProjectActivity(projectId) {
   try { getMock2Db().prepare('UPDATE mock2_projects SET last_activity_at = ? WHERE id = ?').run(nowIso(), Number(projectId)); } catch { /* advisory */ }
 }
 
+export function deployedCommit(projectId) {
+  try { return getMock2Db().prepare('SELECT deployed_commit FROM mock2_projects WHERE id = ?').get(Number(projectId))?.deployed_commit || null; } catch { return null; }
+}
+export function setDeployedCommit(projectId, sha) {
+  try { getMock2Db().prepare('UPDATE mock2_projects SET deployed_commit = ? WHERE id = ?').run(sha == null ? null : String(sha), Number(projectId)); } catch { /* advisory: a miss costs one redundant deploy */ }
+}
+
 export function setContainerIp(projectId, ip) {
   if (!ip) return;
   getMock2Db().prepare('UPDATE mock2_projects SET container_ip = ? WHERE id = ?').run(String(ip), Number(projectId));

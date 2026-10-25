@@ -2038,6 +2038,13 @@ export function createMock2Router() {
     if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
       return res.status(409).json({ error: `Cannot archive a project in state "${project.lifecycle}"` });
     }
+    // An unfinished foundation adoption (running, rolling back or failed)
+    // keeps its rollback point in the guest: archiving would delete it.
+    const adoptionRefused = foundationAdoptService.archiveAdoptionRefusal(project.id);
+    if (adoptionRefused) {
+      logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE_REFUSED', 'mock2_project', project.id, { name: project.name, code: adoptionRefused.code }, req.ip);
+      return res.status(409).json({ error: adoptionRefused.message, code: adoptionRefused.code, message: adoptionRefused.message, options: adoptionRefused.options || [] });
+    }
     // Archive destroys the guest, and a foundation project's bundled storage
     // objects live only in it (no checkpoint): refused while it holds any or
     // cannot be counted (foundation-service.js archiveRefusal). Pre-foundation

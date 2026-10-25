@@ -389,6 +389,27 @@ test('a busy port after the native server stops fails step 4 with what to do; re
   assert.equal(adoptStore.getAdoption(row.id).state, 'succeeded');
 });
 
+test('the published port after the restart: busy → start_foundation stops with what to do; the stack\'s own port on a resume is fine', async () => {
+  const w = setup({ guest: { portSquatter: true } });
+  const r = routes();
+  const { row } = await adoptAll(r);
+  assert.equal(row.step, 'start_foundation');
+  assert.match(row.error, /port 5432 in the guest is in use .*ss -ltnp/);
+  assert.equal(w.trace.filter((t) => t.what === 'stop_native').length, 2, 'the native server is stopped once more before giving up');
+  assert.equal(w.g.stack.up, false, 'nothing was started on a busy port');
+  w.g.portSquatter = false;
+  w.fail.start_foundation_late = 'storage identities failed';
+  await r.call('post', '/projects/:id/foundation/adopt/resume', {});
+  await adopt._whenAdoptionSettled(row.id);
+  const second = adoptStore.getAdoption(row.id);
+  assert.equal(second.step, 'start_foundation');
+  assert.equal(w.g.stack.up, true, 'the stack\'s PostgreSQL now publishes the port');
+  const res = await r.call('post', '/projects/:id/foundation/adopt/resume', {});
+  assert.equal(res.status, 202);
+  await adopt._whenAdoptionSettled(row.id);
+  assert.equal(adoptStore.getAdoption(row.id).state, 'succeeded', 'its own published port does not block the resume');
+});
+
 test('resume retries only the failed step and finishes; the steps before are not run again', async () => {
   const w = setup();
   w.fail.deploy = 'the health window closed';
@@ -444,14 +465,17 @@ test('a foundation database that already holds other data is never overwritten',
 
 test('rollback after success: the guest, the repository and mock2.db go back; a new plan is possible', async () => {
   const w = setup();
+  w.db.prepare('UPDATE mock2_projects SET deployed_commit = ? WHERE id = 1').run(w.original.head);
   const r = routes();
   const { row } = await adoptAll(r);
   assert.equal(row.state, 'succeeded');
+  w.db.prepare('UPDATE mock2_projects SET deployed_commit = ? WHERE id = 1').run(w.g.head); // the deploy's stamp
   const rb = await r.call('post', '/projects/:id/foundation/adopt/rollback', {});
   assert.equal(rb.status, 202);
   await adopt._whenAdoptionSettled(row.id);
   const done = adoptStore.getAdoption(row.id);
   assertRolledBack(w, done);
+  assert.equal(projectRow(w.db).deployed_commit, w.original.head, 'the served commit is the one before the run');
   assert.ok(w.trace.some((t) => t.what === 'repo reset'));
   const pre = w.snapshots.get(`pre-rollback-${row.id}`).state;
   assert.equal(pre.docker, true, 'the adopted state is kept in the pre-rollback snapshot');
@@ -486,6 +510,23 @@ test('a missing rollback snapshot is refused before anything is touched', async 
   assert.equal(rb.body.code, 'SNAPSHOT_MISSING');
   assert.equal(adoptStore.getAdoption(row.id).state, 'failed');
   assert.equal(leaseHeld(), true, 'the failed run keeps its lease');
+});
+
+test('archiving is refused while an adoption is unfinished (its rollback snapshot lives in the guest)', async () => {
+  const w = setup();
+  w.fail.deploy = 'x';
+  const r = routes();
+  const { row } = await adoptAll(r);
+  const refused = adopt.archiveAdoptionRefusal(1);
+  assert.equal(refused.code, 'ADOPTION_UNFINISHED');
+  assert.match(refused.message, /Archiving deletes the guest and its rollback snapshot/);
+  assert.deepEqual(refused.options, [{ action: 'resume' }, { action: 'rollback' }]);
+  await r.call('post', '/projects/:id/foundation/adopt/resume', {});
+  await adopt._whenAdoptionSettled(row.id);
+  assert.equal(adopt.archiveAdoptionRefusal(1), null, 'a finished adoption does not hold the archive');
+  const src = await readFile(new URL('../mock2/routes.js', import.meta.url), 'utf8');
+  const archive = src.slice(src.indexOf("router.post('/projects/:id/archive'"), src.indexOf("router.post('/projects/:id/rehydrate'"));
+  assert.ok(archive.indexOf('archiveAdoptionRefusal') > 0 && archive.indexOf('archiveAdoptionRefusal') < archive.indexOf('startArchive(project)'), 'the archive route asks before it destroys the guest');
 });
 
 test('a backend restart: the running adoption becomes failed with its step and reason; resume finishes; the late step changes nothing', async () => {

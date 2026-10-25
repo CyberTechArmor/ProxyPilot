@@ -219,7 +219,8 @@ const ENGINE_GREP_RE = 'sqlite|libsql|sql\\.js|pglite|mysql|mongoose|mongodb|typ
 const GREP_INCLUDES = ['*.ts', '*.tsx', '*.mts', '*.cts', '*.js', '*.jsx', '*.mjs', '*.cjs', '.env*'].map((g) => `--include=${sq(g)}`).join(' ');
 const GREP_EXCLUDES = ['node_modules', 'dist', 'build', 'coverage', '.git', 'state', 'foundation'].map((d) => `--exclude-dir=${d}`).join(' ');
 
-export function adoptProbeScript({ appDir = APP_DIR, native = NATIVE_DEFAULT } = {}) {
+export function adoptProbeScript({ appDir = APP_DIR, native = NATIVE_DEFAULT, environmentFile = '/etc/environment', layout = DEFAULT_LAYOUT } = {}) {
+  if (!ENV_FILE_RE.test(String(environmentFile)) || String(environmentFile).includes('..')) throw new Error(`invalid environment file: ${environmentFile}`);
   return [
     'set +e',
     `A=${sq(appDir)}`,
@@ -233,9 +234,9 @@ export function adoptProbeScript({ appDir = APP_DIR, native = NATIVE_DEFAULT } =
     '  if [ "$r" = "$h" ] || git -C "$A" merge-base --is-ancestor "$r" "$h" 2>/dev/null; then echo "GIT_REMOTE_IN_HEAD:yes"; echo "GIT_AHEAD:$(git -C "$A" rev-list --count "$r..$h" 2>/dev/null || echo 0)"; else echo "GIT_REMOTE_IN_HEAD:no"; fi',
     'fi',
     'git -C "$A" status --porcelain 2>/dev/null | head -n 50 | while IFS= read -r l; do printf "GIT_DIRTY:%s\\n" "$(printf "%s" "$l" | cut -c4-)"; done',
-    "[ -f /etc/environment ] && sed -n 's/^[[:space:]]*\\(export[[:space:]]\\+\\)\\?\\([A-Za-z_][A-Za-z0-9_]*\\)[[:space:]]*=.*/ENV_KEY:\\2/p' /etc/environment",
+    `E=${sq(environmentFile)}; [ -f "$E" ] && sed -n 's/^[[:space:]]*\\(export[[:space:]]\\+\\)\\?\\([A-Za-z_][A-Za-z0-9_]*\\)[[:space:]]*=.*/ENV_KEY:\\2/p' "$E"`,
     'echo "DISK_FREE:$(df -B1 --output=avail / 2>/dev/null | tail -n1 | tr -d " ")"',
-    `if [ -e ${sq(DEFAULT_LAYOUT.composeFile)} ]; then echo "STACK_PRESENT:yes"; else echo "STACK_PRESENT:no"; fi`,
+    `if [ -e ${sq(layout.composeFile)} ]; then echo "STACK_PRESENT:yes"; else echo "STACK_PRESENT:no"; fi`,
     `grep -rnIE ${sq(ENGINE_GREP_RE)} ${GREP_INCLUDES} ${GREP_EXCLUDES} "$A" 2>/dev/null | head -n 300 | while IFS= read -r l; do printf "ENGINE:%s\\n" "$(printf "%s" "$l" | base64 -w0)"; done`,
     'if ! id postgres >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1; then echo "NATIVE:no_server"; else',
     `  out=$(printf '%s\\n' ${sq("SELECT 'HASDB:' || count(*) FROM pg_database WHERE datname = 'app';")} | ${nativeAs('psql -X -At -v ON_ERROR_STOP=1 -d postgres', native)} 2>&1); rc=$?`,
@@ -410,12 +411,12 @@ export function downtimeEstimate(dbBytes) {
     + `copying the database (${known ? formatBytes(dbBytes) : 'its size could not be read'}) is included.`;
 }
 
-// adoptionBlockers(facts) → [{ code, message, next_step }]. `message` says
-// what is wrong and ends with the plain next step; `next_step` is that step
-// alone. Guest checks run only when the guest was probed.
+// adoptionBlockers(facts) → [{ code, message, next_step }]: `message` is the
+// plain reason, `next_step` the plain next step (the dashboard shows both).
+// Guest checks run only when the guest was probed.
 export function adoptionBlockers(facts) {
   const out = [];
-  const add = (code, problem, next) => out.push({ code, message: `${problem} ${next}`, next_step: next });
+  const add = (code, message, next) => out.push({ code, message, next_step: next });
   const p = facts?.project;
   if (!p) return [{ code: ADOPT_CODES.PROJECT_NOT_FOUND, message: 'Project not found.', next_step: 'Open the project from Dev Studio again.' }];
   if (p.foundation_version) add(ADOPT_CODES.NOT_LEGACY_PROJECT, 'This project already runs on the application foundation, so there is nothing to adopt.', 'Nothing to do: manage it under Build → Application foundation.');
@@ -638,14 +639,17 @@ export function stopNativeScript({ port = DEFAULT_LAYOUT.ports.postgres } = {}) 
 }
 
 // Before the stack starts (after the guest restart): the port the foundation's
-// PostgreSQL publishes is free, and no native cluster came back.
-export function portCheckScript({ port = DEFAULT_LAYOUT.ports.postgres } = {}) {
+// PostgreSQL publishes is free — or published by this stack itself (a resume
+// after an earlier bring-up started it) — and no native cluster came back.
+export function portCheckScript({ port = DEFAULT_LAYOUT.ports.postgres, composeProject = DEFAULT_LAYOUT.composeProject } = {}) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(String(composeProject))) throw new Error(`invalid compose project name: ${composeProject}`);
   return [
     'set +e',
     portBusyFn(port),
     'n=0; if command -v pg_lsclusters >/dev/null 2>&1; then n=$(pg_lsclusters -h 2>/dev/null | grep -c " online"); fi',
     'echo "NATIVE_ONLINE:${n:-0}"',
     `if port_busy; then echo "PORT_FREE:no:${Number(port)}"; else echo "PORT_FREE:yes:${Number(port)}"; fi`,
+    `if command -v docker >/dev/null 2>&1; then o=$(docker ps --filter "publish=${Number(port)}" --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | head -n1); echo "PORT_OWNER:\${o:-none}"; fi`,
     '',
   ].join('\n');
 }
@@ -653,7 +657,13 @@ export function parsePortCheck(stdout) {
   const s = String(stdout || '');
   const free = s.match(/^PORT_FREE:(yes|no):(\d+)$/m) || [];
   const online = Number((s.match(/^NATIVE_ONLINE:(\d+)$/m) || [])[1]);
-  return { free: free[1] === 'yes' ? true : free[1] === 'no' ? false : null, port: free[2] ? Number(free[2]) : null, nativeOnline: Number.isFinite(online) ? online : null };
+  const owner = (s.match(/^PORT_OWNER:(\S+)$/m) || [])[1] || null;
+  return {
+    free: free[1] === 'yes' ? true : free[1] === 'no' ? false : null,
+    port: free[2] ? Number(free[2]) : null,
+    nativeOnline: Number.isFinite(online) ? online : null,
+    owner: owner && owner !== 'none' ? owner : null,
+  };
 }
 
 // Restore the dump into the foundation PostgreSQL ($1 = the dump in the
@@ -685,12 +695,19 @@ export function restoreScript(layout = DEFAULT_LAYOUT) {
   ].join('\n');
 }
 
-export const READ_ENVIRONMENT_SCRIPT = 'cat /etc/environment 2>/dev/null || true\n';
+const ENV_FILE_RE = /^\/[A-Za-z0-9._/-]{1,200}$/;
+// The guest's environment file, whole (its values reach the host in memory
+// only; the service never logs or stores this output).
+export function readEnvironmentScript({ file = '/etc/environment' } = {}) {
+  if (!ENV_FILE_RE.test(String(file)) || String(file).includes('..')) throw new Error(`invalid environment file: ${file}`);
+  return `cat ${sq(file)} 2>/dev/null || true\n`;
+}
+export const READ_ENVIRONMENT_SCRIPT = readEnvironmentScript();
 
 // Remove the KEY= lines of the given keys ($@) from /etc/environment; prints
 // how many remain (0), never a value.
 export function removeEnvironmentKeysScript({ file = '/etc/environment' } = {}) {
-  if (!/^\/[A-Za-z0-9._/-]{1,200}$/.test(String(file)) || String(file).includes('..')) throw new Error(`invalid environment file: ${file}`);
+  if (!ENV_FILE_RE.test(String(file)) || String(file).includes('..')) throw new Error(`invalid environment file: ${file}`);
   return [
     'set -eu',
     `F=${sq(file)}`,

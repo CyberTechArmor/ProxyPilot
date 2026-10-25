@@ -355,11 +355,39 @@ test('sweep: a job whose app row stopped moving is relaunched (resumable), then 
   guest.jobs[jobId].updated_at = new Date(Date.now() - service.JOB_STALE_MS - 1000).toISOString();
   await service.sweepFoundationJobs();
   assert.equal(calls.detached.length, 2, 'relaunched');
-  store.updateJob(jobId, { progress: { launches: service.RELAUNCH_MAX } });
+  store.updateJob(jobId, { progress: { launches: service.RELAUNCH_MAX, relaunched_at: new Date(Date.now() - service.JOB_STALE_MS - 1000).toISOString() } });
   await service.sweepFoundationJobs();
   const j = store.getJob(jobId);
   assert.equal(j.state, 'failed');
   assert.match(j.error, /stopped making progress/);
+});
+
+test('a stale job is relaunched once per stale window, not on every poll; the count starts over when the app row moves', async () => {
+  const { guest, calls } = setup({ objects: 1 });
+  const r = routes();
+  const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+  const jobId = res.body.job.id;
+  const old = () => new Date(Date.now() - service.JOB_STALE_MS - 1000).toISOString();
+  guest.jobs[jobId].state = 'running';
+  guest.jobs[jobId].updated_at = old();
+  // The 3 s watch, a GET and the sweep keep polling a long copy whose row is quiet.
+  for (let i = 0; i < 3 * service.RELAUNCH_MAX; i++) await service.getJob(1, jobId);
+  let j = store.getJob(jobId);
+  assert.equal(j.state, 'running', 'polling alone never fails the job');
+  assert.equal(calls.detached.length, 2, 'one relaunch for the stale window');
+  assert.equal(JSON.parse(j.progress_json).launches, 2);
+  // A whole window later it is still quiet: one more relaunch.
+  store.updateJob(jobId, { progress: { relaunched_at: old() } });
+  await service.getJob(1, jobId);
+  await service.getJob(1, jobId);
+  assert.equal(calls.detached.length, 3);
+  assert.equal(JSON.parse(store.getJob(jobId).progress_json).launches, 3);
+  // The relaunched job writes again: the count starts over.
+  guest.jobs[jobId].updated_at = new Date(Date.now() + 1000).toISOString();
+  await service.getJob(1, jobId);
+  j = store.getJob(jobId);
+  assert.deepEqual([j.state, JSON.parse(j.progress_json).launches, JSON.parse(j.progress_json).relaunched_at], ['running', 1, null]);
+  assert.equal(calls.detached.length, 3);
 });
 
 test('polls that overlap a promotion (sweep + GET job + GET foundation) promote once and never report the job failed', async () => {

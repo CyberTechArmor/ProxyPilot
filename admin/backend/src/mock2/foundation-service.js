@@ -35,7 +35,9 @@ const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
 const stack = () => import('./foundation-stack.js');
 // A job whose app-side row has not moved for this long is relaunched (job-run
-// is resumable and idempotent), at most RELAUNCH_MAX times.
+// is resumable and idempotent): at most once per window, and failed after
+// RELAUNCH_MAX launches with no movement in between (the count starts over
+// when the row moves again).
 export const JOB_STALE_MS = 10 * 60_000;
 export const RELAUNCH_MAX = 5;
 const HEALTH_CACHE_MS = 10_000;
@@ -360,8 +362,15 @@ async function refreshJobOnce(project, staleJob) {
   const hostProgress = parseJsonObject(job.progress_json, {}) || {};
   if (appJob.state === 'queued' || appJob.state === 'running') {
     const updated = Date.parse(appJob.updated_at || '') || 0;
-    if (updated && Date.now() - updated > JOB_STALE_MS) {
-      const launches = Number(hostProgress.launches) || 0;
+    const relaunchedAt = Date.parse(hostProgress.relaunched_at || '') || 0;
+    // The app row moved after our last relaunch: the job is alive again, so
+    // the count of relaunches without progress starts over.
+    const moved = relaunchedAt > 0 && updated > relaunchedAt;
+    const launches = moved ? 1 : (Number(hostProgress.launches) || 0);
+    // Relaunch (or give up) only when the row has not moved for the stale
+    // window AND the last relaunch is itself that old — every poll (the 3 s
+    // watch included) must not count as another relaunch.
+    if (updated && Date.now() - updated > JOB_STALE_MS && (!relaunchedAt || moved || Date.now() - relaunchedAt > JOB_STALE_MS)) {
       if (launches >= RELAUNCH_MAX) {
         await store.appPsql(project.container_name, buildCancelJobSql({ jobId: job.id, indexId: params.target_index || null })).catch(() => {});
         updatePending(project.id, feature, { job_id: null });
@@ -373,7 +382,7 @@ async function refreshJobOnce(project, staleJob) {
       } catch { /* the next sweep tries again */ }
       return store.updateJob(job.id, { state: appJob.state, progress: { ...appProgress, launches: launches + 1, relaunched_at: nowIso(), last_poll_at: nowIso() } });
     }
-    return store.updateJob(job.id, { state: appJob.state, progress: { ...appProgress, last_poll_at: nowIso() } });
+    return store.updateJob(job.id, { state: appJob.state, progress: { ...appProgress, ...(moved ? { launches, relaunched_at: null } : {}), last_poll_at: nowIso() } });
   }
   if (appJob.state === 'failed' || appJob.state === 'cancelled') {
     // The switch stays staged (tested) so it can be tried again; a service

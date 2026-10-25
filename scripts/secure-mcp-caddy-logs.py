@@ -29,11 +29,10 @@ LEGACY_FORMAT = '''format filter {
             request>headers>Authorization delete
             request>headers>Cookie delete
         }'''
-MARKER = '# ProxyPilot MCP credential redaction v2'
-# Two encoder layers: retain the existing MCP URL mask, then remove bearer
-# query keys from every structured request URI (including HTTP error logs).
-# Neither layer modifies the request Caddy forwards to the upstream.
-FORMAT = '''format filter {
+V2_MARKER = '# ProxyPilot MCP credential redaction v2'
+# Known v2 format retained only for exact migration. Nested field filters
+# did not compose at runtime, so the v3 format below replaces both layers.
+V2_FORMAT = '''format filter {
             wrap filter {
                 wrap json
                 request>uri query {
@@ -48,13 +47,31 @@ FORMAT = '''format filter {
             request>headers>Cookie delete
         }'''
 
+# Caddy does not compose two nested filter encoders on the same object field.
+# Use one multi-regexp field filter: mask MCP URLs, then drop all other query
+# strings from global/dashboard logs. Service access logs retain safe queries.
+MARKER = '# ProxyPilot MCP credential redaction v3'
+FORMAT = '''format filter {
+            wrap json
+            request>uri regexp "/api/mcp[^ ]*" "[redacted MCP URL]"
+            request>uri regexp "[?].*" ""
+            request>headers>Referer delete
+            request>headers>Authorization delete
+            request>headers>Cookie delete
+        }'''
+
 def transform(text, global_config=False):
     if re.search(r'^\s*(?:log_credentials|debug)\b', text, re.M):
         raise ValueError('Custom/debug logging needs local credential-redaction review')
     if MARKER in text:
         if text.count(MARKER) != 1 or FORMAT not in text:
-            raise ValueError('Modified v2 log filter needs local review')
+            raise ValueError('Modified current log filter needs local review')
         return text
+    if V2_MARKER in text:
+        expected = V2_MARKER + '\n        ' + V2_FORMAT
+        if text.count(V2_MARKER) != 1 or expected not in text:
+            raise ValueError('Modified v2 log filter needs local review')
+        return text.replace(expected, MARKER + '\n        ' + FORMAT, 1)
     if LEGACY_MARKER in text:
         expected = LEGACY_MARKER + '\n        ' + LEGACY_FORMAT
         if text.count(LEGACY_MARKER) != 1 or expected not in text:
@@ -108,10 +125,10 @@ def query_encoder():
 
 SERVICE_ENCODER = {'format': 'filter', 'wrap': {'format': 'json'}, 'fields': {
     'request>uri': query_encoder(), 'request>headers>Referer': query_encoder()}}
-GLOBAL_ENCODER = {'format': 'filter', 'wrap': {
-    'format': 'filter', 'wrap': {'format': 'json'},
-    'fields': {'request>uri': query_encoder()}}, 'fields': {
-    'request>uri': {'filter': 'regexp', 'regexp': '/api/mcp[^ ]*', 'value': '[redacted MCP URL]'},
+GLOBAL_ENCODER = {'format': 'filter', 'wrap': {'format': 'json'}, 'fields': {
+    'request>uri': {'filter': 'multi_regexp', 'operations': [
+        {'regexp': '/api/mcp[^ ]*', 'value': '[redacted MCP URL]'},
+        {'regexp': '[?].*'}]},
     **{'request>headers>' + key: {'filter': 'delete'}
        for key in ('Referer', 'Authorization', 'Cookie')}}}
 
@@ -203,7 +220,7 @@ def read_records(path):
     return [parse_json(line) for line in path.read_bytes().splitlines() if line.strip()]
 
 
-def prove_records(records, sentinels, expected):
+def prove_records(records, sentinels, expected, preserve_query=True):
     for record in records:
         text = json.dumps(record, ensure_ascii=False)
         # Catch raw, escaped and percent-encoded marker values in ANY field.
@@ -218,7 +235,9 @@ def prove_records(records, sentinels, expected):
         require(len(matches) == 1)
         if not masked:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(matches[0]['request']['uri']).query)
-            require(query == {'keep': ['visible']})
+            require(query == ({'keep': ['visible']} if preserve_query else {}))
+            if not preserve_query:
+                require(not urllib.parse.urlsplit(matches[0]['request']['uri']).query)
     require(len(access) == len(expected))
     return len(access)
 
@@ -305,6 +324,8 @@ def verify_fixture():
                 stage("fixture_requests")
                 nonce = secrets.token_hex(16)
                 sentinels = [f'PP_{key}_{nonce}_{i}' for key in ('auth', 'rauth', 'login') for i in (1, 2)]
+                mcp_sentinel = 'PP_mcp_' + nonce
+                sentinels.append(mcp_sentinel)
                 parts = ['keep=visible']
                 for key, encoded in [('auth', 'a%75th'), ('rauth', 'r%61uth'), ('login', 'lo%67in')]:
                     first, second = [s for s in sentinels if s.startswith('PP_' + key + '_')]
@@ -315,7 +336,7 @@ def verify_fixture():
                 for index, port in enumerate(ports[:2]):
                     cases = [('/__pp_normal', 200, False), ('/__pp_error', 502, False)]
                     if index == 0:
-                        cases.append(('/api/mcp/__pp_probe', 200, True))
+                        cases.append(('/api/mcp/' + mcp_sentinel, 200, True))
                     expected_sets.append(cases)
                     for path, status, _masked in cases:
                         conn = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
@@ -336,7 +357,7 @@ def verify_fixture():
             all_records = read_records(runtime)
             for access, expected in zip(access_paths, expected_sets):
                 records = read_records(access)
-                counts.append(prove_records(records, sentinels, expected))
+                counts.append(prove_records(records, sentinels, expected, preserve_query=access == access_paths[1]))
                 if access == access_paths[1]:
                     for record in records:
                         if 'status' in record:
@@ -353,7 +374,7 @@ def verify_fixture():
             for record in runtime_errors:
                 uri = urllib.parse.urlsplit(record.get('request', {}).get('uri', ''))
                 require(record.get('status') == 502 and uri.path == '/__pp_error' and
-                        urllib.parse.parse_qs(uri.query) == {'keep': ['visible']})
+                        not uri.query)
             # process.log is not assumed JSON (Caddy CLI startup diagnostics).
             process_text = (root / 'process.log').read_text(errors='replace')
             require(not any(marker in urllib.parse.unquote(process_text) for marker in sentinels))
@@ -364,7 +385,7 @@ def verify_fixture():
                     text = urllib.parse.unquote(text)
             return expected_encoder, {'fixture_verified': True, 'requests': sum(counts),
                 'runtime_errors': 2, 'fixture_all_fields_redacted': True, 'upstream_query_unchanged': True,
-                'path_status_keep_preserved': True, 'mcp_mask_preserved': True,
+                'path_status_preserved': True, 'service_keep_preserved': True, 'global_query_removed': True, 'mcp_mask_preserved': True,
                 'service_referer_redacted': True}
         finally:
             if child is not None:

@@ -27,17 +27,25 @@ class Logs(unittest.TestCase):
             patched = logs.transform(text, root)
             self.assertIn(logs.MARKER, patched)
             self.assertIn('request>uri regexp "/api/mcp[^ ]*"', patched)
-            for key in ['auth', 'rauth', 'login']:
-                self.assertIn('delete ' + key, patched)
+            self.assertIn('request>uri regexp "[?].*" ""', patched)
             for header in ['Referer', 'Authorization', 'Cookie']:
                 self.assertIn('request>headers>' + header + ' delete', patched)
             self.assertEqual(logs.transform(patched, root), patched)
     def test_modified_or_debug_existing_filter_refused(self):
-        for marker, fmt in [(logs.LEGACY_MARKER, logs.LEGACY_FORMAT), (logs.MARKER, logs.FORMAT)]:
+        for marker, fmt in [(logs.LEGACY_MARKER, logs.LEGACY_FORMAT), (logs.V2_MARKER, logs.V2_FORMAT), (logs.MARKER, logs.FORMAT)]:
             with self.assertRaises(ValueError):
                 logs.transform('{\n' + marker + '\n' + fmt.replace('wrap json', 'wrap console') + '\n}')
             with self.assertRaises(ValueError):
                 logs.transform('{\n debug\n' + marker + '\n        ' + fmt + '\n}')
+
+class V3Migration(unittest.TestCase):
+    def test_exact_v2_migration_and_idempotence(self):
+        text = '{\n    log {\n        ' + logs.V2_MARKER + '\n        ' + logs.V2_FORMAT + '\n    }\n}\n'
+        patched = logs.transform(text, True)
+        self.assertIn(logs.MARKER, patched)
+        self.assertIn(logs.FORMAT, patched)
+        self.assertNotIn('wrap filter', patched)
+        self.assertEqual(logs.transform(patched, True), patched)
 
 class Verification(unittest.TestCase):
     def setUp(self):

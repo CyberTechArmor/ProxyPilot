@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 spec = importlib.util.spec_from_file_location('a3_fence', Path(__file__).with_name('a3-network-fence.py'))
 fence = importlib.util.module_from_spec(spec)
@@ -292,6 +293,49 @@ def live_relay(enable=True):
     return status()
 
 
+def scratch_table():
+    """The reviewed rules file loaded alone into a fresh network namespace.
+
+    The host's own ruleset is never read or written here; the namespace and
+    its table vanish when the process exits.
+    """
+    code = ('import subprocess, sys\n'
+            'subprocess.run(["nft", "--file", sys.argv[1]], check=True, capture_output=True, timeout=30)\n'
+            'sys.stdout.write(subprocess.run(["nft", "--json", "list", "table", "bridge", sys.argv[2]],'
+            ' check=True, capture_output=True, text=True, timeout=30).stdout)\n')
+    return parse_json(execute(['unshare', '--net', '--', sys.executable, '-I', '-c', code, str(RULES), fence.TABLE]),
+                      'nft list bridge ' + fence.TABLE + ' (scratch namespace)')
+
+
+def reattest():
+    """Re-record the table fingerprint after an nft/kernel output change.
+
+    Never after a rule change: the recorded rules file and unit must be the
+    reviewed bytes, the rules file must be this installer's own rendering, and
+    the live table must equal those rules loaded alone into a scratch network
+    namespace. Nothing is applied to the host ruleset.
+    """
+    inspect(stopped=False)
+    data = read_journal()
+    if data.get('phase') != 'installed':
+        raise ValueError('The fence is not installed')
+    verify_files(data)
+    if digest(fence.render(MANIFEST, live=data.get('live_relay') is True)) != data['files'][str(RULES)]:
+        raise ValueError('Recorded rules are not the reviewed rendering; refusing')
+    live = fingerprint(table())
+    if live == data.get('table_fingerprint'):
+        return status()
+    if fingerprint(scratch_table()) != live:
+        raise ValueError('Live A3 table differs from the reviewed rules; refusing to re-record')
+    verify_files(data)  # the rules file did not change during the comparison
+    data.setdefault('reattested', []).append(dict(
+        at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        previous=data.get('table_fingerprint'), current=live))
+    data['table_fingerprint'] = live
+    write_journal(data)
+    return status()
+
+
 def remove():
     instance = inspect()  # Never remove a fence from a running VM.
     data = read_journal()
@@ -322,7 +366,7 @@ def remove():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('install', 'status', 'remove', 'live-relay', 'live-relay-remove'))
+    parser.add_argument('action', choices=('install', 'status', 'remove', 'live-relay', 'live-relay-remove', 'reattest'))
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Run in the host root terminal')
@@ -333,7 +377,8 @@ def main():
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         print(json.dumps({'install': install, 'status': status, 'remove': remove,
                           'live-relay': lambda: live_relay(True),
-                          'live-relay-remove': lambda: live_relay(False)}[args.action](), indent=2))
+                          'live-relay-remove': lambda: live_relay(False),
+                          'reattest': reattest}[args.action](), indent=2))
 
 
 if __name__ == '__main__':

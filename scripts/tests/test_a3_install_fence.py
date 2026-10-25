@@ -1,7 +1,9 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -186,6 +188,95 @@ class InstallTests(unittest.TestCase):
                 self.assertEqual(commands[2], ['nft', 'delete', 'table', 'bridge', i.fence.TABLE])
                 self.assertFalse(rules.exists())
                 self.assertFalse(unit.exists())
+
+
+    def reattest_world(self, tmp, live=True, recorded='old'):
+        rules = Path(tmp) / 'fence.nft'
+        rules.write_text(i.fence.render(i.MANIFEST, live=live))
+        data = {'phase': 'installed', 'live_relay': live, 'table_fingerprint': recorded,
+                'files': {str(rules): i.digest(rules.read_text())}}
+        return rules, data
+
+    def test_reattest_records_only_an_output_change(self):
+        doc = {'nftables': [{'table': {'family': 'bridge', 'name': i.fence.TABLE}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, data = self.reattest_world(tmp)
+            with patch.object(i, 'RULES', rules), patch.object(i, 'inspect'), \
+                    patch.object(i, 'read_journal', return_value=data), patch.object(i, 'verify_files'), \
+                    patch.object(i, 'table', return_value=doc), patch.object(i, 'scratch_table', return_value=doc), \
+                    patch.object(i, 'write_journal') as journal, patch.object(i, 'status', return_value='ok'):
+                self.assertEqual(i.reattest(), 'ok')
+            written = journal.call_args.args[0]
+            self.assertEqual(written['table_fingerprint'], i.fingerprint(doc))
+            self.assertEqual(written['reattested'][-1]['previous'], 'old')
+            self.assertEqual(written['reattested'][-1]['current'], i.fingerprint(doc))
+
+    def test_reattest_never_records_a_rule_change(self):
+        live = {'nftables': [{'rule': {'expr': [{'accept': None}]}}]}
+        reviewed = {'nftables': [{'rule': {'expr': [{'drop': None}]}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, data = self.reattest_world(tmp)
+            with patch.object(i, 'RULES', rules), patch.object(i, 'inspect'), \
+                    patch.object(i, 'read_journal', return_value=data), patch.object(i, 'verify_files'), \
+                    patch.object(i, 'table', return_value=live), patch.object(i, 'scratch_table', return_value=reviewed), \
+                    patch.object(i, 'write_journal') as journal:
+                with self.assertRaisesRegex(ValueError, 'differs from the reviewed rules'):
+                    i.reattest()
+            journal.assert_not_called()
+
+    def test_reattest_refuses_rules_that_are_not_the_reviewed_rendering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, data = self.reattest_world(tmp, live=False)
+            data['live_relay'] = True  # recorded relay state no longer matches the file
+            with patch.object(i, 'RULES', rules), patch.object(i, 'inspect'), \
+                    patch.object(i, 'read_journal', return_value=data), patch.object(i, 'verify_files'), \
+                    patch.object(i, 'table') as table, patch.object(i, 'write_journal') as journal:
+                with self.assertRaisesRegex(ValueError, 'reviewed rendering'):
+                    i.reattest()
+            table.assert_not_called()
+            journal.assert_not_called()
+
+    def test_reattest_refuses_an_incomplete_fence(self):
+        for phase in ('prepared', 'fenced', 'relay_pending', 'removed'):
+            with self.subTest(phase=phase), patch.object(i, 'inspect'), \
+                    patch.object(i, 'read_journal', return_value={'phase': phase}), \
+                    patch.object(i, 'write_journal') as journal, self.assertRaisesRegex(ValueError, 'not installed'):
+                i.reattest()
+            journal.assert_not_called()
+
+    def test_reattest_is_a_no_op_when_the_fingerprint_still_matches(self):
+        doc = {'nftables': []}
+        with tempfile.TemporaryDirectory() as tmp:
+            rules, data = self.reattest_world(tmp, recorded=i.fingerprint(doc))
+            with patch.object(i, 'RULES', rules), patch.object(i, 'inspect'), \
+                    patch.object(i, 'read_journal', return_value=data), patch.object(i, 'verify_files'), \
+                    patch.object(i, 'table', return_value=doc), patch.object(i, 'scratch_table') as scratch, \
+                    patch.object(i, 'write_journal') as journal, patch.object(i, 'status', return_value='ok'):
+                self.assertEqual(i.reattest(), 'ok')
+            scratch.assert_not_called()
+            journal.assert_not_called()
+
+    def test_scratch_table_runs_in_a_new_namespace_without_a_shell(self):
+        with patch.object(i, 'execute', return_value='{"nftables": []}') as execute:
+            self.assertEqual(i.scratch_table(), {'nftables': []})
+        argv = execute.call_args.args[0]
+        self.assertEqual(argv[:3], ['unshare', '--net', '--'])
+        self.assertEqual(argv[-2:], [str(i.RULES), i.fence.TABLE])
+        self.assertNotIn('sh', [Path(a).name for a in argv])
+
+    def test_scratch_load_of_the_rendered_rules_matches_itself(self):
+        nft, unshare = shutil.which('nft'), shutil.which('unshare')
+        if os.geteuid() != 0 or not nft or not unshare or \
+                subprocess.run([unshare, '--net', '--', 'true'], capture_output=True).returncode:
+            self.skipTest('needs root, nft and network namespaces')
+        with tempfile.TemporaryDirectory() as tmp:
+            rules = Path(tmp) / 'fence.nft'
+            rules.write_text(i.fence.render(i.MANIFEST, live=True))
+            with patch.object(i, 'RULES', rules):
+                first, second = i.scratch_table(), i.scratch_table()
+        names = [r['table']['name'] for r in first['nftables'] if 'table' in r]
+        self.assertEqual(names, [i.fence.TABLE])
+        self.assertEqual(i.fingerprint(first), i.fingerprint(second))
 
 
 if __name__ == '__main__':

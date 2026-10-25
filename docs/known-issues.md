@@ -14,9 +14,10 @@ From the foundation build (docs/features/app-foundation.md).
   foundation keep their native in-guest Postgres. Moving one onto the stack
   (data move, pgvector, storage, secrets out of `/etc/environment`) is a
   separate, explicit step that is not built.
-- **Apps that already drifted to SQLite now fail quick and MVP builds**
-  (constitution-lint runs in every tier). The person either records the
-  explicit request (Foundation → Database exception) or the app is migrated.
+- **Apps that already drifted to SQLite** (created before the foundation) get
+  an advisory on quick and MVP builds, and the full build refuses what it
+  refused before. A build that adds an engine is refused in every tier. Moving
+  such an app onto the foundation is part of the missing adoption path.
 - **Not proven in the sandbox:** Docker inside a nested Incus guest, the
   Debian 13 `docker.io` / `docker-compose` / `postgresql-client` install (the
   failure path is proven), and the local embedding model (the TEI image and

@@ -148,7 +148,24 @@ deletes data. Writes need sudo and are audited.
 - **Refusal extras:** `FOUNDATION_JOB_RUNNING` carries `job_id`; `STORAGE_HAS_OBJECTS`
   carries `object_count`.
 - **Promotion:** runs under the same per-deployment lock as a cancel. A cancel during a
-  promotion is refused busy, and a cancelled job is never promoted.
+  promotion is refused busy, and a cancelled job is never promoted. Before promoting, the
+  host re-checks the result itself:
+  - a copy is tested again against the target, and the target's object count is
+    compared with the job's;
+  - a re-embed's target index is read back as superuser.
+
+  On a mismatch nothing is switched; the job stays `running` with the reason and is
+  re-checked every minute.
+- **Index repair:** when the active index was built with another provider, model or
+  dimensions (after a clone or a restore), GET warns `INDEX_PROVIDER_MISMATCH`, and a
+  switch to the configured provider re-embeds.
+- **Archive:** archiving a foundation project from the dashboard deletes its guest, so it
+  is refused (409) while bundled storage holds objects or cannot be counted. Copy the
+  objects to an external provider or export them first. Archiving over MCP stops and keeps
+  the guest, so its volumes survive.
+- **Clones:** a clone mints its own component secrets. Only a full clone keeps the keys
+  that protect the data it copied, and it takes the source's non-secret embeddings
+  settings, never its key.
 
 ## Generated app side
 
@@ -214,10 +231,19 @@ Proof: `tests/foundation-panel.browser.mjs`, against a mocked API.
   and a `src/` with no `package.json`. In foundation apps it also refuses (rule 5)
   source outside `foundation/` that imports an S3 SDK or `minio`, or that calls an
   embeddings API directly.
-- **How the host runs it:** the host sets `MOCK2_DATABASE_EXCEPTION` from mock2.db only.
-  The finish guard compares against HEAD. The command policy (`harness-safety.js`)
+- **How the host runs it:** the host sets `MOCK2_DATABASE_EXCEPTION` and `MOCK2_FOUNDATION`
+  (from `projects.foundation_version`) from mock2.db only.
+  - On a foundation project the check refuses these engines in every tier.
+  - In an app created before the foundation, an engine already in the repository is
+    reported as an advisory, and the full build still refuses the `src/` imports it
+    refused before.
+  - An engine a build adds blocks in every tier and at finish.
+- **Finish guard:** compares against the commit the cycle started from. The command policy (`harness-safety.js`)
   refuses installs of these packages, and anything that tears down the foundation stack
   or deletes its volumes.
+- **`foundation/` is platform-owned.** A foundation-project build that changes it cannot
+  finish, and the platform puts the files back, also before every checkpoint. Files that
+  hold exactly the base-app upgrade's bytes are exempt.
 - **Standards:** constitution §2 is the binding text for builders, and the appended pinned
   guidance does not supersede it. The mock2-core 1.39.0 amendment is drafted in
   `docs/mock2/upstream/2026-10-foundation/`.

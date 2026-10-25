@@ -367,6 +367,35 @@ export function planStorageAction({ current, request, facts = {} }) {
   };
 }
 
+// archiveStorageRefusal({ count, external, online }) → the refusal of a
+// dashboard Archive (which destroys the guest, and the stack's volumes with
+// it) while the bundled storage holds objects or could not be counted; null
+// when it is empty. `external`: another provider is active and `count` is what
+// the preserved bundled volume still holds.
+export function archiveStorageRefusal({ count = null, external = false, online = true } = {}) {
+  if (count === 0) return null;
+  const options = [
+    { action: 'switch_storage', provider: 'external', mode: 'copy', description: 'Copy every object to an external S3 provider (Application foundation → Switch provider, mode copy), then archive: the objects then live outside the guest.' },
+    { action: 'export', description: 'Export the objects first (an export of the project\'s guest contains the bundled storage volume), remove them from the app, then archive.' },
+  ];
+  if (external) {
+    options[0] = { action: 'switch_storage', provider: 'bundled', mode: 'fresh', description: 'Switch storage back to bundled (its objects come back), then to the external provider with mode copy, then archive.' };
+  }
+  if (!Number.isInteger(count)) {
+    return refusal(CODES.STORAGE_OBJECTS_UNKNOWN,
+      `Archiving destroys this project's guest and its bundled storage with it, and the bundled storage could not be checked for objects${online ? '' : ' (the project is not online)'}, so it is not archived — a rehydrated project would come back with an empty bucket.`,
+      [...(online ? [{ action: 'archive', description: 'Try again once the storage service answers.' }] : [{ action: 'wake', description: 'Wake the project so its bundled storage can be counted, then archive again.' }]), ...options]);
+  }
+  return {
+    ...refusal(CODES.STORAGE_HAS_OBJECTS,
+      external
+        ? `Archiving destroys this project's guest, and with it the preserved bundled storage volume, which still holds ${count} object(s) left behind when storage switched to the external provider without copying them. It is not archived.`
+        : `Archiving destroys this project's guest, and with it the bundled storage, which holds ${count} object(s) with no other copy — a rehydrated project would come back with an empty bucket. It is not archived.`,
+      options),
+    object_count: count,
+  };
+}
+
 // needsReembed(active, pending) — a different vector space: provider, model,
 // dimensions or metric changed. A key or address change alone does not.
 export function needsReembed(active, pending) {

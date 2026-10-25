@@ -569,6 +569,67 @@ test('a service that will not start refuses the change and changes nothing (a th
   assert.match(offLocal.body.warning, /could not be stopped/);
 });
 
+test('archive (destroys the guest): refused while the bundled storage holds objects or cannot be counted; legacy projects unchanged', async () => {
+  const { db, guest, stack } = setup({ objects: 3 });
+  const has = await service.archiveRefusal(1);
+  assert.deepEqual([has.code, has.object_count], [CODES.STORAGE_HAS_OBJECTS, 3]);
+  assert.match(has.message, /holds 3 object\(s\)/);
+  assert.deepEqual(has.options.map((o) => o.action), ['switch_storage', 'export']);
+  assert.deepEqual([has.options[0].provider, has.options[0].mode], ['external', 'copy']);
+  guest.objectCount = 0;
+  assert.equal(await service.archiveRefusal(1), null, 'empty bundled storage: archive goes ahead');
+  stack.bundledStorageObjectCount = async () => null;
+  const unknown = await service.archiveRefusal(1);
+  assert.equal(unknown.code, CODES.STORAGE_OBJECTS_UNKNOWN, 'a count that cannot be read is never taken as empty');
+  // Stopped: the bundled storage cannot be counted.
+  addProject(db, { id: 4, lifecycle: 'stopped' });
+  store.getFoundationProvisionInputs(4);
+  const stopped = await service.archiveRefusal(4);
+  assert.equal(stopped.code, CODES.STORAGE_OBJECTS_UNKNOWN);
+  assert.equal(stopped.options[0].action, 'wake');
+  // Bundled storage that is off was empty when turned off: archive goes ahead.
+  store.writeFeature(4, 'storage', { ...store.readFeatureRows(4).storage, state: 'off' });
+  assert.equal(await service.archiveRefusal(4), null);
+  // Pre-foundation projects: unchanged.
+  addProject(db, { id: 2, foundationVersion: null });
+  assert.equal(await service.archiveRefusal(2), null);
+});
+
+test('archive with an external provider: refused while the preserved bundled volume still holds objects that were never copied', async () => {
+  {
+    const { guest } = setup({ objects: 2 });
+    const r = routes();
+    const fresh = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'fresh', acknowledge: true } });
+    assert.equal(fresh.body.promoted, true);
+    guest.objectCount = null;  // the bundled container is stopped now
+    const refused = await service.archiveRefusal(1);
+    assert.deepEqual([refused.code, refused.object_count], [CODES.STORAGE_HAS_OBJECTS, 2]);
+    assert.match(refused.message, /left behind/);
+    assert.deepEqual([refused.options[0].provider, refused.options[0].mode], ['bundled', 'fresh']);
+  }
+  {
+    const { guest } = setup({ objects: 2 });
+    const r = routes();
+    const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+    guest.jobs[res.body.job.id].state = 'succeeded';
+    assert.equal((await service.getJob(1, res.body.job.id)).state, 'succeeded');
+    assert.equal(await service.archiveRefusal(1), null, 'every object was copied (verified) to the external provider');
+  }
+});
+
+test('RATCHET: the dashboard archive route asks archiveRefusal before it destroys the guest, and answers 409 with the options', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../mock2/routes.js', import.meta.url), 'utf8');
+  const start = src.indexOf("router.post('/projects/:id/archive'");
+  const handler = src.slice(start, src.indexOf('router.post(', start + 10));
+  assert.ok(start > 0);
+  const ask = handler.indexOf('foundationService.archiveRefusal(project.id)');
+  assert.ok(ask > 0, 'the guard is called');
+  assert.ok(ask < handler.indexOf('startArchive(project)'), 'before the teardown starts');
+  assert.match(handler, /if \(project\.foundation_version\)/, 'only foundation projects');
+  assert.match(handler, /res\.status\(409\)\.json\(\{ error: refused\.message, code: refused\.code, message: refused\.message, options: refused\.options/);
+});
+
 test('a pre-foundation project has no switches; an offline project refuses writes; invalid bodies are 400', async () => {
   const { db } = setup();
   addProject(db, { id: 2, foundationVersion: null });

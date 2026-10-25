@@ -28,7 +28,7 @@ import {
   parseHealthOutput, projectFoundation, projectJob, credentialSecretNames, parseJsonObject, parseJsonRows, newJobId, newIndexId,
   buildJobInsertSql, buildJobPollSql, buildActiveIndexSql, buildOverviewReadSql, buildCancelJobSql, promoteIndexStatements,
   SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId, needsReembed, indexSpace,
-  buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion,
+  buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion, archiveStorageRefusal,
 } from './foundation-logic.js';
 import { SECRET_NAMES } from './foundation-contract.js';
 
@@ -664,6 +664,41 @@ export async function featureAction(projectId, feature, request, { userId = null
     if (plan.op === 'set_state') return setState(project, feature, plan);
     return performSwitch(project, feature, plan, { userId });
   });
+}
+
+// ---- archive ---------------------------------------------------------------------
+//
+// The dashboard's Archive destroys the guest (incus delete --force), and with
+// it the stack's volumes; the bundled storage's objects have no checkpoint, so
+// a rehydrate would come back with an empty bucket. archiveRefusal(projectId)
+// → null (the archive may go ahead) | a refusal { code, message, options,
+// object_count? } while the bundled storage holds objects or cannot be
+// counted. A pre-foundation project always answers null (unchanged).
+export async function archiveRefusal(projectId) {
+  const project = store.getFoundationProject(projectId);
+  if (!project?.foundation_version) return null;
+  const row = store.readFeatureRows(project.id).storage;
+  const online = project.lifecycle === 'active' && !!project.container_name;
+  if (row.provider === 'bundled') {
+    // Bundled storage is turned off only while empty, and nothing writes to it while it is off.
+    if (row.state === 'off') return null;
+    return archiveStorageRefusal({ count: online ? await bundledObjectCount(project) : null, online });
+  }
+  return archiveStorageRefusal({ count: preservedBundledObjects(project.id), external: true, online });
+}
+
+// While another provider is active the bundled volume is not counted live (its
+// container is stopped). What it still holds: the last count the host took of
+// it (taken when storage last switched away from bundled), unless a verified
+// copy away from bundled succeeded after that count. null = unknown.
+function preservedBundledObjects(projectId) {
+  const last = store.readObjectCount(projectId);
+  if (!last) return null;
+  if (last.count === 0) return 0;
+  const at = Date.parse(last.at || '') || 0;
+  const copied = store.listJobs(projectId, 50).some((j) => j.kind === 'storage_migrate' && j.state === 'succeeded'
+    && parseJsonObject(j.params_json, {})?.from?.provider === 'bundled' && (Date.parse(j.finished_at || '') || 0) >= at);
+  return copied ? 0 : last.count;
 }
 
 // For tests: drop in-process caches.

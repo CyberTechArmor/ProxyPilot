@@ -2036,6 +2036,19 @@ export function createMock2Router() {
     if (project.lifecycle !== 'active' && project.lifecycle !== 'stopped') {
       return res.status(409).json({ error: `Cannot archive a project in state "${project.lifecycle}"` });
     }
+    // Archive destroys the guest, and a foundation project's bundled storage
+    // objects live only in it (no checkpoint): refused while it holds any or
+    // cannot be counted (foundation-service.js archiveRefusal). Pre-foundation
+    // projects are unchanged.
+    if (project.foundation_version) {
+      const refused = await foundationService.archiveRefusal(project.id)
+        .catch((e) => ({ code: 'STORAGE_OBJECTS_UNKNOWN', message: `The bundled storage could not be checked for objects, so the project is not archived: ${String(e?.message || e).slice(0, 200)}`, options: [] }));
+      if (refused) {
+        const count = Number.isInteger(refused.object_count) ? { object_count: refused.object_count } : {};
+        logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE_REFUSED', 'mock2_project', project.id, { name: project.name, code: refused.code, ...count }, req.ip);
+        return res.status(409).json({ error: refused.message, code: refused.code, message: refused.message, options: refused.options || [], ...count });
+      }
+    }
     logAudit(req.user.id, 'MOCK2_PROJECT_ARCHIVE', 'mock2_project', project.id,
       { name: project.name, slug: project.slug, acting_as_admin: req.mock2Access.actingAsAdmin }, req.ip);
     startArchive(project);

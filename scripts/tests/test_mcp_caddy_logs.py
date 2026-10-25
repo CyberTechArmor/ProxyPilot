@@ -274,6 +274,15 @@ class Verification(unittest.TestCase):
             config['apps']['http']['servers']['srv0']['routes'][0]['handle'].append(handler)
             with self.assertRaises(ValueError): logs.prove_domain(config, 'app.example.test')
 
+    def test_catch_all_server_default_cannot_bypass_domain_proof(self):
+        config = self.domain_config()
+        config['apps']['http']['servers']['catchall'] = {
+            'logs': {'logger_names': {}, 'default_logger_name': 'unfiltered'},
+            'routes': [{'handle': [{'handler': 'reverse_proxy'}]}]}
+        with self.assertRaises(ValueError): logs.prove_domain(config, 'app.example.test')
+        config['apps']['http']['servers']['catchall']['routes'][0]['match'] = [{'host': ['other.example.test']}]
+        self.assertEqual(logs.prove_domain(config, 'app.example.test'), ['log0'])
+
     def test_active_domain_cli_read_only_and_sanitized(self):
         config = self.domain_config()
         with mock.patch.object(logs, 'active_config', return_value=config), \
@@ -296,6 +305,7 @@ class Verification(unittest.TestCase):
         for value in ['../secret', 'APP.example.test', 'host:443', '', 'x' * 254]:
             self.assertFalse(logs.valid_domain(value))
         self.assertTrue(logs.valid_domain('app.example.test'))
+        self.assertTrue(logs.matches_host('APP.EXAMPLE.TEST', 'app.example.test'))
         self.assertTrue(logs.logger_selects({'include': ['http.log.access']}, 'http.log.access.log0'))
         self.assertFalse(logs.logger_selects({'include': ['http.log.access.log1']}, 'http.log.access.log0'))
         self.assertFalse(logs.logger_selects({'exclude': ['http.log.access']}, 'http.log.access.log0'))

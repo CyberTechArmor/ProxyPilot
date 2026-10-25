@@ -407,9 +407,18 @@ def walk(value):
 
 
 def matches_host(pattern, domain):
+    pattern = pattern.lower()
     return pattern == domain or (pattern.startswith('*.') and
            domain.endswith(pattern[1:]) and len(domain.split('.')) == len(pattern.split('.')))
 
+
+
+def route_could_match(route, domain):
+    # Match groups are ORed; a group without a host constraint can accept this
+    # Host. Do not miss catch-all servers merely because no domain is written.
+    groups = route.get('match', [])
+    return not groups or any('host' not in group or
+        any(matches_host(host, domain) for host in group['host']) for group in groups)
 
 def logger_selects(logger, topic):
     def specificity(names):
@@ -431,8 +440,7 @@ def prove_domain(config, domain):
         settings = server.get('logs') or {}
         mappings = settings.get('logger_names', {})
         route_nodes = list(walk(server.get('routes', []))) + list(walk(server.get('errors', {})))
-        route_match = any(any(matches_host(host, domain) for host in node.get('host', []))
-                          for node in route_nodes)
+        route_match = any(route_could_match(route, domain) for route in server.get('routes', []))
         if not any(matches_host(host, domain) for host in mappings) and not route_match:
             continue
         bound_servers += 1

@@ -460,3 +460,31 @@ repository checkpoint/maintenance/remote-readback tests, runner fencing and
 interrupted activation recovery, and exact-tree self-Git tests. These fixtures
 and source checks do not claim that Nodus has adopted the deployment layout or
 that every application has passed a production rollout.
+
+## Mock2 application foundation (2026-10-24)
+
+The foundation adds no new host-level command path and does not close S6.
+`mock2/foundation-stack.js` reaches a project guest only through
+`mock2/host.js` (`incus exec <guest> -- …`, nsenter when the backend runs in
+Docker). Its exec seam (`guestExec`) is replaceable in tests. It runs fixed
+programs inside the guest: `docker compose` against the platform-owned stack
+directory, `psql` / `pg_dump` inside the stack's postgres service with SQL on
+stdin, `weed shell` with S3 keys on stdin, and the app's own
+`foundation/bin/foundation.mjs` CLI, as a transient `systemd-run` unit for jobs.
+Validated container names, job ids and app directories are the only caller
+inputs that reach argv. Secret values cross into the guest on stdin only.
+
+`mock2/foundation-adopt-service.js` (moving an existing project) adds fixed
+Incus calls through the same adapter: snapshot create/restore, the five
+Docker-ready `config set` keys, stop/start, and guest programs for the dump,
+restore, port check and `/etc/environment` rewrite. It reads its own state
+directory under `MOCK2_DATA_DIR`. `lib/setup-engine/guest-probes.js` gains a
+foundation branch of the pre-migration dump script that runs `pg_dump` inside
+the stack (`foundationPgExecPrefix`).
+
+Guests are created with `security.nesting=true` plus the syscall intercepts
+`create_lxc_container`'s `docker_ready` already uses. Root inside the guest
+still controls the guest's Docker daemon; this is guest authority, not host
+authority. The existing backend's host-root-equivalent authority is unchanged.
+Coverage: `foundation-stack.test.js`, `mock2-foundation-adopt-*.test.js`,
+`foundation-seams.test.js` and the `FOUNDATION_E2E=1` real-Docker suites.

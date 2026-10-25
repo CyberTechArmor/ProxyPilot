@@ -37,7 +37,9 @@ const server = await createServer({
       vite.middlewares.use(async (req, res, next) => {
         if (req.url.startsWith('/foundation-test')) {
           const q = new URL(req.url, 'http://x').searchParams;
-          world = createWorld(q.get('case') || 'default', { advanceJobs: false });
+          // ?adopt=running|failed|succeeded: a move onto the foundation on record.
+          const adopt = q.get('adopt') ? { initial: q.get('adopt'), advance: false } : {};
+          world = createWorld(q.get('case') || 'default', { advanceJobs: false, adopt });
           res.writeHead(200, { 'Content-Type': 'text/html' });
           res.end(await vite.transformIndexHtml(req.url, PAGE));
           return;
@@ -70,6 +72,11 @@ try {
     storage_off: '?case=storage_off',
     viewer: '?case=external&viewer=1',
     legacy: '?case=legacy',
+    adopt_plan: '?case=legacy&project=legacy&open=adopt-plan',
+    adopt_running: '?case=legacy&project=legacy&adopt=running',
+    adopt_failed: '?case=legacy&project=legacy&adopt=failed',
+    adopt_viewer: '?case=legacy&project=legacy&adopt=failed&viewer=1',
+    adopted: '?case=default&adopt=succeeded',
   };
   for (const [name, q] of Object.entries(pages)) {
     const url = `${origin}/foundation-test${q}`;

@@ -16,6 +16,16 @@
 // The words and request bodies live in foundation-panel-logic.js (pure,
 // tested by tests/foundation-panel-logic.test.mjs).
 //
+// A project created before the foundation shows a short note and, for
+// editors, "Move onto the application foundation" (user decision 2026-10-25):
+// a check (the plan: steps, downtime, database, disk, secrets, feature
+// choices, warnings, or the blockers with their next step), then a confirm
+// with the downtime acknowledged (sudo). The move's steps are polled while it
+// runs; a failed move offers Resume / Roll back, a finished one Roll back
+// while the server still offers it, and the normal cards take over once the
+// foundation read answers with a foundation_version. Rules and words:
+// foundation-adopt-logic.js (tests/foundation-adopt-logic.test.mjs).
+//
 // MOBILE_FIRST: one column on phones, 2-column key/value grids from sm, 44px
 // targets, dialogs full-screen below sm and completable at 360px
 // (tests/foundation-panel.browser.mjs audits 360/375/768/1280).
@@ -32,8 +42,14 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import {
-  AlertTriangle, ChevronDown, Database, HardDrive, Layers, Loader2, RefreshCw, Search, X,
+  AlertTriangle, Check as CheckIcon, ChevronDown, Circle, Database, HardDrive, Layers, Loader2, Minus, Play, RefreshCw,
+  Search, X,
 } from 'lucide-react';
+import {
+  ADOPTION_POLL_MS, ADOPT_ACTION, ADOPT_INTRO, PLAN_STALE, SAFETY_TEXT, STALE_TEXT,
+  ackText as adoptAckText, adoptBody, adoptionEnded, adoptionView, answeredAdoption, canStartAdoption,
+  featureChoices, featureNote, isAdoptionActive, planView, rollbackCopy, showAdoptionWhenReady,
+} from './foundation-adopt-logic';
 import {
   ACTIVE_JOB_STATES, EXCEPTION_MAX, EXCEPTION_MIN, LEGACY_TEXT, LOCAL_DIMENSIONS, LOCAL_MODEL,
   OPENAI_DEFAULT_DIMENSIONS, OPENAI_DEFAULT_MODEL, STORAGE_HAS_OBJECTS,
@@ -633,6 +649,333 @@ function DatabaseException({ projectId, canEdit }) {
 }
 
 // ---------------------------------------------------------------------------
+// Moving a pre-foundation project onto the foundation (adoption). The rules
+// and words live in foundation-adopt-logic.js.
+// ---------------------------------------------------------------------------
+const WIDE = 'max-w-full h-full content-start rounded-none sm:max-w-xl sm:h-auto sm:max-h-[90vh] sm:rounded-lg';
+
+const STEP_ICON = {
+  done: { Icon: CheckIcon, cls: 'text-emerald-600 dark:text-emerald-400' },
+  running: { Icon: Loader2, cls: 'animate-spin text-blue-600 dark:text-blue-400' },
+  failed: { Icon: X, cls: 'text-red-600 dark:text-red-400' },
+  skipped: { Icon: Minus, cls: 'text-muted-foreground' },
+  pending: { Icon: Circle, cls: 'text-muted-foreground' },
+};
+
+function AdoptionSteps({ steps, current, detail }) {
+  if (!steps.length) return null;
+  return (
+    <ol className="space-y-2" aria-label="Steps" data-foundation-adopt-steps>
+      {steps.map((s) => {
+        const { Icon, cls } = STEP_ICON[s.state] || STEP_ICON.pending;
+        const isCurrent = !!current && current.name === s.name;
+        return (
+          <li key={s.name} data-adopt-step={s.name} data-state={s.state} className="flex items-start gap-3">
+            <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${cls}`} aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <p className={`break-words text-sm ${isCurrent ? 'font-medium' : ''} ${s.state === 'pending' ? 'text-muted-foreground' : ''}`}>
+                {s.title}<span className="sr-only">: {s.stateLabel}</span>
+              </p>
+              {isCurrent && detail ? <p className="break-words text-xs text-muted-foreground" data-adopt-detail>{detail}</p> : null}
+            </div>
+            <span className="shrink-0 text-xs text-muted-foreground" aria-hidden="true">{s.durationText || s.stateLabel}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+// The move's progress, outcome and next steps. Viewers see the same block
+// with no buttons.
+function AdoptionStatus({ adoption, canEdit, busy, refusal, onResume, onRollback, onRefresh }) {
+  const active = isAdoptionActive(adoption);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return undefined;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  const v = adoptionView(adoption, now);
+  if (!v) return null;
+  const actions = canEdit && (v.canResume || v.canRollback);
+  return (
+    <section data-foundation-adoption={v.state} aria-label={v.title} className="space-y-3 rounded-lg border p-4">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <h3 className="font-medium">{v.title}</h3>
+        <StatusChip view={v} />
+      </div>
+      {v.progressText || v.elapsedText ? (
+        <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          {v.progressText ? <span role="status" aria-live="polite">{v.progressText}</span> : null}
+          {v.elapsedText ? <span data-adopt-elapsed>{v.elapsedText}</span> : null}
+        </p>
+      ) : null}
+      {v.active ? (
+        <div
+          className="h-2 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={v.title}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={v.percent ?? undefined}
+        >
+          <div
+            className={`h-full rounded-full bg-primary transition-all ${v.percent == null ? 'w-1/3 animate-pulse' : ''}`}
+            style={v.percent == null ? undefined : { width: `${Math.max(4, v.percent)}%` }}
+          />
+        </div>
+      ) : null}
+      {v.showSteps ? <AdoptionSteps steps={v.steps} current={v.current} detail={v.currentDetail} /> : null}
+      {v.error ? <Banner tone="bad" data-foundation-adopt-error><p className="break-words">{v.error}</p></Banner> : null}
+      {v.outcome ? <p className="text-sm text-muted-foreground">{v.outcome}</p> : null}
+      {refusal ? (
+        <Banner tone="warn" data-foundation-refusal={refusal.code || 'refused'}>
+          <p className="break-words">{refusal.message}</p>
+          <Button type="button" variant="outline" className={`${TAP} text-foreground`} onClick={onRefresh} disabled={!!busy}>Check again</Button>
+        </Banner>
+      ) : null}
+      {actions ? (
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+          {v.canResume ? (
+            <Button type="button" className={TAP} disabled={!!busy} onClick={onResume}>
+              {busy === 'resume' ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Play className="mr-1 h-4 w-4" aria-hidden="true" />}Resume
+            </Button>
+          ) : null}
+          {v.canRollback ? (
+            <Button type="button" variant="outline" className={TAP} disabled={!!busy} onClick={onRollback}>Roll back</Button>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+// A feature choice for the move; the whole row is the label (44px target).
+function FeatureToggle({ id, title, checked, onChange, note, warn }) {
+  return (
+    <label htmlFor={id} data-foundation-adopt-feature={id} className="flex min-h-[44px] cursor-pointer items-start justify-between gap-3 rounded-md border p-3">
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium">{title}</span>
+        <span className={`block break-words text-xs ${warn ? 'text-amber-800 dark:text-amber-400' : 'text-muted-foreground'}`}>{note}</span>
+      </span>
+      <Switch id={id} checked={checked} onCheckedChange={onChange} className="mt-0.5" />
+    </label>
+  );
+}
+
+function Fact({ label, children }) {
+  if (children == null || children === '') return null;
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="break-words text-sm">{children}</dd>
+    </div>
+  );
+}
+
+// Step 1: check the project (the plan), then confirm with the downtime
+// acknowledged. A stale plan is checked again by itself.
+function AdoptDialog({ open, projectId, onClose, onStarted }) {
+  const [phase, setPhase] = useState('intro'); // intro | checking | plan | error
+  const [plan, setPlan] = useState(null);
+  const [failure, setFailure] = useState(null);
+  const [stale, setStale] = useState(false);
+  const [features, setFeatures] = useState(() => featureChoices(null));
+  const [ack, setAck] = useState(false);
+  const [errors, setErrors] = useState({});
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setPhase('intro'); setPlan(null); setFailure(null); setStale(false);
+    setFeatures(featureChoices(null)); setAck(false); setErrors({}); setBusy(false);
+  }, [open]);
+
+  const check = async (afterStale = false) => {
+    setPhase('checking'); setFailure(null); setErrors({}); setAck(false);
+    try {
+      const v = planView(await api.mock2PlanFoundationAdoption(projectId));
+      setPlan(v); setFeatures(v.features); setStale(afterStale); setPhase('plan');
+    } catch (e) {
+      setFailure(refusalOf(e)); setStale(false); setPhase('error');
+    }
+  };
+
+  const confirm = async (e) => {
+    e.preventDefault();
+    const r = adoptBody({ token: plan?.token, acknowledge: ack, features });
+    setErrors(r.errors);
+    if (!r.ok) return;
+    setBusy(true); setFailure(null);
+    let replan = false;
+    try {
+      const res = await api.mock2StartFoundationAdoption(projectId, r.body);
+      onStarted(answeredAdoption(res, 'running'));
+    } catch (err) {
+      const refusal = refusalOf(err);
+      if (refusal.code === PLAN_STALE) replan = true; else setFailure(refusal);
+    } finally { setBusy(false); }
+    if (replan) await check(true);
+  };
+
+  const setFeature = (name, on) => setFeatures((f) => ({ ...f, [name]: on ? 'on' : 'off' }));
+  const blocked = phase === 'plan' && plan?.blocked;
+  const ready = phase === 'plan' && plan && !plan.blocked;
+  const staleNote = stale ? <Banner tone="info" data-foundation-adopt-stale><p>{STALE_TEXT}</p></Banner> : null;
+  const cancel = (label = 'Cancel') => (
+    <Button type="button" variant="outline" className="h-11 sm:h-10" onClick={onClose} disabled={busy}>{label}</Button>
+  );
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
+      <DialogContent className={WIDE} data-foundation-dialog="adopt">
+        <DialogHeader>
+          {/* Clear of the corner X on a phone, where the title is centred. */}
+          <DialogTitle className="px-6 leading-snug sm:px-0 sm:pr-6">{ADOPT_ACTION}</DialogTitle>
+          <DialogDescription>
+            {ready ? 'This is what the move does. Nothing changes until you confirm.' : 'The project is checked first. Nothing changes until you confirm.'}
+          </DialogDescription>
+        </DialogHeader>
+
+        {phase === 'intro' ? (
+          <>
+            <p className="text-sm">
+              The check looks at the app&apos;s database, the free disk and the secrets the app uses. It shows what the move
+              does and how long the app is offline.
+            </p>
+            <DialogFooter className="gap-2 sm:space-x-0">
+              {cancel()}
+              <Button type="button" className="h-11 sm:h-10" onClick={() => check()}>Check this project</Button>
+            </DialogFooter>
+          </>
+        ) : null}
+
+        {phase === 'checking' ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> Checking the project…
+          </p>
+        ) : null}
+
+        {phase === 'error' ? (
+          <>
+            <Banner tone="bad" data-foundation-adopt-failure><p className="break-words">{failure?.message}</p></Banner>
+            <DialogFooter className="gap-2 sm:space-x-0">
+              {cancel()}
+              <Button type="button" className="h-11 sm:h-10" onClick={() => check()}>Try again</Button>
+            </DialogFooter>
+          </>
+        ) : null}
+
+        {blocked ? (
+          <>
+            {staleNote}
+            <div className="space-y-2" data-foundation-adopt-blockers>
+              <p className="text-sm font-medium">This project cannot move yet:</p>
+              <ul className="space-y-2">
+                {plan.blockers.map((b, i) => (
+                  <li key={`${b.code || 'blocker'}-${i}`} data-foundation-blocker={b.code || 'blocker'} className={`space-y-1 rounded-md border p-3 text-sm ${TONE.warn}`}>
+                    <p className="break-words font-medium">{b.message}</p>
+                    <p className="break-words text-xs">{b.next}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <DialogFooter className="gap-2 sm:space-x-0">
+              {cancel('Close')}
+              <Button type="button" className="h-11 sm:h-10" onClick={() => check()}>Check again</Button>
+            </DialogFooter>
+          </>
+        ) : null}
+
+        {ready ? (
+          <form onSubmit={confirm} className="space-y-4" noValidate>
+            {staleNote}
+            {plan.steps.length ? (
+              <section className="space-y-2" aria-label="What happens">
+                <h3 className="text-sm font-medium">What happens</h3>
+                <ol className="list-decimal space-y-1 pl-5 text-sm" data-foundation-adopt-plan-steps>
+                  {plan.steps.map((s) => <li key={s.name} className="break-words">{s.summary}</li>)}
+                </ol>
+              </section>
+            ) : null}
+            <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2" data-foundation-adopt-facts>
+              <Fact label="App offline">{plan.downtime || 'Not reported'}</Fact>
+              <Fact label="Database">{plan.databaseText}</Fact>
+              <Fact label="Disk">
+                {plan.diskText}
+                {plan.diskShort ? <span className="block text-xs text-amber-800 dark:text-amber-400">Not enough free disk.</span> : null}
+              </Fact>
+            </dl>
+            <section className="space-y-2" aria-label="Secrets">
+              <h3 className="text-sm font-medium">Secrets that move into encrypted storage</h3>
+              {plan.secrets.length ? (
+                <ul className="flex flex-wrap gap-2" data-foundation-adopt-secrets>
+                  {plan.secrets.map((n) => <li key={n} className="max-w-full break-all rounded border bg-muted/40 px-2 py-0.5 font-mono text-xs">{n}</li>)}
+                </ul>
+              ) : <p className="text-sm text-muted-foreground">None found.</p>}
+              <p className="text-xs text-muted-foreground">Names only. The values are stored encrypted and never shown.</p>
+            </section>
+            <fieldset className="space-y-2">
+              <legend className="mb-1 text-sm font-medium">Features</legend>
+              <FeatureToggle
+                id="adopt-storage" title="File storage" checked={features.storage === 'on'}
+                onChange={(v) => setFeature('storage', v)} note={featureNote('storage', features.storage)}
+              />
+              <FeatureToggle
+                id="adopt-embeddings" title="Search embeddings" checked={features.embeddings === 'on'}
+                onChange={(v) => setFeature('embeddings', v)} note={featureNote('embeddings', features.embeddings)}
+                warn={features.embeddings === 'on'}
+              />
+            </fieldset>
+            {plan.warnings.map((w) => <Banner key={w} tone="warn" data-foundation-adopt-warning><p className="break-words">{w}</p></Banner>)}
+            <p className="rounded-md border bg-muted/30 p-3 text-sm" data-foundation-adopt-safety>{SAFETY_TEXT}</p>
+            {plan.token ? (
+              <Check id="adopt-ack" checked={ack} onChange={(v) => { setAck(v); setErrors((x) => ({ ...x, acknowledge: undefined })); }} error={errors.acknowledge}>
+                {adoptAckText(plan.downtime)}
+              </Check>
+            ) : (
+              <p className="text-sm text-muted-foreground">The check did not return a plan to confirm. Check again.</p>
+            )}
+            {failure ? (
+              <Banner tone="warn" data-foundation-adopt-refusal={failure.code || 'refused'}>
+                <p className="break-words">{failure.message}</p>
+                <Button type="button" variant="outline" className={`${TAP} text-foreground`} onClick={() => check()} disabled={busy}>Check again</Button>
+              </Banner>
+            ) : null}
+            <DialogFooter className="gap-2 sm:space-x-0">
+              {cancel()}
+              {plan.token ? (
+                <Button type="submit" className="h-11 sm:h-10" disabled={busy}>
+                  {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}Move this project
+                </Button>
+              ) : (
+                <Button type="button" className="h-11 sm:h-10" onClick={() => check()}>Check again</Button>
+              )}
+            </DialogFooter>
+          </form>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RollbackDialog({ open, state, onClose, onConfirm, busy, refusal }) {
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
+      <DialogContent className={SMALL} data-foundation-dialog="adopt-rollback">
+        <DialogHeader>
+          <DialogTitle>Roll back the move?</DialogTitle>
+          <DialogDescription>{rollbackCopy(state)}</DialogDescription>
+        </DialogHeader>
+        {refusal ? <Banner tone="warn" data-foundation-refusal={refusal.code || 'refused'}><p className="break-words">{refusal.message}</p></Banner> : null}
+        <DialogFooter className="gap-2 sm:space-x-0">
+          <Button type="button" variant="outline" className="h-11 sm:h-10" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button type="button" className="h-11 sm:h-10" onClick={onConfirm} disabled={busy}>
+            {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}Roll back
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The panel
 // ---------------------------------------------------------------------------
 const FEATURE_WORD = { storage: 'File storage', embeddings: 'Search embeddings' };
@@ -662,6 +1005,19 @@ export default function ProjectFoundation({ projectId, project = null, canEdit =
   // A refusal for an action taken straight from a card (Turn on, Cancel).
   const [notice, setNotice] = useState({});
   const startingPolls = useRef(0);
+  // A project row that says "legacy" is not read until a move onto the
+  // foundation says otherwise (the row passed in does not refresh by itself).
+  const readFoundation = useRef(!legacyByProject);
+  // The latest move onto the foundation (GET …/foundation/adopt), or null.
+  const [adoption, setAdoption] = useState(null);
+  const [adoptOpen, setAdoptOpen] = useState(false);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [adoptBusy, setAdoptBusy] = useState(null); // 'resume' | 'rollback'
+  const [adoptRefusal, setAdoptRefusal] = useState(null);
+  const [justMoved, setJustMoved] = useState(false);
+  const [foundationTick, setFoundationTick] = useState(0);
+  const foundationPolls = useRef(0);
+  const prevAdoptState = useRef(null);
 
   const mergeJobs = useCallback((list) => {
     if (!list?.length) return;
@@ -672,21 +1028,115 @@ export default function ProjectFoundation({ projectId, project = null, canEdit =
     });
   }, []);
 
-  const load = useCallback(async () => {
-    if (legacyByProject) return;
+  const load = useCallback(async ({ force = false } = {}) => {
+    if (!readFoundation.current && force !== true) return;
     try {
       const d = await api.mock2Foundation(projectId);
       setData(d);
       setLoadError('');
-      setStatus(isLegacy(null, d) ? 'legacy' : 'ready');
+      const legacy = isLegacy(null, d);
+      if (!legacy) readFoundation.current = true;
+      setStatus(legacy ? 'legacy' : 'ready');
       mergeJobs(activeJobs(d));
     } catch (e) {
       if (e?.status === 404 && !project?.foundation_version) { setStatus('legacy'); return; }
+      // A re-read after a move keeps the legacy view; the next try may answer.
+      if (!readFoundation.current) return;
       setLoadError(e?.message || 'Could not read the foundation status.');
       setStatus((s) => (s === 'ready' ? 'ready' : 'error'));
     }
-  }, [projectId, legacyByProject, project?.foundation_version, mergeJobs]);
+  }, [projectId, project?.foundation_version, mergeJobs]);
   useEffect(() => { load(); }, [load]);
+
+  const loadAdoption = useCallback(async () => {
+    try {
+      const r = await api.mock2FoundationAdoption(projectId);
+      setAdoption(r?.adoption && typeof r.adoption === 'object' ? r.adoption : null);
+    } catch { /* no adoption route (or a transient error): nothing new to show */ }
+  }, [projectId]);
+  useEffect(() => { loadAdoption(); }, [loadAdoption]);
+
+  // A move (or its roll back) in progress is re-read every few seconds.
+  const adoptionRunning = isAdoptionActive(adoption);
+  useEffect(() => {
+    if (!adoptionRunning) return undefined;
+    const t = setInterval(loadAdoption, ADOPTION_POLL_MS);
+    return () => clearInterval(t);
+  }, [adoptionRunning, loadAdoption]);
+
+  const adoptState = adoption?.state ?? null;
+  useEffect(() => {
+    const ended = adoptionEnded(prevAdoptState.current, adoptState);
+    prevAdoptState.current = adoptState;
+    if (ended === 'succeeded') {
+      setJustMoved(true);
+      toast({ title: 'Moved onto the foundation', description: 'The app now runs on its database, file storage and search.' });
+    } else if (ended === 'rolled_back') {
+      setJustMoved(false);
+      toast({ title: 'Move rolled back', description: 'The project is back as it was before the move.' });
+    } else if (ended === 'failed') {
+      toast({ variant: 'destructive', title: 'The move stopped', description: 'Nothing is deleted. Resume it or roll it back.' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adoptState]);
+
+  // After a move (or a roll back), re-read the foundation until it agrees:
+  // the normal cards take over once it answers with a foundation_version.
+  const expectStatus = adoptState === 'succeeded' && status === 'legacy' ? 'ready'
+    : adoptState === 'rolled_back' && status === 'ready' ? 'legacy' : null;
+  useEffect(() => {
+    if (!expectStatus) { foundationPolls.current = 0; return undefined; }
+    if (foundationPolls.current >= 20) return undefined;
+    const t = setTimeout(async () => {
+      foundationPolls.current += 1;
+      await load({ force: true });
+      setFoundationTick((n) => n + 1);
+    }, foundationPolls.current === 0 ? 0 : ADOPTION_POLL_MS);
+    return () => clearTimeout(t);
+  }, [expectStatus, foundationTick, load]);
+
+  const onAdoptStarted = (a) => {
+    setAdoptOpen(false);
+    setAdoptRefusal(null);
+    setJustMoved(false);
+    setAdoption(a);
+    toast({ title: 'Move started', description: 'The steps show here as they run.' });
+  };
+  const resumeAdoption = async () => {
+    setAdoptBusy('resume'); setAdoptRefusal(null);
+    try {
+      const r = await api.mock2ResumeFoundationAdoption(projectId);
+      setAdoption((prev) => answeredAdoption(r, 'running', prev));
+    } catch (e) {
+      setAdoptRefusal(refusalOf(e));
+    } finally { setAdoptBusy(null); }
+  };
+  const rollbackAdoption = async () => {
+    setAdoptBusy('rollback'); setAdoptRefusal(null);
+    try {
+      const r = await api.mock2RollbackFoundationAdoption(projectId);
+      setAdoption((prev) => answeredAdoption(r, 'rolling_back', prev));
+      setRollbackOpen(false);
+    } catch (e) {
+      setAdoptRefusal(refusalOf(e));
+    } finally { setAdoptBusy(null); }
+  };
+  const adoptionBlock = adoption ? (
+    <AdoptionStatus
+      adoption={adoption} canEdit={canEdit} busy={adoptBusy} refusal={rollbackOpen ? null : adoptRefusal}
+      onResume={resumeAdoption} onRollback={() => { setAdoptRefusal(null); setRollbackOpen(true); }}
+      onRefresh={() => { setAdoptRefusal(null); loadAdoption(); }}
+    />
+  ) : null;
+  const adoptionDialogs = (
+    <>
+      <AdoptDialog open={adoptOpen} projectId={projectId} onClose={() => setAdoptOpen(false)} onStarted={onAdoptStarted} />
+      <RollbackDialog
+        open={rollbackOpen} state={adoptState} busy={adoptBusy === 'rollback'} refusal={rollbackOpen ? adoptRefusal : null}
+        onClose={() => { setRollbackOpen(false); setAdoptRefusal(null); }} onConfirm={rollbackAdoption}
+      />
+    </>
+  );
 
   // A service that is still starting is re-read for up to two minutes.
   const starting = ['database', 'storage', 'embeddings'].some((f) => data?.[f]?.health?.status === 'starting');
@@ -836,10 +1286,24 @@ export default function ProjectFoundation({ projectId, project = null, canEdit =
   );
 
   if (status === 'legacy') {
+    const canStart = canStartAdoption(adoption, canEdit);
     return (
       <Card data-foundation-panel="legacy">
         {header}
-        <CardContent><p className="text-sm text-muted-foreground">{LEGACY_TEXT}</p></CardContent>
+        <CardContent className="space-y-4">
+          <div className="space-y-1 text-sm text-muted-foreground">
+            <p>{LEGACY_TEXT}</p>
+            {canStart ? <p>{ADOPT_INTRO}</p> : null}
+          </div>
+          {adoptionBlock}
+          {canStart ? (
+            <Button type="button" className={`${TAP} h-auto whitespace-normal py-2 text-center`} onClick={() => setAdoptOpen(true)} data-foundation-adopt-start>
+              {ADOPT_ACTION}
+            </Button>
+          ) : null}
+          {!canEdit ? <p className="text-xs text-muted-foreground">Only project editors can move it onto the foundation.</p> : null}
+        </CardContent>
+        {adoptionDialogs}
       </Card>
     );
   }
@@ -917,6 +1381,7 @@ export default function ProjectFoundation({ projectId, project = null, canEdit =
       {header}
       <CardContent className="space-y-4">
         {others.map((w) => <Banner key={w} tone="warn"><p className="break-words">{w}</p></Banner>)}
+        {showAdoptionWhenReady(adoption, { justMoved }) ? adoptionBlock : null}
 
         <FeatureSection
           name="database" icon={Database} title="Database" view={dbView}
@@ -988,6 +1453,7 @@ export default function ProjectFoundation({ projectId, project = null, canEdit =
           okTitle: 'Re-embedding started', okText: 'Search keeps using the current index until the new one passes its checks.',
         })}
       />
+      {adoptionDialogs}
     </Card>
   );
 }

@@ -488,3 +488,18 @@ still controls the guest's Docker daemon; this is guest authority, not host
 authority. The existing backend's host-root-equivalent authority is unchanged.
 Coverage: `foundation-stack.test.js`, `mock2-foundation-adopt-*.test.js`,
 `foundation-seams.test.js` and the `FOUNDATION_E2E=1` real-Docker suites.
+
+## Active Caddy credential-redaction proof (2026-10-25, host self-edit)
+
+`lib/caddy-log-proof.js` (`readCaddyLogProof`) runs one fixed host command
+through the existing `runHostCapture` adapter: `python3 -c <bootstrap>
+<source-dir>/scripts/secure-mcp-caddy-logs.py <domain>`. The bootstrap imports
+the script under a non-main name and calls only its read-only
+`active_proof_cli`, so an older script cannot run its mutating entry point.
+The source directory comes from the self-update record and is path-validated.
+The domain must be a lower-case DNS name. Output is capped at 64 KiB and
+parsed against a fixed schema; raw stdout/stderr are never returned. The MCP
+edge tool (`routes/mcp-tools/edge.js`) exposes only that sanitized proof.
+These commits were made on the host through MCP self-edit and merged here
+with their original IDs. Coverage: `lib/caddy-log-proof.test.js`,
+`__tests__/caddy-access-log.test.js`, `scripts/tests/test_mcp_caddy_logs.py`.

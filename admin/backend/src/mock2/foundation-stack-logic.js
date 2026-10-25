@@ -754,6 +754,9 @@ export function foundationDumpScript(layout = DEFAULT_LAYOUT) {
 export const CLONE_EXCLUDED_TABLE_DATA = Object.freeze([
   'mock2_foundation.secrets', 'mock2_foundation.features', 'mock2_foundation.jobs',
   'mock2_foundation.storage_migration_items', 'mock2_foundation.health',
+  // Created by the app runtime on first use: a copy job's per-key source
+  // state, and the re-embed catch-up queue of a pending switch.
+  'mock2_foundation.storage_migration_sources', 'mock2_foundation.vector_catchup',
 ]);
 // A build checkpoint's database snapshot (state/db/snapshot.sql) is COMMITTED
 // into the app repository, which may be pushed to a remote: the platform-held

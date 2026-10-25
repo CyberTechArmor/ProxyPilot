@@ -277,7 +277,23 @@ async function stopIfUnused(project, feature) {
 }
 
 // Poll one active job against the app database; promote when it succeeded.
-export async function refreshJob(project, job) {
+// One refresh per job at a time (this process), each starting from the row the
+// previous one left: the minute sweep, GET /foundation and GET /jobs/:id all
+// poll, and a promotion takes seconds — a second poll that ran meanwhile found
+// the job succeeded in the app with its switch no longer staged and marked the
+// promoted job failed.
+const refreshing = new Map();
+export function refreshJob(project, job) {
+  if (!job || !['queued', 'running'].includes(job.state)) return Promise.resolve(job);
+  const key = job.id;
+  const next = (refreshing.get(key) || Promise.resolve()).catch(() => {})
+    .then(() => refreshJobOnce(project, store.getJob(key) || job));
+  refreshing.set(key, next);
+  next.finally(() => { if (refreshing.get(key) === next) refreshing.delete(key); }).catch(() => {});
+  return next;
+}
+
+async function refreshJobOnce(project, job) {
   if (!job || !['queued', 'running'].includes(job.state)) return job;
   const params = parseJsonObject(job.params_json, {}) || {};
   const feature = FEATURE_OF_JOB[job.kind];
@@ -515,5 +531,5 @@ export async function featureAction(projectId, feature, request, { userId = null
 
 // For tests: drop in-process caches.
 export function resetFoundationServiceCaches() {
-  healthCache.clear(); lastRefresh.clear(); busy.clear();
+  healthCache.clear(); lastRefresh.clear(); busy.clear(); refreshing.clear();
 }

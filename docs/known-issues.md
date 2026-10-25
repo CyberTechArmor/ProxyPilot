@@ -28,11 +28,13 @@ From the foundation build (docs/features/app-foundation.md).
   - The post-deploy stored-credential check is skipped on foundation deploys
     (the keys live in mock2.db, not `/etc/environment`); it needs a host-side
     probe.
-  - The app's read-only SQL role cannot connect on the foundation (no TCP,
-    peer only); it needs a socket-side proxy or a TCP listener restricted to
-    that role.
 - **A checkpoint restored from before a re-embed** can bring back an index
   that does not match the current embeddings provider.
+- **The foundation Postgres sits on its own Compose bridge** (so the
+  read-only reporting role can be published on 127.0.0.1:5432), which gives
+  the container outbound network access; only a superuser could use it.
+  Docker cannot publish a port from an `internal` network, so closing it
+  needs a guest-side egress rule for that bridge.
 - **The command policy** (harness-safety.js) covers run_terminal,
   exec_in_container and the SDK lane, but not MCP `run_project_command` or
   the ask lane.

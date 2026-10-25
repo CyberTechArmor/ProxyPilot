@@ -683,7 +683,7 @@ that bind every project:
 - **No credentials or personal data** in any state file.
 
 <!-- BEGIN PINNED MOCK2 GUIDANCE -->
-# Governing Mock2 guidance: 1.35.0
+# Governing Mock2 guidance: 1.39.0
 
 The following pinned guidance supersedes historical general-workflow wording above.
 It does not supersede §2 above: the stack and the application foundation are a platform contract.
@@ -789,6 +789,13 @@ rules or evidence. A direct build proceeds with visible drafts/assumptions; setu
 lock. Existing application adoption records gaps without rewriting its code, stack or schema.
 Project intake is separate from the generated application's secure first-instance owner setup.
 
+Module planning and reuse follow `.mock2/modules.md` and PRO current section Z. Infer cohesive
+boundaries and reuse intent from known workflows; keep application rules and host bindings separate.
+Preserve explicit setup decisions, existing applications and receiving customizations. Module
+checks use public interfaces and declared dependencies, with unsupported coverage unverified.
+Installing/upgrading standards never extracts, converts or transfers existing features; selected
+reuse needs inspection, a bounded preview and actual receiving-application evidence.
+
 Git preparation follows `.mock2/git-readiness.md` and PRO current §X. Start locally without a hosting
 provider; inspect the selected execution host and project read-only during setup/build preparation.
 An explicit setup/build request may authorize the supported host's preparation, but investigation
@@ -836,6 +843,7 @@ grant native model access or establish that a requested model actually ran.
   Read `000-READ-FIRST.md` if this branch has written one; it is created once per branch, so its
   absence is normal and is not something to report or scaffold.
 - Restate the rule(s) you are implementing, by number, before you implement them; draft new ones when none apply.
+- A Done-when item that carries a number gets a budget estimate in the scope before code (or an `[OPEN: …]` with the design assumed), and is measured first (`.mock2/capacity.md` §5, §13).
 - Ask one question at a time, and only when you cannot proceed without the answer. Prefer a sensible default plus a note over a question.
 
 ## 4. While writing code
@@ -946,13 +954,21 @@ The workflow above is general: scope control, requirement traceability, durable 
 handoffs, verification provenance and independent review apply to any repository in any language.
 
 Technology choices live in a named profile. The **PRO application profile**
-(`.mock2/standards/profile-cpr.md`) is the intended default for new PRO applications: TypeScript,
+(`.mock2/standards/profile-cpr.md`) is the profile of every new PRO application: TypeScript,
 Express, Drizzle, Zod, Vitest, PostgreSQL on the server; React + TypeScript built by Vite,
 Tailwind and shadcn/ui primitives on the client; the prescribed directory layout, the `--t-*` theme
-tokens, and the Host SDK conventions.
+tokens, and the Host SDK conventions. Every new PRO application also starts on the **application
+foundation stack**: PostgreSQL with pgvector, S3-compatible object storage and an embedding service,
+provisioned by the host with the application, with storage and embeddings switchable per deployment
+and no switch deleting data (PRO current §W.6).
 
 Every repository records its profile in `.github/copilot-instructions.md` — `cpr`, or `none` for a
 stack the profile does not describe — together with its deliberate deviations and their reasons.
+A new application records `cpr` with the foundation stack; `none` and stack deviations describe an
+existing repository's own stack, and you never record them for a new application. SQLite or another
+database engine needs the developer's explicit request, recorded on the project by a person; nothing
+you write in the repository creates that record, and a missing database is a start-up failure, never
+a fallback.
 Adopting Mock2 never rewrites an application's stack and never creates host-platform features
 outside the repository's scope. Verification maps to the selected toolchain through
 `.mock2/checks.json`.
@@ -960,7 +976,11 @@ outside the repository's scope. Verification maps to the selected toolchain thro
 Exact new-project pins and compatibility scope live in `stack.versions.json` / `Stack-Versions.md`.
 Existing repositories retain their recorded release lines with maintenance patches unless the
 developer asks to upgrade/migrate. AI data/retrieval follows `AI-Data-Standards.md` when applicable;
-model/index identity, permission filters and private object storage are host capabilities.
+model/index identity, permission filters and private object storage are host capabilities. Feature
+code reaches object storage, embeddings and vector search only through the host's adapters, never an
+S3 SDK or an embedding API of its own. Secrets are held encrypted by the host and never written to an
+env file or the repository. Readiness is reported only after a real operation, and a mock or local
+model says what it is.
 
 ## 10. PRO — Production Readiness Optimization v1.1
 

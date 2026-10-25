@@ -9,8 +9,9 @@
 >
 > 2026-10-24: constitution §2 is now **"The stack and the application foundation"**,
 > a platform contract that the pinned guidance does not supersede (§7 below). The
-> matching upstream amendment for mock2-core 1.39.0 is drafted, **not published**, in
-> `docs/mock2/upstream/2026-10-foundation/`.
+> matching upstream amendment was **published as mock2-core 1.39.0** on 2026-10-25
+> (commit `8e2eaf7`, from `docs/mock2/upstream/2026-10-foundation/`), and the seed now
+> pins 1.39.0.
 
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 
@@ -214,10 +215,10 @@ explicitly asked and a person recorded it on the project.
 - The build skill's stack sentence (`skills.json`), the seed README (base-app is a
   reference implementation, not installed) and `base-app/lib/db.js` (no hard-coded
   `DATABASE_URL`; it fails with `DATABASE_URL_REQUIRED`) follow.
-- `standards-version.json` still names upstream 1.35.0. Its new `local_amendments`
-  entry records this amendment and the upstream release it is proposed for
-  (`drafted-not-published`). The self-update check reads only the fields it knows,
-  so the dashboard's Update block and `check_proxypilot_update` are unaffected.
+- `standards-version.json` names upstream 1.39.0. Its `local_amendments` entry
+  records this amendment as `published-adopted` (2026-10-25, commit `8e2eaf7`). The
+  self-update check reads only the fields it knows, so the dashboard's Update block
+  and `check_proxypilot_update` are unaffected.
 
 **How §2 reaches a project and the model.**
 

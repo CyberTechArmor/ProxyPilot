@@ -1,9 +1,10 @@
 # mock2-core 1.38.0 → 1.39.0: the application foundation stack (upstream amendment package)
 
-*Drafted 2026-10-24 in ProxyPilot. **Not published.*** Nothing here has been sent to
-git.fractionate.ai or mock2.fractionate.ai. Publishing is the user's decision; ProxyPilot's
-site publish path (`/opt/app/site/.publish` on the `mock2` guest,
-`docs/mock2/standards-and-cpr.md` §3) was not used.
+*Drafted 2026-10-24 in ProxyPilot. **Published 2026-10-25** as mock2-core 1.39.0, on the
+user's decision, through ProxyPilot's site publish path (`/opt/app/site/.publish` on the
+`mock2` guest, `docs/mock2/standards-and-cpr.md` §3): mock2-core commit `8e2eaf7`. The live
+manifest, `release.json` and all 14 changed files were checked against the result hashes
+below after the publish; `mock2-project-template` was not republished (no marker).*
 
 ## Why
 

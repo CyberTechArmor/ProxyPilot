@@ -1,24 +1,26 @@
 {
-  "$comment": "The Mock2 standards version this seed renders. Bump `version` and `synced` whenever the seed is updated from the site (docs/mock2/standards-and-cpr.md §3); the dashboard's Update block and the check_proxypilot_update MCP tool compare it with the live manifest to say whether the site has moved on. `local_amendments` lists ProxyPilot-owned text this seed adds on top of that upstream version (never the pinned upstream bytes), with the upstream release each is proposed for; a proposed release is not a published one, so `version` never moves for it.",
+  "$comment": "The Mock2 standards version this seed renders. Bump `version` and `synced` whenever the seed is updated from the site (docs/mock2/standards-and-cpr.md \u00a73); the dashboard's Update block and the check_proxypilot_update MCP tool compare it with the live manifest to say whether the site has moved on. `local_amendments` lists ProxyPilot-owned text this seed adds on top of that upstream version (never the pinned upstream bytes), with the upstream release each is proposed for; a proposed release is not a published one, so `version` never moves for it.",
   "source": "https://git.fractionate.ai/mock2/mock2-core",
   "manifest": "https://mock2.fractionate.ai/manifest.json",
-  "version": "1.35.0",
-  "synced": "2026-10-22",
+  "version": "1.39.0",
+  "synced": "2026-10-25",
   "cpr_version": "1.1",
-  "source_version": "1.35.0",
+  "source_version": "1.39.0",
   "family": "mock2-core",
   "adoption_scope": "guidance",
   "runtime_scope": "git-readiness-local-inspection",
   "local_amendments": [
     {
       "id": "proxypilot-app-foundation-2026-10-24",
-      "scope": "constitution §2 (the stack and the application foundation) and the pinned-guidance header line; the pinned upstream files and hashes are unchanged",
+      "scope": "constitution \u00a72 (the stack and the application foundation) and the pinned-guidance header line; the pinned upstream files and hashes are unchanged",
       "decided": "2026-10-24",
       "proposed_upstream": {
         "family": "mock2-core",
         "from": "1.38.0",
         "to": "1.39.0",
-        "status": "drafted-not-published"
+        "status": "published-adopted",
+        "published": "2026-10-25",
+        "commit": "8e2eaf7"
       },
       "package": "docs/mock2/upstream/2026-10-foundation/README.md"
     }

@@ -9,9 +9,9 @@ differs from the latest published version, `upgradeFrameworkFromSeed()` publishe
 disabled or production-pinned host nothing here is read, imported, or installed
 (ADR-001). The registry is append-only and content rows are immutable (ADR-003).
 
-## Current guidance adoption (2026-10-22)
+## Current guidance adoption (2026-10-25)
 
-The embedded Mock2 source release is **1.35.0**, family `mock2-core`, scope
+The embedded Mock2 source release is **1.39.0**, family `mock2-core`, scope
 `guidance`. `upstream-guidance.json` retains 33 canonical guidance files and their
 release hashes. The platform constitution includes the pinned current
 constitution after the retained platform contracts. New project seeds carry
@@ -22,9 +22,10 @@ framework version does not certify their local files or deployed application.
 Regenerate offline with `node scripts/sync-mock2-guidance.mjs <source-directory>`.
 Every required source file is checked against release.json before output.
 Source release.json SHA256 at adoption:
-`7a3eea91ef84f43033386da14c7735b5fb1805ba2f624b8d4abe2991bc40fab6`
-(1.35.0, 2026-10-22; previous adoption 1.23.2 on 2026-10-17 was
-`745cb748d94f4ae229b1c4731fc26f10d1e3ba28403f774399ecd6ea1512574d`).
+`78872e8a1cef39b8c9c67fc2b440eab9d84a9bcabe507c2635746b203cad96e8`
+(1.39.0, 2026-10-25, published from ProxyPilot's foundation amendment; previous
+adoption 1.35.0 on 2026-10-22 was
+`7a3eea91ef84f43033386da14c7735b5fb1805ba2f624b8d4abe2991bc40fab6`).
 
 CPR remains specification **1.1**, framework registry integers and the base-app
 scaffold are separate version families. Relay reference **1.2.1** is described
@@ -63,9 +64,11 @@ keeps it. The pinned upstream bytes and hashes are unchanged.
 The build skill's stack sentence (`skills.json`) carries the same rules in short.
 `base-app/lib/db.js` no longer falls back to a hard-coded `DATABASE_URL`; it fails
 with `DATABASE_URL_REQUIRED`. The upstream text that closes the same gaps in
-mock2-core is drafted, not published, in `docs/mock2/upstream/2026-10-foundation/`.
-`standards-version.json` still names upstream **1.35.0**; its `local_amendments`
-entry records this ProxyPilot amendment and the upstream version it is proposed for.
+mock2-core was published as **1.39.0** on 2026-10-25 from
+`docs/mock2/upstream/2026-10-foundation/` (mock2-core commit `8e2eaf7`), and this seed
+now pins 1.39.0. `standards-version.json`'s `local_amendments` entry records the
+amendment as published and adopted; §2 stays a ProxyPilot platform contract above
+the pinned text.
 
 ## Portable Git readiness adoption (2026-10-22)
 

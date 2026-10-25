@@ -22,8 +22,8 @@ const registry = JSON.parse(read('files/core/cpr/stack.versions.json'));
 const rows = [...readme.matchAll(/^\| `([^`]+)` \| `([0-9a-f]{64})` \| `([0-9a-f]{64})` \| ([^|]+) \|$/gm)]
   .map(([, path, base, result, form]) => ({ path, base, result, form: form.trim() }));
 
-test('the package says it is a draft and names its base release', () => {
-  assert.match(readme, /\*\*Not published\.\*\*/);
+test('the package records its publication and names its base release', () => {
+  assert.match(readme, /\*\*Published 2026-10-25\*\* as mock2-core 1\.39\.0/);
   assert.match(readme, /mock2-core 1\.38\.0 → 1\.39\.0/);
   assert.match(readme, /Base: mock2-core \*\*1\.38\.0\*\*/);
   assert.match(readme, /> 1\.39\.0: The application foundation stack\./);
@@ -108,7 +108,7 @@ test('standards-version.json never claims an upstream version that does not exis
   const amendment = sv.local_amendments.find((a) => a.id === 'proxypilot-app-foundation-2026-10-24');
   assert.ok(amendment, 'the local amendment is recorded');
   assert.equal(amendment.proposed_upstream.to, '1.39.0');
-  assert.equal(amendment.proposed_upstream.status, 'drafted-not-published');
-  assert.notEqual(sv.version, amendment.proposed_upstream.to);
+  assert.equal(amendment.proposed_upstream.status, 'published-adopted');
+  assert.equal(sv.version, amendment.proposed_upstream.to, 'the seed pins the published release');
   assert.ok(existsSync(new URL(`../../../../${amendment.package}`, import.meta.url)), amendment.package);
 });

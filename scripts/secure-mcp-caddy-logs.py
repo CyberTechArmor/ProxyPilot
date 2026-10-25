@@ -91,6 +91,13 @@ SERVICE_FORMAT = """format filter {
 }"""
 LIMIT = 8 * 1024 * 1024
 COMMAND_TIMEOUT = 20
+STAGE = "startup"
+PROBE_VERSION = "unknown"
+
+def stage(name):
+    global STAGE
+    STAGE = name
+
 
 
 
@@ -126,6 +133,8 @@ def parse_json(data):
 
 def run_caddy(*args, capture=False):
     # Captures can contain configuration; they are only parsed in-process.
+    previous_stage = STAGE
+    stage('caddy_' + args[0])
     with tempfile.TemporaryFile() as output:
         subprocess.run(['caddy', *args], check=True, stdout=output if capture else subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=COMMAND_TIMEOUT)
@@ -133,7 +142,9 @@ def run_caddy(*args, capture=False):
             output.seek(0)
             result = output.read(LIMIT + 1)
             require(len(result) <= LIMIT)
+            stage(previous_stage)
             return result
+        stage(previous_stage)
 
 
 def adapt(path):
@@ -266,6 +277,7 @@ def verify_fixture():
         config_path.write_text(config)
         child = None
         try:
+            stage("fixture_encoder")
             reference = adapt(config_path)
             expected_encoder = default_encoder(reference)
             require(expected_encoder == GLOBAL_ENCODER)
@@ -276,6 +288,7 @@ def verify_fixture():
                 sock.close()
             # The third socket stays bound but never listens: controlled refusal.
             with (root / 'process.log').open('wb') as process_log:
+                stage('fixture_listen')
                 child = subprocess.Popen(['caddy', 'run', '--config', str(config_path)],
                                          stdout=process_log, stderr=process_log,
                                          env={**os.environ, 'XDG_DATA_HOME': str(root / 'data'),
@@ -289,6 +302,7 @@ def verify_fixture():
                     except OSError:
                         require(time.monotonic() < deadline)
                         time.sleep(0.05)
+                stage("fixture_requests")
                 nonce = secrets.token_hex(16)
                 sentinels = [f'PP_{key}_{nonce}_{i}' for key in ('auth', 'rauth', 'login') for i in (1, 2)]
                 parts = ['keep=visible']
@@ -316,6 +330,7 @@ def verify_fixture():
                         finally:
                             conn.close()
                 stop_child(child)
+            stage("fixture_results")
             require(received == expected_upstream)
             counts = []
             all_records = read_records(runtime)
@@ -362,7 +377,9 @@ def verify_fixture():
 
 
 def verify(config_path, no_reload=False):
+    stage("fixture")
     encoder, fixture = verify_fixture()
+    stage("disk_configuration")
     disk = adapt(config_path)
     proof = prove_config(disk, encoder)
     version, version_digest = safe_version()
@@ -373,6 +390,7 @@ def verify(config_path, no_reload=False):
     if no_reload:
         receipt.update(active_global_verified=False, result='pending_reload')
     else:
+        stage("active_configuration")
         active = active_config(disk)
         prove_config(active, encoder)
         require(default_encoder(disk) == default_encoder(active))
@@ -513,6 +531,10 @@ def active_proof_cli(args):
     return code
 
 def main():
+    global PROBE_VERSION
+    stage('version')
+    PROBE_VERSION = safe_version()[0]
+    stage('identify_configuration')
     root = pathlib.Path('/etc/caddy')
     sites = [p for p in (root / 'sites').iterdir() if p.is_file() and not p.is_symlink()
              and '# ProxyPilot Admin Dashboard' in p.read_text()]
@@ -522,6 +544,7 @@ def main():
     if any(p.is_symlink() for p in paths):
         raise ValueError('Refusing symlink Caddy configuration')
     originals = [p.read_text() for p in paths]
+    stage('transform_configuration')
     changed = [transform(originals[0], True), transform(originals[1])]
     no_reload = '--no-reload' in sys.argv
     reloaded = False
@@ -550,6 +573,7 @@ if __name__ == '__main__':
         main()
     except Exception:
         print(json.dumps({'type': 'proxypilot.caddy-log-verification', 'version': 1,
-                          'result': 'failed', 'active_global_verified': False}), flush=True)
+                          'result': 'failed', 'active_global_verified': False,
+                          'phase': STAGE, 'caddy_version': PROBE_VERSION}), flush=True)
         print('MCP log hardening or verification failed; review Caddy logging locally before continuing.', file=sys.stderr)
         sys.exit(1)

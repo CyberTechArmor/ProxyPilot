@@ -47,6 +47,13 @@ class Verification(unittest.TestCase):
                                    'request>headers>Referer': {'filter': 'delete'}}}
         self.config = {'logging': {'logs': {'default': {'encoder': self.encoder}}}}
 
+    def test_failed_caddy_command_preserves_safe_phase(self):
+        logs.stage('fixture')
+        with mock.patch.object(logs.subprocess, 'run', side_effect=logs.subprocess.CalledProcessError(1, ['caddy'])):
+            with self.assertRaises(logs.subprocess.CalledProcessError):
+                logs.run_caddy('validate', '--config', '/private')
+        self.assertEqual(logs.STAGE, 'caddy_validate')
+
     def test_active_global_proof(self):
         self.assertTrue(logs.prove_config(self.config, self.encoder)['global_default_encoder'])
         self.config['logging']['logs']['access'] = {'include': ['http.log.access.log0']}
@@ -173,6 +180,7 @@ class Verification(unittest.TestCase):
             global_path.write_text(original)
             site.write_text(original_site)
             with mock.patch.object(logs.pathlib, 'Path', return_value=root), \
+                 mock.patch.object(logs, 'safe_version', return_value=('v2.11.2', 'hash')), \
                  mock.patch.object(logs, 'verify', side_effect=ValueError('fail')), \
                  mock.patch.object(logs, 'run_caddy') as run, \
                  mock.patch.object(logs.sys, 'argv', ['script']):
@@ -189,6 +197,7 @@ class Verification(unittest.TestCase):
             (root / 'sites' / 'dashboard').write_text(logs.transform('# ProxyPilot Admin Dashboard\ns {\n log {\n }\n}\n'))
             out = io.StringIO()
             with mock.patch.object(logs.pathlib, 'Path', return_value=root), \
+                 mock.patch.object(logs, 'safe_version', return_value=('v2.11.2', 'hash')), \
                  mock.patch.object(logs, 'verify', return_value={'result': 'verified'}) as verify, \
                  mock.patch.object(logs, 'run_caddy') as run, contextlib.redirect_stdout(out):
                 logs.main()

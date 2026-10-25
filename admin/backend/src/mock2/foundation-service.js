@@ -382,18 +382,28 @@ async function refreshJobOnce(project, staleJob) {
     await stopIfUnused(project, feature);
     return store.updateJob(job.id, { state: appJob.state, error: appJob.error || (appJob.state === 'failed' ? 'the job failed' : null), progress: appProgress, finished: true });
   }
-  // succeeded — promote (the switch is done only once promoted).
-  const row = store.readFeatureRows(project.id)[feature];
-  if (row.pending?.job_id !== job.id) {
-    return store.updateJob(job.id, { state: 'failed', error: 'the job finished but the switch it served is no longer staged; nothing was promoted', progress: appProgress, finished: true });
-  }
-  if (job.kind === 'reembed' && !['ready', 'active'].includes(index?.state)) {
-    updatePending(project.id, feature, { job_id: null });
-    return store.updateJob(job.id, { state: 'failed', error: `the new index did not validate (state ${index?.state || 'missing'}); the active index is unchanged`, progress: appProgress, finished: true });
-  }
-  const p = await promote(project, feature, { indexId: job.kind === 'reembed' ? params.target_index : null });
-  if (!p.ok) return store.updateJob(job.id, { state: 'running', error: `promotion pending: ${p.error}`, progress: { ...appProgress, phase: 'promoting' } });
-  return store.updateJob(job.id, { state: 'succeeded', error: null, progress: { ...appProgress, phase: 'promoted', promoted_at: nowIso() }, finished: true });
+  // succeeded — promote (the switch is done only once promoted), under the
+  // deployment lock cancelJob takes, so a cancel can never answer "cancelled"
+  // while the switch completes. The job is re-read inside: a cancel that won
+  // the lock first leaves it finished, and a busy lock means the next poll
+  // promotes.
+  const done = await exclusive(project.id, async () => {
+    const current = store.getJob(job.id);
+    if (!current || !['queued', 'running'].includes(current.state)) return current;
+    const row = store.readFeatureRows(project.id)[feature];
+    if (row.pending?.job_id !== job.id) {
+      return store.updateJob(job.id, { state: 'failed', error: 'the job finished but the switch it served is no longer staged; nothing was promoted', progress: appProgress, finished: true });
+    }
+    if (job.kind === 'reembed' && !['ready', 'active'].includes(index?.state)) {
+      updatePending(project.id, feature, { job_id: null });
+      return store.updateJob(job.id, { state: 'failed', error: `the new index did not validate (state ${index?.state || 'missing'}); the active index is unchanged`, progress: appProgress, finished: true });
+    }
+    const p = await promote(project, feature, { indexId: job.kind === 'reembed' ? params.target_index : null });
+    if (!p.ok) return store.updateJob(job.id, { state: 'running', error: `promotion pending: ${p.error}`, progress: { ...appProgress, phase: 'promoting' } });
+    return store.updateJob(job.id, { state: 'succeeded', error: null, progress: { ...appProgress, phase: 'promoted', promoted_at: nowIso() }, finished: true });
+  });
+  if (done?.ok === false && done.code === CODES.FOUNDATION_BUSY) return store.getJob(job.id) || job;
+  return done;
 }
 
 export async function getJob(projectId, jobId, { refresh = true } = {}) {

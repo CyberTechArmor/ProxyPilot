@@ -315,6 +315,37 @@ test('cancel: the job ends host-side, the guest is told, the staged switch is ab
   assert.deepEqual(r.audits.at(-1).detail, { job_id: 'fj_000000000000', outcome: 'refused', code: CODES.JOB_NOT_FOUND });
 });
 
+test('a cancel never interleaves with a promotion: during it the cancel is refused busy; before it nothing is promoted', async () => {
+  {
+    const { guest, stack } = setup({ objects: 2 });
+    const r = routes();
+    const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+    const jobId = res.body.job.id;
+    guest.jobs[jobId].state = 'succeeded';
+    const cli = stack.foundationCli;
+    stack.foundationCli = async (...a) => { await new Promise((ok) => setTimeout(ok, 150)); return cli(...a); };
+    const sweep = service.sweepFoundationJobs();
+    await new Promise((ok) => setTimeout(ok, 40));
+    const c = await r.call('post', '/projects/:id/foundation/jobs/:jobId/cancel', { params: { jobId } });
+    assert.deepEqual([c.status, c.body.code], [409, CODES.FOUNDATION_BUSY], 'a cancel during the promotion is refused, not falsely "cancelled"');
+    await sweep;
+    assert.equal(store.getJob(jobId).state, 'succeeded');
+    assert.equal(store.readFeatureRows(1).storage.provider, 'external');
+  }
+  {
+    const { guest } = setup({ objects: 2 });
+    const r = routes();
+    const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+    const jobId = res.body.job.id;
+    const c = await r.call('post', '/projects/:id/foundation/jobs/:jobId/cancel', { params: { jobId } });
+    assert.equal(c.body.job.state, 'cancelled');
+    guest.jobs[jobId].state = 'succeeded';   // the guest finished anyway
+    await service.sweepFoundationJobs();
+    assert.equal(store.getJob(jobId).state, 'cancelled');
+    assert.equal(store.readFeatureRows(1).storage.provider, 'bundled', 'a cancelled job is never promoted');
+  }
+});
+
 test('sweep: a job whose app row stopped moving is relaunched (resumable), then failed after the relaunch limit', async () => {
   const { guest, calls } = setup({ objects: 1 });
   const r = routes();

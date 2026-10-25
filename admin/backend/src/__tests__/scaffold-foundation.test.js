@@ -9,6 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -244,6 +245,52 @@ test('the generated re-embed validation bar is the exported one', () => {
   const jobs = byPath(files()).get('foundation/runtime/jobs.mjs').content;
   assert.ok(jobs.includes(`export const SELF_RETRIEVAL = Object.freeze(${JSON.stringify(SELF_RETRIEVAL)});`));
   assert.ok(SELF_RETRIEVAL.threshold >= 0.8 && SELF_RETRIEVAL.threshold < 1);
+});
+
+test('storage_migrate change detection: a same-size overwrite changes the source fingerprint (ETag, Last-Modified), an unchanged listing does not', async () => {
+  const dir = materialize({ withNodeModules: true });
+  try {
+    const jobs = await import(pathToFileURL(path.join(dir, 'foundation/runtime/jobs.mjs')).href);
+    const listed = { key: 'a.bin', size: 4096, etag: '"0cc175b9c0f1b6a831c399e269772661"', lastModified: '2026-10-25T10:00:00.000Z' };
+    const fp = jobs.sourceFingerprint(listed);
+    assert.equal(jobs.sourceFingerprint({ ...listed }), fp, 'the same listing gives the same fingerprint');
+    assert.equal(jobs.sourceFingerprint({ ...listed, etag: '0cc175b9c0f1b6a831c399e269772661' }), fp, 'quotes are not a change');
+    assert.equal(jobs.sourceFingerprint({ ...listed, etag: 'W/"0cc175b9c0f1b6a831c399e269772661"' }), fp, 'a weak marker is not a change');
+    assert.equal(jobs.sourceFingerprint({ ...listed, lastModified: '2026-10-25T10:00:00.700Z' }), fp, 'Last-Modified counts to the second');
+    assert.notEqual(jobs.sourceFingerprint({ ...listed, etag: '"92eb5ffee6ae2fec3ad71c777531578f"' }), fp, 'same size, other content (ETag)');
+    assert.notEqual(jobs.sourceFingerprint({ ...listed, lastModified: '2026-10-25T10:00:01.000Z' }), fp, 'same size and ETag, rewritten later');
+    assert.notEqual(jobs.sourceFingerprint({ ...listed, size: 4097 }), fp);
+    assert.match(jobs.keySha256('ünïcode name.txt'), /^[0-9a-f]{64}$/);
+    assert.equal(jobs.keySha256('k'), crypto.createHash('sha256').update('k', 'utf8').digest('hex'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('storage_migrate never deletes from the SOURCE: its one delete is on the pending target, behind a guard', () => {
+  const jobs = byPath(files()).get('foundation/runtime/jobs.mjs').content;
+  const deletes = (jobs.match(/\b[A-Za-z_.]+\.delete\(/g) || []).filter((d) => d !== 'ctx.transfers.delete(');
+  assert.deepEqual(deletes, ['target.delete('], 'the only storage delete in jobs.mjs');
+  assert.match(jobs, /async function deleteFromTarget\(target, key\) \{\n {2}if \(!target \|\| target\.pending !== true\)/);
+  assert.doesNotMatch(jobs, /source\.(?:delete|put)\(/);
+});
+
+test('health: the pending storage probe counts the objects under bucket + prefix (probe keys left out, every page), or omits the count', async () => {
+  const dir = materialize({ withNodeModules: true });
+  try {
+    const health = await import(pathToFileURL(path.join(dir, 'foundation/runtime/health.mjs')).href);
+    const keys = ['a', 'b/c', '.mock2-health/0b1e', 'd', '.mock2-health/x', 'e.mock2-health/kept'];
+    let pages = 0;
+    const paged = { async *listAll() { for (const key of keys) { if (key === 'd') pages += 1; yield { key, size: 1 }; } } };
+    assert.equal(await health.countObjects(paged), 4);
+    assert.equal(pages, 1);
+    const broken = { async *listAll() { yield { key: 'a' }; throw new Error('listing failed'); } };
+    assert.equal(await health.countObjects(broken), null, 'a failed listing is no count, never a guess');
+    const jobs = byPath(files()).get('foundation/runtime/jobs.mjs').content;
+    assert.match(jobs, /const items = page\.items\.filter\(\(i\) => !i\.key\.startsWith\(PROBE_PREFIX\)\);/, 'the copy job skips the probe keys it is compared without');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

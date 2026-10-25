@@ -179,6 +179,61 @@ test('embeddings: OpenAI with no key is MISSING_CREDENTIALS; a new key alone (sa
   assert.equal(shorter.plan.credentials, 'reuse_active', 'same provider at the same address reuses the stored key');
 });
 
+test('embeddings: an active index in another space than the provider is repaired by a switch to the current provider (re-embed, not a no-op)', () => {
+  const openaiCfg = validateEmbeddingsConfig('openai', {}).config;
+  const openai = { state: 'on', provider: 'openai', config: openaiCfg, pending: null, secretNames: new Set([SECRET_NAMES.embeddingsApiKey]), activeJob: null };
+  const localIndex = { id: 'ix_local0001', provider: 'local', model: STACK.embeddings.model, dimensions: 384, metric: 'cosine' };
+  const repair = planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: localIndex } });
+  assert.equal(repair.plan.op, 'switch');
+  assert.equal(repair.plan.after, 'reembed');
+  assert.equal(repair.plan.credentials, 'reuse_active');
+  const matching = { id: 'ix_openai001', provider: 'openai', model: openaiCfg.model, dimensions: openaiCfg.dimensions, metric: 'cosine' };
+  assert.equal(planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: matching } }).plan.op, 'noop');
+  assert.equal(planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: false } }).plan.op, 'noop', 'no index: nothing to repair');
+  assert.equal(planEmbeddingsAction({ current: openai, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: null } }).plan.op, 'noop', 'unknown: the feature row decides');
+  // A clone without the key: the repair asks for it.
+  assert.equal(planEmbeddingsAction({ current: { ...openai, secretNames: new Set() }, request: { action: 'switch', provider: 'openai' }, facts: { activeIndex: localIndex } }).code, CODES.MISSING_CREDENTIALS);
+});
+
+test('GET: an active index that does not match the embeddings provider is warned INDEX_PROVIDER_MISMATCH with the repair as next step', () => {
+  const openaiCfg = validateEmbeddingsConfig('openai', {}).config;
+  const rows = featureRowsFrom([{ feature: 'embeddings', state: 'on', provider: 'openai', config_json: JSON.stringify(openaiCfg), pending_json: null, updated_at: '2026-10-24T10:00:00Z' }]);
+  const activeIndex = { type: 'index', id: 'ix_local0001', provider: 'local', model: STACK.embeddings.model, dimensions: 384, metric: 'cosine', item_count: 12 };
+  const p = projectFoundation({ project: PROJECT, rows, secretNames: [], activeIndex });
+  const w = p.warnings.find((x) => x.code === 'INDEX_PROVIDER_MISMATCH');
+  assert.ok(w, 'warned');
+  assert.match(w.message, /ix_local0001/);
+  assert.match(w.message, /switch embeddings to openai/);
+  assert.deepEqual(w.options, [{ action: 'switch', provider: 'openai', config: openaiCfg, field: 'credentials' }], 'the next step, and the key it needs');
+  const keyed = projectFoundation({ project: PROJECT, rows, secretNames: [SECRET_NAMES.embeddingsApiKey], activeIndex });
+  assert.deepEqual(keyed.warnings.find((x) => x.code === 'INDEX_PROVIDER_MISMATCH').options, [{ action: 'switch', provider: 'openai', config: openaiCfg }]);
+  const matching = projectFoundation({ project: PROJECT, rows, secretNames: [], activeIndex: { ...activeIndex, provider: 'openai', model: openaiCfg.model, dimensions: 1536 } });
+  assert.equal(matching.warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false);
+  assert.equal(projectFoundation({ project: PROJECT, rows, secretNames: [] }).warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false, 'no index, no warning');
+});
+
+test('promotion read-back: the reembed check SQL interpolates only validated ids; the checks name every mismatch', async () => {
+  const { buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion } = await import('../mock2/foundation-logic.js');
+  const sql = buildReembedCheckSql({ targetIndex: 'ix_new0001', sourceIndex: 'ix_old0001' });
+  assert.match(sql, /'mock2_foundation\.vec_ix_new0001'::regclass/);
+  assert.match(sql, /count\(\*\) FROM mock2_foundation\.vec_ix_new0001\)/);
+  assert.match(sql, /'source_rows', \(SELECT count\(\*\) FROM mock2_foundation\.vec_ix_old0001\)/);
+  assert.match(buildReembedCheckSql({ targetIndex: 'ix_new0001' }), /'source_rows', NULL/);
+  for (const bad of ["x'; DROP TABLE y; --", 'IX', '']) assert.throws(() => buildReembedCheckSql({ targetIndex: bad }));
+  assert.throws(() => buildReembedCheckSql({ targetIndex: 'ix_ok', sourceIndex: 'a b' }));
+  const good = { state: 'ready', provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536, item_count: 7, column_type: 'vector(1536)', target_rows: 7, source_rows: 7 };
+  const planned = { provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 };
+  assert.deepEqual(checkReembedPromotion({ check: good, planned, sourceIndex: 'ix_old' }), { ok: true, items: 7 });
+  assert.match(checkReembedPromotion({ check: { ...good, dimensions: 3072, column_type: 'halfvec(3072)' }, planned, sourceIndex: 'ix_old' }).error, /3072 dimensions/);
+  assert.match(checkReembedPromotion({ check: { ...good, model: 'other' }, planned }).error, /model is other/);
+  assert.match(checkReembedPromotion({ check: { ...good, state: 'building' }, planned }).error, /building, not ready/);
+  assert.equal(checkReembedPromotion({ check: undefined, planned }).ok, false);
+  assert.equal(checkReembedPromotion({ check: { ...good, source_rows: 9 }, planned }).ok, true, 'no source index planned: not compared');
+  assert.equal(checkStorageCopyPromotion({ progress: { objects_done: 3, objects_total: 3, failed: 0 }, test: { ok: true }, targetCount: null }).ok, true, 'no count reported: the re-test decides');
+  assert.equal(checkStorageCopyPromotion({ progress: {}, test: { ok: false, status: 'unavailable' } }).ok, false);
+  assert.equal(checkStorageCopyPromotion({ progress: { objects_done: 3 }, test: { ok: true }, targetCount: 5 }).ok, true, 'a target may already hold other objects');
+});
+
 test('embeddings: OpenAI-compatible needs base_url, model and dimensions; its key is optional and never reused at a new address', () => {
   assert.equal(validateEmbeddingsConfig('openai_compatible', { model: 'm', dimensions: 768 }).status, 400);
   assert.equal(validateEmbeddingsConfig('openai_compatible', { base_url: 'http://10.0.0.5:8080/v1', dimensions: 768 }).status, 400);

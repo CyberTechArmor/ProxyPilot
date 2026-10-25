@@ -27,7 +27,8 @@ import {
   CODES, BUNDLED_APP_IDENTITY, refusal, planStorageAction, planEmbeddingsAction, serviceStillUsed, interpretCliTest,
   parseHealthOutput, projectFoundation, projectJob, credentialSecretNames, parseJsonObject, parseJsonRows, newJobId, newIndexId,
   buildJobInsertSql, buildJobPollSql, buildActiveIndexSql, buildOverviewReadSql, buildCancelJobSql, promoteIndexStatements,
-  SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId,
+  SQL_MARKERS, parseMarker, sanitizeDetail, redactSecrets, isValidJobId, needsReembed, indexSpace,
+  buildReembedCheckSql, checkReembedPromotion, checkStorageCopyPromotion, archiveStorageRefusal,
 } from './foundation-logic.js';
 import { SECRET_NAMES } from './foundation-contract.js';
 
@@ -35,7 +36,9 @@ const APP_DIR = '/srv/app';
 const nowIso = () => new Date().toISOString();
 const stack = () => import('./foundation-stack.js');
 // A job whose app-side row has not moved for this long is relaunched (job-run
-// is resumable and idempotent), at most RELAUNCH_MAX times.
+// is resumable and idempotent): at most once per window, and failed after
+// RELAUNCH_MAX launches with no movement in between (the count starts over
+// when the row moves again).
 export const JOB_STALE_MS = 10 * 60_000;
 export const RELAUNCH_MAX = 5;
 const HEALTH_CACHE_MS = 10_000;
@@ -258,6 +261,57 @@ async function promote(project, feature, { indexId = null } = {}) {
   return { ok: true, generation: s.generation, ...(serviceNote ? { warning: serviceNote } : {}) };
 }
 
+// ---- the host's look before a job's promotion ------------------------------------
+//
+// TRUST BOUNDARY. The app role owns the app database (it can write the jobs and
+// vector_indexes rows and its own vec_* tables) and the foundation CLI runs
+// inside the guest, so a job's 'succeeded' and an index's 'ready' are the
+// guest's word. Before switching, the host looks for itself where it cheaply
+// can, and refuses the promotion on a mismatch (the job stays 'running' with
+// the reason; nothing is switched):
+//   storage_migrate — the job's own counts must agree (every object verified,
+//     none failed); the pending provider is tested again NOW (storage-test
+//     --pending); and the target's object count — taken by the HOST with the
+//     platform's admin identity when the target is the bundled storage,
+//     reported by the CLI for an external target when it reports one
+//     (detail.object_count) — must not be below the job's verified count.
+//   reembed — the host reads the target index back as the superuser: its row
+//     (state, provider, model, dimensions), the declared type of its vector
+//     column (Postgres enforces it on every row) and the REAL row counts of
+//     the target and source tables; the target must hold exactly what its row
+//     claims, and as many items as the source.
+// What stays the guest's word: the per-object size/sha256 verification and the
+// self-retrieval sample (the host neither re-reads object bytes nor re-embeds
+// a sample), and an external target's object count. A guest that lies
+// consistently about those can still get a switch promoted; the source (the
+// preserved bundled volume, the retired index) is never deleted by a
+// promotion, so it can be switched back.
+export const PROMOTION_RECHECK_MS = 60_000;
+
+async function verifyBeforePromotion(project, job, params, appProgress) {
+  try {
+    if (job.kind === 'storage_migrate') {
+      const test = await testPending(project, 'storage', []);
+      let targetCount = null;
+      if (params.to?.provider === 'bundled') {
+        targetCount = await bundledObjectCount(project);
+        if (targetCount == null && Number.isInteger(appProgress.objects_done)) return { ok: false, error: 'the bundled storage could not be counted' };
+      } else if (Number.isInteger(test?.detail?.object_count)) {
+        targetCount = test.detail.object_count;
+      }
+      return checkStorageCopyPromotion({ progress: appProgress, test, targetCount });
+    }
+    const r = await store.appPsql(project.container_name, buildReembedCheckSql({ targetIndex: params.target_index, sourceIndex: params.source_index || null }), { timeoutMs: 120_000 });
+    if (Number(r?.code) !== 0 || !parseMarker(r.stdout, SQL_MARKERS.ok).length) {
+      return { ok: false, error: `the new index could not be read back: ${redactSecrets(String(r?.stderr || r?.stdout || 'no answer')).trim().slice(-200)}` };
+    }
+    const check = parseJsonRows(r.stdout).find((x) => x.type === 'recheck');
+    return checkReembedPromotion({ check, planned: params.to || {}, sourceIndex: params.source_index || null });
+  } catch (e) {
+    return { ok: false, error: redactSecrets(e?.message || String(e)).slice(0, 200) };
+  }
+}
+
 // ---- jobs -----------------------------------------------------------------------
 
 async function startJob(project, feature, { kind, params, index = null }, { userId }) {
@@ -360,8 +414,15 @@ async function refreshJobOnce(project, staleJob) {
   const hostProgress = parseJsonObject(job.progress_json, {}) || {};
   if (appJob.state === 'queued' || appJob.state === 'running') {
     const updated = Date.parse(appJob.updated_at || '') || 0;
-    if (updated && Date.now() - updated > JOB_STALE_MS) {
-      const launches = Number(hostProgress.launches) || 0;
+    const relaunchedAt = Date.parse(hostProgress.relaunched_at || '') || 0;
+    // The app row moved after our last relaunch: the job is alive again, so
+    // the count of relaunches without progress starts over.
+    const moved = relaunchedAt > 0 && updated > relaunchedAt;
+    const launches = moved ? 1 : (Number(hostProgress.launches) || 0);
+    // Relaunch (or give up) only when the row has not moved for the stale
+    // window AND the last relaunch is itself that old — every poll (the 3 s
+    // watch included) must not count as another relaunch.
+    if (updated && Date.now() - updated > JOB_STALE_MS && (!relaunchedAt || moved || Date.now() - relaunchedAt > JOB_STALE_MS)) {
       if (launches >= RELAUNCH_MAX) {
         await store.appPsql(project.container_name, buildCancelJobSql({ jobId: job.id, indexId: params.target_index || null })).catch(() => {});
         updatePending(project.id, feature, { job_id: null });
@@ -373,7 +434,7 @@ async function refreshJobOnce(project, staleJob) {
       } catch { /* the next sweep tries again */ }
       return store.updateJob(job.id, { state: appJob.state, progress: { ...appProgress, launches: launches + 1, relaunched_at: nowIso(), last_poll_at: nowIso() } });
     }
-    return store.updateJob(job.id, { state: appJob.state, progress: { ...appProgress, last_poll_at: nowIso() } });
+    return store.updateJob(job.id, { state: appJob.state, progress: { ...appProgress, ...(moved ? { launches, relaunched_at: null } : {}), last_poll_at: nowIso() } });
   }
   if (appJob.state === 'failed' || appJob.state === 'cancelled') {
     // The switch stays staged (tested) so it can be tried again; a service
@@ -386,7 +447,12 @@ async function refreshJobOnce(project, staleJob) {
   // deployment lock cancelJob takes, so a cancel can never answer "cancelled"
   // while the switch completes. The job is re-read inside: a cancel that won
   // the lock first leaves it finished, and a busy lock means the next poll
-  // promotes.
+  // promotes. A promotion the host's own check refused is looked at again
+  // once per PROMOTION_RECHECK_MS, not on every poll.
+  const lastCheck = Date.parse(hostProgress.promotion_checked_at || '') || 0;
+  if (hostProgress.phase === 'verifying' && Date.now() - lastCheck < PROMOTION_RECHECK_MS) {
+    return store.updateJob(job.id, { progress: { last_poll_at: nowIso() } });
+  }
   const done = await exclusive(project.id, async () => {
     const current = store.getJob(job.id);
     if (!current || !['queued', 'running'].includes(current.state)) return current;
@@ -397,6 +463,10 @@ async function refreshJobOnce(project, staleJob) {
     if (job.kind === 'reembed' && !['ready', 'active'].includes(index?.state)) {
       updatePending(project.id, feature, { job_id: null });
       return store.updateJob(job.id, { state: 'failed', error: `the new index did not validate (state ${index?.state || 'missing'}); the active index is unchanged`, progress: appProgress, finished: true });
+    }
+    const check = await verifyBeforePromotion(project, job, params, appProgress);
+    if (!check.ok) {
+      return store.updateJob(job.id, { state: 'running', error: `promotion refused: ${check.error}; nothing was switched`, progress: { ...appProgress, phase: 'verifying', promotion_checked_at: nowIso() } });
     }
     const p = await promote(project, feature, { indexId: job.kind === 'reembed' ? params.target_index : null });
     if (!p.ok) return store.updateJob(job.id, { state: 'running', error: `promotion pending: ${p.error}`, progress: { ...appProgress, phase: 'promoting' } });
@@ -531,18 +601,15 @@ async function performSwitch(project, feature, plan, { userId }) {
       params: { from: { provider: activeRow.provider, ...pickSide(activeRow.config) }, to: { provider: plan.pending.provider, ...pickSide(plan.pending.config) }, verify: ['size', 'sha256'] },
     }, { userId });
   }
-  // reembed: when the app has no active index there is nothing to rebuild —
-  // promote at once; otherwise build and validate a new index first.
-  let active;
-  try {
-    const r = await store.appPsql(project.container_name, buildActiveIndexSql(), { timeoutMs: 20_000 });
-    active = Number(r?.code) === 0 && parseMarker(r.stdout, SQL_MARKERS.ok).length ? (parseJsonRows(r.stdout)[0] || false) : null;
-  } catch { active = null; }
+  // reembed: when the app has no active index, or its active index is already
+  // in the new vector space, there is nothing to rebuild — promote at once;
+  // otherwise build and validate a new index first.
+  const active = await readActiveIndex(project);
   if (active == null) {
     await stopUnused();
     return refusal(CODES.FOUNDATION_UNAVAILABLE, 'The app database did not say whether an index exists; nothing was switched.', [{ action: 'switch' }]);
   }
-  if (active === false) {
+  if (active === false || !needsReembed(indexSpace(active), plan.pending)) {
     const p = await promote(project, feature);
     if (!p.ok) return refusal(CODES.FOUNDATION_UNAVAILABLE, `The switch tested fine but could not be applied: ${p.error}`, [{ action: 'switch' }]);
     return { ok: true, promoted: true, reembedded: false, ...(plan.warnings?.length ? { warnings: plan.warnings } : {}) };
@@ -558,6 +625,15 @@ async function performSwitch(project, feature, plan, { userId }) {
     },
     index: { id: target, provider: plan.pending.provider, model: cfg.model, dimensions: cfg.dimensions, metric: cfg.metric },
   }, { userId });
+}
+
+// The app database's active vector index row, false when there is none, null
+// when the database did not answer.
+async function readActiveIndex(project) {
+  try {
+    const r = await store.appPsql(project.container_name, buildActiveIndexSql(), { timeoutMs: 20_000 });
+    return Number(r?.code) === 0 && parseMarker(r.stdout, SQL_MARKERS.ok).length ? (parseJsonRows(r.stdout)[0] || false) : null;
+  } catch { return null; }
 }
 
 function pickSide(config = {}) {
@@ -576,13 +652,53 @@ export async function featureAction(projectId, feature, request, { userId = null
     if (feature === 'storage' && current.provider === 'bundled' && !current.activeJob && (request?.action === 'off' || request?.action === 'switch')) {
       facts = { bundledObjectCount: await bundledObjectCount(project) };
     }
-    const decision = feature === 'storage' ? planStorageAction({ current, request, facts }) : planEmbeddingsAction({ current, request });
+    // An active index that does not match the requested space is rebuilt even
+    // when the feature row already names it (the repair of a mismatched index).
+    if (feature === 'embeddings' && !current.activeJob && request?.action === 'switch') {
+      facts = { activeIndex: await readActiveIndex(project) };
+    }
+    const decision = feature === 'storage' ? planStorageAction({ current, request, facts }) : planEmbeddingsAction({ current, request, facts });
     if (!decision.ok) return decision;
     const plan = decision.plan;
     if (plan.op === 'noop') return { ok: true, noop: true, reason: plan.reason };
     if (plan.op === 'set_state') return setState(project, feature, plan);
     return performSwitch(project, feature, plan, { userId });
   });
+}
+
+// ---- archive ---------------------------------------------------------------------
+//
+// The dashboard's Archive destroys the guest (incus delete --force), and with
+// it the stack's volumes; the bundled storage's objects have no checkpoint, so
+// a rehydrate would come back with an empty bucket. archiveRefusal(projectId)
+// → null (the archive may go ahead) | a refusal { code, message, options,
+// object_count? } while the bundled storage holds objects or cannot be
+// counted. A pre-foundation project always answers null (unchanged).
+export async function archiveRefusal(projectId) {
+  const project = store.getFoundationProject(projectId);
+  if (!project?.foundation_version) return null;
+  const row = store.readFeatureRows(project.id).storage;
+  const online = project.lifecycle === 'active' && !!project.container_name;
+  if (row.provider === 'bundled') {
+    // Bundled storage is turned off only while empty, and nothing writes to it while it is off.
+    if (row.state === 'off') return null;
+    return archiveStorageRefusal({ count: online ? await bundledObjectCount(project) : null, online });
+  }
+  return archiveStorageRefusal({ count: preservedBundledObjects(project.id), external: true, online });
+}
+
+// While another provider is active the bundled volume is not counted live (its
+// container is stopped). What it still holds: the last count the host took of
+// it (taken when storage last switched away from bundled), unless a verified
+// copy away from bundled succeeded after that count. null = unknown.
+function preservedBundledObjects(projectId) {
+  const last = store.readObjectCount(projectId);
+  if (!last) return null;
+  if (last.count === 0) return 0;
+  const at = Date.parse(last.at || '') || 0;
+  const copied = store.listJobs(projectId, 50).some((j) => j.kind === 'storage_migrate' && j.state === 'succeeded'
+    && parseJsonObject(j.params_json, {})?.from?.provider === 'bundled' && (Date.parse(j.finished_at || '') || 0) >= at);
+  return copied ? 0 : last.count;
 }
 
 // For tests: drop in-process caches.

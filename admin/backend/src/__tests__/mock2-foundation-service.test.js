@@ -262,7 +262,7 @@ test('embeddings: with an active index a provider change re-embeds into a NEW in
   const again = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai', credentials: { api_key: API_KEY } } });
   const job2 = again.body.job;
   guest.jobs[job2.id].state = 'succeeded';
-  guest.indexes[job2.target_index].state = 'ready';
+  Object.assign(guest.indexes[job2.target_index], { state: 'ready', item_count: 50 });
   const done = await service.getJob(1, job2.id);
   assert.equal(done.state, 'succeeded');
   assert.equal(guest.activeIndex.id, job2.target_index);
@@ -271,6 +271,140 @@ test('embeddings: with an active index a provider change re-embeds into a NEW in
   assert.ok(promoteSql.indexOf("SET state = 'retired'") < promoteSql.indexOf("INSERT INTO mock2_foundation.features"), 'index swap and provider switch in the same transaction');
   assert.equal(store.readFeatureRows(1).embeddings.provider, 'openai');
   assert.deepEqual(calls.services.at(-1), ['embeddings', 'stop'], 'the local model is no longer used');
+});
+
+test('embeddings: an active index that does not match the provider (a full clone, an old restore) is warned and repaired by switching to the current provider', async () => {
+  const { guest } = setup();
+  // The feature row says OpenAI (with its key); the database brought a local index.
+  const r = routes();
+  const toOpenai = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai', credentials: { api_key: API_KEY } } });
+  assert.equal(toOpenai.body.promoted, true);
+  guest.activeIndex = { id: 'ix_local0001', provider: 'local', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, metric: 'cosine', item_count: 12 };
+  guest.indexes.ix_local0001 = { ...guest.activeIndex, state: 'active' };
+  service.resetFoundationServiceCaches();
+  const view = (await r.call('get', '/projects/:id/foundation')).body;
+  const w = view.warnings.find((x) => x.code === 'INDEX_PROVIDER_MISMATCH');
+  assert.ok(w, 'GET warns');
+  assert.deepEqual(w.options[0].provider, 'openai');
+  // The next step: "switch to the current provider" re-embeds into a NEW index (the stored key is reused).
+  const repair = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai' } });
+  assert.equal(repair.status, 202, JSON.stringify(repair.body));
+  assert.equal(repair.body.job.kind, 'reembed');
+  assert.deepEqual(repair.body.job.from, { provider: 'local', model: 'BAAI/bge-small-en-v1.5', dimensions: 384 });
+  assert.deepEqual(repair.body.job.to, { provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536 });
+  assert.equal(store.readSecret(1, 'pending.embeddings.api_key'), API_KEY, 'reuse_active');
+  const target = repair.body.job.target_index;
+  guest.jobs[repair.body.job.id].state = 'succeeded';
+  Object.assign(guest.indexes[target], { state: 'ready', item_count: 12 });
+  assert.equal((await service.getJob(1, repair.body.job.id)).state, 'succeeded');
+  assert.equal(guest.activeIndex.id, target);
+  assert.equal(guest.indexes.ix_local0001.state, 'retired');
+  service.resetFoundationServiceCaches();
+  assert.equal((await r.call('get', '/projects/:id/foundation')).body.warnings.some((x) => x.code === 'INDEX_PROVIDER_MISMATCH'), false);
+  for (const resp of r.responses) noPlanted(resp);
+});
+
+test('embeddings: switching the provider to the space the active index is already in promotes at once (nothing to rebuild)', async () => {
+  const { guest } = setup();
+  // The feature row is local; a restored dump brought an OpenAI index.
+  guest.activeIndex = { id: 'ix_openai001', provider: 'openai', model: 'text-embedding-3-small', dimensions: 1536, metric: 'cosine', item_count: 3 };
+  guest.indexes.ix_openai001 = { ...guest.activeIndex, state: 'active' };
+  const r = routes();
+  const res = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai', credentials: { api_key: API_KEY } } });
+  assert.equal(res.status, 200);
+  assert.deepEqual([res.body.promoted, res.body.reembedded], [true, false]);
+  assert.equal(store.readFeatureRows(1).embeddings.provider, 'openai');
+  assert.equal(guest.activeIndex.id, 'ix_openai001', 'the matching index stays active');
+});
+
+test('promotion re-checks a reembed on the host: a "ready" index that does not hold what it claims is never swapped in', async () => {
+  const { guest, calls } = setup();
+  guest.activeIndex = { id: 'ix_local0001', provider: 'local', model: 'BAAI/bge-small-en-v1.5', dimensions: 384, metric: 'cosine', item_count: 50 };
+  guest.indexes.ix_local0001 = { ...guest.activeIndex, state: 'active' };
+  const r = routes();
+  const res = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'switch', provider: 'openai', credentials: { api_key: API_KEY } } });
+  const { id: jobId, target_index: target } = res.body.job;
+  guest.jobs[jobId].state = 'succeeded';
+  const refusedWith = async (patch, re) => {
+    Object.assign(guest.indexes[target], patch);
+    store.updateJob(jobId, { progress: { promotion_checked_at: null } });
+    const j = await service.getJob(1, jobId);
+    assert.equal(j.state, 'running', JSON.stringify(patch));
+    assert.match(j.error, re);
+    assert.match(j.error, /promotion refused.*nothing was switched/);
+    assert.equal(store.readFeatureRows(1).embeddings.provider, 'local', 'nothing switched');
+    assert.equal(guest.activeIndex.id, 'ix_local0001', 'the active index is unchanged');
+  };
+  // Claims 50 items in its row, but its table holds none.
+  await refusedWith({ state: 'ready', item_count: 50, rows: 0 }, /reports 50 item\(s\) but holds 0/);
+  // Holds what it claims, but fewer items than the source.
+  await refusedWith({ item_count: 20, rows: 20 }, /holds 20 item\(s\) but the active index ix_local0001 holds 50/);
+  // Its vector column is not the planned type.
+  await refusedWith({ item_count: 50, rows: 50, column_type: 'vector(384)' }, /vector column is vector\(384\), not vector\(1536\)/);
+  // A refused check is not repeated on every poll.
+  Object.assign(guest.indexes[target], { column_type: undefined });
+  const rechecks = () => calls.psql.filter((c) => c.sql.includes("'type', 'recheck'")).length;
+  const before = rechecks();
+  assert.equal((await service.getJob(1, jobId)).state, 'running', 'within PROMOTION_RECHECK_MS: not checked again');
+  assert.equal(rechecks(), before);
+  // Once it checks out, the next look promotes.
+  store.updateJob(jobId, { progress: { promotion_checked_at: new Date(Date.now() - service.PROMOTION_RECHECK_MS - 1000).toISOString() } });
+  const done = await service.getJob(1, jobId);
+  assert.deepEqual([done.state, done.error], ['succeeded', null]);
+  assert.equal(guest.activeIndex.id, target);
+});
+
+test('promotion re-checks a storage copy: the target is tested again and counted; fewer objects than verified is refused', async () => {
+  const { guest, calls } = setup({ objects: 5 });
+  const r = routes();
+  // External → bundled with copy: the host counts the bundled target itself.
+  const out = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'fresh', acknowledge: true } });
+  assert.equal(out.body.promoted, true);
+  const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'bundled', mode: 'copy' } });
+  assert.equal(res.status, 202);
+  const jobId = res.body.job.id;
+  guest.jobs[jobId].state = 'succeeded';
+  guest.jobs[jobId].progress = { objects_done: 9, objects_total: 9, failed: 0 };
+  guest.objectCount = 4;
+  const tests = calls.cli.filter((c) => c.args[0] === 'storage-test').length;
+  const j = await service.getJob(1, jobId);
+  assert.equal(j.state, 'running');
+  assert.match(j.error, /holds 4 object\(s\), fewer than the 9 the job verified/);
+  assert.equal(calls.cli.filter((c) => c.args[0] === 'storage-test').length, tests + 1, 'the pending provider was tested again');
+  assert.equal(store.readFeatureRows(1).storage.provider, 'external', 'nothing switched');
+  // The job's own numbers disagree.
+  guest.objectCount = 9;
+  guest.jobs[jobId].progress = { objects_done: 8, objects_total: 9, failed: 1 };
+  store.updateJob(jobId, { progress: { promotion_checked_at: null } });
+  assert.match((await service.getJob(1, jobId)).error, /8 of 9 object\(s\) verified/);
+  // The re-test fails.
+  guest.jobs[jobId].progress = { objects_done: 9, objects_total: 9, failed: 0 };
+  guest.cli['storage-test'] = { code: 1, stdout: '{"status":"degraded","detail":{"message":"bucket gone"}}' };
+  store.updateJob(jobId, { progress: { promotion_checked_at: null } });
+  assert.match((await service.getJob(1, jobId)).error, /did not pass its test again \(degraded\)/);
+  // An external target's count comes from the CLI when it reports one.
+  delete guest.cli['storage-test'];
+  store.updateJob(jobId, { progress: { promotion_checked_at: null } });
+  const done = await service.getJob(1, jobId);
+  assert.deepEqual([done.state, done.error], ['succeeded', null]);
+  assert.equal(store.readFeatureRows(1).storage.provider, 'bundled');
+});
+
+test('promotion re-check of a copy to an external provider uses the CLI\'s reported object count', async () => {
+  const { guest } = setup({ objects: 3 });
+  const r = routes();
+  const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+  const jobId = res.body.job.id;
+  guest.jobs[jobId].state = 'succeeded';
+  guest.jobs[jobId].progress = { objects_done: 3, objects_total: 3, failed: 0 };
+  guest.cli['storage-test'] = { code: 0, stdout: '{"status":"ready","detail":{"object_count":2}}' };
+  const j = await service.getJob(1, jobId);
+  assert.equal(j.state, 'running');
+  assert.match(j.error, /holds 2 object\(s\), fewer than the 3/);
+  guest.cli['storage-test'] = { code: 0, stdout: '{"status":"ready","detail":{"object_count":3}}' };
+  store.updateJob(jobId, { progress: { promotion_checked_at: null } });
+  assert.equal((await service.getJob(1, jobId)).state, 'succeeded');
+  assert.equal(store.readFeatureRows(1).storage.provider, 'external');
 });
 
 test('a promotion the app database refuses leaves mock2.db exactly as it was (the job keeps promoting)', async () => {
@@ -355,11 +489,39 @@ test('sweep: a job whose app row stopped moving is relaunched (resumable), then 
   guest.jobs[jobId].updated_at = new Date(Date.now() - service.JOB_STALE_MS - 1000).toISOString();
   await service.sweepFoundationJobs();
   assert.equal(calls.detached.length, 2, 'relaunched');
-  store.updateJob(jobId, { progress: { launches: service.RELAUNCH_MAX } });
+  store.updateJob(jobId, { progress: { launches: service.RELAUNCH_MAX, relaunched_at: new Date(Date.now() - service.JOB_STALE_MS - 1000).toISOString() } });
   await service.sweepFoundationJobs();
   const j = store.getJob(jobId);
   assert.equal(j.state, 'failed');
   assert.match(j.error, /stopped making progress/);
+});
+
+test('a stale job is relaunched once per stale window, not on every poll; the count starts over when the app row moves', async () => {
+  const { guest, calls } = setup({ objects: 1 });
+  const r = routes();
+  const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+  const jobId = res.body.job.id;
+  const old = () => new Date(Date.now() - service.JOB_STALE_MS - 1000).toISOString();
+  guest.jobs[jobId].state = 'running';
+  guest.jobs[jobId].updated_at = old();
+  // The 3 s watch, a GET and the sweep keep polling a long copy whose row is quiet.
+  for (let i = 0; i < 3 * service.RELAUNCH_MAX; i++) await service.getJob(1, jobId);
+  let j = store.getJob(jobId);
+  assert.equal(j.state, 'running', 'polling alone never fails the job');
+  assert.equal(calls.detached.length, 2, 'one relaunch for the stale window');
+  assert.equal(JSON.parse(j.progress_json).launches, 2);
+  // A whole window later it is still quiet: one more relaunch.
+  store.updateJob(jobId, { progress: { relaunched_at: old() } });
+  await service.getJob(1, jobId);
+  await service.getJob(1, jobId);
+  assert.equal(calls.detached.length, 3);
+  assert.equal(JSON.parse(store.getJob(jobId).progress_json).launches, 3);
+  // The relaunched job writes again: the count starts over.
+  guest.jobs[jobId].updated_at = new Date(Date.now() + 1000).toISOString();
+  await service.getJob(1, jobId);
+  j = store.getJob(jobId);
+  assert.deepEqual([j.state, JSON.parse(j.progress_json).launches, JSON.parse(j.progress_json).relaunched_at], ['running', 1, null]);
+  assert.equal(calls.detached.length, 3);
 });
 
 test('polls that overlap a promotion (sweep + GET job + GET foundation) promote once and never report the job failed', async () => {
@@ -405,6 +567,67 @@ test('a service that will not start refuses the change and changes nothing (a th
   const offLocal = await r.call('post', '/projects/:id/foundation/embeddings', { body: { action: 'off' } });
   assert.equal(offLocal.status, 200, 'turning off still applies (the app is told first)');
   assert.match(offLocal.body.warning, /could not be stopped/);
+});
+
+test('archive (destroys the guest): refused while the bundled storage holds objects or cannot be counted; legacy projects unchanged', async () => {
+  const { db, guest, stack } = setup({ objects: 3 });
+  const has = await service.archiveRefusal(1);
+  assert.deepEqual([has.code, has.object_count], [CODES.STORAGE_HAS_OBJECTS, 3]);
+  assert.match(has.message, /holds 3 object\(s\)/);
+  assert.deepEqual(has.options.map((o) => o.action), ['switch_storage', 'export']);
+  assert.deepEqual([has.options[0].provider, has.options[0].mode], ['external', 'copy']);
+  guest.objectCount = 0;
+  assert.equal(await service.archiveRefusal(1), null, 'empty bundled storage: archive goes ahead');
+  stack.bundledStorageObjectCount = async () => null;
+  const unknown = await service.archiveRefusal(1);
+  assert.equal(unknown.code, CODES.STORAGE_OBJECTS_UNKNOWN, 'a count that cannot be read is never taken as empty');
+  // Stopped: the bundled storage cannot be counted.
+  addProject(db, { id: 4, lifecycle: 'stopped' });
+  store.getFoundationProvisionInputs(4);
+  const stopped = await service.archiveRefusal(4);
+  assert.equal(stopped.code, CODES.STORAGE_OBJECTS_UNKNOWN);
+  assert.equal(stopped.options[0].action, 'wake');
+  // Bundled storage that is off was empty when turned off: archive goes ahead.
+  store.writeFeature(4, 'storage', { ...store.readFeatureRows(4).storage, state: 'off' });
+  assert.equal(await service.archiveRefusal(4), null);
+  // Pre-foundation projects: unchanged.
+  addProject(db, { id: 2, foundationVersion: null });
+  assert.equal(await service.archiveRefusal(2), null);
+});
+
+test('archive with an external provider: refused while the preserved bundled volume still holds objects that were never copied', async () => {
+  {
+    const { guest } = setup({ objects: 2 });
+    const r = routes();
+    const fresh = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'fresh', acknowledge: true } });
+    assert.equal(fresh.body.promoted, true);
+    guest.objectCount = null;  // the bundled container is stopped now
+    const refused = await service.archiveRefusal(1);
+    assert.deepEqual([refused.code, refused.object_count], [CODES.STORAGE_HAS_OBJECTS, 2]);
+    assert.match(refused.message, /left behind/);
+    assert.deepEqual([refused.options[0].provider, refused.options[0].mode], ['bundled', 'fresh']);
+  }
+  {
+    const { guest } = setup({ objects: 2 });
+    const r = routes();
+    const res = await r.call('post', '/projects/:id/foundation/storage', { body: { action: 'switch', provider: 'external', config: S3, credentials: { access_key_id: KEY_ID, secret_access_key: SECRET }, mode: 'copy' } });
+    guest.jobs[res.body.job.id].state = 'succeeded';
+    assert.equal((await service.getJob(1, res.body.job.id)).state, 'succeeded');
+    assert.equal(await service.archiveRefusal(1), null, 'every object was copied (verified) to the external provider');
+  }
+});
+
+test('RATCHET: the dashboard archive route asks archiveRefusal before it destroys the guest, and answers 409 with the options', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../mock2/routes.js', import.meta.url), 'utf8');
+  const start = src.indexOf("router.post('/projects/:id/archive'");
+  const handler = src.slice(start, src.indexOf('router.post(', start + 10));
+  assert.ok(start > 0);
+  const ask = handler.indexOf('foundationService.archiveRefusal(project.id)');
+  assert.ok(ask > 0, 'the guard is called');
+  assert.ok(ask < handler.indexOf('startArchive(project)'), 'before the teardown starts');
+  assert.match(handler, /if \(project\.foundation_version\)/, 'only foundation projects');
+  assert.match(handler, /res\.status\(409\)\.json\(\{ error: refused\.message, code: refused\.code, message: refused\.message, options: refused\.options/);
 });
 
 test('a pre-foundation project has no switches; an offline project refuses writes; invalid bodies are 400', async () => {

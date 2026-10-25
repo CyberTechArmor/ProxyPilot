@@ -13,6 +13,7 @@
 import { registerHooks } from 'node:module';
 import { DatabaseSync } from 'node:sqlite';
 import { MOCK2_MIGRATIONS } from '../../mock2/migrations.js';
+import { vectorColumnPlan } from '../../mock2/foundation-contract.js';
 
 const world = globalThis.__foundationWorld || (globalThis.__foundationWorld = { db: null, stack: null, mainDb: null });
 
@@ -101,6 +102,16 @@ export function scriptedStack() {
         guest.generation += 1;
         guest.lastSync = sql;
         return ok(`BEGIN\nINSERT 0 1\n MF_GENERATION:${guest.generation}\n`);
+      }
+      if (sql.includes("'type', 'recheck'")) {
+        // The host's read-back before a reembed promotion. `rows` / `column_type`
+        // on a guest index override what its row claims (a lying or broken guest).
+        const ix = guest.indexes[sql.match(/WHERE ix\.id = '([a-z0-9_]+)'/)[1]];
+        const src = guest.indexes[sql.match(/'source_rows', \(SELECT count\(\*\) FROM mock2_foundation\.vec_([a-z0-9_]+)\)/)?.[1]];
+        if (!ix) return ok('MF_OK:checked\n');
+        const rowsOf = (x) => (x ? (x.rows ?? x.item_count ?? 0) : null);
+        const check = { type: 'recheck', id: ix.id, state: ix.state, provider: ix.provider, model: ix.model, dimensions: ix.dimensions, item_count: ix.item_count ?? 0, column_type: ix.column_type ?? vectorColumnPlan(ix.dimensions).type, target_rows: rowsOf(ix), source_rows: rowsOf(src) };
+        return ok(`MF_JSON:${JSON.stringify(check)}\nMF_OK:checked\n`);
       }
       if (sql.includes('INSERT INTO mock2_foundation.jobs')) {
         const m = sql.match(/VALUES \('(fj_[a-z0-9]+)', '(storage_migrate|reembed)'/);

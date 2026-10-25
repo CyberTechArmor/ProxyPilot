@@ -367,6 +367,35 @@ export function planStorageAction({ current, request, facts = {} }) {
   };
 }
 
+// archiveStorageRefusal({ count, external, online }) → the refusal of a
+// dashboard Archive (which destroys the guest, and the stack's volumes with
+// it) while the bundled storage holds objects or could not be counted; null
+// when it is empty. `external`: another provider is active and `count` is what
+// the preserved bundled volume still holds.
+export function archiveStorageRefusal({ count = null, external = false, online = true } = {}) {
+  if (count === 0) return null;
+  const options = [
+    { action: 'switch_storage', provider: 'external', mode: 'copy', description: 'Copy every object to an external S3 provider (Application foundation → Switch provider, mode copy), then archive: the objects then live outside the guest.' },
+    { action: 'export', description: 'Export the objects first (an export of the project\'s guest contains the bundled storage volume), remove them from the app, then archive.' },
+  ];
+  if (external) {
+    options[0] = { action: 'switch_storage', provider: 'bundled', mode: 'fresh', description: 'Switch storage back to bundled (its objects come back), then to the external provider with mode copy, then archive.' };
+  }
+  if (!Number.isInteger(count)) {
+    return refusal(CODES.STORAGE_OBJECTS_UNKNOWN,
+      `Archiving destroys this project's guest and its bundled storage with it, and the bundled storage could not be checked for objects${online ? '' : ' (the project is not online)'}, so it is not archived — a rehydrated project would come back with an empty bucket.`,
+      [...(online ? [{ action: 'archive', description: 'Try again once the storage service answers.' }] : [{ action: 'wake', description: 'Wake the project so its bundled storage can be counted, then archive again.' }]), ...options]);
+  }
+  return {
+    ...refusal(CODES.STORAGE_HAS_OBJECTS,
+      external
+        ? `Archiving destroys this project's guest, and with it the preserved bundled storage volume, which still holds ${count} object(s) left behind when storage switched to the external provider without copying them. It is not archived.`
+        : `Archiving destroys this project's guest, and with it the bundled storage, which holds ${count} object(s) with no other copy — a rehydrated project would come back with an empty bucket. It is not archived.`,
+      options),
+    object_count: count,
+  };
+}
+
 // needsReembed(active, pending) — a different vector space: provider, model,
 // dimensions or metric changed. A key or address change alone does not.
 export function needsReembed(active, pending) {
@@ -375,7 +404,28 @@ export function needsReembed(active, pending) {
     || Number(a.config?.dimensions) !== Number(p.config?.dimensions) || (a.config?.metric || 'cosine') !== (p.config?.metric || 'cosine');
 }
 
-export function planEmbeddingsAction({ current, request }) {
+// The vector space an index row was built in, in the feature-row shape
+// needsReembed compares.
+export function indexSpace(index) {
+  return { provider: index?.provider, config: { model: index?.model, dimensions: index?.dimensions, metric: index?.metric || 'cosine' } };
+}
+
+// indexProviderMismatch(index, row) — the active index was built with another
+// provider, model or dimensions than the embeddings feature row: the app's
+// vector calls answer INDEX_PROVIDER_MISMATCH (the same three fields the app
+// runtime compares). A full clone or a restored dump/snapshot taken before a
+// re-embed can bring such an index back.
+export function indexProviderMismatch(index, row) {
+  if (!plain(index) || !plain(row)) return false;
+  return index.provider !== row.provider || index.model !== row.config?.model || Number(index.dimensions) !== Number(row.config?.dimensions);
+}
+
+// facts.activeIndex: the app database's active index row (null/undefined when
+// unknown, false when there is none). An active index built in another space
+// than the requested one needs a re-embed even when the feature row already
+// names the requested provider — "switch to the current provider" is how an
+// index that does not match it is repaired.
+export function planEmbeddingsAction({ current, request, facts = {} }) {
   const action = request?.action;
   if (!['on', 'off', 'switch'].includes(action)) return refusal(CODES.INVALID_REQUEST, "action must be 'on', 'off' or 'switch'", [], 400);
   if (current?.activeJob) return jobRunning(current);
@@ -397,7 +447,8 @@ export function planEmbeddingsAction({ current, request }) {
   if (!creds.ok) return creds;
   const config = v.config;
   const pending = { provider, config };
-  const reembed = needsReembed({ provider: current.provider, config: current.config }, pending);
+  const staleIndex = plain(facts.activeIndex) && needsReembed(indexSpace(facts.activeIndex), pending);
+  const reembed = staleIndex || needsReembed({ provider: current.provider, config: current.config }, pending);
   const supplied = Object.keys(creds.values).length > 0;
   if (!reembed && !supplied && current.config?.base_url === config.base_url) {
     return { ok: true, plan: { op: 'noop', reason: 'embeddings already use this provider, model and dimensions' } };
@@ -652,6 +703,17 @@ export function projectFoundation({ project, rows, secretNames = [], jobs = [], 
       try { if (vectorColumnPlan(r.dimensions).ann === 'none') warnings.push({ code: 'EXACT_SCAN_ONLY', message: `${r.dimensions} dimensions is above pgvector's index limit: search is an exact scan.` }); } catch { /* invalid stays invalid */ }
     }
   }
+  if (embeddings.index && indexProviderMismatch(embeddings.index, rows.embeddings)) {
+    const ix = embeddings.index;
+    const row = rows.embeddings;
+    const needsKey = credentialsRequired('embeddings', row.provider) && !hasCredentials('embeddings', row.provider, names);
+    warnings.push({
+      code: 'INDEX_PROVIDER_MISMATCH',
+      message: `The active vector index (${ix.id}) was built with ${ix.provider} ${ix.model} (${ix.dimensions} dimensions), but embeddings use ${row.provider} ${row.config?.model} (${row.config?.dimensions} dimensions), so vector search and writes fail until the index is rebuilt. `
+        + `Next step: switch embeddings to ${row.provider} with the same model and dimensions — that re-embeds the stored content into a new index${needsKey ? ' (give its API key with the switch)' : ''}.`,
+      options: [{ action: 'switch', provider: row.provider, config: pickConfig('embeddings', row.config), ...(needsKey ? { field: 'credentials' } : {}) }],
+    });
+  }
   if (rows.storage.state === 'on' && rows.storage.provider === 'external' && /^http:/.test(rows.storage.config?.endpoint || '')) {
     warnings.push({ code: 'PLAINTEXT_STORAGE_ENDPOINT', message: 'The external S3 endpoint uses http: requests and credentials signatures travel unencrypted.' });
   }
@@ -821,6 +883,57 @@ export function promoteIndexStatements(indexId) {
   ];
 }
 
+// The host's read-back of a validated index before it is promoted (run as the
+// superuser): the index row, the declared type of its vector column (Postgres
+// enforces it on every row) and the REAL row counts of the target and the
+// source tables — not the item_count the app maintains.
+export function buildReembedCheckSql({ targetIndex, sourceIndex = null }) {
+  const target = vectorTableName(targetIndex);
+  const source = sourceIndex == null || sourceIndex === '' ? null : vectorTableName(sourceIndex);
+  return `${SQL_PREAMBLE}SELECT ${sqlLiteral(SQL_MARKERS.json)} || json_build_object('type', 'recheck', 'id', ix.id, 'state', ix.state, 'provider', ix.provider, 'model', ix.model, 'dimensions', ix.dimensions, 'item_count', ix.item_count, `
+    + `'column_type', (SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = ${sqlLiteral(`mock2_foundation.${target}`)}::regclass AND a.attname = 'embedding' AND NOT a.attisdropped), `
+    + `'target_rows', (SELECT count(*) FROM mock2_foundation.${target}), `
+    + `'source_rows', ${source ? `(SELECT count(*) FROM mock2_foundation.${source})` : 'NULL'})::text FROM mock2_foundation.vector_indexes ix WHERE ix.id = ${sqlLiteral(targetIndex)};
+SELECT ${sqlLiteral(`${SQL_MARKERS.ok}checked`)};
+`;
+}
+
+// checkReembedPromotion({ check, planned, sourceIndex }) → { ok } | { ok: false, error }.
+//   check: the buildReembedCheckSql row; planned: the job's params.to.
+export function checkReembedPromotion({ check, planned = {}, sourceIndex = null } = {}) {
+  if (!plain(check)) return { ok: false, error: 'the new index could not be read back' };
+  const problems = [];
+  if (!['ready', 'active'].includes(check.state)) problems.push(`it is ${check.state || 'missing'}, not ready`);
+  for (const k of ['provider', 'model']) if (planned?.[k] != null && check[k] !== planned[k]) problems.push(`its ${k} is ${check[k]}, not the planned ${planned[k]}`);
+  const dims = Number(planned?.dimensions ?? check.dimensions);
+  if (Number(check.dimensions) !== dims) problems.push(`it has ${check.dimensions} dimensions, not the planned ${dims}`);
+  let type = null;
+  try { type = vectorColumnPlan(dims).type; } catch { problems.push('its dimensions are invalid'); }
+  if (type && check.column_type !== type) problems.push(`its vector column is ${check.column_type || 'missing'}, not ${type}`);
+  const rows = Number(check.target_rows);
+  if (check.target_rows == null || !Number.isInteger(rows)) problems.push('its rows could not be counted');
+  else {
+    if (Number(check.item_count) !== rows) problems.push(`it reports ${check.item_count} item(s) but holds ${rows}`);
+    if (sourceIndex && Number(check.source_rows) !== rows) problems.push(`it holds ${rows} item(s) but the active index ${sourceIndex} holds ${check.source_rows}`);
+  }
+  return problems.length ? { ok: false, error: `the new index does not check out: ${problems.join('; ')}` } : { ok: true, items: rows };
+}
+
+// checkStorageCopyPromotion({ progress, test, targetCount }) → { ok } | { ok: false, error }.
+//   progress: the job's progress (objects_done = verified, objects_total, failed);
+//   test: the pending provider's storage-test, run again now;
+//   targetCount: the target's object count, or null when nobody could count it.
+export function checkStorageCopyPromotion({ progress = {}, test = null, targetCount = null } = {}) {
+  const done = Number.isInteger(progress?.objects_done) ? progress.objects_done : null;
+  const total = Number.isInteger(progress?.objects_total) ? progress.objects_total : null;
+  const no = (error) => ({ ok: false, error });
+  if (done != null && total != null && done !== total) return no(`the job reports ${done} of ${total} object(s) verified`);
+  if (Number(progress?.failed) > 0) return no(`the job reports ${progress.failed} failed object(s)`);
+  if (!test?.ok) return no(`the new provider did not pass its test again (${test?.status || 'no answer'})`);
+  if (done != null && Number.isInteger(targetCount) && targetCount < done) return no(`the new provider holds ${targetCount} object(s), fewer than the ${done} the job verified`);
+  return { ok: true };
+}
+
 export function buildCancelJobSql({ jobId, indexId = null }) {
   if (!isValidJobId(jobId)) throw new Error('invalid job id');
   const lines = [SQL_PREAMBLE, 'BEGIN;'];
@@ -871,6 +984,45 @@ SELECT ${sqlLiteral(SQL_MARKERS.ok)} || 'rows';
 //     the app; a foundation deployment needs an operator to decide).
 //   * a key that cannot be a foundation secret name is deferred.
 // probes: { [KEY]: 'no_table' | 'empty' | 'rows' | 'unknown' }.
+//
+// A key guards stored data when the contract says what it encrypts
+// (`protects`, the data guard secretDataGuards reads) or names the code that
+// migrates data encrypted under it (`requires_marker`).
+export function guardsStoredData(c) {
+  return !!(c && (c.protects?.table || c.requires_marker));
+}
+
+// cloneInheritedSecretNames({ origin, sourceNames, sourceConfigs }) → the
+// component.<KEY> names a clone takes from its source on its first
+// provisioning. Only a FULL clone carries the source's data, so only it takes
+// keys, and only the ones that guard stored data (the copied rows are
+// encrypted under them). Every other key is minted fresh for the clone — above
+// all a token signing key: the auth component's AUTH_JWT_SECRET signs stateless
+// HS256 tokens, so a shared one would make a token of either deployment valid
+// on the other. A fresh clone (new database) inherits nothing.
+//   sourceConfigs: the contract.config entries of the source's components.
+export function cloneInheritedSecretNames({ origin, sourceNames = [], sourceConfigs = [] } = {}) {
+  if (origin?.kind !== 'clone' || origin.mode !== 'full') return [];
+  const guarded = new Set((sourceConfigs || [])
+    .filter((c) => c && c.secret === true && c.generate === true && guardsStoredData(c))
+    .map((c) => componentSecretName(String(c.key || ''))));
+  return [...new Set(sourceNames)].filter((n) => guarded.has(n) && isValidSecretName(n)).sort();
+}
+
+// cloneEmbeddingsFeature({ origin, sourceRow }) → the embeddings feature row a
+// FULL clone starts with, or null (the defaults). Its database brings the
+// source's vector indexes, so it starts on the source's embedding provider —
+// the NON-SECRET part only (state, provider, model, dimensions, metric,
+// base_url): never the key, so a provider that needs one reports
+// missing_credentials until the person gives the clone its own. Storage is
+// never copied: the clone keeps its own bundled default.
+export function cloneEmbeddingsFeature({ origin, sourceRow } = {}) {
+  if (origin?.kind !== 'clone' || origin.mode !== 'full' || !plain(sourceRow) || !['on', 'off'].includes(sourceRow.state)) return null;
+  const v = validateEmbeddingsConfig(sourceRow.provider, sourceRow.config || {});
+  if (!v.ok) return null;
+  return { state: sourceRow.state, provider: sourceRow.provider, config: v.config, pending: null };
+}
+
 export function planFoundationComponentMint({ configs = [], heldNames = [], newlyProvisioned = false, probes = {} } = {}) {
   const held = new Set(heldNames);
   const out = { held: [], mint: [], deferred: [] };
@@ -886,8 +1038,7 @@ export function planFoundationComponentMint({ configs = [], heldNames = [], newl
       continue;
     }
     if (held.has(name)) { out.held.push(key); continue; }
-    const guarded = !!(c.protects?.table || c.requires_marker);
-    if (!guarded) { out.mint.push(key); continue; }
+    if (!guardsStoredData(c)) { out.mint.push(key); continue; }
     const probe = c.protects?.table ? (probes[key] || 'unknown') : 'no_table';
     if (newlyProvisioned && (probe === 'no_table' || probe === 'empty')) { out.mint.push(key); continue; }
     out.deferred.push({

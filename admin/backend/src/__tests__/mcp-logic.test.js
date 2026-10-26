@@ -25,7 +25,7 @@ import {
   validSha256, sha256Hex, zipChecksumError,
   normalizeChunkSeq, decodeChunkBase64, UPLOAD_CHUNK_MAX_BYTES,
   parseLxcListJson, lxcContainerIp, lxcContainerSummaries,
-  validFileMode, startupRunTimeoutMs, STARTUP_RUN_TIMEOUT_MAX_S, parseMarkedStreams,
+  validFileMode, startupRunTimeoutMs, STARTUP_RUN_TIMEOUT_MAX_S, parseMarkedStreams, rerunStartupGuard,
   PROJECT_COMMAND_OUTPUT_CAP,
 } from '../lib/mcp-logic.js';
 import { computeChangeHash, changePayload, canonicalJson } from '../mock2/change-logic.js';
@@ -2573,4 +2573,33 @@ test('mcpTokenDefaultDays: reads MCP_TOKEN_DEFAULT_DAYS, falls back to 365 on an
   assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '0' }), 0);
   assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: '9999' }), 365);
   assert.equal(mcpTokenDefaultDays({ MCP_TOKEN_DEFAULT_DAYS: 'forever' }), 365);
+});
+
+test('rerunStartupGuard: a startup script inside a release-managed application is refused unless acknowledged', () => {
+  const apps = [
+    { id: 1, name: 'Nodus', targetId: 'nodus', profile: { sourceDir: '/opt/nodus', releaseRoot: '/opt/nodus-releases' } },
+    { id: 2, name: 'Plain', targetId: 'plain', profile: { sourceDir: '/srv/app', releaseRoot: null } },
+  ];
+  const nodus = { scriptPath: '/opt/nodus/deploy/startup.sh', workingDir: '/opt/nodus' };
+  const refused = rerunStartupGuard({ container: 'nodus', startup: nodus, applications: apps });
+  assert.equal(refused.refusal.code, 'RELEASE_MANAGED_STARTUP');
+  assert.deepEqual(refused.refusal.applications, [{ id: 1, name: 'Nodus', sourceDir: '/opt/nodus', releaseRoot: '/opt/nodus-releases' }]);
+  assert.match(refused.refusal.message, /Nothing was run/); assert.match(refused.refusal.message, /deploy_application_release/);
+  assert.match(refused.refusal.message, /acknowledge_release_managed: true only if the user has explicitly asked/);
+  // An explicit acknowledgement runs it; the conflicts go into the audit entry.
+  assert.deepEqual(rerunStartupGuard({ container: 'nodus', startup: nodus, applications: apps, acknowledged: true }).conflicts.map((a) => a.id), [1]);
+  assert.ok(rerunStartupGuard({ container: 'nodus', startup: nodus, applications: apps, acknowledged: 'yes' }).refusal, 'only a literal true acknowledges');
+  // The working directory alone, the release root, and a path that normalises inside.
+  for (const startup of [{ scriptPath: '/usr/local/bin/boot.sh', workingDir: '/opt/nodus' }, { scriptPath: '/opt/nodus-releases/abc/deploy/startup.sh', workingDir: '/' }, { scriptPath: '/opt/x/../nodus/./deploy/startup.sh', workingDir: null }])
+    assert.equal(rerunStartupGuard({ container: 'nodus', startup, applications: apps }).refusal?.code, 'RELEASE_MANAGED_STARTUP', JSON.stringify(startup));
+  // Another container, an application without a release layout, a sibling prefix: run as before.
+  assert.deepEqual(rerunStartupGuard({ container: 'other', startup: nodus, applications: apps }), { conflicts: [] });
+  assert.deepEqual(rerunStartupGuard({ container: 'plain', startup: { scriptPath: '/srv/app/startup.sh', workingDir: '/srv/app' }, applications: apps }), { conflicts: [] });
+  assert.deepEqual(rerunStartupGuard({ container: 'nodus', startup: { scriptPath: '/opt/nodus-old/startup.sh', workingDir: '/' }, applications: apps }), { conflicts: [] });
+  assert.deepEqual(rerunStartupGuard({ container: 'nodus', startup: nodus, applications: [] }), { conflicts: [] });
+  // A registry that cannot be read is not taken as empty.
+  assert.equal(rerunStartupGuard({ container: 'nodus', startup: nodus, registryError: true }).refusal.code, 'RELEASE_REGISTRY_UNAVAILABLE');
+  assert.deepEqual(rerunStartupGuard({ container: 'nodus', startup: nodus, registryError: true, acknowledged: true }), { conflicts: [] });
+  const tool = MCP_TOOLS.find((t) => t.name === 'rerun_startup');
+  assert.equal(tool.inputSchema.properties.acknowledge_release_managed.type, 'boolean');
 });

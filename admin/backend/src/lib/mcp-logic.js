@@ -21,6 +21,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { MCP_EXT_TOOLS, MCP_EXT_INSTRUCTIONS } from './mcp-ext/catalog/index.js';
 import { DATABASE_RULE } from '../mock2/database-exception-logic.js';
+import { releaseManagedStartupConflicts } from './setup-engine/application-deploy-logic.js';
 
 export const MCP_PROTOCOL_VERSION = '2025-03-26';
 // Versions we accept from clients (echoed back when known; otherwise we answer
@@ -1462,6 +1463,7 @@ const MCP_BASE_TOOLS = [
       properties: {
         container: { type: 'string' },
         timeout_seconds: { type: 'number', description: 'Kill the run after this many seconds (default 120, max 1800). A run that hits the deadline reports timed_out: true and may still be running inside the container.' },
+        acknowledge_release_managed: { type: 'boolean', description: 'Only when the user has explicitly asked for it: run the script although it lies inside a registered application\'s release-managed source or release root (it then runs as root against the live release, outside the application release runner). Without it such a run is refused; deploy that application with the application release tools instead.' },
       },
       required: ['container'],
       additionalProperties: false,
@@ -2743,6 +2745,25 @@ export function projectCommandTimeoutMs(seconds) {
 // tail'd inside the container so the last 64 KB is what comes back.
 
 export const STARTUP_RUN_TIMEOUT_MAX_S = PROJECT_COMMAND_TIMEOUT_MAX_S;
+
+// A registered startup script inside a release-managed application's source or
+// release root runs as root against the live release, outside the application
+// release runner (the 2026-10 Nodus outage: an old self-deploy script rebuilt
+// the sealed release and left the service down). rerun_startup refuses it
+// unless the caller explicitly acknowledges; a registry that cannot be read is
+// refused the same way rather than assumed empty.
+// → { refusal: { code, message, applications } } or { conflicts } (run; the
+//   acknowledged applications go into the audit entry).
+export function rerunStartupGuard({ container, startup, applications = null, registryError = false, acknowledged = false }) {
+  const conflicts = registryError ? [] : releaseManagedStartupConflicts(startup, applications || [], container);
+  if (acknowledged === true) return { conflicts };
+  if (registryError) return { refusal: { code: 'RELEASE_REGISTRY_UNAVAILABLE', applications: [],
+    message: 'The registered-application list could not be read, so it is unknown whether this startup script belongs to a release-managed application. Nothing was run. Pass acknowledge_release_managed: true only if the user has explicitly asked to run it anyway.' } };
+  if (!conflicts.length) return { conflicts };
+  const names = conflicts.map((a) => `${a.name || `application ${a.id}`} (${a.sourceDir})`).join(', ');
+  return { refusal: { code: 'RELEASE_MANAGED_STARTUP', applications: conflicts,
+    message: `The registered startup script ${startup.scriptPath} lies inside the release-managed source of ${names}. Running it executes an old deploy script as root against the live release, outside the application release runner. Nothing was run. Use the application release tools (validate_application_release, deploy_application_release) instead, and disable the unit in the guest (systemctl disable proxypilot-startup.service). Pass acknowledge_release_managed: true only if the user has explicitly asked to run it anyway.` } };
+}
 
 /** Caller timeout wins (clamped to the max); otherwise the operator's
  *  configured default, itself clamped so an env var cannot exceed the cap. */

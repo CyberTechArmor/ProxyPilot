@@ -9,7 +9,7 @@ import { RELEASE_CLEANUP_SOURCE, resolveReleaseRetention, releaseContextFromAppl
 import { SAFE_GIT_SOURCE } from './safe-git.js';
 import { containedScript, parseContainment, reapStaleWritersScript, reapAttemptScriptsScript, parseStaleWriters } from './guest-probes.js';
 
-import { APPLICATION_JOB_KINDS, applicationGuestName } from './application-deploy-logic.js';
+import { APPLICATION_JOB_KINDS, applicationGuestName, LEGACY_STARTUP_UNIT, legacyStartupFinding } from './application-deploy-logic.js';
 export { APPLICATION_JOB_KINDS, applicationGuestName, validateApplicationJob } from './application-deploy-logic.js';
 const quote = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const digest = x => createHash('sha256').update(JSON.stringify(x)).digest('hex');
@@ -55,9 +55,29 @@ function freeze(root){try{safeRemover(fs,p).freezeTree(root)}catch(e){if(e&&type
 function identity(root){let m;try{m=JSON.parse(fs.readFileSync(p.join(root,'.proxypilot-release.json'),'utf8'))}catch{m={sha:git(root,['rev-parse','HEAD'])}}if(!/^[a-f0-9]{40}$/.test(m.sha||''))fail('NO_RELEASE_IDENTITY');return m}
 function layout(){if(!a.profile.releaseRoot)fail('RELEASE_ROOT_REQUIRED');protectedPath(p.dirname(a.profile.sourceDir));protectedPath(a.profile.releaseRoot);const link=fs.lstatSync(a.profile.sourceDir);if(!link.isSymbolicLink())fail('SYMLINK_LAYOUT_REQUIRED');if(link.uid!==0)fail('UNSAFE_RELEASE_DIRECTORY');const target=fs.realpathSync(a.profile.sourceDir);const root=fs.realpathSync(a.profile.releaseRoot);if(!inside(root,target)||target===root)fail('RELEASE_OUTSIDE_ROOT');return {target,root,identity:identity(target)}}
 function service(){const unit=a.profile.serviceName;const loaded=run('systemctl',['show',unit,'--property=LoadState','--value']);if(loaded!=='loaded')fail('SERVICE_NOT_LOADED');const workingDir=run('systemctl',['show',unit,'--property=WorkingDirectory','--value']);const start=run('systemctl',['show',unit,'--property=ExecStart','--value']);if(workingDir!==a.profile.sourceDir&&!start.includes(a.profile.sourceDir+'/'))fail('SERVICE_LAYOUT_UNSUPPORTED');return {user:run('systemctl',['show',unit,'--property=User','--value'])||'root',group:run('systemctl',['show',unit,'--property=Group','--value'])||''}}
+// The legacy boot unit (LEGACY_STARTUP_UNIT, application-deploy-logic.js):
+// whether it exists, is enabled, and whether its script or working directory
+// resolves inside sourceDir or releaseRoot. Read-only, fixed argv; is-enabled
+// exits non-zero for a disabled unit, so neither call goes through run(). It
+// never fails inspect, which the recovery paths read too; the job decides.
+function legacyStartup(){
+ const unit=${JSON.stringify(LEGACY_STARTUP_UNIT)};
+ const sys=args=>{const r=cp.spawnSync('systemctl',args,{encoding:'utf8',maxBuffer:65536,timeout:30000});return {status:r.status,out:String(r.stdout||'').trim()}};
+ const load=sys(['show',unit,'--property=LoadState','--value']);
+ if(load.status!==0)return {state:'unknown'};
+ if(load.out!=='loaded')return {state:'absent'};
+ const enabled=sys(['is-enabled',unit]).out;
+ const exec=/(?:^|[{;]\s*)path=([^\s;]+)/.exec(sys(['show',unit,'--property=ExecStart','--value']).out);
+ const script=exec?exec[1]:null,workingDir=sys(['show',unit,'--property=WorkingDirectory','--value']).out.replace(/^[-!+]+/,'')||null;
+ const real=x=>{try{return fs.realpathSync(x)}catch(e){return null}};
+ const roots=[a.profile.sourceDir,a.profile.releaseRoot].filter(x=>typeof x==='string'&&x.startsWith('/'));
+ const within=x=>{if(typeof x!=='string'||!x.startsWith('/'))return false;const n=p.resolve(x),r=real(n);return roots.some(root=>{const rr=real(root);return inside(p.resolve(root),n)||(!!r&&!!rr&&inside(rr,r))})};
+ const shown=x=>typeof x==='string'&&/^\/[A-Za-z0-9._\/@+-]{0,255}$/.test(x)?x:null;
+ return {state:'present',enabled:/^[a-z-]{1,32}$/.test(enabled)?enabled:'unknown',scriptPath:shown(script),workingDir:shown(workingDir),inside:within(script)||within(workingDir)};
+}
 let out={ok:true};
 try{
-if(a.action==='inspect'){const s=service();out={...out,...s};if(a.strict)out={...out,...layout()};}
+if(a.action==='inspect'){const s=service();let startup;try{startup=legacyStartup()}catch(e){startup={state:'unknown'}}out={...out,...s,startup};if(a.strict)out={...out,...layout()};}
 else if(a.action==='prepare'){protectedPath(a.root);fs.mkdirSync(a.root,{recursive:true,mode:0o755});protectedPath(a.root);const stageRoot=p.join(a.root,'.staging');if(fs.existsSync(stageRoot))protectedPath(stageRoot);else fs.mkdirSync(stageRoot,{mode:0o711});fs.chmodSync(stageRoot,0o711);}
 else if(a.action==='stage'){
  if(fs.existsSync(a.stage)||fs.existsSync(a.release))fail('RELEASE_EXISTS');
@@ -215,6 +235,15 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     return answer;
   };
   const mark = (phase, data = {}) => { job.fence({ safe: !disruptive }); job.checkpoint(phase, { applicationRelease: true, resumable: false, disruptive, ...data }); job.event?.('step', phase); };
+  // A legacy boot unit pointing into the live release (legacyStartupFinding):
+  // every job reports it once, from its first inspect. Only a deploy or
+  // rollback about to promote refuses it; recovery only reports it.
+  let startupReported = false;
+  const reportStartup = observed => {
+    const finding = legacyStartupFinding(observed?.startup);
+    if (finding && !startupReported) { startupReported = true; job.event?.('legacy_startup', finding.message, finding.data); }
+    return finding;
+  };
   job.fence({ safe: true });
   const reap = await exec.guest(container, reapStaleWritersScript(attempt), { timeoutMs: 30000 });
   if (parseStaleWriters(reap?.stdout) !== 0) throw safeError('PREVIOUS_WRITER_ALIVE', 'A previous application writer could not be established stopped; no release action was issued.');
@@ -222,7 +251,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     // A dead promotion never runs again. Restore only its recorded old target,
     // and only if the current target is still one of those two exact paths.
     disruptive = true;
-    const observed = await guest('inspect', { strict: true });
+    const observed = await guest('inspect', { strict: true }); reportStartup(observed);
     if (![prior.previousTarget, prior.nextTarget].includes(observed.target)) throw safeError('LIVE_TARGET_CHANGED', 'Interrupted release has an unexpected live target; operator recovery is required.');
     if (observed.target !== prior.previousTarget) await guest('switch', { expected: prior.nextTarget, target: prior.previousTarget, jobId: attempt });
     else { const restarted = await exec.guest(container, containedScript(attempt, `systemctl restart ${quote(profile.serviceName)}\n`), { timeoutMs: 90000 }); if (restarted.code !== 0) throw safeError('RECOVERY_FAILED', 'The existing application service could not restart.'); }
@@ -237,7 +266,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     throw last;
   }
   if (kind === 'application_validate') {
-    mark('inspect'); const identity = await guest('inspect', { strict: false });
+    mark('inspect'); const identity = await guest('inspect', { strict: false }); reportStartup(identity);
     const stage = `${root}/.staging/${attempt}`;
     const bundle = `${root}/.staging/${attempt}.bundle`;
     const scripts = [profile.installScript, profile.buildScript, ...(profile.validationScripts || [])].filter(Boolean);
@@ -298,7 +327,7 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
       if (transfer) await hostFs.rm(transfer, { recursive: true, force: true });
     }
   }
-  mark('inspect'); const previous = await guest('inspect', { strict: true });
+  mark('inspect'); const previous = await guest('inspect', { strict: true }); const startup = reportStartup(previous);
   if (!validation?.passed || !/^[a-f0-9]{64}$/.test(validation.artifactDigest || '') || validation.profileDigest !== profile.digest || validation.treeSha !== candidate.treeSha || typeof release !== 'string' || !release.startsWith(`${root}/${candidate.sha}-p${profile.revision}-`) || release.includes('/../')) throw safeError('VALIDATION_REQUIRED', 'This exact candidate, profile and release artifact need successful validation.');
   await guest('artifact', { release, sha: candidate.sha, treeSha: candidate.treeSha, profileDigest: profile.digest, evidenceDigest: validation.evidenceDigest, artifactDigest: validation.artifactDigest });
   if (kind === 'application_verify') {
@@ -314,6 +343,11 @@ export async function runApplicationReleaseOperation({ kind, params, exec, job, 
     return { ok: true, outcome: 'live_verified', verification: proof };
   }
   if (previous.target === release) { const proof = await verify(release, candidate.sha, validation.artifactDigest); return { ok: true, outcome: 'already_live', verification: proof }; }
+  // Promotion refuses an enabled legacy boot unit before anything changes
+  // (not disruptive yet: the job fails plainly, no recovery hold). The
+  // interrupted-release recovery above and rollback-on-failure below never
+  // reach this check.
+  if (startup?.blocks) throw safeError(startup.code, startup.message);
   // Shared paths are attached only after validation. Scripts do not receive
   // production env files or shared data during the build/test phase.
   await guest('links', { release, previous: previous.target });

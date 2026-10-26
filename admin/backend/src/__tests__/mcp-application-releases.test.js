@@ -93,3 +93,16 @@ test('snapshot remote reader respects disabled Dev Studio before opening optiona
   f.kit.ctx.applicationGitConnectors={getTargetRemote:()=>{throw new Error('must not open DB');}};
   assert.match((await f.handlers.get_git_remote({kind:'lxc',target:'nodus'},auth)).content[0].text,/disabled/);
 });
+test('a job that met an enabled legacy startup unit points at the unit, not at another release job',async()=>{
+  const f=fixture();const args={container:'nodus',application_id:1,job_id:'j1'};
+  const event={kind:'legacy_startup',message:'enabled',data:{code:'LEGACY_STARTUP_ENABLED',unit:'proxypilot-startup.service'}};
+  for(const detail of [{job:{id:'j1',status:'failed',outcome:'LEGACY_STARTUP_ENABLED',plan:{params:{applicationId:1}}},events:[event]},{job:{id:'j1',status:'succeeded',outcome:'validated',plan:{params:{applicationId:1}}},events:[event]}]){
+    f.kit.ctx.applicationReleaseJobs.jobDetail=()=>detail;
+    const r=parse(await f.handlers.get_application_job(args,auth));
+    assert.equal(r.next_actions[0].tool,'get_lxc_startup');assert.deepEqual(r.next_actions[0].arguments,{container:'nodus'});
+    assert.match(r.next_actions[0].purpose,/systemctl disable proxypilot-startup\.service/);assert.match(r.next_actions[0].purpose,/do not run it with rerun_startup/);
+  }
+  // A disabled (still registered) unit and an ordinary job keep the ordinary next actions.
+  f.kit.ctx.applicationReleaseJobs.jobDetail=()=>({job:{id:'j1',status:'succeeded',outcome:'live_verified',plan:{params:{applicationId:1}}},events:[{...event,data:{code:'LEGACY_STARTUP_REGISTERED'}}]});
+  assert.equal(parse(await f.handlers.get_application_job(args,auth)).next_actions[0].tool,'get_application');
+});

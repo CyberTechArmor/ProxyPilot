@@ -6,11 +6,13 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { APPLICATION_JOB_KINDS, applicationGuestScript, runApplicationReleaseOperation, validateApplicationJob } from '../lib/setup-engine/application-deploy-op.js';
-import { ensureSetupEngineSchema, getJob, claimNextJob, readLock, createJob, checkpoint, acquireLock, recordJobOutcome, markLockStale } from '../lib/setup-engine/store.js';
+import { ensureSetupEngineSchema, getJob, claimNextJob, readLock, createJob, checkpoint, acquireLock, recordJobOutcome, markLockStale, listEvents } from '../lib/setup-engine/store.js';
 import { submitApplicationReleaseJob, listApplicationReleaseJobs } from '../lib/setup-engine/backend.js';
 import { reapAttemptScriptsScript } from '../lib/setup-engine/guest-probes.js';
 import { executeJob, reconcile } from '../lib/setup-engine/executor.js';
 import { ownerIdentity, redact, validateRunnerJob } from '../lib/setup-engine/logic.js';
+import { LEGACY_STARTUP_UNIT, legacyStartupFinding } from '../lib/setup-engine/application-deploy-logic.js';
+import { STARTUP_UNIT_NAME } from '../lib/lxc-zip.js';
 
 const sha = 'a'.repeat(40), treeSha = 'b'.repeat(40), profileDigest = 'c'.repeat(64);
 const params = { applicationId: 3, profileRevision: 1, profileDigest, sha, treeSha };
@@ -39,7 +41,7 @@ function fixture() {
       calls.push(data);
       const response = { ok: true };
       if (data.action === 'seal') response.artifactDigest = 'f'.repeat(64);
-      if (data.action === 'inspect') Object.assign(response, { user: 'root', group: '', target: state.target, identity: { sha: state.target.endsWith('/old') ? state.previousSha : sha } });
+      if (data.action === 'inspect') Object.assign(response, { user: 'root', group: '', target: state.target, identity: { sha: state.target.endsWith('/old') ? state.previousSha : sha } }, state.startup ? { startup: typeof state.startup === 'function' ? state.startup() : state.startup } : {});
       if (data.action === 'switch') { assert.equal(state.target, data.expected); state.target = data.target; }
       if (data.action === 'verify') {
         if (state.failHealth && state.target !== '/opt/nodus-releases/old') return { code: 1, stdout: JSON.stringify({ ok: false, code: 'HEALTH_FAILED' }), stderr: 'CONTAINMENT:systemd fixture' };
@@ -365,4 +367,131 @@ test('real guest link program preserves absolute data paths, rejects tracked col
   const collision = run({ action:'links', profile:{...profile,preservePaths:[path.join(source,'app.js')]},previous:old,release}); assert.equal(JSON.parse(collision.stdout).code,'PRESERVED_SOURCE_COLLISION');
   await fs.mkdir(path.join(old,'nested')); await fs.mkdir(path.join(old,'nested','item')); await fs.symlink(old,path.join(release,'nested'));
   const escape = run({ action:'links', profile:{...profile,preservePaths:[path.join(source,'nested','item')]},previous:old,release}); assert.equal(JSON.parse(escape.stdout).code,'PRESERVED_PATH_COLLISION');
+});
+
+// ── Legacy startup unit (the 2026-10 Nodus outage) ───────────────────────
+const enabledStartup = { state: 'present', enabled: 'enabled', scriptPath: '/opt/nodus/deploy/startup.sh', workingDir: '/opt/nodus', inside: true };
+const recordEvents = f => { const events = []; f.job.event = (kind, message, data = null) => events.push({ kind, message, data }); return events; };
+const startupEvents = events => events.filter(e => e.kind === 'legacy_startup');
+
+test('the legacy startup unit name is the one lxc-zip registers', () => {
+  assert.equal(LEGACY_STARTUP_UNIT, STARTUP_UNIT_NAME);
+});
+
+test('legacy startup findings: enabled blocks, a disabled or unreadable unit only reports, outside or absent says nothing', () => {
+  const enabled = legacyStartupFinding(enabledStartup);
+  assert.equal(enabled.code, 'LEGACY_STARTUP_ENABLED'); assert.equal(enabled.blocks, true);
+  assert.match(enabled.message, /at every boot it runs a script inside the live release as root/);
+  assert.match(enabled.message, /Disable it in the guest with: systemctl disable proxypilot-startup\.service\./);
+  assert.match(enabled.message, /Script: \/opt\/nodus\/deploy\/startup\.sh, working directory \/opt\/nodus\.$/);
+  assert.deepEqual(enabled.data, { code: 'LEGACY_STARTUP_ENABLED', unit: 'proxypilot-startup.service', enabled: 'enabled', scriptPath: '/opt/nodus/deploy/startup.sh', workingDir: '/opt/nodus' });
+  assert.equal(legacyStartupFinding({ ...enabledStartup, enabled: 'enabled-runtime' }).blocks, true);
+  const disabled = legacyStartupFinding({ ...enabledStartup, enabled: 'disabled' });
+  assert.equal(disabled.code, 'LEGACY_STARTUP_REGISTERED'); assert.equal(disabled.blocks, false); assert.match(disabled.message, /\(disabled\)/);
+  assert.equal(legacyStartupFinding({ ...enabledStartup, enabled: 'masked' }).blocks, false);
+  const unknown = legacyStartupFinding({ state: 'unknown' }); assert.equal(unknown.code, 'LEGACY_STARTUP_UNKNOWN'); assert.equal(unknown.blocks, false);
+  for (const quiet of [null, undefined, {}, { state: 'absent' }, { ...enabledStartup, inside: false }, { ...enabledStartup, inside: 'yes' }]) assert.equal(legacyStartupFinding(quiet), null);
+  // Guest-supplied text never reaches the message unless it is a plain path; the instruction always comes first.
+  const odd = legacyStartupFinding({ ...enabledStartup, scriptPath: '/opt/nodus/x; reboot', workingDir: `/${'a'.repeat(300)}`, enabled: 'Enabled!' });
+  assert.equal(odd.blocks, false); assert.equal(odd.data.scriptPath, null); assert.equal(odd.data.workingDir, null); assert.equal(odd.data.enabled, 'unknown');
+  assert.doesNotMatch(odd.message, /reboot/);
+});
+
+test('an enabled legacy startup unit is reported by every job and refuses deploy and rollback before anything changes', async t => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'app-host-')); t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  // Validation builds a new sealed release and never touches the live one: it reports and goes on.
+  const v = fixture(); v.state.startup = enabledStartup; const vEvents = recordEvents(v);
+  assert.equal((await runApplicationReleaseOperation({ kind: 'application_validate', params, ...v, hostRoot: temp })).outcome, 'validated');
+  assert.equal(startupEvents(vEvents).length, 1); assert.equal(startupEvents(vEvents)[0].data.code, 'LEGACY_STARTUP_ENABLED');
+  // Verification only reads what is live: it reports and still records the live state.
+  const live = fixture(); live.state.target = live.candidate.validation.releasePath; live.state.startup = enabledStartup; const liveEvents = recordEvents(live);
+  assert.equal((await runApplicationReleaseOperation({ kind: 'application_verify', params, ...live, sleep: async () => {} })).outcome, 'live_verified');
+  assert.equal(startupEvents(liveEvents).length, 1); assert.equal(live.records.at(-1)[0], 'live');
+  // Deploy and rollback refuse with the stable code: no links, no promotion checkpoint, no switch, nothing recorded live.
+  for (const kind of ['application_deploy', 'application_rollback']) {
+    const f = fixture(); f.state.startup = enabledStartup; const events = recordEvents(f);
+    await assert.rejects(runApplicationReleaseOperation({ kind, params, ...f, sleep: async () => {} }),
+      e => e.code === 'LEGACY_STARTUP_ENABLED' && e.applicationReleaseSafe === true && /Deploy and rollback are refused while it is enabled/.test(e.message));
+    assert.equal(f.calls.some(c => ['links', 'switch'].includes(c.action) || c.checkpoint === 'promoting'), false, kind);
+    assert.equal(f.calls.some(c => c.checkpoint && c.disruptive), false, `${kind} never became disruptive`);
+    assert.equal(f.records.length, 0); assert.equal(f.state.target, '/opt/nodus-releases/old');
+    assert.equal(startupEvents(events).length, 1, 'reported once');
+  }
+  // Redeploying the release that is already live changes nothing: reported, not refused.
+  const same = fixture(); same.state.target = same.candidate.validation.releasePath; same.state.startup = enabledStartup; recordEvents(same);
+  assert.equal((await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...same, sleep: async () => {} })).outcome, 'already_live');
+});
+
+test('a disabled, outside or absent legacy startup unit does not stop a deployment', async () => {
+  for (const [startup, code] of [[{ ...enabledStartup, enabled: 'disabled' }, 'LEGACY_STARTUP_REGISTERED'], [{ ...enabledStartup, inside: false }, null], [{ state: 'absent' }, null]]) {
+    const f = fixture(); f.state.startup = startup; const events = recordEvents(f);
+    const r = await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...f, sleep: async () => {} });
+    assert.equal(r.outcome, 'live_verified'); assert.equal(f.state.target, f.candidate.validation.releasePath);
+    assert.deepEqual(startupEvents(events).map(e => e.data.code), code ? [code] : []);
+  }
+});
+
+test('the legacy startup refusal never strands recovery: interrupted-release recovery and rollback-on-failure still restore the previous release', async () => {
+  // Interrupted promotion, unit enabled: the recovery path reports and restores.
+  const f = fixture(); f.state.target = f.candidate.validation.releasePath; f.state.startup = enabledStartup; const events = recordEvents(f);
+  const r = await runApplicationReleaseOperation({ kind: 'application_rollback', params, ...f, prior: { applicationRelease: true, disruptive: true, previousTarget: '/opt/nodus-releases/old', previousSha: f.state.previousSha, nextTarget: f.state.target }, sleep: async () => {} });
+  assert.equal(r.recovered, true); assert.equal(r.outcome, 'interrupted_release_rolled_back'); assert.equal(f.state.target, '/opt/nodus-releases/old');
+  assert.equal(f.records.at(-1)[2].restored, true); assert.equal(startupEvents(events).length, 1);
+  // The unit is enabled after the deployment started promoting and the new release fails health: the old one is restored.
+  const g = fixture(); g.state.failHealth = true; let inspects = 0; g.state.startup = () => (++inspects > 1 ? enabledStartup : { state: 'absent' });
+  const r2 = await runApplicationReleaseOperation({ kind: 'application_deploy', params, ...g, sleep: async () => {} });
+  assert.equal(r2.recovered, true); assert.equal(r2.outcome, 'release_failed_rolled_back'); assert.equal(g.state.target, '/opt/nodus-releases/old');
+  assert.equal(g.records.at(-1)[2].restored, true); assert.ok(inspects >= 2, 'rollback-on-failure inspected with the unit enabled');
+});
+
+test('runner records the legacy startup refusal as a plain failed outcome with its event, and releases the guest lease', async () => {
+  const f = fixture(), db = new DatabaseSync(':memory:'); ensureSetupEngineSchema(db); f.state.startup = enabledStartup;
+  await submitApplicationReleaseJob(db, { applicationId: 3, sha, operation: 'deploy', service: f.service });
+  const claimed = claimNextJob(db, { owner: runner, kinds: APPLICATION_JOB_KINDS });
+  const r = await executeJob(claimed, { db, owner: runner, exec: f.exec, applicationService: f.service, sleep: async () => {} });
+  assert.equal(r.status, 'failed'); assert.equal(r.outcome, 'LEGACY_STARTUP_ENABLED');
+  const row = getJob(db, claimed.id); assert.equal(row.status, 'failed'); assert.match(row.reason, /systemctl disable proxypilot-startup\.service/);
+  assert.equal(readLock(db, 'pp-nodus'), null, 'no recovery hold');
+  const event = listEvents(db, claimed.id).find(e => e.kind === 'legacy_startup');
+  assert.equal(JSON.parse(event.data_json).code, 'LEGACY_STARTUP_ENABLED'); assert.match(event.message, /Deploy and rollback are refused/);
+  assert.equal(f.calls.some(c => c.action === 'switch'), false); db.close();
+});
+
+test('real guest inspect reads the legacy startup unit read-only and resolves its paths through the release link', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'app-startup-')); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const releases = path.join(root, 'releases'), release = path.join(releases, 'r1'), source = path.join(root, 'app'), bin = path.join(root, 'bin'), units = path.join(root, 'units');
+  await fs.mkdir(path.join(release, 'deploy'), { recursive: true }); await fs.writeFile(path.join(release, 'deploy', 'startup.sh'), '#!/bin/sh\n'); await fs.symlink(release, source);
+  await fs.mkdir(bin); await fs.mkdir(units);
+  // A scripted systemctl: show <unit> --property=P --value prints units/<unit>.P (LoadState defaults to not-found);
+  // is-enabled prints units/<unit>.enabled and, like systemd, exits non-zero unless it is enabled.
+  await fs.writeFile(path.join(bin, 'systemctl'), [
+    '#!/bin/sh', `echo "$*" >> '${root}/calls'`,
+    'case "$1" in',
+    ` show) [ -f '${units}/'"$2.fail" ] && exit 1; f='${units}/'"$2.\${3#--property=}"; if [ -f "$f" ]; then cat "$f"; elif [ "$3" = --property=LoadState ]; then echo not-found; fi; exit 0 ;;`,
+    ` is-enabled) f='${units}/'"$2.enabled"; if [ -f "$f" ]; then s=$(cat "$f"); echo "$s"; [ "$s" = enabled ] && exit 0; exit 1; fi; echo not-found; exit 4 ;;`,
+    'esac', 'exit 1', ''].join('\n'), { mode: 0o755 });
+  const unit = async (name, props) => { for (const [k, v] of Object.entries(props)) await fs.writeFile(path.join(units, `${name}.${k}`), `${v}\n`); };
+  await unit('app.service', { LoadState: 'loaded', WorkingDirectory: source, ExecStart: `{ path=/usr/bin/node ; argv[]=/usr/bin/node ${source}/index.js ; ignore_errors=no }`, User: '', Group: '' });
+  const profile = { sourceDir: source, releaseRoot: releases, serviceName: 'app.service', preservePaths: [], envFiles: [] };
+  const inspect = () => { const r = spawnSync('sh', ['-c', applicationGuestScript({ action: 'inspect', profile, strict: false })], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }); assert.equal(r.status, 0, r.stdout); return JSON.parse(r.stdout).startup; };
+  const startupUnit = props => unit('proxypilot-startup.service', { LoadState: 'loaded', ...props });
+  const execOf = script => `{ path=${script} ; argv[]=${script} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }`;
+  assert.deepEqual(inspect(), { state: 'absent' });
+  // Nodus's own shape: the script and working directory through the live link.
+  await startupUnit({ ExecStart: execOf(`${source}/deploy/startup.sh`), WorkingDirectory: source, enabled: 'enabled' });
+  assert.deepEqual(inspect(), { state: 'present', enabled: 'enabled', scriptPath: `${source}/deploy/startup.sh`, workingDir: source, inside: true });
+  // Disabled: is-enabled exits non-zero and inspect still answers.
+  await startupUnit({ enabled: 'disabled' }); assert.deepEqual(inspect(), { state: 'present', enabled: 'disabled', scriptPath: `${source}/deploy/startup.sh`, workingDir: source, inside: true });
+  // Reached through a link from elsewhere, it still resolves into the release root.
+  await fs.symlink(path.join(release, 'deploy'), path.join(root, 'boot'));
+  await startupUnit({ ExecStart: execOf(path.join(root, 'boot', 'startup.sh')), WorkingDirectory: '-/', enabled: 'enabled' });
+  assert.equal(inspect().inside, true);
+  // Only the working directory inside the release root.
+  await startupUnit({ ExecStart: execOf('/usr/local/bin/boot.sh'), WorkingDirectory: release }); assert.equal(inspect().inside, true);
+  // An unrelated boot script.
+  await startupUnit({ ExecStart: execOf('/usr/local/bin/boot.sh'), WorkingDirectory: '/' }); assert.deepEqual(inspect(), { state: 'present', enabled: 'enabled', scriptPath: '/usr/local/bin/boot.sh', workingDir: '/', inside: false });
+  // A unit systemctl cannot describe: unknown, and inspect does not fail.
+  await fs.writeFile(path.join(units, 'proxypilot-startup.service.fail'), ''); assert.deepEqual(inspect(), { state: 'unknown' });
+  // Nothing but read verbs reached systemctl.
+  for (const line of (await fs.readFile(path.join(root, 'calls'), 'utf8')).trim().split('\n')) assert.match(line, /^(show \S+ --property=[A-Za-z]+ --value|is-enabled proxypilot-startup\.service)$/);
 });

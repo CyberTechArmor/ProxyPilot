@@ -78,7 +78,12 @@ export function createApplicationReleaseHandlers(kit) {
       const detail=await jobs.jobDetail(db,args.job_id);
       if(!detail?.job || detail.job.plan?.params?.applicationId!==app.id)return err('Job not found for this application');
       const recovery=detail?.job?.status==='recovery_required' && detail.job.outcome==='application_recovery_required';
-      return ok({...detail,next_actions: recovery ? [{tool:'rollback_application_release',arguments:{container:app.targetId,application_id:app.id,sha:detail.job.plan.params.sha},purpose:'Recover the recorded previous live target from this interrupted job; the original deployment will not be replayed.'}] : next(app).next_actions});
+      // An enabled legacy boot unit inside the live release (the job's
+      // legacy_startup event; deploy and rollback refuse it): the fix is in the
+      // guest, by a person, not another release job.
+      const legacyStartup=detail.job.outcome==='LEGACY_STARTUP_ENABLED'||(detail.events||[]).some(e=>e?.kind==='legacy_startup'&&e.data?.code==='LEGACY_STARTUP_ENABLED');
+      const startupAction={tool:'get_lxc_startup',arguments:{container:app.targetId},purpose:'Read the legacy startup unit that runs inside the live release at boot. Disable it in the guest (systemctl disable proxypilot-startup.service) before deploying or rolling back; do not run it with rerun_startup.'};
+      return ok({...detail,next_actions: recovery ? [{tool:'rollback_application_release',arguments:{container:app.targetId,application_id:app.id,sha:detail.job.plan.params.sha},purpose:'Recover the recorded previous live target from this interrupted job; the original deployment will not be replayed.'}] : legacyStartup ? [startupAction,...next(app).next_actions] : next(app).next_actions});
     }),
     reconcile_application_operation: write('reconcile_application_operation', async (args, auth, req, note) => {
       const {s,app}=await appFor(args);note.subject_id=app.id;

@@ -28,6 +28,53 @@ untouched. Tracked-source collisions, overlapping paths and traversal through
 unapproved symlink parents are refused. Database changes and migrations are
 outside this first supported mode because file rollback cannot undo them.
 
+## Legacy startup units
+
+A guest can still carry the zip-upload startup unit, `proxypilot-startup.service`
+(`lib/lxc-zip.js`). If its script or working directory resolves inside the
+profile's `sourceDir` or `releaseRoot`, the unit runs that script as root at
+every boot against the live release, outside this runner. This is how Nodus went
+down in October 2026. Its old self-deploy script treated the boot as a new deploy
+and rebuilt inside the sealed release. Its `chmod -R` followed the source symlink
+and stripped "other" access. It then stopped the service and failed at the
+migration.
+
+The guest program's `inspect` reads the unit read-only (`systemctl show` and
+`is-enabled`, fixed argv). It reports whether the unit exists and is enabled,
+and whether its paths resolve inside the release, including through links.
+Reading the unit never fails `inspect`; each job decides what to do with the
+result:
+
+- Every application job (validate, deploy, verify, rollback and the recovery
+  jobs) records one `legacy_startup` job event. Its `data.code` is
+  `LEGACY_STARTUP_ENABLED`, `LEGACY_STARTUP_REGISTERED` (present but not
+  enabled), or `LEGACY_STARTUP_UNKNOWN` (the unit could not be read).
+  The message says what runs at boot and how to disable the unit:
+  `systemctl disable proxypilot-startup.service` inside the guest.
+- Deploy and rollback refuse to promote while the unit is enabled. The job
+  fails with outcome `LEGACY_STARTUP_ENABLED` before links, promotion checkpoint
+  or switch. It is not disruptive, so there is no recovery hold. Redeploying
+  the release that is already live is only reported. Validation and
+  verification only report: they never touch the live release. A fixed release
+  still has to be validated before it can ship.
+- The recovery paths never refuse. Interrupted-release recovery, including the
+  explicit recovery job for an interrupted candidate, and rollback-on-failure
+  restore the previous release whatever the unit's state. A legacy unit cannot
+  strand a release mid-promotion.
+- `get_application_job` lists `get_lxc_startup` first in `next_actions` for a
+  job that met an enabled unit. The fix is a person disabling the unit in the
+  guest; this workflow never changes the guest's units itself.
+- `rerun_startup` runs the registered script directly, whether or not the unit
+  is enabled. It refuses a script or working directory inside a registered
+  application's `sourceDir` or `releaseRoot` (`RELEASE_MANAGED_STARTUP`).
+  If the application registry cannot be read, it refuses with
+  `RELEASE_REGISTRY_UNAVAILABLE`. A deliberate `acknowledge_release_managed:
+  true` overrides the refusal and is recorded in the audit entry.
+
+`prepare_application_release` and the deploy preview read only host-side
+evidence. The guest is read by the independent runner alone, so the hazard
+surfaces in the job, before anything changes.
+
 ## Durable operations
 
 `application_validate`, `application_deploy`, `application_verify` and

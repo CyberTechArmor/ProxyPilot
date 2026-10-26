@@ -46,7 +46,7 @@ import {
   parseIpRouteGet, upstreamRoutability,
   snapshotArgv, snapshotCliFormFromProbe, isSnapshotCliShapeError,
   SNAPSHOT_CLI_SUBCOMMAND, SNAPSHOT_CLI_LEGACY,
-  startupRunTimeoutMs, parseMarkedStreams,
+  startupRunTimeoutMs, parseMarkedStreams, rerunStartupGuard,
   parseLxcCommand, lxcCommandTimeoutMs, lxcContainerDetail, mcpGuestCreateOptions,
   validSnapshotName, defaultSnapshotName, validateLxcConfigChange,
   validIpv4, validImageAlias,
@@ -927,6 +927,18 @@ async function toolRerunStartup(args, auth) {
   if (!startup?.scriptPath) {
     return toolResult('No startup script is registered for this container — deploy one via apply_lxc_zip (startup_script) first', { isError: true });
   }
+  // A script inside a registered application's release-managed source runs
+  // as root against the live release, outside the release runner (the Nodus
+  // outage, 2026-10). Refused unless explicitly acknowledged (rerunStartupGuard).
+  let applications = [], registryError = false;
+  if (mock2Enabled()) {
+    try { applications = (await (await import('../mock2/application-releases.js')).getApplicationReleaseService()).listApplications(); }
+    catch { registryError = true; }
+  }
+  const guard = rerunStartupGuard({ container: name, startup, applications, registryError, acknowledged: args.acknowledge_release_managed === true });
+  if (guard.refusal) {
+    return toolResult({ ran: false, refused: guard.refusal.code, script: startup.scriptPath, working_dir: startup.workingDir || '/', applications: guard.refusal.applications, error: guard.refusal.message }, { isError: true });
+  }
   const wd = startup.workingDir || '/';
   const timeoutMs = startupRunTimeoutMs(
     args.timeout_seconds,
@@ -956,6 +968,7 @@ async function toolRerunStartup(args, auth) {
   const streams = parseMarkedStreams(r.stdout, nonce);
   logAudit(auth.created_by, 'LXC_STARTUP_RERUN', 'lxc', name, {
     via: 'mcp', script: startup.scriptPath, exit: streams.found ? streams.exit_code : r.status, timed_out: !!r.timedOut,
+    ...(guard.conflicts.length || registryError ? { acknowledged_release_managed: guard.conflicts.map((a) => a.id), ...(registryError ? { registry_unavailable: true } : {}) } : {}),
   }, null);
   emitContentChanged({ kind: 'lxc', id: name, reason: 'startup re-run', actor: 'mcp' });
 

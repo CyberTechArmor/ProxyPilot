@@ -25,7 +25,7 @@ import { readFileSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { requestBrowserRuntime } from '../lib/browser-runtime-install.js';
+import { browserMaintenanceStatus, requestBrowserMaintenance, requestBrowserRuntime } from '../lib/browser-runtime-install.js';
 import { checkForUpdates, installedState, startUpdate, updateStatus } from '../lib/self-update.js';
 import { flagsFromOptions, isUpdateId, mapAgentErrorToHttp, sanitizeRequestedBy, updateStartRefusal } from '../lib/self-update-logic.js';
 
@@ -1338,6 +1338,26 @@ userRouter.post('/version/reset-dismiss', (req, res) => {
 // Request an update (Admin + sudo). 202 with the run id; 409 when it cannot
 // run right now (agent unreachable, uncommitted changes on the host, a run
 // already live) with the reason the UI shows verbatim.
+// Automatic maintenance is an explicit host preference, default off.
+userRouter.get('/version/browser-runtime/maintenance', requireAdmin, async (req, res) => {
+  try {
+    res.json(await browserMaintenanceStatus());
+  } catch (error) {
+    res.status(mapAgentErrorToHttp(error.code)).json({ error: error.message, code: error.code });
+  }
+});
+userRouter.patch('/version/browser-runtime/maintenance', requireAdmin, requireSudo, async (req, res) => {
+  try {
+    const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(req.body);
+    const started = await requestBrowserMaintenance({ enabled, requestedBy: req.user.id });
+    logAudit(req.user.id, 'BROWSER_MAINTENANCE_REQUESTED', 'system', started.id, { enabled, via: 'dashboard' }, req.ip);
+    res.status(202).json(started);
+  } catch (error) {
+    if (error instanceof z.ZodError) return res.status(400).json({ error: error.errors[0].message });
+    res.status(mapAgentErrorToHttp(error.code)).json({ error: error.message, code: error.code });
+  }
+});
+
 // Fixed runtime operation, under the same admin/sudo/CSRF boundary as Update.
 userRouter.post('/version/browser-runtime', requireAdmin, requireSudo, async (req, res) => {
   try {

@@ -485,7 +485,7 @@ test('browser runtime dispatch uses fixed argv and refuses caller flags', (t) =>
   const bin = join(s.root, 'bin'); mkdirSync(bin);
   const argsFile = join(s.root, 'argv');
   writeFileSync(join(bin, 'flock'), `#!/bin/bash\nprintf '%s\\n' "$@" > "${argsFile}"\n`, { mode: 0o755 });
-  for (const operation of ['install', 'recover', 'rollback']) {
+  for (const operation of ['install', 'recover', 'rollback', 'maintenance-enable', 'maintenance-disable']) {
     const id = s.request({ action: `browser-runtime-${operation}` });
     assert.equal(s.runner([], { PATH: `${bin}:${process.env.PATH}` }).status, 0);
     const argv = readFileSync(argsFile, 'utf8').trim().split('\n');

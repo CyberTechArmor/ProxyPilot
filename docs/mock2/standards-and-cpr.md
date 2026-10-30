@@ -12,6 +12,10 @@
 > matching upstream amendment was **published as mock2-core 1.39.0** on 2026-10-25
 > (commit `8e2eaf7`, from `docs/mock2/upstream/2026-10-foundation/`), and the seed now
 > pins 1.39.0.
+>
+> 2026-10-30: mock2-core **1.42.0** (release-train lessons) and **1.43.0** (provider-scoped model tiers,
+> workflow and attribution) exist as smoke-tested, unpublished candidates on published 1.40.0, in
+> `docs/mock2/upstream/2026-10-release-train-and-model-tiers/`. The seed still pins 1.39.0.
 
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 

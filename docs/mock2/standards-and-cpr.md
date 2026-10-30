@@ -13,9 +13,10 @@
 > (commit `8e2eaf7`, from `docs/mock2/upstream/2026-10-foundation/`), and the seed now
 > pins 1.39.0.
 >
-> 2026-10-30: mock2-core **1.42.0** (release-train lessons) and **1.43.0** (provider-scoped model tiers,
-> workflow and attribution) exist as smoke-tested, unpublished candidates on published 1.40.0, in
-> `docs/mock2/upstream/2026-10-release-train-and-model-tiers/`. The seed still pins 1.39.0.
+> 2026-10-30: mock2-core **1.42.0** (release-train lessons; core `2154827`) and **1.43.0** (provider-scoped
+> model tiers, workflow and attribution; core `3e57c5c`) were **published** from
+> `docs/mock2/upstream/2026-10-release-train-and-model-tiers/`. The seed still pins 1.39.0; adopting them is
+> separate reviewed work.
 
 # Mock2 standards, CPR v1.1, and how ProxyPilot tracks them
 

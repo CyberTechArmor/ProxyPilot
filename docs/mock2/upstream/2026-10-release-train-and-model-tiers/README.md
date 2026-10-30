@@ -1,8 +1,18 @@
 # mock2-core 1.40.0 → 1.42.0 → 1.43.0: release-train lessons, then provider-scoped model tiers (upstream candidates)
 
-*Built 2026-10-29/30 in a ProxyPilot cloud session from the developer's two-part prompt. **Not published.** The
-developer asked to stop at smoke-tested candidates; publication follows the procedure below, on the developer's
-decision, 1.42.0 first.*
+*Built 2026-10-29/30 in a ProxyPilot cloud session from the developer's two-part prompt. **Published 2026-10-30** on
+the developer's decision, through ProxyPilot's site publish path (`/opt/app/site/.publish` on the `mock2` guest),
+after a guest snapshot each time (`pre-mock2-1-42-0-publish`, `pre-mock2-1-43-0-publish`):*
+
+| Release | mock2-core | project template | public `release.json` | live smoke |
+| --- | --- | --- | --- | --- |
+| 1.42.0 | `2154827` | `c4f69f6` | identical to the candidate; all 307 files verified over HTTPS | 4/4 (earlier: 1.40.0) |
+| 1.43.0 | `3e57c5c` | `cb944ab` | identical to the candidate; all 325 files verified over HTTPS | 4/4 (earlier: 1.42.0) |
+| records | `eb93c87` | — | unchanged | — |
+
+*The publisher's generator (`/opt/app/gen-artifacts.py`) now matches 1.43.0's. Not run before publishing: the names
+check with the private list, Windows and macOS smoke (see below). The pending 1.41.0 lessons release is to be rebased
+onto 1.43.0 when its prompt is found; it takes the next free minor.*
 
 ## Baseline and numbering
 
